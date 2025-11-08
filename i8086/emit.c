@@ -228,6 +228,100 @@ emitins(Ins *i, Fn *fn, FILE *f)
 {
 	int o;
 	char *fmt;
+	Ref r0, r1;
+
+	/* Special handling for division and remainder */
+	if (i->op == Odiv || i->op == Orem) {
+		/* Signed division/remainder
+		 * mov ax, dividend
+		 * cwd              ; sign-extend AX into DX:AX
+		 * idiv divisor
+		 * ; quotient in AX, remainder in DX
+		 */
+		r0 = i->arg[0]; /* dividend */
+		r1 = i->arg[1]; /* divisor */
+
+		/* Move dividend to AX if not already there */
+		if (rtype(r0) != RTmp || r0.val != RAX) {
+			fprintf(f, "\tmov ax, ");
+			if (rtype(r0) == RTmp)
+				fprintf(f, "%s\n", rname[r0.val]);
+			else if (rtype(r0) == RCon)
+				fprintf(f, "%"PRIi64"\n", fn->con[r0.val].bits.i);
+			else
+				fprintf(f, "?\n");
+		}
+
+		/* Sign-extend AX into DX:AX */
+		fprintf(f, "\tcwd\n");
+
+		/* Perform signed division */
+		fprintf(f, "\tidiv ");
+		if (rtype(r1) == RTmp)
+			fprintf(f, "%s\n", rname[r1.val]);
+		else if (rtype(r1) == RCon)
+			fprintf(f, "%"PRIi64"\n", fn->con[r1.val].bits.i);
+		else
+			fprintf(f, "?\n");
+
+		/* Move result to destination */
+		if (i->op == Odiv) {
+			/* Quotient is in AX */
+			if (rtype(i->to) == RTmp && i->to.val != RAX)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+		} else {
+			/* Remainder is in DX */
+			if (rtype(i->to) == RTmp)
+				fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
+		}
+		return;
+	}
+
+	if (i->op == Oudiv || i->op == Ourem) {
+		/* Unsigned division/remainder
+		 * mov ax, dividend
+		 * xor dx, dx       ; zero-extend into DX:AX
+		 * div divisor
+		 * ; quotient in AX, remainder in DX
+		 */
+		r0 = i->arg[0]; /* dividend */
+		r1 = i->arg[1]; /* divisor */
+
+		/* Move dividend to AX if not already there */
+		if (rtype(r0) != RTmp || r0.val != RAX) {
+			fprintf(f, "\tmov ax, ");
+			if (rtype(r0) == RTmp)
+				fprintf(f, "%s\n", rname[r0.val]);
+			else if (rtype(r0) == RCon)
+				fprintf(f, "%"PRIi64"\n", fn->con[r0.val].bits.i);
+			else
+				fprintf(f, "?\n");
+		}
+
+		/* Zero-extend into DX:AX */
+		fprintf(f, "\txor dx, dx\n");
+
+		/* Perform unsigned division */
+		fprintf(f, "\tdiv ");
+		if (rtype(r1) == RTmp)
+			fprintf(f, "%s\n", rname[r1.val]);
+		else if (rtype(r1) == RCon)
+			fprintf(f, "%"PRIi64"\n", fn->con[r1.val].bits.i);
+		else
+			fprintf(f, "?\n");
+
+		/* Move result to destination */
+		if (i->op == Oudiv) {
+			/* Quotient is in AX */
+			if (rtype(i->to) == RTmp && i->to.val != RAX)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+		} else {
+			/* Remainder is in DX */
+			if (rtype(i->to) == RTmp)
+				fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
+		}
+		return;
+	}
 
 	/* Find the appropriate format string */
 	for (o = 0; omap[o].op != NOp; o++) {
