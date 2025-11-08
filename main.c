@@ -29,6 +29,7 @@ extern Target T_amd64_win;
 extern Target T_arm64;
 extern Target T_arm64_apple;
 extern Target T_rv64;
+extern Target T_i8086;
 
 static Target *tlist[] = {
 	&T_amd64_sysv,
@@ -37,6 +38,7 @@ static Target *tlist[] = {
 	&T_arm64,
 	&T_arm64_apple,
 	&T_rv64,
+	&T_i8086,
 	0
 };
 static FILE *outf;
