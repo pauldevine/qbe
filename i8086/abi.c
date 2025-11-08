@@ -127,81 +127,15 @@ selpar(Fn *fn, Ins *i0, Ins *i1)
 static void
 selcall(Fn *fn, Ins *i0, Ins *icall)
 {
-	Ins *i;
-	int stk, off;
-	Ref sp, addr;
-
-	/* cdecl: arguments pushed right-to-left on stack
-	 * Execution order:
-	 *   1. sub sp, total_size   (allocate)
-	 *   2. store args to [sp+off]
-	 *   3. call function
-	 *   4. add sp, total_size   (cleanup)
-	 *
-	 * Emission order (reversed):
-	 *   1. add sp (cleanup)
-	 *   2. call
-	 *   3. stores
-	 *   4. sub sp (allocate)
+	/* For now, just emit the call and skip arguments
+	 * This is a minimal implementation to get things working
+	 * TODO: Properly lower arguments to stack stores
 	 */
+	(void)fn;
+	(void)i0;
 
-	stk = 0;
-
-	/* Count total stack space needed */
-	for (i = i0; i < icall; i++) {
-		if (!isarg(i->op))
-			continue;
-		if (i->cls == Kl)
-			stk += 4;  /* 32-bit arg */
-		else
-			stk += 2;  /* 16-bit or smaller */
-	}
-
-	/* 1. Emit stack cleanup (executed after call) */
-	/* For i8086, we manually clean up the stack after the call */
-	if (stk > 0) {
-		sp = newtmp("abi", Kw, fn);
-		emit(Ocopy, Kw, TMP(RSP), sp, R);
-	}
-
-	/* 2. Emit the call */
-	emit(icall->op, icall->cls, icall->to, icall->arg[0], icall->arg[1]);
-
-	/* 3. Emit argument stores (executed before call) */
-	if (stk > 0) {
-		/* Allocate a temp for the base of arguments */
-		sp = newtmp("abi", Kl, fn);
-
-		off = 0;
-		for (i = i0; i < icall; i++) {
-			int sz;
-
-			if (!isarg(i->op))
-				continue;
-
-			sz = (i->cls == Kl) ? 4 : 2;
-
-			/* Create address [sp+off] */
-			if (off > 0) {
-				addr = newtmp("abi", Kl, fn);
-				emit(Oadd, Kl, addr, sp, getcon(off, fn));
-			} else {
-				addr = sp;
-			}
-
-			/* Store argument */
-			if (i->cls == Kl)
-				emit(Ostorel, Kw, R, i->arg[0], addr);
-			else
-				emit(Ostorew, Kw, R, i->arg[0], addr);
-
-			off += sz;
-		}
-
-		/* 4. Emit stack allocation (executed first) */
-		/* Use Osalloc with negative value to allocate */
-		emit(Osalloc, Kl, sp, getcon(-stk, fn), R);
-	}
+	/* Just emit the call as-is */
+	emiti(*icall);
 }
 
 void
@@ -218,9 +152,6 @@ i8086_abi(Fn *fn)
 	for (i = b->ins; i < &b->ins[b->nins]; i++)
 		if (!ispar(i->op))
 			break;
-
-	/* Set function register usage - no register arguments for cdecl */
-	fn->reg = 0;
 
 	/* Transform parameter loads */
 	if (i > b->ins) {
@@ -243,33 +174,7 @@ i8086_abi(Fn *fn)
 		b->nins = n0 + n1;
 	}
 
-	/* Lower calls in all blocks */
-	for (b = fn->start; b; b = b->link) {
-		curi = &insb[NIns];
-		n = 0;
-
-		for (i = &b->ins[b->nins]; i != b->ins;) {
-			i--;
-
-			if (i->op == Ocall) {
-				/* Find arguments for this call */
-				for (i0 = i; i0 > b->ins; i0--)
-					if (!isarg((i0-1)->op))
-						break;
-
-				selcall(fn, i0, i);
-				i = i0;
-			} else if (isarg(i->op)) {
-				/* Skip - handled with call */
-			} else {
-				emiti(*i);
-			}
-		}
-
-		/* Replace instructions */
-		n0 = &insb[NIns] - curi;
-		vgrow(&b->ins, n0);
-		icpy(b->ins, curi, n0);
-		b->nins = n0;
-	}
+	/* TODO: Lower calls and arguments
+	 * For now, skip call lowering to get parameters working first
+	 */
 }
