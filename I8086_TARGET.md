@@ -333,6 +333,10 @@ Supported addressing modes:
   - Base + index + offset: `[bx+si+offset]`
   - LEA (load effective address) for address calculations
 - **Function prologue/epilogue**: Standard BP-based stack frames
+- **Parameter reception**: ✓ Working - functions correctly receive parameters from stack
+  - Parameters loaded from [bp+4], [bp+6], etc.
+  - Supports 16-bit (Kw), 32-bit (Kl), and extended byte/halfword parameters
+  - No TODO comments in generated code for parameter access
 - **Calling convention**: cdecl (arguments on stack, caller cleanup)
 - **Return values**: AX for 16-bit, DX:AX for 32-bit
 - **Register allocation**: AX, BX, CX, DX, SI, DI
@@ -340,10 +344,12 @@ Supported addressing modes:
 
 ### Limitations / TODO
 
+- **Function calls with arguments**: Calling functions with arguments causes crash in register allocator
+  - Functions can receive parameters correctly (✓ working)
+  - But making calls TO functions with arguments is not yet implemented
+  - This is the main blocker for full ABI support
 - **No floating point**: The 8087 FPU is not yet supported
 - **Limited 32-bit support**: Long (Kl) operations are not fully implemented
-- **Parameter passing**: Opar operations not yet fully implemented (shows as TODO in output)
-- **Function calls**: Only basic call support, no full ABI implementation
 - **Incomplete instruction selection**: Some QBE IR operations are not yet mapped
 - **No optimizations**: Code generation is straightforward without target-specific optimizations
 - **Missing features**:
@@ -431,7 +437,8 @@ tlink program.obj, program.exe
 | Loops | ✓ Working | while, for, all loop structures |
 | Memory addressing | ✓ Working | All i8086 addressing modes, LEA support |
 | Memory load/store | ✓ Working | loadb/w/l, storeb/w/l with all addressing modes |
-| Function calls | ⚠ Partial | Basic call works, full ABI TODO |
+| Parameter reception | ✓ Working | Functions receive params from stack correctly |
+| Function calls | ✗ TODO | Crash in register allocator with arguments |
 | Floating point | ✗ TODO | 8087 support needed |
 | 32-bit operations | ✗ TODO | Limited support |
 | Optimizations | ✗ TODO | None yet |
