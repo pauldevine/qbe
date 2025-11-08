@@ -91,6 +91,35 @@ seljmp(Blk *b, Fn *fn)
 }
 
 static void
+seldiv(Ins i, Fn *fn, int issigned)
+{
+	Ins *i0;
+
+	/* x86 division is special:
+	 * - Dividend is in DX:AX (32-bit)
+	 * - Divisor is the operand
+	 * - Quotient goes to AX, remainder to DX
+	 *
+	 * For signed division (idiv):
+	 *   mov ax, dividend
+	 *   cwd              ; sign-extend AX into DX:AX
+	 *   idiv divisor
+	 *
+	 * For unsigned division (div):
+	 *   mov ax, dividend
+	 *   xor dx, dx       ; zero-extend into DX:AX
+	 *   div divisor
+	 *
+	 * The emit phase will handle this specially.
+	 */
+
+	emiti(i);
+	i0 = curi;
+	fixarg(&i0->arg[0], Kw, i0, fn);
+	fixarg(&i0->arg[1], Kw, i0, fn);
+}
+
+static void
 sel(Ins i, Fn *fn)
 {
 	Ins *i0;
@@ -99,6 +128,18 @@ sel(Ins i, Fn *fn)
 	/* Handle comparisons specially */
 	if (iscmp(i.op, &ck, &cc)) {
 		selcmp(i, ck, cc, fn);
+		return;
+	}
+
+	/* Handle division and remainder specially */
+	switch (i.op) {
+	case Odiv:
+	case Orem:
+		seldiv(i, fn, 1); /* signed */
+		return;
+	case Oudiv:
+	case Ourem:
+		seldiv(i, fn, 0); /* unsigned */
 		return;
 	}
 

@@ -145,12 +145,51 @@ end:
 	ret
 ```
 
+### Example 4: Division and Modulo
+
+Input `test_divmod.ssa`:
+```
+export function w $divmod_sum(w %a, w %b) {
+@start
+	%q =w div %a, %b
+	%r =w rem %a, %b
+	%sum =w add %q, %r
+	ret %sum
+}
+```
+
+Output shows proper x86 division handling:
+```asm
+_divmod_sum:
+divmod_sum:
+	push bp
+	mov bp, sp
+	cwd              ; Sign-extend AX into DX:AX
+	idiv cx          ; Signed divide, quotient in AX, remainder in DX
+	mov ax, cx
+	cwd
+	idiv dx
+	mov cx, dx       ; Move remainder to CX
+	add ax, cx       ; Add quotient + remainder
+	mov sp, bp
+	pop bp
+	ret
+```
+
+Key features:
+- **Signed division (`div`)**: Uses `cwd` to sign-extend, then `idiv`
+- **Unsigned division (`udiv`)**: Uses `xor dx, dx` to zero-extend, then `div`
+- **Remainder (`rem`/`urem`)**: Same as division, but result from DX instead of AX
+
 ## Features
 
 ### Implemented
 
 - **16-bit word operations** (`Kw` class)
-- **Basic arithmetic**: add, sub, and, or, xor
+- **Basic arithmetic**: add, sub, mul, and, or, xor
+- **Division and remainder**: Both signed (div/rem) and unsigned (udiv/urem)
+  - Proper DX:AX handling with `cwd` for signed, `xor dx,dx` for unsigned
+  - Quotient from AX, remainder from DX
 - **Comparisons**: All signed and unsigned integer comparisons (eq, ne, lt, gt, le, ge)
 - **Conditional branches**: Full support for if-statements and conditional jumps
 - **Loops**: While loops, for loops, and all control flow structures
@@ -169,11 +208,11 @@ end:
 - **Incomplete instruction selection**: Some QBE IR operations are not yet mapped
 - **No optimizations**: Code generation is straightforward without target-specific optimizations
 - **Missing features**:
-  - Division and remainder operations
-  - Bit shifts and rotations
+  - Bit shifts and rotations (shl/shr/sar - partially in omap but not tested)
   - Conditional moves
   - Structure passing
   - Far pointers for large/huge memory models
+  - Multiply high word operations
 
 ## Register Usage
 
@@ -245,14 +284,14 @@ tlink program.obj, program.exe
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Integer arithmetic (16-bit) | ✓ Working | add, sub, and, or, xor |
+| Integer arithmetic (16-bit) | ✓ Working | add, sub, mul, and, or, xor |
+| Division/Remainder | ✓ Working | div, rem, udiv, urem with proper DX:AX handling |
 | Comparisons | ✓ Working | All signed/unsigned integer comparisons |
 | Conditional branches | ✓ Working | if-else, all conditional jumps |
 | Loops | ✓ Working | while, for, all loop structures |
 | Memory load/store | ✓ Partial | Simple cases work |
 | Function calls | ⚠ Partial | Basic call works, full ABI TODO |
-| Division/Remainder | ✗ TODO | Not yet implemented |
-| Bit shifts | ✗ TODO | Not yet implemented |
+| Bit shifts | ⚠ Partial | In omap, needs testing |
 | Floating point | ✗ TODO | 8087 support needed |
 | 32-bit operations | ✗ TODO | Limited support |
 | Optimizations | ✗ TODO | None yet |
