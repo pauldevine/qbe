@@ -1,0 +1,193 @@
+# QBE i8086 Backend
+
+This document describes the i8086 backend for QBE, which allows you to generate 16-bit x86 assembly code for real mode DOS and compatible environments.
+
+## Overview
+
+The i8086 backend targets 16-bit x86 processors (8086, 80186, 80286, 80386 in 16-bit mode). This allows QBE to generate code for:
+- MS-DOS and DOS-compatible systems
+- Embedded x86 systems running in real mode
+- Boot loaders and firmware
+- Retro computing projects
+
+**Important**: This backend runs on modern systems (Mac, Linux, Windows) and **cross-compiles** to 16-bit x86. You do not need to run QBE on DOS itself.
+
+## Usage
+
+```bash
+# Compile QBE with i8086 support (included by default)
+make
+
+# Generate 16-bit x86 assembly from QBE IR
+./qbe -t i8086 input.ssa > output.asm
+
+# List all available targets
+./qbe -h
+```
+
+## Example
+
+Input `test.ssa`:
+```
+export function w $add(w %a, w %b) {
+@start
+	%c =w add %a, %b
+	ret %c
+}
+```
+
+Command:
+```bash
+./qbe -t i8086 test.ssa > test.asm
+```
+
+Output `test.asm`:
+```asm
+.text
+.balign 16
+.globl _add
+_add:
+add:
+	push bp
+	mov bp, sp
+	add ax, cx
+	mov sp, bp
+	pop bp
+	ret
+```
+
+## Features
+
+### Implemented
+
+- **16-bit word operations** (`Kw` class)
+- **Basic arithmetic**: add, sub, and, or, xor
+- **Function prologue/epilogue**: Standard BP-based stack frames
+- **Calling convention**: cdecl (arguments on stack, caller cleanup)
+- **Return values**: AX for 16-bit, DX:AX for 32-bit
+- **Register allocation**: AX, BX, CX, DX, SI, DI
+- **Stack operations**: push/pop, local variables
+
+### Limitations / TODO
+
+- **No floating point**: The 8087 FPU is not yet supported
+- **Limited 32-bit support**: Long (Kl) operations are not fully implemented
+- **Incomplete instruction selection**: Some QBE IR operations are not yet mapped
+- **Simple ABI**: Only basic cdecl calling convention
+- **No optimizations**: Code generation is straightforward without target-specific optimizations
+- **Missing features**:
+  - Signed/unsigned distinction in some operations
+  - Bit shifts and rotations
+  - Conditional moves
+  - Structure passing
+  - Far pointers for large/huge memory models
+
+## Register Usage
+
+### General Purpose Registers (16-bit)
+
+| Register | Usage | Saved By | Notes |
+|----------|-------|----------|-------|
+| AX | Accumulator, return value | Caller | Used for function returns |
+| BX | Base | Callee | General purpose |
+| CX | Counter | Caller | Used for loops, shifts |
+| DX | Data, extended return | Caller | DX:AX for 32-bit returns |
+| SI | Source index | Callee | String operations, general purpose |
+| DI | Destination index | Callee | String operations, general purpose |
+| BP | Base pointer | Callee | Frame pointer (always preserved) |
+| SP | Stack pointer | - | Stack pointer (globally live) |
+
+### Calling Convention
+
+The i8086 backend uses the **cdecl** calling convention:
+
+1. Arguments pushed on stack **right-to-left**
+2. Caller cleans up stack after call
+3. Return values:
+   - 8/16-bit: AL/AX
+   - 32-bit: DX:AX (DX = high word, AX = low word)
+4. Callee must preserve: BX, SI, DI, BP
+5. Caller must preserve: AX, CX, DX
+
+## Assembly Syntax
+
+The generated assembly uses:
+- **Intel syntax**: `mov dst, src`
+- **AT&T-style directives**: `.text`, `.globl`, `.balign`
+- **Underscore prefix**: Global symbols prefixed with `_` (DOS/OMF convention)
+
+You can assemble the output with:
+- **NASM**: `nasm -f obj output.asm`
+- **MASM/TASM**: May need minor syntax adjustments
+- **GNU as**: With `--32` flag and some preprocessing
+
+## Memory Models
+
+Currently, the backend assumes **small memory model**:
+- Code < 64KB (near code pointers)
+- Data < 64KB (near data pointers)
+- Stack < 64KB
+
+Support for tiny, compact, medium, large, and huge models is planned but not yet implemented.
+
+## Building for DOS
+
+After generating assembly with QBE:
+
+```bash
+# Generate assembly
+./qbe -t i8086 program.ssa > program.asm
+
+# Assemble with NASM (produces OBJ file)
+nasm -f obj program.asm -o program.obj
+
+# Link with OpenWatcom's wlink
+wlink system dos file program.obj name program.exe
+
+# Or use Turbo Link
+tlink program.obj, program.exe
+```
+
+## Implementation Status
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Integer arithmetic (16-bit) | ✓ Partial | Basic ops working |
+| Memory load/store | ✓ Partial | Simple cases work |
+| Function calls | ✓ Partial | cdecl only |
+| Conditional branches | ✗ TODO | Not yet implemented |
+| Comparisons | ✗ TODO | Not yet implemented |
+| Floating point | ✗ TODO | 8087 support needed |
+| 32-bit operations | ✗ TODO | Limited support |
+| Optimizations | ✗ TODO | None yet |
+
+## Architecture
+
+The i8086 backend consists of:
+
+- `i8086/all.h` - Register definitions, forward declarations
+- `i8086/targ.c` - Target definition and registration
+- `i8086/abi.c` - Calling convention (cdecl)
+- `i8086/isel.c` - Instruction selection (QBE IR → x86 instructions)
+- `i8086/emit.c` - Assembly code generation
+
+## Contributing
+
+The i8086 backend is functional but incomplete. Contributions are welcome for:
+
+- Implementing missing operations (div, mod, shifts, etc.)
+- Adding 8087 FPU support
+- Improving ABI handling
+- Adding memory model support
+- Optimizing code generation
+- Better handling of 32-bit operations
+
+## References
+
+- [Intel 8086 Family User's Manual](https://edge.edx.org/c4x/BITSPilani/EEE231/asset/8086_family_Users_Manual_1_.pdf)
+- [QBE IL Documentation](https://c9x.me/compile/doc/il.html)
+- [x86 DOS Calling Conventions](https://en.wikipedia.org/wiki/X86_calling_conventions#cdecl)
+
+## License
+
+This backend follows the same MIT license as QBE itself.
