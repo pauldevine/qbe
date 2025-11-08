@@ -28,9 +28,9 @@ static struct {
 	{ Oand,    Ki, "and %=, %1" },
 	{ Oor,     Ki, "or %=, %1" },
 	{ Oxor,    Ki, "xor %=, %1" },
-	{ Oshl,    Ki, "shl %=, cl" },
-	{ Oshr,    Ki, "shr %=, cl" },
-	{ Osar,    Ki, "sar %=, cl" },
+	{ Oshl,    Ki, "shl %=, %1" },
+	{ Oshr,    Ki, "shr %=, %1" },
+	{ Osar,    Ki, "sar %=, %1" },
 
 	/* Memory operations */
 	{ Ostoreb, Kw, "mov byte ptr %M1, %0" },
@@ -229,6 +229,57 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	int o;
 	char *fmt;
 	Ref r0, r1;
+	char *shiftop;
+
+	/* Special handling for shift operations */
+	if (i->op == Oshl || i->op == Oshr || i->op == Osar) {
+		/* Determine shift operation mnemonic */
+		shiftop = (i->op == Oshl) ? "shl" :
+		          (i->op == Oshr) ? "shr" : "sar";
+
+		r0 = i->arg[0]; /* value to shift */
+		r1 = i->arg[1]; /* shift count */
+
+		/* If shift count is a register (not CX) and not immediate, move to CX */
+		if (rtype(r1) == RTmp && r1.val != RCX) {
+			fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
+		} else if (rtype(r1) == RSlot) {
+			/* Load from stack slot into CX */
+			fprintf(f, "\tmov cx, [bp%+ld]\n", (long)slot(r1, fn));
+		}
+
+		/* Move value to destination if needed (before shift) */
+		if (rtype(i->to) == RTmp && i->to.val != r0.val && rtype(r0) == RTmp) {
+			fprintf(f, "\tmov %s, %s\n", rname[i->to.val], rname[r0.val]);
+			r0 = i->to; /* Now shift the destination */
+		}
+
+		/* Emit the shift operation */
+		fprintf(f, "\t%s ", shiftop);
+
+		/* Emit destination/source */
+		if (rtype(r0) == RTmp)
+			fprintf(f, "%s", rname[r0.val]);
+		else if (rtype(i->to) == RTmp)
+			fprintf(f, "%s", rname[i->to.val]);
+		else
+			fprintf(f, "?");
+
+		fprintf(f, ", ");
+
+		/* Emit shift count - use CL for register, immediate for constant */
+		if (rtype(r1) == RCon) {
+			/* Immediate shift count */
+			fprintf(f, "%"PRIi64, fn->con[r1.val].bits.i);
+		} else {
+			/* Shift count in CL (we moved it there if needed) */
+			fprintf(f, "cl");
+		}
+
+		fprintf(f, "\n");
+
+		return;
+	}
 
 	/* Special handling for division and remainder */
 	if (i->op == Odiv || i->op == Orem) {
