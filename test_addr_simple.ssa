@@ -1,0 +1,18 @@
+# Simple memory addressing test
+export function w $simple_load(l %addr) {
+@start
+	%val =w loadw %addr
+	ret %val
+}
+
+export function $simple_store(l %addr, w %val) {
+@start
+	storew %val, %addr
+	ret
+}
+
+export function w $load_from_bp() {
+@start
+	%local =w copy 0
+	ret %local
+}

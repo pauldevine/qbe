@@ -50,6 +50,7 @@ static struct {
 	/* Data movement */
 	{ Ocopy,   Ki, "mov %=, %0" },
 	{ Oswap,   Ki, "xchg %=, %0" },
+	{ Oaddr,   Ki, "lea %=, %M0" },
 
 	/* Comparisons - special handling needed for setCC (8-bit only) */
 	{ Oceqw,   Kw, "cmp %0, %1\n\tsete %B=\n\tmovzx %=, %B=" },
@@ -193,7 +194,52 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 			else
 				die("invalid memory operand");
 
-			if (rtype(r) == RCon) {
+			/* Handle different reference types for memory operands */
+			switch (rtype(r)) {
+			case RMem: {
+				/* Complex addressing mode: [base + index + offset] */
+				Mem *m = &fn->mem[r.val];
+				int has_offset = (m->offset.type != CUndef);
+				int has_base = !req(m->base, R);
+				int has_index = !req(m->index, R);
+
+				fputc('[', f);
+
+				/* Emit base register if present */
+				if (has_base) {
+					if (rtype(m->base) == RTmp)
+						fprintf(f, "%s", rname[m->base.val]);
+					else if (rtype(m->base) == RSlot) {
+						fprintf(f, "bp%+ld", (long)slot(m->base, fn));
+					}
+				}
+
+				/* Emit index register if present */
+				if (has_index) {
+					if (has_base)
+						fprintf(f, " + ");
+					if (rtype(m->index) == RTmp)
+						fprintf(f, "%s", rname[m->index.val]);
+					/* i8086 doesn't support scale > 1 */
+					if (m->scale != 1 && m->scale != 0)
+						die("i8086 only supports scale of 1");
+				}
+
+				/* Emit offset if present */
+				if (has_offset) {
+					if (has_base || has_index)
+						fprintf(f, " + ");
+					if (m->offset.type == CAddr) {
+						emitaddr(&m->offset, f);
+					} else if (m->offset.type == CBits) {
+						fprintf(f, "%"PRIi64, m->offset.bits.i);
+					}
+				}
+
+				fputc(']', f);
+				break;
+			}
+			case RCon:
 				pc = &fn->con[r.val];
 				if (pc->type == CAddr) {
 					fputc('[', f);
@@ -202,11 +248,16 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 				} else {
 					fprintf(f, "%"PRIi64, pc->bits.i);
 				}
-			} else if (rtype(r) == RTmp) {
+				break;
+			case RTmp:
 				fprintf(f, "[%s]", rname[r.val]);
-			} else if (rtype(r) == RSlot) {
+				break;
+			case RSlot:
 				offset = slot(r, fn);
 				fprintf(f, "[bp%+ld]", (long)offset);
+				break;
+			default:
+				die("invalid memory reference type");
 			}
 			break;
 		default:

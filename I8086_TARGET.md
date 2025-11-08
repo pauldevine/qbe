@@ -241,6 +241,75 @@ Key features:
 - **Immediate shifts**: Can shift by constant amounts (1-31)
 - **Variable shifts**: Count must be in CL register; backend automatically moves to CL if needed
 
+### Example 6: Memory Addressing Modes
+
+The i8086 backend supports various addressing modes:
+
+Input `test_memory.ssa`:
+```
+export function w $simple_load(l %addr) {
+@start
+	%val =w loadw %addr
+	ret %val
+}
+
+export function $simple_store(l %addr, w %val) {
+@start
+	storew %val, %addr
+	ret
+}
+
+export function w $struct_field(l %ptr) {
+@start
+	%addr =l add %ptr, 4
+	%val =w loadw %addr
+	ret %val
+}
+```
+
+Output shows proper addressing modes:
+```asm
+_simple_load:
+simple_load:
+	push bp
+	mov bp, sp
+	mov ax, word ptr [ax]       ; Register indirect: [reg]
+	mov sp, bp
+	pop bp
+	ret
+
+_simple_store:
+simple_store:
+	push bp
+	mov bp, sp
+	mov word ptr [cx], ax       ; Store to [reg]
+	mov sp, bp
+	pop bp
+	ret
+
+_struct_field:
+struct_field:
+	push bp
+	mov bp, sp
+	add ax, 4                   ; Calculate address
+	mov ax, word ptr [ax]       ; Load from [base+offset]
+	mov sp, bp
+	pop bp
+	ret
+```
+
+Supported addressing modes:
+- **Register indirect**: `[bx]`, `[bp]`, `[si]`, `[di]`
+- **Base + offset**: `[bx+4]`, `[bp-2]`
+- **Base + index**: `[bx+si]`, `[bp+di]`
+- **Base + index + offset**: `[bx+si+8]`
+- **Direct**: `[label]`, `[data]`
+
+**Note**: The i8086 only supports specific register combinations for base and index:
+- Base: BX or BP
+- Index: SI or DI
+- No scaling (scale is always 1)
+
 ## Features
 
 ### Implemented
@@ -257,6 +326,12 @@ Key features:
 - **Comparisons**: All signed and unsigned integer comparisons (eq, ne, lt, gt, le, ge)
 - **Conditional branches**: Full support for if-statements and conditional jumps
 - **Loops**: While loops, for loops, and all control flow structures
+- **Memory addressing**: Full support for i8086 addressing modes
+  - Register indirect: `[bx]`, `[bp]`, `[si]`, `[di]`
+  - Base + offset: `[bp+4]`, `[bx-2]`
+  - Base + index: `[bx+si]`, `[bp+di]`
+  - Base + index + offset: `[bx+si+offset]`
+  - LEA (load effective address) for address calculations
 - **Function prologue/epilogue**: Standard BP-based stack frames
 - **Calling convention**: cdecl (arguments on stack, caller cleanup)
 - **Return values**: AX for 16-bit, DX:AX for 32-bit
@@ -354,7 +429,8 @@ tlink program.obj, program.exe
 | Comparisons | ✓ Working | All signed/unsigned integer comparisons |
 | Conditional branches | ✓ Working | if-else, all conditional jumps |
 | Loops | ✓ Working | while, for, all loop structures |
-| Memory load/store | ✓ Partial | Simple cases work |
+| Memory addressing | ✓ Working | All i8086 addressing modes, LEA support |
+| Memory load/store | ✓ Working | loadb/w/l, storeb/w/l with all addressing modes |
 | Function calls | ⚠ Partial | Basic call works, full ABI TODO |
 | Floating point | ✗ TODO | 8087 support needed |
 | 32-bit operations | ✗ TODO | Limited support |
