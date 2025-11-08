@@ -41,9 +41,66 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 }
 
 static void
+selcmp(Ins i, int k, int cmp, Fn *fn)
+{
+	Ins *i0;
+
+	/* For x86, comparisons work as:
+	 * 1. cmp arg0, arg1  (sets flags)
+	 * 2. setCC dest      (sets dest based on flags)
+	 *
+	 * We emit the comparison operation with the QBE cmp opcode,
+	 * and the emit phase will translate it to cmp + setCC
+	 */
+
+	/* Map QBE comparison to x86 comparison operation */
+	switch (cmp) {
+	case Cieq:  i.op = Oceqw; break;
+	case Cine:  i.op = Ocnew; break;
+	case Cislt: i.op = Ocsltw; break;
+	case Cisgt: i.op = Ocsgtw; break;
+	case Cisle: i.op = Ocslew; break;
+	case Cisge: i.op = Ocsgew; break;
+	case Ciult: i.op = Ocultw; break;
+	case Ciugt: i.op = Ocugtw; break;
+	case Ciule: i.op = Oculew; break;
+	case Ciuge: i.op = Ocugew; break;
+	default:
+		/* Unsupported comparison */
+		die("unsupported comparison %d", cmp);
+	}
+
+	emiti(i);
+	i0 = curi;
+	fixarg(&i0->arg[0], k, i0, fn);
+	fixarg(&i0->arg[1], k, i0, fn);
+}
+
+static void
+seljmp(Blk *b, Fn *fn)
+{
+	Ref r;
+
+	if (b->jmp.type == Jjnz) {
+		/* test reg, reg; jnz label */
+		r = b->jmp.arg;
+		fixarg(&r, Kw, 0, fn);
+		b->jmp.arg = r;
+	}
+	/* Other jump types are handled in emit phase */
+}
+
+static void
 sel(Ins i, Fn *fn)
 {
 	Ins *i0;
+	int ck, cc;
+
+	/* Handle comparisons specially */
+	if (iscmp(i.op, &ck, &cc)) {
+		selcmp(i, ck, cc, fn);
+		return;
+	}
 
 	/* Emit the instruction first, then fix args
 	 * This follows the pattern from rv64/isel.c
@@ -77,8 +134,8 @@ i8086_isel(Fn *fn)
 				fixarg(&p->arg[n], p->cls, 0, fn);
 			}
 
-		/* Process jump instruction - handled in emit phase */
-		/* seljmp(b, fn); */
+		/* Process jump instruction */
+		seljmp(b, fn);
 
 		/* Process regular instructions in reverse */
 		for (i = &b->ins[b->nins]; i != b->ins;)

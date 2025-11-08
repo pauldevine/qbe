@@ -51,17 +51,17 @@ static struct {
 	{ Ocopy,   Ki, "mov %=, %0" },
 	{ Oswap,   Ki, "xchg %=, %0" },
 
-	/* Comparisons */
-	{ Oceqw,   Kw, "cmp %0, %1\n\tsete %=" },
-	{ Ocnew,   Kw, "cmp %0, %1\n\tsetne %=" },
-	{ Ocsltw,  Kw, "cmp %0, %1\n\tsetl %=" },
-	{ Ocsgtw,  Kw, "cmp %0, %1\n\tsetg %=" },
-	{ Ocslew,  Kw, "cmp %0, %1\n\tsetle %=" },
-	{ Ocsgew,  Kw, "cmp %0, %1\n\tsetge %=" },
-	{ Ocultw,  Kw, "cmp %0, %1\n\tsetb %=" },
-	{ Ocugtw,  Kw, "cmp %0, %1\n\tseta %=" },
-	{ Oculew,  Kw, "cmp %0, %1\n\tsetbe %=" },
-	{ Ocugew,  Kw, "cmp %0, %1\n\tsetae %=" },
+	/* Comparisons - special handling needed for setCC (8-bit only) */
+	{ Oceqw,   Kw, "cmp %0, %1\n\tsete %B=\n\tmovzx %=, %B=" },
+	{ Ocnew,   Kw, "cmp %0, %1\n\tsetne %B=\n\tmovzx %=, %B=" },
+	{ Ocsltw,  Kw, "cmp %0, %1\n\tsetl %B=\n\tmovzx %=, %B=" },
+	{ Ocsgtw,  Kw, "cmp %0, %1\n\tsetg %B=\n\tmovzx %=, %B=" },
+	{ Ocslew,  Kw, "cmp %0, %1\n\tsetle %B=\n\tmovzx %=, %B=" },
+	{ Ocsgew,  Kw, "cmp %0, %1\n\tsetge %B=\n\tmovzx %=, %B=" },
+	{ Ocultw,  Kw, "cmp %0, %1\n\tsetb %B=\n\tmovzx %=, %B=" },
+	{ Ocugtw,  Kw, "cmp %0, %1\n\tseta %B=\n\tmovzx %=, %B=" },
+	{ Oculew,  Kw, "cmp %0, %1\n\tsetbe %B=\n\tmovzx %=, %B=" },
+	{ Ocugew,  Kw, "cmp %0, %1\n\tsetae %B=\n\tmovzx %=, %B=" },
 
 	/* Control flow */
 	{ Ocall,   Kw, "call %0" },
@@ -79,6 +79,14 @@ static char *rname[] = {
 	[RDI] = "di",
 	[RBP] = "bp",
 	[RSP] = "sp",
+};
+
+/* 8-bit register names (low byte) */
+static char *rname8[] = {
+	[RAX] = "al",
+	[RCX] = "cl",
+	[RDX] = "dl",
+	[RBX] = "bl",
 };
 
 static int64_t
@@ -125,6 +133,22 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 		}
 
 		switch ((c = *s++)) {
+		case 'B': /* 8-bit register version of next ref */
+			c = *s++;
+			if (c == '=')
+				r = i->to;
+			else if (c == '0')
+				r = i->arg[0];
+			else if (c == '1')
+				r = i->arg[1];
+			else
+				die("invalid 8-bit register specifier");
+
+			if (rtype(r) == RTmp && r.val <= RBX)
+				fprintf(f, "%s", rname8[r.val]);
+			else
+				die("8-bit register only available for AX-BX");
+			break;
 		case '=': /* destination register */
 			r = i->to;
 			goto Ref;
@@ -269,8 +293,60 @@ i8086_emitfn(Fn *fn, FILE *f)
 			if (b->s2 != b->link)
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
+		/* Conditional jumps based on flags (from comparison) */
+		case Jjfieq:
+			fprintf(f, "\tje %s\n", b->s1->name);
+			if (b->s2 != b->link)
+				fprintf(f, "\tjmp %s\n", b->s2->name);
+			break;
+		case Jjfine:
+			fprintf(f, "\tjne %s\n", b->s1->name);
+			if (b->s2 != b->link)
+				fprintf(f, "\tjmp %s\n", b->s2->name);
+			break;
+		case Jjfislt:
+			fprintf(f, "\tjl %s\n", b->s1->name);
+			if (b->s2 != b->link)
+				fprintf(f, "\tjmp %s\n", b->s2->name);
+			break;
+		case Jjfisgt:
+			fprintf(f, "\tjg %s\n", b->s1->name);
+			if (b->s2 != b->link)
+				fprintf(f, "\tjmp %s\n", b->s2->name);
+			break;
+		case Jjfisle:
+			fprintf(f, "\tjle %s\n", b->s1->name);
+			if (b->s2 != b->link)
+				fprintf(f, "\tjmp %s\n", b->s2->name);
+			break;
+		case Jjfisge:
+			fprintf(f, "\tjge %s\n", b->s1->name);
+			if (b->s2 != b->link)
+				fprintf(f, "\tjmp %s\n", b->s2->name);
+			break;
+		case Jjfiult:
+			fprintf(f, "\tjb %s\n", b->s1->name);
+			if (b->s2 != b->link)
+				fprintf(f, "\tjmp %s\n", b->s2->name);
+			break;
+		case Jjfiugt:
+			fprintf(f, "\tja %s\n", b->s1->name);
+			if (b->s2 != b->link)
+				fprintf(f, "\tjmp %s\n", b->s2->name);
+			break;
+		case Jjfiule:
+			fprintf(f, "\tjbe %s\n", b->s1->name);
+			if (b->s2 != b->link)
+				fprintf(f, "\tjmp %s\n", b->s2->name);
+			break;
+		case Jjfiuge:
+			fprintf(f, "\tjae %s\n", b->s1->name);
+			if (b->s2 != b->link)
+				fprintf(f, "\tjmp %s\n", b->s2->name);
+			break;
 		default:
-			/* Handle other jump types */
+			/* Unsupported jump type */
+			fprintf(f, "\t; TODO: jump type %d\n", b->jmp.type);
 			break;
 		}
 	}
