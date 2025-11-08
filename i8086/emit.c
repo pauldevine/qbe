@@ -66,6 +66,7 @@ static struct {
 
 	/* Control flow */
 	{ Ocall,   Kw, "call %0" },
+	{ Osalloc, Kw, "sub sp, %0" },
 
 	{ NOp, 0, 0 }
 };
@@ -422,6 +423,34 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			if (rtype(i->to) == RTmp)
 				fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
 		}
+		return;
+	}
+
+	/* Special handling for Osalloc (stack allocation) */
+	if (i->op == Osalloc) {
+		Con *c;
+		int64_t val;
+
+		/* Get the allocation size from arg[0] */
+		if (rtype(i->arg[0]) != RCon)
+			die("Osalloc requires constant argument");
+
+		c = &fn->con[i->arg[0].val];
+		val = c->bits.i;
+
+		if (val < 0) {
+			/* Negative value = deallocate (add to sp) */
+			fprintf(f, "\tadd sp, %"PRId64"\n", -val);
+		} else {
+			/* Positive value = allocate (sub from sp) */
+			fprintf(f, "\tsub sp, %"PRId64"\n", val);
+		}
+
+		/* If destination is not R, copy SP to destination */
+		if (!req(i->to, R) && rtype(i->to) == RTmp) {
+			fprintf(f, "\tmov %s, sp\n", rname[i->to.val]);
+		}
+
 		return;
 	}
 
