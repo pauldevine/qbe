@@ -1,7 +1,11 @@
 #include "all.h"
 #include "config.h"
 #include <ctype.h>
+#ifdef DOS
+#include "dosgetopt.h"
+#else
 #include <getopt.h>
+#endif
 
 Target T;
 

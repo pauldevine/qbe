@@ -5,6 +5,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* OpenWatcom/DOS compatibility */
+#ifdef __WATCOMC__
+#define __attribute__(x)
+#endif
+
 #define MAKESURE(what, x) typedef char make_sure_##what[(x)?1:-1]
 #define die(...) die_(__FILE__, __VA_ARGS__)
 
