@@ -25,9 +25,11 @@ make
 ./qbe -h
 ```
 
-## Example
+## Examples
 
-Input `test.ssa`:
+### Example 1: Simple Addition
+
+Input `test_add.ssa`:
 ```
 export function w $add(w %a, w %b) {
 @start
@@ -38,10 +40,10 @@ export function w $add(w %a, w %b) {
 
 Command:
 ```bash
-./qbe -t i8086 test.ssa > test.asm
+./qbe -t i8086 test_add.ssa > test_add.asm
 ```
 
-Output `test.asm`:
+Output `test_add.asm`:
 ```asm
 .text
 .balign 16
@@ -56,12 +58,102 @@ add:
 	ret
 ```
 
+### Example 2: Maximum (with comparison)
+
+Input `test_max.ssa`:
+```
+export function w $max(w %a, w %b) {
+@start
+	%cond =w csltw %a, %b
+	jnz %cond, @retb, @reta
+@reta
+	ret %a
+@retb
+	ret %b
+}
+```
+
+Output:
+```asm
+_max:
+max:
+	push bp
+	mov bp, sp
+	cmp ax, cx       ; Compare a and b
+	setl dl          ; Set dl if a < b
+	movzx dx, dl     ; Zero-extend to 16-bit
+	test dx, dx      ; Test if true
+	jnz start_retb   ; Jump if a < b
+reta:
+	mov sp, bp
+	pop bp
+	ret
+start_retb:
+	mov ax, cx       ; Return b
+retb:
+	mov sp, bp
+	pop bp
+	ret
+```
+
+### Example 3: Loop (sum from 0 to n)
+
+Input `test_loop.ssa`:
+```
+export function w $sum_to_n(w %n) {
+@start
+	%sum0 =w copy 0
+	%i0 =w copy 0
+	jmp @loop
+@loop
+	%sum =w phi @start %sum0, @body %sum1
+	%i =w phi @start %i0, @body %i1
+	%cond =w csltw %i, %n
+	jnz %cond, @body, @end
+@body
+	%sum1 =w add %sum, %i
+	%i1 =w add %i, 1
+	jmp @loop
+@end
+	ret %sum
+}
+```
+
+Output shows proper loop structure:
+```asm
+_sum_to_n:
+sum_to_n:
+	push bp
+	mov bp, sp
+start_loop:
+	mov cx, 0        ; i = 0
+	mov ax, 0        ; sum = 0
+loop:
+	cmp cx, dx       ; compare i with n
+	setl bl
+	movzx bx, bl
+	test bx, bx
+	jnz body         ; if i < n, continue loop
+	jmp end
+body:
+	add ax, cx       ; sum += i
+	add cx, 1        ; i++
+	jmp loop
+end:
+	mov sp, bp
+	pop bp
+	ret
+```
+
 ## Features
 
 ### Implemented
 
 - **16-bit word operations** (`Kw` class)
 - **Basic arithmetic**: add, sub, and, or, xor
+- **Comparisons**: All signed and unsigned integer comparisons (eq, ne, lt, gt, le, ge)
+- **Conditional branches**: Full support for if-statements and conditional jumps
+- **Loops**: While loops, for loops, and all control flow structures
 - **Function prologue/epilogue**: Standard BP-based stack frames
 - **Calling convention**: cdecl (arguments on stack, caller cleanup)
 - **Return values**: AX for 16-bit, DX:AX for 32-bit
@@ -72,11 +164,12 @@ add:
 
 - **No floating point**: The 8087 FPU is not yet supported
 - **Limited 32-bit support**: Long (Kl) operations are not fully implemented
+- **Parameter passing**: Opar operations not yet fully implemented (shows as TODO in output)
+- **Function calls**: Only basic call support, no full ABI implementation
 - **Incomplete instruction selection**: Some QBE IR operations are not yet mapped
-- **Simple ABI**: Only basic cdecl calling convention
 - **No optimizations**: Code generation is straightforward without target-specific optimizations
 - **Missing features**:
-  - Signed/unsigned distinction in some operations
+  - Division and remainder operations
   - Bit shifts and rotations
   - Conditional moves
   - Structure passing
@@ -152,11 +245,14 @@ tlink program.obj, program.exe
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Integer arithmetic (16-bit) | ✓ Partial | Basic ops working |
+| Integer arithmetic (16-bit) | ✓ Working | add, sub, and, or, xor |
+| Comparisons | ✓ Working | All signed/unsigned integer comparisons |
+| Conditional branches | ✓ Working | if-else, all conditional jumps |
+| Loops | ✓ Working | while, for, all loop structures |
 | Memory load/store | ✓ Partial | Simple cases work |
-| Function calls | ✓ Partial | cdecl only |
-| Conditional branches | ✗ TODO | Not yet implemented |
-| Comparisons | ✗ TODO | Not yet implemented |
+| Function calls | ⚠ Partial | Basic call works, full ABI TODO |
+| Division/Remainder | ✗ TODO | Not yet implemented |
+| Bit shifts | ✗ TODO | Not yet implemented |
 | Floating point | ✗ TODO | 8087 support needed |
 | 32-bit operations | ✗ TODO | Limited support |
 | Optimizations | ✗ TODO | None yet |
