@@ -241,7 +241,63 @@ Key features:
 - **Immediate shifts**: Can shift by constant amounts (1-31)
 - **Variable shifts**: Count must be in CL register; backend automatically moves to CL if needed
 
-### Example 6: Memory Addressing Modes
+### Example 6: Function Calls with Arguments
+
+The i8086 backend fully supports function calls with the cdecl calling convention:
+
+Input `test_call.ssa`:
+```
+export function w $add_two(w %a, w %b) {
+@start
+	%sum =w add %a, %b
+	ret %sum
+}
+
+export function w $test_call() {
+@start
+	%result =w call $add_two(w 10, w 20)
+	ret %result
+}
+```
+
+Output shows proper cdecl calling convention:
+```asm
+_add_two:
+add_two:
+	push bp
+	mov bp, sp
+	mov cx, word ptr [bp+6]    ; Load second parameter
+	mov ax, word ptr [bp+4]    ; Load first parameter
+	add ax, cx
+	mov sp, bp
+	pop bp
+	ret
+
+_test_call:
+test_call:
+	push bp
+	mov bp, sp
+	sub sp, 4                  ; Allocate space for 2 arguments
+	mov ax, sp
+	mov cx, ax
+	add cx, 2
+	mov word ptr [cx], 20      ; Push second arg at [sp+2]
+	mov word ptr [ax], 10      ; Push first arg at [sp]
+	call add_two               ; Call function
+	add sp, 4                  ; Caller cleanup
+	mov sp, bp
+	pop bp
+	ret
+```
+
+Key features:
+- **Arguments on stack**: All arguments passed via stack (no register arguments)
+- **Right-to-left order**: Arguments pushed in reverse order (cdecl convention)
+- **Caller cleanup**: Calling function cleans up stack after call
+- **Return in AX**: 16-bit return values in AX, 32-bit in DX:AX
+- **Stack layout**: `[bp+0]` = saved BP, `[bp+2]` = return address, `[bp+4]` = first arg
+
+### Example 7: Memory Addressing Modes
 
 The i8086 backend supports various addressing modes:
 
@@ -333,6 +389,11 @@ Supported addressing modes:
   - Base + index + offset: `[bx+si+offset]`
   - LEA (load effective address) for address calculations
 - **Function prologue/epilogue**: Standard BP-based stack frames
+- **Function calls**: ✓ Working - full cdecl calling convention support
+  - Arguments passed on stack (right-to-left order)
+  - Caller allocates stack space and cleans up after call
+  - Return values in AX (16-bit) or DX:AX (32-bit)
+  - Proper CALL() encoding for register allocator
 - **Parameter reception**: ✓ Working - functions correctly receive parameters from stack
   - Parameters loaded from [bp+4], [bp+6], etc.
   - Supports 16-bit (Kw), 32-bit (Kl), and extended byte/halfword parameters
@@ -340,14 +401,10 @@ Supported addressing modes:
 - **Calling convention**: cdecl (arguments on stack, caller cleanup)
 - **Return values**: AX for 16-bit, DX:AX for 32-bit
 - **Register allocation**: AX, BX, CX, DX, SI, DI
-- **Stack operations**: push/pop, local variables
+- **Stack operations**: push/pop, local variables, dynamic allocation (Osalloc)
 
 ### Limitations / TODO
 
-- **Function calls with arguments**: Calling functions with arguments causes crash in register allocator
-  - Functions can receive parameters correctly (✓ working)
-  - But making calls TO functions with arguments is not yet implemented
-  - This is the main blocker for full ABI support
 - **No floating point**: The 8087 FPU is not yet supported
 - **Limited 32-bit support**: Long (Kl) operations are not fully implemented
 - **Incomplete instruction selection**: Some QBE IR operations are not yet mapped
@@ -438,7 +495,7 @@ tlink program.obj, program.exe
 | Memory addressing | ✓ Working | All i8086 addressing modes, LEA support |
 | Memory load/store | ✓ Working | loadb/w/l, storeb/w/l with all addressing modes |
 | Parameter reception | ✓ Working | Functions receive params from stack correctly |
-| Function calls | ✗ TODO | Crash in register allocator with arguments |
+| Function calls | ✓ Working | Full cdecl calling convention with stack arguments |
 | Floating point | ✗ TODO | 8087 support needed |
 | 32-bit operations | ✗ TODO | Limited support |
 | Optimizations | ✗ TODO | None yet |
@@ -455,15 +512,15 @@ The i8086 backend consists of:
 
 ## Contributing
 
-The i8086 backend is functional but incomplete. Contributions are welcome for:
+The i8086 backend is functional with core features complete. Contributions are welcome for:
 
 - Adding 8087 FPU support for floating point operations
-- Improving ABI handling for full function call support
+- Improving 32-bit (long) operations (Kl class)
 - Adding memory model support (tiny, compact, medium, large, huge)
-- Optimizing code generation
-- Better handling of 32-bit operations (Kl class)
+- Optimizing code generation (peephole optimizations, better register allocation)
 - Implementing bit rotations (rol, ror, rcl, rcr)
-- Adding conditional move support
+- Adding conditional move support (for 80386+)
+- Better instruction selection for complex patterns
 
 ## References
 
