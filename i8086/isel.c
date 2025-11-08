@@ -120,6 +120,24 @@ seldiv(Ins i, Fn *fn, int issigned)
 }
 
 static void
+selshift(Ins i, Fn *fn)
+{
+	Ins *i0;
+
+	/* x86 shift instructions are special:
+	 * - Shift count can be immediate: shl ax, 5
+	 * - Or must be in CL register: shl ax, cl
+	 *
+	 * The emit phase will handle moving the count to CL if needed.
+	 */
+
+	emiti(i);
+	i0 = curi;
+	fixarg(&i0->arg[0], Kw, i0, fn);
+	fixarg(&i0->arg[1], Kw, i0, fn);
+}
+
+static void
 sel(Ins i, Fn *fn)
 {
 	Ins *i0;
@@ -140,6 +158,12 @@ sel(Ins i, Fn *fn)
 	case Oudiv:
 	case Ourem:
 		seldiv(i, fn, 0); /* unsigned */
+		return;
+	/* Handle shift operations specially */
+	case Oshl:
+	case Oshr:
+	case Osar:
+		selshift(i, fn);
 		return;
 	}
 

@@ -181,6 +181,66 @@ Key features:
 - **Unsigned division (`udiv`)**: Uses `xor dx, dx` to zero-extend, then `div`
 - **Remainder (`rem`/`urem`)**: Same as division, but result from DX instead of AX
 
+### Example 5: Bit Shifts
+
+Input `test_shifts.ssa`:
+```
+export function w $mul16(w %n) {
+@start
+	%result =w shl %n, 4
+	ret %result
+}
+
+export function w $div8(w %n) {
+@start
+	%result =w sar %n, 3
+	ret %result
+}
+
+export function w $shift_left(w %val, w %count) {
+@start
+	%result =w shl %val, %count
+	ret %result
+}
+```
+
+Output shows proper x86 shift handling:
+```asm
+_mul16:
+mul16:
+	push bp
+	mov bp, sp
+	shl ax, 4        ; Shift left by 4 (multiply by 16)
+	mov sp, bp
+	pop bp
+	ret
+
+_div8:
+div8:
+	push bp
+	mov bp, sp
+	sar ax, 3        ; Arithmetic shift right by 3 (divide by 8)
+	mov sp, bp
+	pop bp
+	ret
+
+_shift_left:
+shift_left:
+	push bp
+	mov bp, sp
+	shl ax, cl       ; Variable shift - count must be in CL
+	mov sp, bp
+	pop bp
+	ret
+```
+
+Key features:
+- **Shift left (`shl`)**: Logical shift left, zeros fill from right
+- **Logical shift right (`shr`)**: Logical shift right, zeros fill from left
+- **Arithmetic shift right (`sar`)**: Arithmetic shift right, sign bit fills from left
+- **Immediate shifts**: Can shift by constant amounts (1-31)
+- **Variable shifts**: Count must be in CL register; backend automatically moves to CL if needed
+
 ## Features
 
 ### Implemented
@@ -190,6 +250,10 @@ Key features:
 - **Division and remainder**: Both signed (div/rem) and unsigned (udiv/urem)
   - Proper DX:AX handling with `cwd` for signed, `xor dx,dx` for unsigned
   - Quotient from AX, remainder from DX
+- **Bit shifts**: shl, shr, sar with both immediate and variable shift counts
+  - Immediate shifts: `shl ax, 5`
+  - Variable shifts: `shl ax, cl` (count in CL register)
+  - Backend automatically moves shift count to CL when needed
 - **Comparisons**: All signed and unsigned integer comparisons (eq, ne, lt, gt, le, ge)
 - **Conditional branches**: Full support for if-statements and conditional jumps
 - **Loops**: While loops, for loops, and all control flow structures
@@ -208,7 +272,7 @@ Key features:
 - **Incomplete instruction selection**: Some QBE IR operations are not yet mapped
 - **No optimizations**: Code generation is straightforward without target-specific optimizations
 - **Missing features**:
-  - Bit shifts and rotations (shl/shr/sar - partially in omap but not tested)
+  - Bit rotations (rol/ror)
   - Conditional moves
   - Structure passing
   - Far pointers for large/huge memory models
@@ -286,12 +350,12 @@ tlink program.obj, program.exe
 |---------|--------|-------|
 | Integer arithmetic (16-bit) | ✓ Working | add, sub, mul, and, or, xor |
 | Division/Remainder | ✓ Working | div, rem, udiv, urem with proper DX:AX handling |
+| Bit shifts | ✓ Working | shl, shr, sar with immediate and variable counts |
 | Comparisons | ✓ Working | All signed/unsigned integer comparisons |
 | Conditional branches | ✓ Working | if-else, all conditional jumps |
 | Loops | ✓ Working | while, for, all loop structures |
 | Memory load/store | ✓ Partial | Simple cases work |
 | Function calls | ⚠ Partial | Basic call works, full ABI TODO |
-| Bit shifts | ⚠ Partial | In omap, needs testing |
 | Floating point | ✗ TODO | 8087 support needed |
 | 32-bit operations | ✗ TODO | Limited support |
 | Optimizations | ✗ TODO | None yet |
@@ -310,12 +374,13 @@ The i8086 backend consists of:
 
 The i8086 backend is functional but incomplete. Contributions are welcome for:
 
-- Implementing missing operations (div, mod, shifts, etc.)
-- Adding 8087 FPU support
-- Improving ABI handling
-- Adding memory model support
+- Adding 8087 FPU support for floating point operations
+- Improving ABI handling for full function call support
+- Adding memory model support (tiny, compact, medium, large, huge)
 - Optimizing code generation
-- Better handling of 32-bit operations
+- Better handling of 32-bit operations (Kl class)
+- Implementing bit rotations (rol, ror, rcl, rcr)
+- Adding conditional move support
 
 ## References
 
