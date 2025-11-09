@@ -1,0 +1,39 @@
+# Test memory addressing modes
+export function w $array_access(l %arr, l %index) {
+@start
+	# Test array access: arr[index]
+	# Should generate address calculation
+	%addr =l add %arr, %index
+	%val =w loadw %addr
+	ret %val
+}
+
+export function w $struct_field(l %ptr) {
+@start
+	# Test structure field access: ptr->field
+	# Access field at offset 4
+	%addr =l add %ptr, 4
+	%val =w loadw %addr
+	ret %val
+}
+
+export function w $local_array() {
+@start
+	# Test local array allocation and access
+	%arr =l alloc8 16         # Allocate 16 bytes on stack
+	%val =w copy 42
+	storew %val, %arr         # arr[0] = 42
+	%addr2 =l add %arr, 2     # &arr[1]
+	%val2 =w copy 99
+	storew %val2, %addr2      # arr[1] = 99
+	%result =w loadw %arr     # Load arr[0]
+	ret %result
+}
+
+export function w $base_offset(l %base) {
+@start
+	# Test base + constant offset
+	%off8 =l add %base, 8
+	%val =w loadw %off8
+	ret %val
+}

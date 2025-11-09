@@ -1,0 +1,12 @@
+# Test call with no arguments
+export function w $get_value() {
+@start
+	%val =w copy 42
+	ret %val
+}
+
+export function w $test_no_args() {
+@start
+	%result =w call $get_value()
+	ret %result
+}

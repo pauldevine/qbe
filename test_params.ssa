@@ -1,0 +1,13 @@
+# Test function parameters
+export function w $add_two(w %a, w %b) {
+@start
+	%sum =w add %a, %b
+	ret %sum
+}
+
+export function w $mul_add(w %a, w %b, w %c) {
+@start
+	%tmp =w mul %a, %b
+	%result =w add %tmp, %c
+	ret %result
+}
