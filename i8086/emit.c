@@ -1,7 +1,36 @@
 #include "all.h"
+#include <string.h>
 
 /* Track whether we've emitted the segment directive */
 static int segment_open = 0;
+
+/* Track external symbols that need extrn declarations */
+#define MAX_EXTERNS 256
+static char *extern_syms[MAX_EXTERNS];
+static int num_externs = 0;
+
+static void
+add_extern(char *name)
+{
+	int i;
+
+	/* Skip if name is NULL or empty */
+	if (!name || !*name)
+		return;
+
+	/* Check if already in list */
+	for (i = 0; i < num_externs; i++) {
+		if (strcmp(extern_syms[i], name) == 0)
+			return;
+	}
+
+	/* Add to list if space available */
+	if (num_externs < MAX_EXTERNS) {
+		extern_syms[num_externs] = strdup(name);
+		if (extern_syms[num_externs])
+			num_externs++;
+	}
+}
 
 /* Assembly code emission for 8086/286/386 16-bit mode */
 
@@ -484,6 +513,15 @@ i8086_emitfnlnk(char *name, Lnk *lnk, FILE *f)
 
 	/* Open segment if not already open */
 	if (!segment_open) {
+		int i;
+
+		/* Emit external symbol declarations first */
+		for (i = 0; i < num_externs; i++) {
+			fprintf(f, "extrn %s:near\n", extern_syms[i]);
+		}
+		if (num_externs > 0)
+			fprintf(f, "\n");
+
 		/* Use PARA (16-byte) alignment for the segment */
 		fprintf(f, "_TEXT segment para public 'CODE'\n");
 		segment_open = 1;
@@ -505,6 +543,12 @@ i8086_emitfn(Fn *fn, FILE *f)
 {
 	Blk *b;
 	Ins *i;
+	Con *c;
+
+	/* TODO: Auto-detect external symbols
+	 * For now, external functions must be manually declared with extrn
+	 */
+	(void)c;
 
 	/* Function header */
 	fprintf(f, "\n");
@@ -605,6 +649,8 @@ i8086_emitfn(Fn *fn, FILE *f)
 void
 i8086_emitfin(FILE *f)
 {
+	int i;
+
 	/* Close the code segment */
 	if (segment_open) {
 		fprintf(f, "_TEXT ends\n");
@@ -613,4 +659,11 @@ i8086_emitfin(FILE *f)
 
 	/* MASM/OpenWatcom END directive */
 	fprintf(f, "end\n");
+
+	/* Clean up extern symbols list */
+	for (i = 0; i < num_externs; i++) {
+		free(extern_syms[i]);
+		extern_syms[i] = NULL;
+	}
+	num_externs = 0;
 }
