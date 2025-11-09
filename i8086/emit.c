@@ -484,13 +484,13 @@ i8086_emitfnlnk(char *name, Lnk *lnk, FILE *f)
 
 	/* Open segment if not already open */
 	if (!segment_open) {
-		fprintf(f, "_TEXT segment word public 'CODE'\n");
+		/* Use PARA (16-byte) alignment for the segment */
+		fprintf(f, "_TEXT segment para public 'CODE'\n");
 		segment_open = 1;
 	}
 
-	/* Alignment directive */
-	if (lnk->align)
-		fprintf(f, "\talign %d\n", lnk->align);
+	/* No explicit align directive needed - PARA segment is 16-byte aligned */
+	(void)lnk->align;
 
 	/* Export directive */
 	if (lnk->export)
@@ -509,7 +509,6 @@ i8086_emitfn(Fn *fn, FILE *f)
 	/* Function header */
 	fprintf(f, "\n");
 	i8086_emitfnlnk(fn->name, &fn->lnk, f);
-	fprintf(f, "%s:\n", fn->name);
 
 	/* Function prologue */
 	fprintf(f, "\tpush bp\n");

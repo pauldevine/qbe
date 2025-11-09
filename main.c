@@ -110,7 +110,11 @@ func(Fn *fn)
 			fn->rpo[n]->link = fn->rpo[n+1];
 	if (!dbg) {
 		T.emitfn(fn, outf);
-		fprintf(outf, "/* end function %s */\n\n", fn->name);
+		/* Use MASM-style comments for i8086, C-style for others */
+		if (strcmp(T.name, "i8086") == 0)
+			fprintf(outf, ";; end function %s\n\n", fn->name);
+		else
+			fprintf(outf, "/* end function %s */\n\n", fn->name);
 	} else
 		fprintf(stderr, "\n");
 	freeall();
