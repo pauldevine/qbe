@@ -445,15 +445,31 @@ The i8086 backend uses the **cdecl** calling convention:
 
 ## Assembly Syntax
 
-The generated assembly uses:
+The generated assembly uses **MASM/OpenWatcom syntax**:
 - **Intel syntax**: `mov dst, src`
-- **AT&T-style directives**: `.text`, `.globl`, `.balign`
+- **MASM-style directives**: `_TEXT segment`, `public`, `align`, `end`
 - **Underscore prefix**: Global symbols prefixed with `_` (DOS/OMF convention)
 
-You can assemble the output with:
-- **NASM**: `nasm -f obj output.asm`
-- **MASM/TASM**: May need minor syntax adjustments
-- **GNU as**: With `--32` flag and some preprocessing
+Example output:
+```asm
+_TEXT segment word public 'CODE'
+    align 16
+    public _add
+_add:
+add:
+    push bp
+    mov bp, sp
+    ...
+    ret
+_TEXT ends
+end
+```
+
+You can assemble the output directly with:
+- **OpenWatcom WASM**: `wasm output.asm`
+- **UASM**: `uasm output.asm` (MASM-compatible)
+- **MASM**: `ml /c output.asm`
+- **TASM**: `tasm output.asm`
 
 ## Memory Models
 
@@ -469,17 +485,24 @@ Support for tiny, compact, medium, large, and huge models is planned but not yet
 After generating assembly with QBE:
 
 ```bash
-# Generate assembly
+# Generate assembly (MASM/OpenWatcom syntax)
 ./qbe -t i8086 program.ssa > program.asm
 
-# Assemble with NASM (produces OBJ file)
-nasm -f obj program.asm -o program.obj
-
-# Link with OpenWatcom's wlink
+# Option 1: OpenWatcom toolchain
+wasm program.asm              # Produces program.obj
 wlink system dos file program.obj name program.exe
 
-# Or use Turbo Link
-tlink program.obj, program.exe
+# Option 2: UASM (MASM-compatible)
+uasm -zcw program.asm         # Produces program.obj
+wlink system dos file program.obj name program.exe
+
+# Option 3: Microsoft MASM
+ml /c program.asm             # Produces program.obj
+link program.obj;             # Produces program.exe
+
+# Option 4: Turbo Assembler
+tasm program.asm              # Produces program.obj
+tlink program.obj             # Produces program.exe
 ```
 
 ## Implementation Status
