@@ -1,5 +1,8 @@
 #include "all.h"
 
+/* Track whether we've emitted the segment directive */
+static int segment_open = 0;
+
 /* Assembly code emission for 8086/286/386 16-bit mode */
 
 enum {
@@ -474,6 +477,29 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	emitf(fmt, i, fn, f);
 }
 
+static void
+i8086_emitfnlnk(char *name, Lnk *lnk, FILE *f)
+{
+	/* Emit MASM/OpenWatcom style directives */
+
+	/* Open segment if not already open */
+	if (!segment_open) {
+		fprintf(f, "_TEXT segment word public 'CODE'\n");
+		segment_open = 1;
+	}
+
+	/* Alignment directive */
+	if (lnk->align)
+		fprintf(f, "\talign %d\n", lnk->align);
+
+	/* Export directive */
+	if (lnk->export)
+		fprintf(f, "\tpublic %s%s\n", T.assym, name);
+
+	/* Symbol label with underscore prefix */
+	fprintf(f, "%s%s:\n", T.assym, name);
+}
+
 void
 i8086_emitfn(Fn *fn, FILE *f)
 {
@@ -482,7 +508,7 @@ i8086_emitfn(Fn *fn, FILE *f)
 
 	/* Function header */
 	fprintf(f, "\n");
-	emitfnlnk(fn->name, &fn->lnk, f);
+	i8086_emitfnlnk(fn->name, &fn->lnk, f);
 	fprintf(f, "%s:\n", fn->name);
 
 	/* Function prologue */
@@ -575,4 +601,17 @@ i8086_emitfn(Fn *fn, FILE *f)
 			break;
 		}
 	}
+}
+
+void
+i8086_emitfin(FILE *f)
+{
+	/* Close the code segment */
+	if (segment_open) {
+		fprintf(f, "_TEXT ends\n");
+		segment_open = 0;
+	}
+
+	/* MASM/OpenWatcom END directive */
+	fprintf(f, "end\n");
 }

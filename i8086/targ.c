@@ -44,7 +44,7 @@ Target T_i8086 = {
 	.abi1 = i8086_abi,
 	.isel = i8086_isel,
 	.emitfn = i8086_emitfn,
-	.emitfin = elf_emitfin,  /* TODO: maybe need custom output format */
+	.emitfin = i8086_emitfin,
 	.asloc = ".L",
 	.assym = "_",  /* DOS/OMF conventionally prefixes symbols with _ */
 };

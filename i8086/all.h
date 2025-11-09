@@ -50,3 +50,4 @@ void i8086_isel(Fn *);
 
 /* emit.c */
 void i8086_emitfn(Fn *, FILE *);
+void i8086_emitfin(FILE *);
