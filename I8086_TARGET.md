@@ -482,6 +482,88 @@ Support for tiny, compact, medium, large, and huge models is planned but not yet
 
 ## Building for DOS
 
+### Complete Hello World Example
+
+Here's a complete working example that creates a DOS executable:
+
+**Step 1: Create QBE source** (`hello.ssa`):
+```qbe
+export function w $main() {
+@start
+    call $dos_hello()
+    ret 0
+}
+```
+
+**Step 2: Create DOS startup code** (`dos_start.asm`):
+```asm
+.8086
+extrn _main:near
+
+_TEXT segment para public 'CODE'
+    assume cs:_TEXT, ds:_DATA
+
+    public _start
+_start:
+    mov ax, _DATA
+    mov ds, ax
+    call _main
+    mov ah, 4Ch        ; DOS exit
+    int 21h
+
+    public dos_hello
+dos_hello:
+    push bp
+    mov bp, sp
+    push ds
+    mov ax, _DATA
+    mov ds, ax
+    mov dx, offset msg
+    mov ah, 09h        ; DOS print string
+    int 21h
+    pop ds
+    pop bp
+    ret
+_TEXT ends
+
+_DATA segment word public 'DATA'
+msg db 'Hello, World from QBE!', 13, 10, '$'
+_DATA ends
+
+end _start
+```
+
+**Step 3: Build:**
+```bash
+# Generate assembly
+./qbe -t i8086 hello.ssa > hello_qbe.asm
+
+# Add extrn declaration to hello_qbe.asm (before _TEXT segment):
+#   extrn dos_hello:near
+
+# Assemble
+wasm hello_qbe.asm -fo=hello_qbe.obj
+wasm dos_start.asm -fo=dos_start.obj
+
+# Link (dos_start.obj FIRST!)
+wlink system dos file dos_start.obj,hello_qbe.obj name hello.exe
+```
+
+**Step 4: Run in DOSBox:**
+```
+hello.exe
+```
+
+Output: `Hello, World from QBE!`
+
+**Key points:**
+- DOS programs need startup code with entry point (`_start`)
+- Link startup object file first
+- External functions need `extrn` declarations (currently manual)
+- Use INT 21h, AH=4Ch to exit cleanly to DOS
+
+### Other Build Options
+
 After generating assembly with QBE:
 
 ```bash
