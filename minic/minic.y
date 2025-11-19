@@ -85,6 +85,7 @@ struct Stmt {
 int yylex(void), yyerror(char *);
 Symb expr(Node *), lval(Node *);
 void branch(Node *, int, int);
+int stmt(Stmt *, int);
 
 FILE *of;
 int line;
@@ -219,7 +220,7 @@ structadd(char *name, int isunion)
 void
 structaddmember(int sidx, char *name, unsigned ctyp)
 {
-	int offset, i;
+	int i;
 	struct Member *m;
 
 	if (structh[sidx].nmembers >= 16)
@@ -361,6 +362,23 @@ prom(int op, Symb *l, Symb *r)
 	Symb *t;
 	int sz;
 
+	/* Promote char to int for comparisons (both operands must be int or larger) */
+	if (strchr("ne<l", op) && KIND(l->ctyp) == CHR && KIND(r->ctyp) == CHR) {
+		fprintf(of, "\t%%t%d =w extsb ", tmp);
+		psymb(*l);
+		fprintf(of, "\n");
+		l->t = Tmp;
+		l->ctyp = INT;
+		l->u.n = tmp++;
+		fprintf(of, "\t%%t%d =w extsb ", tmp);
+		psymb(*r);
+		fprintf(of, "\n");
+		r->t = Tmp;
+		r->ctyp = INT;
+		r->u.n = tmp++;
+		return INT;
+	}
+
 	if (l->ctyp == r->ctyp && KIND(l->ctyp) != PTR)
 		return l->ctyp;
 
@@ -448,7 +466,14 @@ load(Symb d, Symb s)
 	fprintf(of, "\t");
 	psymb(d);
 	t = irtyp(d.ctyp);
-	fprintf(of, " =%c load%c ", t, t);
+
+	/* QBE doesn't support byte temporaries, load bytes into words */
+	if (t == 'b') {
+		/* Use word temporary for byte loads */
+		fprintf(of, " =w loads%c ", t);
+	} else {
+		fprintf(of, " =%c load%c ", t, t);
+	}
 	psymb(s);
 	fprintf(of, "\n");
 }
@@ -1063,6 +1088,9 @@ stmt(Stmt *s, int b)
 		/* These are handled within genswitch */
 		if (s->p2)
 			stmt((Stmt*)s->p2, b);
+		return 0;
+	default:
+		die("unknown statement type");
 		return 0;
 	}
 }
