@@ -11,9 +11,17 @@ MiniC compiles a subset of C to QBE intermediate language (IL), which can then b
 ### Data Types
 
 - **int** - 32-bit signed integer (maps to QBE 'w' type)
+- **unsigned int** - 32-bit unsigned integer
 - **long** - 64-bit signed integer (maps to QBE 'l' type)
+- **unsigned long** - 64-bit unsigned integer
+- **char** - 8-bit signed integer (maps to QBE 'b' type)
+- **unsigned char** - 8-bit unsigned integer
 - **void** - used for function return types only
 - **Pointers** - any level of indirection (e.g., `int*`, `int**`, `long*`)
+- **struct** - User-defined composite types
+- **union** - User-defined overlapping types
+- **enum** - Named integer constants
+- **typedef** - Type aliases
 
 ### Operators
 
@@ -53,8 +61,8 @@ MiniC compiles a subset of C to QBE intermediate language (IL), which can then b
 - `*` - Dereference
 
 #### Increment/Decrement
-- `++` - Post-increment (e.g., `i++`)
-- `--` - Post-decrement (e.g., `i--`)
+- `++` - Prefix and post-increment (e.g., `++i`, `i++`)
+- `--` - Prefix and post-decrement (e.g., `--i`, `i--`)
 
 #### Other
 - `[]` - Array subscript (equivalent to pointer arithmetic)
@@ -72,6 +80,25 @@ if (condition)
 else
     statement;
 ```
+
+#### Switch Statements
+```c
+switch (expression) {
+    case constant1:
+        statements;
+        break;
+    case constant2:
+        statements;
+        break;
+    default:
+        statements;
+        break;
+}
+```
+Features:
+- Fall-through behavior supported (omit `break` to fall through)
+- `default` case is optional
+- Cases must be compile-time integer constants
 
 #### Loops
 ```c
@@ -137,10 +164,88 @@ int global_var;
 int array[10];
 array[5] = 42;
 int value = array[5];
+
+# Array initialization
+int primes[5] = {2, 3, 5, 7, 11};
 ```
 - Implemented via pointer arithmetic
 - No bounds checking
 - Can be used with pointer arithmetic
+- Initialization lists supported
+
+### Composite Types
+
+#### Structures
+```c
+struct Point {
+    int x;
+    int y;
+};
+
+struct Point p;
+p.x = 10;
+p.y = 20;
+int px = p.x;  # Member access
+```
+Features:
+- Member access via `.` operator
+- Members stored sequentially in memory
+- Supports nested structures
+- Must declare struct type before use
+
+#### Unions
+```c
+union Data {
+    int i;
+    long l;
+};
+
+union Data d;
+d.i = 42;      # Set as int
+long v = d.l;  # Read as long (shares same memory)
+```
+Features:
+- All members share the same memory location
+- Size is the maximum of all member sizes
+- No automatic tracking of which member is active
+
+#### Enumerations
+```c
+enum Color {
+    RED,      # 0
+    GREEN,    # 1
+    BLUE      # 2
+};
+
+enum Size {
+    SMALL = 10,
+    MEDIUM = 20,
+    LARGE = 30
+};
+
+int c = RED;     # Use as constant
+int s = MEDIUM;
+```
+Features:
+- Compile-time integer constants
+- Auto-increment from 0 or last value
+- Explicit values supported
+
+#### Type Definitions
+```c
+typedef int myint;
+typedef long* longptr;
+typedef struct Point Point;
+
+myint x = 42;
+longptr p;
+Point pt;
+pt.x = 10;
+```
+Features:
+- Create type aliases
+- Simplify complex type declarations
+- Works with all base and composite types
 
 ### Pointers
 ```c
@@ -168,29 +273,29 @@ printf("Hello, world!\n");
 ## Type Promotion and Conversion
 
 - Automatic promotion from `int` to `long` when mixing types
+- Automatic promotion from `char` to `int` in expressions
+- Unsigned promotion: when mixing signed and unsigned of same size, promotes to unsigned
+- Signed to unsigned conversion when assigning or comparing different signedness
 - Pointer arithmetic automatically scales by size of pointed-to type
 - Integer to pointer and pointer to integer conversions allowed (via `void*`)
+- Comparison operators use unsigned comparisons when either operand is unsigned
 
 ## Limitations
 
 ### Not Supported
 
 1. **Types**:
-   - `char`, `short`, `unsigned` types
+   - `short` type
    - `float`, `double` (no floating-point support)
-   - `struct`, `union`, `enum`
-   - `typedef`
    - Type qualifiers: `const`, `volatile`, `restrict`
    - Storage classes: `static`, `extern`, `auto`, `register`
 
 2. **Operators**:
-   - Prefix increment/decrement (`++i`, `--i`)
    - Compound assignments (`+=`, `-=`, `*=`, etc.)
    - Ternary operator (`? :`)
    - Comma operator (`,`)
 
 3. **Control Flow**:
-   - `switch`/`case` statements
    - `goto` and labels
 
 4. **Functions**:
@@ -226,13 +331,9 @@ printf("Hello, world!\n");
    - No character literals (`'a'`)
    - No floating-point literals
 
-4. **Array Initialization**:
-   - Cannot initialize arrays at declaration
-   - Must use assignment statements
-
-5. **Type System**:
+4. **Type System**:
    - Limited type checking
-   - Pointer comparisons may not work correctly (uses signed comparison)
+   - Mixed pointer type assignments may not be caught
 
 ## Example Programs
 
@@ -340,7 +441,32 @@ MiniC generates QBE intermediate language, which uses:
 
 ## Version History
 
-### Latest (November 2024)
+### Current (November 2024)
+**New Features:**
+- **Type System Enhancements:**
+  - Unsigned types: `unsigned int`, `unsigned long`, `unsigned char`
+  - `char` type (signed 8-bit integer)
+  - `struct` and `union` composite types with member access
+  - `enum` for named integer constants
+  - `typedef` for type aliases
+
+- **Control Flow:**
+  - `switch`/`case`/`default` statements with fall-through
+  - Prefix increment/decrement (`++i`, `--i`)
+
+- **Arrays:**
+  - Array initialization lists (e.g., `int arr[] = {1, 2, 3}`)
+
+- **Bug Fixes:**
+  - Fixed unsigned type promotion and comparison operators
+  - Fixed struct member access to properly load values
+  - Improved type checking for assignments with unsigned types
+
+**Test Suite:**
+- Comprehensive unit tests for all features in `test/` directory
+- All tests verified passing with PASS/FAIL output
+
+### Previous (November 2024)
 - Added do-while loops
 - Added continue statement
 - Added bitwise OR (`|`), XOR (`^`), NOT (`~`) operators
