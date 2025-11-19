@@ -365,7 +365,7 @@ prom(int op, Symb *l, Symb *r)
 		return l->ctyp;
 
 	/* Promote char to int */
-	if (l->ctyp == CHR && r->ctyp != CHR) {
+	if (KIND(l->ctyp) == CHR && KIND(r->ctyp) != CHR) {
 		/* Extend char to int */
 		fprintf(of, "\t%%t%d =w extsb ", tmp);
 		psymb(*l);
@@ -374,7 +374,7 @@ prom(int op, Symb *l, Symb *r)
 		l->ctyp = INT;
 		l->u.n = tmp++;
 	}
-	if (r->ctyp == CHR && l->ctyp != CHR) {
+	if (KIND(r->ctyp) == CHR && KIND(l->ctyp) != CHR) {
 		fprintf(of, "\t%%t%d =w extsb ", tmp);
 		psymb(*r);
 		fprintf(of, "\n");
@@ -383,21 +383,24 @@ prom(int op, Symb *l, Symb *r)
 		r->u.n = tmp++;
 	}
 
-	if (l->ctyp == LNG && r->ctyp == INT) {
+	/* Promote int to long (handles both signed and unsigned) */
+	if (KIND(l->ctyp) == LNG && KIND(r->ctyp) == INT) {
 		sext(r);
-		return LNG;
+		/* Return unsigned long if l is unsigned, else signed long */
+		return ISUNSIGNED(l->ctyp) ? (LNG | UNSIGNED) : LNG;
 	}
-	if (l->ctyp == INT && r->ctyp == LNG) {
+	if (KIND(l->ctyp) == INT && KIND(r->ctyp) == LNG) {
 		sext(l);
-		return LNG;
+		/* Return unsigned long if r is unsigned, else signed long */
+		return ISUNSIGNED(r->ctyp) ? (LNG | UNSIGNED) : LNG;
 	}
 
 	/* Handle unsigned type promotion */
-	if ((l->ctyp & ~UNSIGNED) == (r->ctyp & ~UNSIGNED)) {
+	if (KIND(l->ctyp) == KIND(r->ctyp)) {
 		/* Same base type, possibly different signedness */
 		/* Promote to unsigned if either is unsigned */
 		if (ISUNSIGNED(l->ctyp) || ISUNSIGNED(r->ctyp))
-			return (l->ctyp & ~UNSIGNED) | UNSIGNED;
+			return KIND(l->ctyp) | UNSIGNED;
 		return l->ctyp;
 	}
 
@@ -624,6 +627,7 @@ expr(Node *n)
 			char *mname = n->r->u.v;
 			int i, found = 0;
 			struct Member *m;
+			Symb addr;
 
 			/* Find member */
 			for (i = 0; i < structh[sidx].nmembers; i++) {
@@ -638,19 +642,25 @@ expr(Node *n)
 
 			/* Compute member address: struct_addr + offset */
 			if (m->offset > 0) {
-				sr.t = Tmp;
-				sr.u.n = tmp++;
-				sr.ctyp = IDIR(m->ctyp);
+				addr.t = Tmp;
+				addr.u.n = tmp++;
+				addr.ctyp = IDIR(m->ctyp);
 				fprintf(of, "\t");
-				psymb(sr);
+				psymb(addr);
 				fprintf(of, " =l add ");
 				psymb(s0);
 				fprintf(of, ", %d\n", m->offset);
 			} else {
 				/* Offset 0, just use struct address */
-				sr = s0;
-				sr.ctyp = IDIR(m->ctyp);
+				addr = s0;
+				addr.ctyp = IDIR(m->ctyp);
 			}
+
+			/* Load value from member address */
+			sr.t = Tmp;
+			sr.u.n = tmp++;
+			sr.ctyp = m->ctyp;
+			load(sr, addr);
 		}
 		break;
 
@@ -679,13 +689,13 @@ expr(Node *n)
 		s1 = lval(n->l);
 		sr = s0;
 		/* Type conversions for assignment */
-		if (s1.ctyp == LNG &&  s0.ctyp == INT)
+		if (KIND(s1.ctyp) == LNG && KIND(s0.ctyp) == INT)
 			sext(&s0);
-		if (s1.ctyp == CHR && s0.ctyp == INT) {
+		if (KIND(s1.ctyp) == CHR && KIND(s0.ctyp) == INT) {
 			/* Truncate int to char - no explicit conversion needed */
 			/* QBE will handle truncation in storeb */
 		}
-		if (s1.ctyp == INT && s0.ctyp == CHR) {
+		if (KIND(s1.ctyp) == INT && KIND(s0.ctyp) == CHR) {
 			/* Extend char to int */
 			fprintf(of, "\t%%t%d =w extsb ", tmp);
 			psymb(s0);
@@ -698,7 +708,7 @@ expr(Node *n)
 		if (s1.ctyp != IDIR(NIL) || KIND(s0.ctyp) != PTR)
 		/* Allow assignment between signed/unsigned variants */
 		if (s1.ctyp != s0.ctyp
-		    && !(s1.ctyp == CHR && s0.ctyp == INT)
+		    && !(KIND(s1.ctyp) == CHR && KIND(s0.ctyp) == INT)
 		    && !((KIND(s1.ctyp) == KIND(s0.ctyp)) ||
 		         ((KIND(s1.ctyp) & ~UNSIGNED) == (KIND(s0.ctyp) & ~UNSIGNED))))
 			die("invalid assignment");
@@ -816,10 +826,44 @@ lval(Node *n)
 		sr.ctyp = DREF(sr.ctyp);
 		break;
 	case '.':
-		/* Member access is also an lvalue */
-		sr = expr(n);
-		/* expr() returns the member address with IDIR type, need to DREF it for lval */
-		sr.ctyp = DREF(sr.ctyp);
+		/* Member access is also an lvalue - compute address */
+		{
+			Symb s0 = lval(n->l);  /* Get struct lvalue */
+			if (KIND(s0.ctyp) != STRUCT_T && KIND(s0.ctyp) != UNION_T)
+				die("member access on non-struct/union");
+
+			int sidx = DREF(s0.ctyp);
+			char *mname = n->r->u.v;
+			int i, found = 0;
+			struct Member *m;
+
+			/* Find member */
+			for (i = 0; i < structh[sidx].nmembers; i++) {
+				if (strcmp(structh[sidx].members[i].name, mname) == 0) {
+					found = 1;
+					m = &structh[sidx].members[i];
+					break;
+				}
+			}
+			if (!found)
+				die("struct member not found");
+
+			/* Compute member address: struct_addr + offset */
+			if (m->offset > 0) {
+				sr.t = Tmp;
+				sr.u.n = tmp++;
+				sr.ctyp = m->ctyp;  /* lval returns the type, not IDIR */
+				fprintf(of, "\t");
+				psymb(sr);
+				fprintf(of, " =l add ");
+				psymb(s0);
+				fprintf(of, ", %d\n", m->offset);
+			} else {
+				/* Offset 0, just use struct address */
+				sr = s0;
+				sr.ctyp = m->ctyp;  /* lval returns the type, not IDIR */
+			}
+		}
 		break;
 	}
 	return sr;
