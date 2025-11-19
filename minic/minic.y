@@ -21,14 +21,17 @@ enum { /* minic types */
 	FUN,
 };
 
+#define UNSIGNED  (1 << 6)  /* Unsigned flag for types */
 #define IDIR(x) (((x) << 3) + PTR)
 #define FUNC(x) (((x) << 3) + FUN)
 #define DREF(x) ((x) >> 3)
 #define KIND(x) ((x) & 7)
+#define ISUNSIGNED(x) ((x) & UNSIGNED)
+#define BASETYPE(x) (KIND(x) & ~UNSIGNED)
 #define SIZE(x)                                    \
-	(x == NIL ? (die("void has no size"), 0) : \
-	 x == CHR ? 1 :                            \
-	 x == INT ? 4 : 8)
+	(KIND(x) == NIL ? (die("void has no size"), 0) : \
+	 KIND(x) == CHR ? 1 :  \
+	 KIND(x) == INT ? 4 : 8)
 
 typedef struct Node Node;
 typedef struct Symb Symb;
@@ -303,6 +306,15 @@ prom(int op, Symb *l, Symb *r)
 		return LNG;
 	}
 
+	/* Handle unsigned type promotion */
+	if ((l->ctyp & ~UNSIGNED) == (r->ctyp & ~UNSIGNED)) {
+		/* Same base type, possibly different signedness */
+		/* Promote to unsigned if either is unsigned */
+		if (ISUNSIGNED(l->ctyp) || ISUNSIGNED(r->ctyp))
+			return (l->ctyp & ~UNSIGNED) | UNSIGNED;
+		return l->ctyp;
+	}
+
 	if (op == '+') {
 		if (KIND(r->ctyp) == PTR) {
 			t = l;
@@ -554,7 +566,11 @@ expr(Node *n)
 		}
 		if (s0.ctyp != IDIR(NIL) || KIND(s1.ctyp) != PTR)
 		if (s1.ctyp != IDIR(NIL) || KIND(s0.ctyp) != PTR)
-		if (s1.ctyp != s0.ctyp && !(s1.ctyp == CHR && s0.ctyp == INT))
+		/* Allow assignment between signed/unsigned variants */
+		if (s1.ctyp != s0.ctyp
+		    && !(s1.ctyp == CHR && s0.ctyp == INT)
+		    && !((KIND(s1.ctyp) == KIND(s0.ctyp)) ||
+		         ((KIND(s1.ctyp) & ~UNSIGNED) == (KIND(s0.ctyp) & ~UNSIGNED))))
 			die("invalid assignment");
 		fprintf(of, "\tstore%c ", irtyp(s1.ctyp));
 		goto Args;
@@ -617,7 +633,12 @@ expr(Node *n)
 		fprintf(of, "\t");
 		psymb(sr);
 		fprintf(of, " =%c", irtyp(sr.ctyp));
-		fprintf(of, " %s%s ", otoa[o], ty);
+		/* Use unsigned comparison if either operand is unsigned */
+		if (strchr("<l", o) && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp))) {
+			fprintf(of, " %s%s ", o == '<' ? "cult" : "cule", ty);
+		} else {
+			fprintf(of, " %s%s ", otoa[o], ty);
+		}
 	Args:
 		psymb(s0);
 		fprintf(of, ", ");
@@ -966,7 +987,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TINT TLNG
+%token TVOID TCHAR TINT TLNG TUNSIGNED
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME
 
@@ -1111,6 +1132,10 @@ type: type '*' { $$ = IDIR($1); }
     | TINT     { $$ = INT; }
     | TLNG     { $$ = LNG; }
     | TVOID    { $$ = NIL; }
+    | TUNSIGNED TCHAR { $$ = CHR | UNSIGNED; }
+    | TUNSIGNED TINT  { $$ = INT | UNSIGNED; }
+    | TUNSIGNED TLNG  { $$ = LNG | UNSIGNED; }
+    | TUNSIGNED       { $$ = INT | UNSIGNED; }
     | TNAME    { $$ = $1; }
     ;
 
@@ -1214,6 +1239,7 @@ yylex()
 		{ "char", TCHAR },
 		{ "int", TINT },
 		{ "long", TLNG },
+		{ "unsigned", TUNSIGNED },
 		{ "typedef", TYPEDEF },
 		{ "enum", ENUM },
 		{ "switch", SWITCH },
