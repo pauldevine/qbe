@@ -79,11 +79,13 @@ void branch(Node *, int, int);
 FILE *of;
 int line;
 int lbl, tmp, nglo;
+int enumval; /* Current enum value */
 char *ini[NGlo];
 struct {
 	char v[NString];
 	unsigned ctyp;
 	int glo;
+	int enumconst; /* -2 means it's an enum constant, glo stores the value */
 } varh[NVar];
 
 void
@@ -121,7 +123,7 @@ varclr()
 	unsigned h;
 
 	for (h=0; h<NVar; h++)
-		if (!varh[h].glo)
+		if (!varh[h].glo && !varh[h].enumconst)
 			varh[h].v[0] = 0;
 }
 
@@ -137,6 +139,7 @@ varadd(char *v, int glo, unsigned ctyp)
 			strcpy(varh[h].v, v);
 			varh[h].glo = glo;
 			varh[h].ctyp = ctyp;
+			varh[h].enumconst = (glo == -2) ? 1 : 0;
 			return;
 		}
 		if (strcmp(varh[h].v, v) == 0)
@@ -156,7 +159,11 @@ varget(char *v)
 	h = h0;
 	do {
 		if (strcmp(varh[h].v, v) == 0) {
-			if (!varh[h].glo) {
+			if (varh[h].enumconst) {
+				/* Enum constant - return as integer constant */
+				s.t = Con;
+				s.u.n = varh[h].glo;
+			} else if (!varh[h].glo) {
 				s.t = Var;
 				strcpy(s.u.v, v);
 			} else {
@@ -417,7 +424,13 @@ expr(Node *n)
 	case 'V':
 		s0 = lval(n);
 		sr.ctyp = s0.ctyp;
-		load(sr, s0);
+		if (s0.t == Con) {
+			/* Enum constant or other constant - use directly */
+			sr = s0;
+		} else {
+			/* Variable - need to load */
+			load(sr, s0);
+		}
 		break;
 
 	case 'N':
@@ -807,6 +820,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %token TVOID TCHAR TINT TLNG
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN
+%token ENUM
 
 %left ','
 %right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
@@ -828,7 +842,33 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %%
 
-prog: func prog | fdcl prog | idcl prog | ;
+prog: func prog | fdcl prog | idcl prog | edcl prog | ;
+
+edcl: enumstart enums '}' ';'
+    ;
+
+enumstart: ENUM IDENT '{'  { enumval = 0; }
+         | ENUM '{'         { enumval = 0; }
+         ;
+
+enums: enum
+     | enums ',' enum
+     ;
+
+enum: IDENT
+{
+	varadd($1->u.v, enumval, INT);
+	varh[hash($1->u.v)].enumconst = 1;
+	enumval++;
+}
+    | IDENT '=' NUM
+{
+	enumval = $3->u.n;
+	varadd($1->u.v, enumval, INT);
+	varh[hash($1->u.v)].enumconst = 1;
+	enumval++;
+}
+    ;
 
 fdcl: type IDENT '(' ')' ';'
 {
@@ -1015,6 +1055,7 @@ yylex()
 		{ "char", TCHAR },
 		{ "int", TINT },
 		{ "long", TLNG },
+		{ "enum", ENUM },
 		{ "if", IF },
 		{ "else", ELSE },
 		{ "for", FOR },
@@ -1045,12 +1086,73 @@ yylex()
 
 	if (isdigit(c)) {
 		n = 0;
+		/* Check for hex (0x) or octal (0) */
+		if (c == '0') {
+			c = getchar();
+			if (c == 'x' || c == 'X') {
+				/* Hexadecimal */
+				c = getchar();
+				while (isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+					n *= 16;
+					if (isdigit(c))
+						n += c - '0';
+					else if (c >= 'a' && c <= 'f')
+						n += c - 'a' + 10;
+					else
+						n += c - 'A' + 10;
+					c = getchar();
+				}
+			} else if (c >= '0' && c <= '7') {
+				/* Octal */
+				while (c >= '0' && c <= '7') {
+					n *= 8;
+					n += c - '0';
+					c = getchar();
+				}
+			} else {
+				/* Just 0 */
+				ungetc(c, stdin);
+				yylval.n = mknode('N', 0, 0);
+				yylval.n->u.n = 0;
+				return NUM;
+			}
+			ungetc(c, stdin);
+			yylval.n = mknode('N', 0, 0);
+			yylval.n->u.n = n;
+			return NUM;
+		}
+		/* Decimal */
 		do {
 			n *= 10;
 			n += c-'0';
 			c = getchar();
 		} while (isdigit(c));
 		ungetc(c, stdin);
+		yylval.n = mknode('N', 0, 0);
+		yylval.n->u.n = n;
+		return NUM;
+	}
+
+	/* Character literals */
+	if (c == '\'') {
+		c = getchar();
+		if (c == '\\') {
+			c = getchar();
+			switch (c) {
+			case 'n': n = '\n'; break;
+			case 't': n = '\t'; break;
+			case 'r': n = '\r'; break;
+			case '0': n = '\0'; break;
+			case '\\': n = '\\'; break;
+			case '\'': n = '\''; break;
+			default: n = c; break;
+			}
+		} else {
+			n = c;
+		}
+		c = getchar();
+		if (c != '\'')
+			die("unclosed character literal");
 		yylval.n = mknode('N', 0, 0);
 		yylval.n->u.n = n;
 		return NUM;
