@@ -1,0 +1,35 @@
+export function w $main() {
+@l0
+	%x =l alloc4 4
+	storew 2, %x
+	%t2 =w loadw %x
+	%t3 =w ceqw %t2, 1
+	jnz %t3, @l2, @l6
+@l6
+	%t4 =w ceqw %t2, 2
+	jnz %t4, @l3, @l7
+@l7
+	%t5 =w ceqw %t2, 3
+	jnz %t5, @l4, @l8
+@l8
+	jmp @l5
+@l2
+	%t6 =w call $printf(l $glo1, ...)
+	jmp @l1
+@l3
+	%t8 =w call $printf(l $glo2, ...)
+	jmp @l1
+@l4
+	%t10 =w call $printf(l $glo3, ...)
+	jmp @l1
+@l5
+	%t12 =w call $printf(l $glo4, ...)
+	jmp @l1
+@l1
+	ret 0
+}
+
+data $glo1 = { b "one\n", b 0 }
+data $glo2 = { b "two\n", b 0 }
+data $glo3 = { b "three\n", b 0 }
+data $glo4 = { b "other\n", b 0 }
