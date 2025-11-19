@@ -331,6 +331,50 @@ expr(Node *n)
 	case 0:
 		abort();
 
+	case ',':
+		/* Comma operator: evaluate left, discard, return right */
+		expr(n->l);  /* Evaluate but don't use result */
+		sr = expr(n->r);  /* Evaluate and return */
+		break;
+
+	case '?':
+		/* Ternary operator: cond ? true_expr : false_expr */
+		l = lbl;
+		lbl += 3;
+		/* Evaluate condition */
+		s0 = expr(n->l);
+		fprintf(of, "\tjnz ");
+		psymb(s0);
+		fprintf(of, ", @l%d, @l%d\n", l, l+1);
+		/* True branch */
+		fprintf(of, "@l%d\n", l);
+		s0 = expr(n->r->l);  /* true expression */
+		fprintf(of, "\tjmp @l%d\n", l+2);
+		/* False branch */
+		fprintf(of, "@l%d\n", l+1);
+		s1 = expr(n->r->r);  /* false expression */
+		fprintf(of, "\tjmp @l%d\n", l+2);
+		/* Merge */
+		fprintf(of, "@l%d\n", l+2);
+		/* Type promotion */
+		if (s0.ctyp != s1.ctyp) {
+			if (s0.ctyp == LNG && s1.ctyp == INT)
+				sr.ctyp = LNG;
+			else if (s0.ctyp == INT && s1.ctyp == LNG)
+				sr.ctyp = LNG;
+			else
+				sr.ctyp = s0.ctyp;
+		} else
+			sr.ctyp = s0.ctyp;
+		fprintf(of, "\t");
+		psymb(sr);
+		fprintf(of, " =%c phi @l%d ", irtyp(sr.ctyp), l);
+		psymb(s0);
+		fprintf(of, ", @l%d ", l+1);
+		psymb(s1);
+		fprintf(of, "\n");
+		break;
+
 	case 'o':
 	case 'a':
 		l = lbl;
@@ -727,7 +771,9 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token TVOID TINT TLNG
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN
 
+%left ','
 %right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
+%right '?' ':'
 %left OR
 %left AND
 %left '|'
@@ -853,6 +899,8 @@ stmts: stmts stmt { $$ = mkstmt(Seq, $1, $2, 0); }
      ;
 
 expr: pref
+    | expr ',' expr     { $$ = mknode(',', $1, $3); }
+    | expr '?' expr ':' expr { $$ = mknode('?', $1, mknode(':', $3, $5)); }
     | expr '=' expr     { $$ = mknode('=', $1, $3); }
     | expr ADDEQ expr   { $$ = mknode('=', $1, mknode('+', $1, $3)); }
     | expr SUBEQ expr   { $$ = mknode('=', $1, mknode('-', $1, $3)); }
