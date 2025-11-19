@@ -60,9 +60,11 @@ struct Stmt {
 	enum {
 		If,
 		While,
+		DoWhile,
 		Seq,
 		Expr,
 		Break,
+		Continue,
 		Ret,
 	} t;
 	void *p1, *p2, *p3;
@@ -308,6 +310,10 @@ expr(Node *n)
 		['/'] = "div",
 		['%'] = "rem",
 		['&'] = "and",
+		['|'] = "or",
+		['^'] = "xor",
+		['L'] = "shl",
+		['R'] = "shr",
 		['<'] = "cslt",  /* meeeeh, wrong for pointers! */
 		['l'] = "csle",
 		['e'] = "ceq",
@@ -374,6 +380,26 @@ expr(Node *n)
 	case 'A':
 		sr = lval(n->l);
 		sr.ctyp = IDIR(sr.ctyp);
+		break;
+
+	case '~':
+		s0 = expr(n->l);
+		sr.ctyp = s0.ctyp;
+		fprintf(of, "\t");
+		psymb(sr);
+		fprintf(of, " =%c xor ", irtyp(sr.ctyp));
+		psymb(s0);
+		fprintf(of, ", -1\n");
+		break;
+
+	case '!':
+		s0 = expr(n->l);
+		sr.ctyp = INT;
+		fprintf(of, "\t");
+		psymb(sr);
+		fprintf(of, " =w ceq%c ", irtyp(s0.ctyp));
+		psymb(s0);
+		fprintf(of, ", 0\n");
 		break;
 
 	case '=':
@@ -518,6 +544,12 @@ stmt(Stmt *s, int b)
 			die("break not in loop");
 		fprintf(of, "\tjmp @l%d\n", b);
 		return 1;
+	case Continue:
+		if (b < 0)
+			die("continue not in loop");
+		/* Use b-1 for continue target (loop start) */
+		fprintf(of, "\tjmp @l%d\n", b-1);
+		return 1;
 	case Expr:
 		expr(s->p1);
 		return 0;
@@ -542,8 +574,20 @@ stmt(Stmt *s, int b)
 		fprintf(of, "@l%d\n", l);
 		branch(s->p1, l+1, l+2);
 		fprintf(of, "@l%d\n", l+1);
+		/* Pass l for continue (will use l-1=loop start), l+2 for break */
 		if (!stmt(s->p2, l+2))
 			fprintf(of, "\tjmp @l%d\n", l);
+		fprintf(of, "@l%d\n", l+2);
+		return 0;
+	case DoWhile:
+		l = lbl;
+		lbl += 3;
+		fprintf(of, "@l%d\n", l);
+		/* Pass l+1 for continue (test label), l+2 for break */
+		if (!stmt(s->p1, l+2))
+			fprintf(of, "\tjmp @l%d\n", l+1);
+		fprintf(of, "@l%d\n", l+1);
+		branch(s->p2, l, l+2);
 		fprintf(of, "@l%d\n", l+2);
 		return 0;
 	}
@@ -645,17 +689,20 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token <n> NUM
 %token <n> STR
 %token <n> IDENT
-%token PP MM LE GE SIZEOF
+%token PP MM LE GE SIZEOF SHL SHR
 
 %token TVOID TINT TLNG
-%token IF ELSE WHILE FOR BREAK RETURN
+%token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN
 
 %right '='
 %left OR
 %left AND
+%left '|'
+%left '^'
 %left '&'
 %left EQ NE
 %left '<' '>' LE GE
+%left SHL SHR
 %left '+' '-'
 %left '*' '/' '%'
 
@@ -757,9 +804,11 @@ type: type '*' { $$ = IDIR($1); }
 stmt: ';'                            { $$ = 0; }
     | '{' stmts '}'                  { $$ = $2; }
     | BREAK ';'                      { $$ = mkstmt(Break, 0, 0, 0); }
+    | CONTINUE ';'                   { $$ = mkstmt(Continue, 0, 0, 0); }
     | RETURN expr ';'                { $$ = mkstmt(Ret, $2, 0, 0); }
     | expr ';'                       { $$ = mkstmt(Expr, $1, 0, 0); }
     | WHILE '(' expr ')' stmt        { $$ = mkstmt(While, $3, $5, 0); }
+    | DO stmt WHILE '(' expr ')' ';' { $$ = mkstmt(DoWhile, $2, $5, 0); }
     | IF '(' expr ')' stmt ELSE stmt { $$ = mkstmt(If, $3, $5, $7); }
     | IF '(' expr ')' stmt           { $$ = mkstmt(If, $3, $5, 0); }
     | FOR '(' exp0 ';' exp0 ';' exp0 ')' stmt
@@ -784,6 +833,10 @@ expr: pref
     | expr EQ expr      { $$ = mknode('e', $1, $3); }
     | expr NE expr      { $$ = mknode('n', $1, $3); }
     | expr '&' expr     { $$ = mknode('&', $1, $3); }
+    | expr '|' expr     { $$ = mknode('|', $1, $3); }
+    | expr '^' expr     { $$ = mknode('^', $1, $3); }
+    | expr SHL expr     { $$ = mknode('L', $1, $3); }
+    | expr SHR expr     { $$ = mknode('R', $1, $3); }
     | expr AND expr     { $$ = mknode('a', $1, $3); }
     | expr OR expr      { $$ = mknode('o', $1, $3); }
     ;
@@ -796,6 +849,8 @@ pref: post
     | '-' pref          { $$ = mkneg($2); }
     | '*' pref          { $$ = mknode('@', $2, 0); }
     | '&' pref          { $$ = mknode('A', $2, 0); }
+    | '~' pref          { $$ = mknode('~', $2, 0); }
+    | '!' pref          { $$ = mknode('!', $2, 0); }
     ;
 
 post: NUM
@@ -832,8 +887,10 @@ yylex()
 		{ "else", ELSE },
 		{ "for", FOR },
 		{ "while", WHILE },
+		{ "do", DO },
 		{ "return", RETURN },
 		{ "break", BREAK },
+		{ "continue", CONTINUE },
 		{ "sizeof", SIZEOF },
 		{ 0, 0 }
 	};
@@ -918,6 +975,8 @@ yylex()
 	case DI('=','='): return EQ;
 	case DI('<','='): return LE;
 	case DI('>','='): return GE;
+	case DI('<','<'): return SHL;
+	case DI('>','>'): return SHR;
 	case DI('+','+'): return PP;
 	case DI('-','-'): return MM;
 	case DI('&','&'): return AND;
