@@ -415,8 +415,39 @@ expr(Node *n)
 		fprintf(of, "\tstore%c ", irtyp(s1.ctyp));
 		goto Args;
 
+	case 'p':
+	case 'm':
+		/* Prefix increment/decrement: ++i, --i */
+		o = n->op == 'p' ? '+' : '-';
+		sl = lval(n->l);
+		s0.t = Tmp;
+		s0.u.n = tmp++;
+		s0.ctyp = sl.ctyp;
+		load(s0, sl);
+		s1.t = Con;
+		s1.u.n = 1;
+		s1.ctyp = INT;
+		/* Compute new value */
+		sr.ctyp = prom(o, &s0, &s1);
+		fprintf(of, "\t");
+		psymb(sr);
+		fprintf(of, " =%c %s ", irtyp(sr.ctyp), o == '+' ? "add" : "sub");
+		psymb(s0);
+		fprintf(of, ", ");
+		psymb(s1);
+		fprintf(of, "\n");
+		/* Store new value */
+		fprintf(of, "\tstore%c ", irtyp(sl.ctyp));
+		psymb(sr);
+		fprintf(of, ", ");
+		psymb(sl);
+		fprintf(of, "\n");
+		/* Return new value (sr is already the result) */
+		break;
+
 	case 'P':
 	case 'M':
+		/* Postfix increment/decrement: i++, i-- */
 		o = n->op == 'P' ? '+' : '-';
 		sl = lval(n->l);
 		s0.t = Tmp;
@@ -690,11 +721,13 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token <n> STR
 %token <n> IDENT
 %token PP MM LE GE SIZEOF SHL SHR
+%token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
+%token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
 %token TVOID TINT TLNG
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN
 
-%right '='
+%right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
 %left OR
 %left AND
 %left '|'
@@ -821,6 +854,16 @@ stmts: stmts stmt { $$ = mkstmt(Seq, $1, $2, 0); }
 
 expr: pref
     | expr '=' expr     { $$ = mknode('=', $1, $3); }
+    | expr ADDEQ expr   { $$ = mknode('=', $1, mknode('+', $1, $3)); }
+    | expr SUBEQ expr   { $$ = mknode('=', $1, mknode('-', $1, $3)); }
+    | expr MULEQ expr   { $$ = mknode('=', $1, mknode('*', $1, $3)); }
+    | expr DIVEQ expr   { $$ = mknode('=', $1, mknode('/', $1, $3)); }
+    | expr MODEQ expr   { $$ = mknode('=', $1, mknode('%', $1, $3)); }
+    | expr ANDEQ expr   { $$ = mknode('=', $1, mknode('&', $1, $3)); }
+    | expr OREQ expr    { $$ = mknode('=', $1, mknode('|', $1, $3)); }
+    | expr XOREQ expr   { $$ = mknode('=', $1, mknode('^', $1, $3)); }
+    | expr SHLEQ expr   { $$ = mknode('=', $1, mknode('L', $1, $3)); }
+    | expr SHREQ expr   { $$ = mknode('=', $1, mknode('R', $1, $3)); }
     | expr '+' expr     { $$ = mknode('+', $1, $3); }
     | expr '-' expr     { $$ = mknode('-', $1, $3); }
     | expr '*' expr     { $$ = mknode('*', $1, $3); }
@@ -851,6 +894,8 @@ pref: post
     | '&' pref          { $$ = mknode('A', $2, 0); }
     | '~' pref          { $$ = mknode('~', $2, 0); }
     | '!' pref          { $$ = mknode('!', $2, 0); }
+    | PP pref           { $$ = mknode('p', $2, 0); }
+    | MM pref           { $$ = mknode('m', $2, 0); }
     ;
 
 post: NUM
@@ -969,12 +1014,31 @@ yylex()
 	}
 
 	c1 = getchar();
+
+	/* Check for <<= and >>= first (three character operators) */
+	if ((c == '<' && c1 == '<') || (c == '>' && c1 == '>')) {
+		int c2 = getchar();
+		if (c2 == '=') {
+			return (c == '<') ? SHLEQ : SHREQ;
+		}
+		ungetc(c2, stdin);
+		/* Fall through to return SHL or SHR below */
+	}
+
 #define DI(a, b) a + b*256
 	switch (DI(c,c1)) {
 	case DI('!','='): return NE;
 	case DI('=','='): return EQ;
 	case DI('<','='): return LE;
 	case DI('>','='): return GE;
+	case DI('+','='): return ADDEQ;
+	case DI('-','='): return SUBEQ;
+	case DI('*','='): return MULEQ;
+	case DI('/','='): return DIVEQ;
+	case DI('%','='): return MODEQ;
+	case DI('&','='): return ANDEQ;
+	case DI('|','='): return OREQ;
+	case DI('^','='): return XOREQ;
 	case DI('<','<'): return SHL;
 	case DI('>','>'): return SHR;
 	case DI('+','+'): return PP;
@@ -983,6 +1047,7 @@ yylex()
 	case DI('|','|'): return OR;
 	}
 #undef DI
+
 	ungetc(c1, stdin);
 
 	return c;
