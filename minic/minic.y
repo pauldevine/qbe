@@ -575,6 +575,10 @@ expr(Node *n)
 		if (s0.t == Con) {
 			/* Enum constant or other constant - use directly */
 			sr = s0;
+		} else if (KIND(s0.ctyp) == PTR) {
+			/* Array/pointer - the lvalue IS the pointer, don't load */
+			sr = s0;
+			sr.ctyp = s0.ctyp;
 		} else {
 			/* Variable - need to load */
 			load(sr, s0);
@@ -1139,7 +1143,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %type <u> type
 %type <s> stmt stmts
-%type <n> expr exp0 pref post arg0 arg1 par0 par1
+%type <n> expr exp0 pref post arg0 arg1 par0 par1 initlist
 %token <u> TNAME
 
 %%
@@ -1263,7 +1267,8 @@ par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
     ;
 
 
-dcls: | dcls type IDENT ';'
+dcls:
+    | dcls type IDENT ';'
 {
 	int s;
 	char *v;
@@ -1274,7 +1279,59 @@ dcls: | dcls type IDENT ';'
 	s = SIZE($2);
 	varadd(v, 0, $2);
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
-};
+}
+    | dcls type IDENT '[' NUM ']' ';'
+{
+	/* Array declaration without initialization */
+	int s, n, total;
+	char *v;
+
+	if ($2 == NIL)
+		die("invalid void array");
+	v = $3->u.v;
+	n = $5->u.n;  /* array size */
+	s = SIZE($2);  /* element size */
+	total = s * n;
+	varadd(v, 0, IDIR($2));  /* Store as pointer to element type */
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, total);
+}
+    | dcls type IDENT '[' NUM ']' '=' '{' initlist '}' ';'
+{
+	/* Array declaration with initialization */
+	int s, n, total;
+	char *v;
+
+	if ($2 == NIL)
+		die("invalid void array");
+	v = $3->u.v;
+	n = $5->u.n;  /* array size */
+	s = SIZE($2);  /* element size */
+	total = s * n;
+	varadd(v, 0, IDIR($2));  /* Store as pointer to element type */
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, total);
+
+	/* Generate initialization code */
+	{
+		Node *init = $9;
+		int i = 0;
+		while (init && i < n) {
+			Symb val = expr(init->l);
+			fprintf(of, "\t%%t%d =l add ", tmp);
+			fprintf(of, "%%%s, %d\n", v, i * s);
+			fprintf(of, "\tstore%c ", irtyp($2));
+			psymb(val);
+			fprintf(of, ", %%t%d\n", tmp);
+			tmp++;
+			init = init->r;
+			i++;
+		}
+	}
+}
+    ;
+
+initlist: pref                    { $$ = mknode(0, $1, 0); }
+        | pref ',' initlist       { $$ = mknode(0, $1, $3); }
+        ;
 
 type: type '*' { $$ = IDIR($1); }
     | TCHAR    { $$ = CHR; }
