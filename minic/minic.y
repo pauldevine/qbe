@@ -92,6 +92,13 @@ struct {
 	int enumconst; /* -2 means it's an enum constant, glo stores the value */
 } varh[NVar];
 
+/* Typedef table */
+enum { NTyp = 128 };
+struct {
+	char v[NString];
+	unsigned ctyp;
+} typh[NTyp];
+
 void
 die(char *s)
 {
@@ -151,6 +158,45 @@ varadd(char *v, int glo, unsigned ctyp)
 		h = (h+1) % NVar;
 	} while(h != h0);
 	die("too many variables");
+}
+
+void
+typhadd(char *v, unsigned ctyp)
+{
+	unsigned h0, h;
+
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (typh[h].v[0] == 0) {
+			strcpy(typh[h].v, v);
+			typh[h].ctyp = ctyp;
+			return;
+		}
+		if (strcmp(typh[h].v, v) == 0)
+			die("typedef already defined");
+		h = (h+1) % NTyp;
+	} while(h != h0);
+	die("too many typedefs");
+}
+
+int
+typhget(char *v, unsigned *ctyp)
+{
+	unsigned h0, h;
+
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (strcmp(typh[h].v, v) == 0) {
+			*ctyp = typh[h].ctyp;
+			return 1;
+		}
+		if (typh[h].v[0] == 0)
+			return 0;
+		h = (h+1) % NTyp;
+	} while(h != h0);
+	return 0;
 }
 
 Symb *
@@ -922,7 +968,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %token TVOID TCHAR TINT TLNG
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN
-%token ENUM SWITCH CASE DEFAULT
+%token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME
 
 %left ','
 %right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
@@ -941,10 +987,11 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %type <u> type
 %type <s> stmt stmts
 %type <n> expr exp0 pref post arg0 arg1 par0 par1
+%token <u> TNAME
 
 %%
 
-prog: func prog | fdcl prog | idcl prog | edcl prog | ;
+prog: func prog | fdcl prog | idcl prog | edcl prog | tdcl prog | ;
 
 edcl: enumstart enums '}' ';'
     ;
@@ -969,6 +1016,12 @@ enum: IDENT
 	varadd($1->u.v, enumval, INT);
 	varh[hash($1->u.v)].enumconst = 1;
 	enumval++;
+}
+    ;
+
+tdcl: TYPEDEF type IDENT ';'
+{
+	typhadd($3->u.v, $2);
 }
     ;
 
@@ -1058,6 +1111,7 @@ type: type '*' { $$ = IDIR($1); }
     | TINT     { $$ = INT; }
     | TLNG     { $$ = LNG; }
     | TVOID    { $$ = NIL; }
+    | TNAME    { $$ = $1; }
     ;
 
 stmt: ';'                            { $$ = 0; }
@@ -1160,6 +1214,7 @@ yylex()
 		{ "char", TCHAR },
 		{ "int", TINT },
 		{ "long", TLNG },
+		{ "typedef", TYPEDEF },
 		{ "enum", ENUM },
 		{ "switch", SWITCH },
 		{ "case", CASE },
@@ -1281,6 +1336,9 @@ yylex()
 				return kwds[i].t;
 		yylval.n = mknode('V', 0, 0);
 		strcpy(yylval.n->u.v, v);
+		/* Check if it's a typedef name */
+		if (typhget(v, &yylval.u))
+			return TNAME;
 		return IDENT;
 	}
 
