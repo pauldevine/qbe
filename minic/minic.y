@@ -19,6 +19,8 @@ enum { /* minic types */
 	LNG,
 	PTR,
 	FUN,
+	STRUCT_T,  /* struct */
+	UNION_T,   /* union */
 };
 
 #define UNSIGNED  (1 << 6)  /* Unsigned flag for types */
@@ -31,7 +33,8 @@ enum { /* minic types */
 #define SIZE(x)                                    \
 	(KIND(x) == NIL ? (die("void has no size"), 0) : \
 	 KIND(x) == CHR ? 1 :  \
-	 KIND(x) == INT ? 4 : 8)
+	 KIND(x) == INT ? 4 : \
+	 (KIND(x) == STRUCT_T || KIND(x) == UNION_T) ? structh[DREF(x)].size : 8)
 
 typedef struct Node Node;
 typedef struct Symb Symb;
@@ -102,6 +105,26 @@ struct {
 	unsigned ctyp;
 } typh[NTyp];
 
+/* Struct/union member */
+enum { NMember = 256 };
+struct Member {
+	char name[NString];
+	unsigned ctyp;
+	int offset;
+};
+
+/* Struct/union definition table */
+enum { NStruct = 64 };
+struct {
+	char name[NString];
+	int isunion;  /* 1 for union, 0 for struct */
+	int nmembers;
+	struct Member members[16];  /* Max 16 members per struct */
+	int size;
+} structh[NStruct];
+int nstruct = 0;
+int curstruct = -1;  /* Index of struct currently being defined */
+
 void
 die(char *s)
 {
@@ -161,6 +184,69 @@ varadd(char *v, int glo, unsigned ctyp)
 		h = (h+1) % NVar;
 	} while(h != h0);
 	die("too many variables");
+}
+
+int
+structfind(char *name)
+{
+	int i;
+	for (i = 0; i < nstruct; i++)
+		if (strcmp(structh[i].name, name) == 0)
+			return i;
+	return -1;
+}
+
+int
+structadd(char *name, int isunion)
+{
+	int idx;
+
+	if (nstruct >= NStruct)
+		die("too many struct/union definitions");
+
+	idx = structfind(name);
+	if (idx >= 0)
+		die("struct/union already defined");
+
+	idx = nstruct++;
+	strcpy(structh[idx].name, name);
+	structh[idx].isunion = isunion;
+	structh[idx].nmembers = 0;
+	structh[idx].size = 0;
+	return idx;
+}
+
+void
+structaddmember(int sidx, char *name, unsigned ctyp)
+{
+	int offset, i;
+	struct Member *m;
+
+	if (structh[sidx].nmembers >= 16)
+		die("too many members in struct/union");
+
+	/* Check for duplicate member names */
+	for (i = 0; i < structh[sidx].nmembers; i++)
+		if (strcmp(structh[sidx].members[i].name, name) == 0)
+			die("duplicate member name");
+
+	m = &structh[sidx].members[structh[sidx].nmembers];
+	strcpy(m->name, name);
+	m->ctyp = ctyp;
+
+	if (structh[sidx].isunion) {
+		/* Union: all members at offset 0 */
+		m->offset = 0;
+		/* Union size is max of member sizes */
+		if (SIZE(ctyp) > structh[sidx].size)
+			structh[sidx].size = SIZE(ctyp);
+	} else {
+		/* Struct: members laid out sequentially */
+		m->offset = structh[sidx].size;
+		structh[sidx].size += SIZE(ctyp);
+	}
+
+	structh[sidx].nmembers++;
 }
 
 void
@@ -524,6 +610,46 @@ expr(Node *n)
 		sr.ctyp = IDIR(sr.ctyp);
 		break;
 
+	case '.':
+		/* Member access: struct.member */
+		s0 = lval(n->l);  /* Get struct lvalue */
+		if (KIND(s0.ctyp) != STRUCT_T && KIND(s0.ctyp) != UNION_T)
+			die("member access on non-struct/union");
+		{
+			int sidx = DREF(s0.ctyp);
+			char *mname = n->r->u.v;
+			int i, found = 0;
+			struct Member *m;
+
+			/* Find member */
+			for (i = 0; i < structh[sidx].nmembers; i++) {
+				if (strcmp(structh[sidx].members[i].name, mname) == 0) {
+					found = 1;
+					m = &structh[sidx].members[i];
+					break;
+				}
+			}
+			if (!found)
+				die("struct member not found");
+
+			/* Compute member address: struct_addr + offset */
+			if (m->offset > 0) {
+				sr.t = Tmp;
+				sr.u.n = tmp++;
+				sr.ctyp = IDIR(m->ctyp);
+				fprintf(of, "\t");
+				psymb(sr);
+				fprintf(of, " =l add ");
+				psymb(s0);
+				fprintf(of, ", %d\n", m->offset);
+			} else {
+				/* Offset 0, just use struct address */
+				sr = s0;
+				sr.ctyp = IDIR(m->ctyp);
+			}
+		}
+		break;
+
 	case '~':
 		s0 = expr(n->l);
 		sr.ctyp = s0.ctyp;
@@ -683,6 +809,12 @@ lval(Node *n)
 		sr = expr(n->l);
 		if (KIND(sr.ctyp) != PTR)
 			die("dereference of a non-pointer");
+		sr.ctyp = DREF(sr.ctyp);
+		break;
+	case '.':
+		/* Member access is also an lvalue */
+		sr = expr(n);
+		/* expr() returns the member address with IDIR type, need to DREF it for lval */
 		sr.ctyp = DREF(sr.ctyp);
 		break;
 	}
@@ -989,7 +1121,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %token TVOID TCHAR TINT TLNG TUNSIGNED
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN
-%token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME
+%token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 
 %left ','
 %right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
@@ -1012,7 +1144,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %%
 
-prog: func prog | fdcl prog | idcl prog | edcl prog | tdcl prog | ;
+prog: func prog | fdcl prog | idcl prog | edcl prog | tdcl prog | sdcl prog | ;
 
 edcl: enumstart enums '}' ';'
     ;
@@ -1045,6 +1177,23 @@ tdcl: TYPEDEF type IDENT ';'
 	typhadd($3->u.v, $2);
 }
     ;
+
+sdcl: structstart smembers '}' ';'
+{
+	curstruct = -1;  /* Done defining this struct */
+}
+    ;
+
+structstart: STRUCT IDENT '{'  { curstruct = structadd($2->u.v, 0); }
+           | UNION IDENT '{'    { curstruct = structadd($2->u.v, 1); }
+           ;
+
+smembers:
+        | smembers type IDENT ';'
+{
+	structaddmember(curstruct, $3->u.v, $2);
+}
+        ;
 
 fdcl: type IDENT '(' ')' ';'
 {
@@ -1136,6 +1285,18 @@ type: type '*' { $$ = IDIR($1); }
     | TUNSIGNED TINT  { $$ = INT | UNSIGNED; }
     | TUNSIGNED TLNG  { $$ = LNG | UNSIGNED; }
     | TUNSIGNED       { $$ = INT | UNSIGNED; }
+    | STRUCT IDENT {
+        int idx = structfind($2->u.v);
+        if (idx < 0)
+            die("undefined struct");
+        $$ = (idx << 3) + STRUCT_T;
+    }
+    | UNION IDENT {
+        int idx = structfind($2->u.v);
+        if (idx < 0)
+            die("undefined union");
+        $$ = (idx << 3) + UNION_T;
+    }
     | TNAME    { $$ = $1; }
     ;
 
@@ -1217,6 +1378,7 @@ post: NUM
     | post '[' expr ']'   { $$ = mkidx($1, $3); }
     | post PP             { $$ = mknode('P', $1, 0); }
     | post MM             { $$ = mknode('M', $1, 0); }
+    | post '.' IDENT      { $$ = mknode('.', $1, $3); }
     ;
 
 arg0: arg1
@@ -1241,6 +1403,8 @@ yylex()
 		{ "long", TLNG },
 		{ "unsigned", TUNSIGNED },
 		{ "typedef", TYPEDEF },
+		{ "struct", STRUCT },
+		{ "union", UNION },
 		{ "enum", ENUM },
 		{ "switch", SWITCH },
 		{ "case", CASE },
