@@ -14,6 +14,7 @@ enum {
 
 enum { /* minic types */
 	NIL,
+	CHR,
 	INT,
 	LNG,
 	PTR,
@@ -26,6 +27,7 @@ enum { /* minic types */
 #define KIND(x) ((x) & 7)
 #define SIZE(x)                                    \
 	(x == NIL ? (die("void has no size"), 0) : \
+	 x == CHR ? 1 :                            \
 	 x == INT ? 4 : 8)
 
 typedef struct Node Node;
@@ -172,7 +174,9 @@ varget(char *v)
 char
 irtyp(unsigned ctyp)
 {
-	return SIZE(ctyp) == 8 ? 'l' : 'w';
+	if (SIZE(ctyp) == 1) return 'b';
+	if (SIZE(ctyp) == 8) return 'l';
+	return 'w';
 }
 
 void
@@ -213,6 +217,25 @@ prom(int op, Symb *l, Symb *r)
 
 	if (l->ctyp == r->ctyp && KIND(l->ctyp) != PTR)
 		return l->ctyp;
+
+	/* Promote char to int */
+	if (l->ctyp == CHR && r->ctyp != CHR) {
+		/* Extend char to int */
+		fprintf(of, "\t%%t%d =w extsb ", tmp);
+		psymb(*l);
+		fprintf(of, "\n");
+		l->t = Tmp;
+		l->ctyp = INT;
+		l->u.n = tmp++;
+	}
+	if (r->ctyp == CHR && l->ctyp != CHR) {
+		fprintf(of, "\t%%t%d =w extsb ", tmp);
+		psymb(*r);
+		fprintf(of, "\n");
+		r->t = Tmp;
+		r->ctyp = INT;
+		r->u.n = tmp++;
+	}
 
 	if (l->ctyp == LNG && r->ctyp == INT) {
 		sext(r);
@@ -450,11 +473,25 @@ expr(Node *n)
 		s0 = expr(n->r);
 		s1 = lval(n->l);
 		sr = s0;
+		/* Type conversions for assignment */
 		if (s1.ctyp == LNG &&  s0.ctyp == INT)
 			sext(&s0);
+		if (s1.ctyp == CHR && s0.ctyp == INT) {
+			/* Truncate int to char - no explicit conversion needed */
+			/* QBE will handle truncation in storeb */
+		}
+		if (s1.ctyp == INT && s0.ctyp == CHR) {
+			/* Extend char to int */
+			fprintf(of, "\t%%t%d =w extsb ", tmp);
+			psymb(s0);
+			fprintf(of, "\n");
+			s0.t = Tmp;
+			s0.ctyp = INT;
+			s0.u.n = tmp++;
+		}
 		if (s0.ctyp != IDIR(NIL) || KIND(s1.ctyp) != PTR)
 		if (s1.ctyp != IDIR(NIL) || KIND(s0.ctyp) != PTR)
-		if (s1.ctyp != s0.ctyp)
+		if (s1.ctyp != s0.ctyp && !(s1.ctyp == CHR && s0.ctyp == INT))
 			die("invalid assignment");
 		fprintf(of, "\tstore%c ", irtyp(s1.ctyp));
 		goto Args;
@@ -768,7 +805,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TINT TLNG
+%token TVOID TCHAR TINT TLNG
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN
 
 %left ','
@@ -875,6 +912,7 @@ dcls: | dcls type IDENT ';'
 };
 
 type: type '*' { $$ = IDIR($1); }
+    | TCHAR    { $$ = CHR; }
     | TINT     { $$ = INT; }
     | TLNG     { $$ = LNG; }
     | TVOID    { $$ = NIL; }
@@ -974,6 +1012,7 @@ yylex()
 		int t;
 	} kwds[] = {
 		{ "void", TVOID },
+		{ "char", TCHAR },
 		{ "int", TINT },
 		{ "long", TLNG },
 		{ "if", IF },
