@@ -63,6 +63,9 @@ struct Stmt {
 		If,
 		While,
 		DoWhile,
+		Switch,
+		Case,
+		Default,
 		Seq,
 		Expr,
 		Break,
@@ -70,6 +73,7 @@ struct Stmt {
 		Ret,
 	} t;
 	void *p1, *p2, *p3;
+	int val; /* for case values */
 };
 
 int yylex(void), yyerror(char *);
@@ -648,6 +652,92 @@ branch(Node *n, int lt, int lf)
 	}
 }
 
+void
+collectcases(Stmt *s, Stmt **cases, int *ncase, int *defidx)
+{
+	if (!s)
+		return;
+	if (s->t == Seq) {
+		collectcases((Stmt*)s->p1, cases, ncase, defidx);
+		collectcases((Stmt*)s->p2, cases, ncase, defidx);
+	} else if (s->t == Case || s->t == Default) {
+		if (s->t == Default)
+			*defidx = *ncase;
+		cases[(*ncase)++] = s;
+	}
+}
+
+int genswitchbody(Stmt *s, int brk, Stmt **cases, int *caselbl, int ncase);
+
+int
+genswitch(Symb val, Stmt *body, int brk)
+{
+	Stmt *cases[64];
+	int ncase, defidx, i;
+	int caselbl[64];
+
+	ncase = 0;
+	defidx = -1;
+	collectcases(body, cases, &ncase, &defidx);
+
+	/* Allocate labels for all cases */
+	for (i = 0; i < ncase; i++) {
+		caselbl[i] = lbl++;
+	}
+
+	/* Generate case comparisons */
+	for (i = 0; i < ncase; i++) {
+		if (cases[i]->t == Case) {
+			fprintf(of, "\t%%t%d =w ceqw ", tmp);
+			psymb(val);
+			fprintf(of, ", %d\n", cases[i]->val);
+			fprintf(of, "\tjnz %%t%d, @l%d, @l%d\n", tmp++, caselbl[i], lbl);
+			fprintf(of, "@l%d\n", lbl++);
+		}
+	}
+
+	/* Jump to default or break */
+	if (defidx >= 0)
+		fprintf(of, "\tjmp @l%d\n", caselbl[defidx]);
+	else
+		fprintf(of, "\tjmp @l%d\n", brk);
+
+	/* Generate switch body linearly */
+	genswitchbody(body, brk, cases, caselbl, ncase);
+
+	return 0;
+}
+
+int
+genswitchbody(Stmt *s, int brk, Stmt **cases, int *caselbl, int ncase)
+{
+	int i;
+
+	if (!s)
+		return 0;
+
+	if (s->t == Seq) {
+		int r1 = genswitchbody((Stmt*)s->p1, brk, cases, caselbl, ncase);
+		int r2 = genswitchbody((Stmt*)s->p2, brk, cases, caselbl, ncase);
+		return r1 || r2;
+	} else if (s->t == Case || s->t == Default) {
+		/* Find this case in the cases array and emit its label */
+		for (i = 0; i < ncase; i++) {
+			if (cases[i] == s) {
+				fprintf(of, "@l%d\n", caselbl[i]);
+				break;
+			}
+		}
+		/* Process the statement after the case label */
+		if (s->p2)
+			return genswitchbody((Stmt*)s->p2, brk, cases, caselbl, ncase);
+		return 0;
+	} else {
+		/* Regular statement - process normally */
+		return stmt(s, brk);
+	}
+}
+
 int
 stmt(Stmt *s, int b)
 {
@@ -714,6 +804,18 @@ stmt(Stmt *s, int b)
 		fprintf(of, "@l%d\n", l+1);
 		branch(s->p2, l, l+2);
 		fprintf(of, "@l%d\n", l+2);
+		return 0;
+	case Switch:
+		x = expr(s->p1);
+		l = lbl++;
+		genswitch(x, (Stmt*)s->p2, l);
+		fprintf(of, "@l%d\n", l);
+		return 0;
+	case Case:
+	case Default:
+		/* These are handled within genswitch */
+		if (s->p2)
+			stmt((Stmt*)s->p2, b);
 		return 0;
 	}
 }
@@ -820,7 +922,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %token TVOID TCHAR TINT TLNG
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN
-%token ENUM
+%token ENUM SWITCH CASE DEFAULT
 
 %left ','
 %right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
@@ -970,6 +1072,9 @@ stmt: ';'                            { $$ = 0; }
     | IF '(' expr ')' stmt           { $$ = mkstmt(If, $3, $5, 0); }
     | FOR '(' exp0 ';' exp0 ';' exp0 ')' stmt
                                      { $$ = mkfor($3, $5, $7, $9); }
+    | SWITCH '(' expr ')' stmt       { $$ = mkstmt(Switch, $3, $5, 0); }
+    | CASE NUM ':' stmt              { Stmt *s = mkstmt(Case, 0, $4, 0); s->val = $2->u.n; $$ = s; }
+    | DEFAULT ':' stmt               { $$ = mkstmt(Default, 0, $3, 0); }
     ;
 
 stmts: stmts stmt { $$ = mkstmt(Seq, $1, $2, 0); }
@@ -1056,6 +1161,9 @@ yylex()
 		{ "int", TINT },
 		{ "long", TLNG },
 		{ "enum", ENUM },
+		{ "switch", SWITCH },
+		{ "case", CASE },
+		{ "default", DEFAULT },
 		{ "if", IF },
 		{ "else", ELSE },
 		{ "for", FOR },
