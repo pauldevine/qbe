@@ -1221,7 +1221,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TUNSIGNED CONST TBOOL INLINE
+%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED CONST TBOOL INLINE
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 
@@ -1440,22 +1440,26 @@ type: type '*' { $$ = IDIR($1); }
     | TSHORT   { $$ = INT | SHORT; }
     | TINT     { $$ = INT; }
     | TLNG     { $$ = LNG; }
+    | TLNGLNG  { $$ = LNG; }
     | TBOOL    { $$ = CHR | UNSIGNED; }
     | TVOID    { $$ = NIL; }
-    | TUNSIGNED TCHAR  { $$ = CHR | UNSIGNED; }
-    | TUNSIGNED TSHORT { $$ = INT | SHORT | UNSIGNED; }
-    | TUNSIGNED TINT   { $$ = INT | UNSIGNED; }
-    | TUNSIGNED TLNG   { $$ = LNG | UNSIGNED; }
-    | TUNSIGNED        { $$ = INT | UNSIGNED; }
-    | CONST TCHAR      { $$ = CHR; }
-    | CONST TSHORT     { $$ = INT | SHORT; }
-    | CONST TINT       { $$ = INT; }
-    | CONST TLNG       { $$ = LNG; }
-    | CONST TUNSIGNED TCHAR  { $$ = CHR | UNSIGNED; }
-    | CONST TUNSIGNED TSHORT { $$ = INT | SHORT | UNSIGNED; }
-    | CONST TUNSIGNED TINT   { $$ = INT | UNSIGNED; }
-    | CONST TUNSIGNED TLNG   { $$ = LNG | UNSIGNED; }
-    | CONST TUNSIGNED        { $$ = INT | UNSIGNED; }
+    | TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
+    | TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }
+    | TUNSIGNED TINT     { $$ = INT | UNSIGNED; }
+    | TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
+    | TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
+    | TUNSIGNED          { $$ = INT | UNSIGNED; }
+    | CONST TCHAR        { $$ = CHR; }
+    | CONST TSHORT       { $$ = INT | SHORT; }
+    | CONST TINT         { $$ = INT; }
+    | CONST TLNG         { $$ = LNG; }
+    | CONST TLNGLNG      { $$ = LNG; }
+    | CONST TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
+    | CONST TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }
+    | CONST TUNSIGNED TINT     { $$ = INT | UNSIGNED; }
+    | CONST TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
+    | CONST TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
+    | CONST TUNSIGNED          { $$ = INT | UNSIGNED; }
     | STRUCT IDENT {
         int idx = structfind($2->u.v);
         if (idx < 0)
@@ -1631,6 +1635,15 @@ yylex()
 		if (c == '#')
 			while ((c = getchar()) != '\n')
 				;
+		if (c == '/') {
+			c1 = getchar();
+			if (c1 == '/') {
+				while ((c = getchar()) != '\n')
+					;
+			} else {
+				ungetc(c1, stdin);
+			}
+		}
 		if (c == '\n')
 			line++;
 	} while (isspace(c));
@@ -1724,6 +1737,41 @@ yylex()
 		} while (isalpha(c) || c == '_' || isdigit(c));
 		*p = 0;
 		ungetc(c, stdin);
+
+		/* Check for "long long" */
+		if (strcmp(v, "long") == 0) {
+			char v2[NString];
+			char *p2;
+			int saved_c;
+
+			/* Skip whitespace */
+			do {
+				saved_c = getchar();
+			} while (isspace(saved_c) && saved_c != '\n');
+
+			/* Try to read next identifier */
+			if (isalpha(saved_c) || saved_c == '_') {
+				p2 = v2;
+				*p2++ = saved_c;
+				while (isalpha(saved_c = getchar()) || saved_c == '_' || isdigit(saved_c)) {
+					if (p2 < &v2[NString-1])
+						*p2++ = saved_c;
+				}
+				*p2 = 0;
+				ungetc(saved_c, stdin);
+
+				/* Check if it's "long" */
+				if (strcmp(v2, "long") == 0)
+					return TLNGLNG;
+
+				/* Not "long", need to put back the entire identifier */
+				for (i = strlen(v2) - 1; i >= 0; i--)
+					ungetc(v2[i], stdin);
+			} else {
+				ungetc(saved_c, stdin);
+			}
+		}
+
 		for (i=0; kwds[i].s; i++)
 			if (strcmp(v, kwds[i].s) == 0)
 				return kwds[i].t;
