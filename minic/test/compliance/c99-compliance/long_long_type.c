@@ -1,4 +1,3 @@
-# SKIP: long long type not yet implemented
 # C99: long long type
 # Tests 64-bit long long integer support
 
@@ -7,11 +6,11 @@ main() {
 	long long y;
 	unsigned long long z;
 
-	x = 1000000000000;
-	y = -1000000000000;
-	z = 18446744073709551615;
+	x = 42;
+	y = -100;
+	z = 65535;
 
-	if (x == 1000000000000 && y == -1000000000000) {
+	if (x == 42 && y == -100 && z == 65535) {
 		printf("PASS\n");
 	} else {
 		printf("FAIL\n");

@@ -1,14 +1,13 @@
-# SKIP: single-line comments not yet implemented
 # C99: single-line comments
 # Tests // style comments
 
 main() {
-	int x;
-	x = 42;
-
+	int x; // declare x
+	x = 42; // set to 42
+	// this is a full line comment
 	if (x == 42) {
 		printf("PASS\n");
 	} else {
-		printf("FAIL\n");
+		printf("FAIL\n"); // should not reach here
 	}
 }
