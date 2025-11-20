@@ -23,6 +23,7 @@ enum { /* minic types */
 	UNION_T,   /* union */
 };
 
+#define SHORT     (1 << 7)  /* Short flag for types */
 #define UNSIGNED  (1 << 6)  /* Unsigned flag for types */
 #define IDIR(x) (((x) << 3) + PTR)
 #define FUNC(x) (((x) << 3) + FUN)
@@ -33,6 +34,7 @@ enum { /* minic types */
 #define SIZE(x)                                    \
 	(KIND(x) == NIL ? (die("void has no size"), 0) : \
 	 KIND(x) == CHR ? 1 :  \
+	 ((x) & SHORT) ? 2 :  \
 	 KIND(x) == INT ? 4 : \
 	 (KIND(x) == STRUCT_T || KIND(x) == UNION_T) ? structh[DREF(x)].size : 8)
 
@@ -97,6 +99,7 @@ struct {
 	unsigned ctyp;
 	int glo;
 	int enumconst; /* -2 means it's an enum constant, glo stores the value */
+	int isarray; /* 1 if this is an array, 0 if it's a regular variable or pointer */
 } varh[NVar];
 
 /* Typedef table */
@@ -166,7 +169,7 @@ varclr()
 }
 
 void
-varadd(char *v, int glo, unsigned ctyp)
+varadd(char *v, int glo, unsigned ctyp, int isarray)
 {
 	unsigned h0, h;
 
@@ -178,6 +181,7 @@ varadd(char *v, int glo, unsigned ctyp)
 			varh[h].glo = glo;
 			varh[h].ctyp = ctyp;
 			varh[h].enumconst = (glo == -2) ? 1 : 0;
+			varh[h].isarray = isarray;
 			return;
 		}
 		if (strcmp(varh[h].v, v) == 0)
@@ -322,6 +326,7 @@ char
 irtyp(unsigned ctyp)
 {
 	if (SIZE(ctyp) == 1) return 'b';
+	if (ctyp & SHORT) return 'h';
 	if (SIZE(ctyp) == 8) return 'l';
 	return 'w';
 }
@@ -467,10 +472,14 @@ load(Symb d, Symb s)
 	psymb(d);
 	t = irtyp(d.ctyp);
 
-	/* QBE doesn't support byte temporaries, load bytes into words */
-	if (t == 'b') {
-		/* Use word temporary for byte loads */
-		fprintf(of, " =w loads%c ", t);
+	/* QBE doesn't support byte/halfword temporaries, load into words */
+	if (t == 'b' || t == 'h') {
+		/* Use word temporary for byte/halfword loads */
+		if (ISUNSIGNED(d.ctyp)) {
+			fprintf(of, " =w loadu%c ", t);
+		} else {
+			fprintf(of, " =w loads%c ", t);
+		}
 	} else {
 		fprintf(of, " =%c load%c ", t, t);
 	}
@@ -603,13 +612,21 @@ expr(Node *n)
 		if (s0.t == Con) {
 			/* Enum constant or other constant - use directly */
 			sr = s0;
-		} else if (KIND(s0.ctyp) == PTR) {
-			/* Array/pointer - the lvalue IS the pointer, don't load */
+		} else if (varh[hash(n->u.v)].isarray) {
+			/* Arrays - don't load, the lvalue IS the pointer */
 			sr = s0;
-			sr.ctyp = s0.ctyp;
 		} else {
-			/* Variable - need to load */
+			/* Regular variables and pointer variables - load value */
+			sr.t = Tmp;
+			sr.u.n = tmp++;
 			load(sr, s0);
+			/* Bytes and shorts are extended to words during load */
+			if (KIND(sr.ctyp) == CHR || (sr.ctyp & SHORT)) {
+				if (ISUNSIGNED(sr.ctyp))
+					sr.ctyp = INT | UNSIGNED;
+				else
+					sr.ctyp = INT;
+			}
 		}
 		break;
 
@@ -1150,7 +1167,7 @@ param(char *v, unsigned ctyp, Node *pl)
 	if (ctyp == NIL)
 		die("invalid void declaration");
 	n = mknode(0, 0, pl);
-	varadd(v, 0, ctyp);
+	varadd(v, 0, ctyp, 0);
 	strcpy(n->u.v, v);
 	return n;
 }
@@ -1195,7 +1212,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TINT TLNG TUNSIGNED
+%token TVOID TCHAR TSHORT TINT TLNG TUNSIGNED
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 
@@ -1235,14 +1252,14 @@ enums: enum
 
 enum: IDENT
 {
-	varadd($1->u.v, enumval, INT);
+	varadd($1->u.v, enumval, INT, 0);
 	varh[hash($1->u.v)].enumconst = 1;
 	enumval++;
 }
     | IDENT '=' NUM
 {
 	enumval = $3->u.n;
-	varadd($1->u.v, enumval, INT);
+	varadd($1->u.v, enumval, INT, 0);
 	varh[hash($1->u.v)].enumconst = 1;
 	enumval++;
 }
@@ -1273,7 +1290,7 @@ smembers:
 
 fdcl: type IDENT '(' ')' ';'
 {
-	varadd($2->u.v, 1, FUNC($1));
+	varadd($2->u.v, 1, FUNC($1), 0);
 };
 
 idcl: type IDENT ';'
@@ -1284,7 +1301,7 @@ idcl: type IDENT ';'
 		die("too many string literals");
 	ini[nglo] = alloc(sizeof "{ x 0 }");
 	sprintf(ini[nglo], "{ %c 0 }", irtyp($1));
-	varadd($2->u.v, nglo++, $1);
+	varadd($2->u.v, nglo++, $1, 0);
 };
 
 init:
@@ -1306,7 +1323,7 @@ prot: IDENT '(' par0 ')'
 	Node *n;
 	int t, m;
 
-	varadd($1->u.v, 1, FUNC(INT));
+	varadd($1->u.v, 1, FUNC(INT), 0);
 	fprintf(of, "export function w $%s(", $1->u.v);
 	n = $3;
 	if (n)
@@ -1349,7 +1366,7 @@ dcls:
 		die("invalid void declaration");
 	v = $3->u.v;
 	s = SIZE($2);
-	varadd(v, 0, $2);
+	varadd(v, 0, $2, 0);
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
 }
     | dcls type IDENT '[' NUM ']' ';'
@@ -1364,7 +1381,7 @@ dcls:
 	n = $5->u.n;  /* array size */
 	s = SIZE($2);  /* element size */
 	total = s * n;
-	varadd(v, 0, IDIR($2));  /* Store as pointer to element type */
+	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, total);
 }
     | dcls type IDENT '[' NUM ']' '=' '{' initlist '}' ';'
@@ -1379,7 +1396,7 @@ dcls:
 	n = $5->u.n;  /* array size */
 	s = SIZE($2);  /* element size */
 	total = s * n;
-	varadd(v, 0, IDIR($2));  /* Store as pointer to element type */
+	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, total);
 
 	/* Generate initialization code */
@@ -1407,13 +1424,15 @@ initlist: pref                    { $$ = mknode(0, $1, 0); }
 
 type: type '*' { $$ = IDIR($1); }
     | TCHAR    { $$ = CHR; }
+    | TSHORT   { $$ = INT | SHORT; }
     | TINT     { $$ = INT; }
     | TLNG     { $$ = LNG; }
     | TVOID    { $$ = NIL; }
-    | TUNSIGNED TCHAR { $$ = CHR | UNSIGNED; }
-    | TUNSIGNED TINT  { $$ = INT | UNSIGNED; }
-    | TUNSIGNED TLNG  { $$ = LNG | UNSIGNED; }
-    | TUNSIGNED       { $$ = INT | UNSIGNED; }
+    | TUNSIGNED TCHAR  { $$ = CHR | UNSIGNED; }
+    | TUNSIGNED TSHORT { $$ = INT | SHORT | UNSIGNED; }
+    | TUNSIGNED TINT   { $$ = INT | UNSIGNED; }
+    | TUNSIGNED TLNG   { $$ = LNG | UNSIGNED; }
+    | TUNSIGNED        { $$ = INT | UNSIGNED; }
     | STRUCT IDENT {
         int idx = structfind($2->u.v);
         if (idx < 0)
@@ -1528,6 +1547,7 @@ yylex()
 	} kwds[] = {
 		{ "void", TVOID },
 		{ "char", TCHAR },
+		{ "short", TSHORT },
 		{ "int", TINT },
 		{ "long", TLNG },
 		{ "unsigned", TUNSIGNED },
