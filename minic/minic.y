@@ -1221,7 +1221,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED CONST TBOOL INLINE
+%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED CONST TBOOL INLINE STATIC EXTERN
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 
@@ -1323,9 +1323,14 @@ inlineopt: INLINE
          |
          ;
 
-func: inlineopt init prot '{' dcls stmts '}'
+storageopt: STATIC
+          | EXTERN
+          |
+          ;
+
+func: storageopt inlineopt init prot '{' dcls stmts '}'
 {
-	if (!stmt($6, -1))
+	if (!stmt($7, -1))
 		fprintf(of, "\tret 0\n");
 	fprintf(of, "}\n\n");
 };
@@ -1380,6 +1385,30 @@ dcls:
 	v = $3->u.v;
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+}
+    | dcls STATIC type IDENT ';'
+{
+	int s;
+	char *v;
+
+	if ($3 == NIL)
+		die("invalid void declaration");
+	v = $4->u.v;
+	s = SIZE($3);
+	varadd(v, 0, $3, 0);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+}
+    | dcls EXTERN type IDENT ';'
+{
+	int s;
+	char *v;
+
+	if ($3 == NIL)
+		die("invalid void declaration");
+	v = $4->u.v;
+	s = SIZE($3);
+	varadd(v, 0, $3, 0);
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
 }
     | dcls type IDENT '[' NUM ']' ';'
@@ -1490,6 +1519,28 @@ stmt: ';'                            { $$ = 0; }
         v = $2->u.v;
         s = SIZE($1);
         varadd(v, 0, $1, 0);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        $$ = 0;
+    }
+    | STATIC type IDENT ';'          {
+        int s;
+        char *v;
+        if ($2 == NIL)
+            die("invalid void declaration");
+        v = $3->u.v;
+        s = SIZE($2);
+        varadd(v, 0, $2, 0);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        $$ = 0;
+    }
+    | EXTERN type IDENT ';'          {
+        int s;
+        char *v;
+        if ($2 == NIL)
+            die("invalid void declaration");
+        v = $3->u.v;
+        s = SIZE($2);
+        varadd(v, 0, $2, 0);
         fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
         $$ = 0;
     }
@@ -1608,6 +1659,8 @@ yylex()
 		{ "const", CONST },
 		{ "_Bool", TBOOL },
 		{ "inline", INLINE },
+		{ "static", STATIC },
+		{ "extern", EXTERN },
 		{ "typedef", TYPEDEF },
 		{ "struct", STRUCT },
 		{ "union", UNION },
@@ -1638,8 +1691,23 @@ yylex()
 		if (c == '/') {
 			c1 = getchar();
 			if (c1 == '/') {
+				/* Single-line comment */
 				while ((c = getchar()) != '\n')
 					;
+			} else if (c1 == '*') {
+				/* Block comment */
+				int prev = 0;
+				while (1) {
+					c = getchar();
+					if (c == EOF)
+						die("unclosed block comment");
+					if (c == '\n')
+						line++;
+					if (prev == '*' && c == '/')
+						break;
+					prev = c;
+				}
+				c = ' ';
 			} else {
 				ungetc(c1, stdin);
 			}
