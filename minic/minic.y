@@ -1221,7 +1221,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TUNSIGNED CONST
+%token TVOID TCHAR TSHORT TINT TLNG TUNSIGNED CONST TBOOL
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 
@@ -1436,6 +1436,7 @@ type: type '*' { $$ = IDIR($1); }
     | TSHORT   { $$ = INT | SHORT; }
     | TINT     { $$ = INT; }
     | TLNG     { $$ = LNG; }
+    | TBOOL    { $$ = CHR | UNSIGNED; }
     | TVOID    { $$ = NIL; }
     | TUNSIGNED TCHAR  { $$ = CHR | UNSIGNED; }
     | TUNSIGNED TSHORT { $$ = INT | SHORT | UNSIGNED; }
@@ -1572,6 +1573,7 @@ yylex()
 		{ "long", TLNG },
 		{ "unsigned", TUNSIGNED },
 		{ "const", CONST },
+		{ "_Bool", TBOOL },
 		{ "typedef", TYPEDEF },
 		{ "struct", STRUCT },
 		{ "union", UNION },
@@ -1682,14 +1684,14 @@ yylex()
 		return NUM;
 	}
 
-	if (isalpha(c)) {
+	if (isalpha(c) || c == '_') {
 		p = v;
 		do {
 			if (p == &v[NString-1])
 				die("ident too long");
 			*p++ = c;
 			c = getchar();
-		} while (isalpha(c) || c == '_');
+		} while (isalpha(c) || c == '_' || isdigit(c));
 		*p = 0;
 		ungetc(c, stdin);
 		for (i=0; kwds[i].s; i++)
