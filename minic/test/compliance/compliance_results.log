@@ -1,9 +1,9 @@
-Starting compliance test run: Wed Nov 19 22:54:48 UTC 2025
+Starting compliance test run: Thu Nov 20 01:12:18 UTC 2025
 PASS: arrays
 PASS: char_type
 SKIP: const_qualifier -  const qualifier not yet implemented
 SKIP: goto_labels -  goto and labels not yet implemented
 PASS: int_type
 PASS: long_type
-FAIL: pointers - FAIL
-SKIP: short_type -  short type not yet implemented
+PASS: pointers
+PASS: short_type
