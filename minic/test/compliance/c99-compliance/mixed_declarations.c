@@ -1,4 +1,3 @@
-# SKIP: mixed declarations not yet implemented
 # C99: mixed declarations and statements
 # Tests declaring variables after statements
 

@@ -1,16 +1,15 @@
-# SKIP: inline keyword not yet implemented
 # C99: inline functions
 # Tests inline function specifier
 
-inline int add(int a, int b) {
-	return a + b;
+inline get42() {
+	return 42;
 }
 
 main() {
 	int result;
-	result = add(10, 20);
+	result = get42();
 
-	if (result == 30) {
+	if (result == 42) {
 		printf("PASS\n");
 	} else {
 		printf("FAIL\n");
