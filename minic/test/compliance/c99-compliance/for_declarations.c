@@ -1,4 +1,3 @@
-# SKIP: for-loop declarations not yet implemented
 # C99: for-loop initial declarations
 # Tests declaring variables in for-loop initializer
 

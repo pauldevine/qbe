@@ -1221,7 +1221,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TUNSIGNED CONST TBOOL
+%token TVOID TCHAR TSHORT TINT TLNG TUNSIGNED CONST TBOOL INLINE
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 
@@ -1319,9 +1319,13 @@ init:
 	tmp = 0;
 };
 
-func: init prot '{' dcls stmts '}'
+inlineopt: INLINE
+         |
+         ;
+
+func: inlineopt init prot '{' dcls stmts '}'
 {
-	if (!stmt($5, -1))
+	if (!stmt($6, -1))
 		fprintf(of, "\tret 0\n");
 	fprintf(of, "}\n\n");
 };
@@ -1474,6 +1478,17 @@ stmt: ';'                            { $$ = 0; }
     | RETURN expr ';'                { $$ = mkstmt(Ret, $2, 0, 0); }
     | GOTO IDENT ';'                 { Stmt *s = mkstmt(Goto, 0, 0, 0); strcpy(s->label, $2->u.v); $$ = s; }
     | IDENT ':' stmt                 { Stmt *s = mkstmt(Label, $3, 0, 0); strcpy(s->label, $1->u.v); $$ = s; }
+    | type IDENT ';'                 {
+        int s;
+        char *v;
+        if ($1 == NIL)
+            die("invalid void declaration");
+        v = $2->u.v;
+        s = SIZE($1);
+        varadd(v, 0, $1, 0);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        $$ = 0;
+    }
     | expr ';'                       { $$ = mkstmt(Expr, $1, 0, 0); }
     | WHILE '(' expr ')' stmt        { $$ = mkstmt(While, $3, $5, 0); }
     | DO stmt WHILE '(' expr ')' ';' { $$ = mkstmt(DoWhile, $2, $5, 0); }
@@ -1481,6 +1496,20 @@ stmt: ';'                            { $$ = 0; }
     | IF '(' expr ')' stmt           { $$ = mkstmt(If, $3, $5, 0); }
     | FOR '(' exp0 ';' exp0 ';' exp0 ')' stmt
                                      { $$ = mkfor($3, $5, $7, $9); }
+    | FOR '(' type IDENT '=' expr ';' exp0 ';' exp0 ')' stmt
+                                     {
+        int s;
+        char *v;
+        Node *init_expr;
+        if ($3 == NIL)
+            die("invalid void declaration");
+        v = $4->u.v;
+        s = SIZE($3);
+        varadd(v, 0, $3, 0);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        init_expr = mknode('=', $4, $6);
+        $$ = mkfor(init_expr, $8, $10, $12);
+    }
     | SWITCH '(' expr ')' stmt       { $$ = mkstmt(Switch, $3, $5, 0); }
     | CASE NUM ':' stmt              { Stmt *s = mkstmt(Case, 0, $4, 0); s->val = $2->u.n; $$ = s; }
     | DEFAULT ':' stmt               { $$ = mkstmt(Default, 0, $3, 0); }
@@ -1574,6 +1603,7 @@ yylex()
 		{ "unsigned", TUNSIGNED },
 		{ "const", CONST },
 		{ "_Bool", TBOOL },
+		{ "inline", INLINE },
 		{ "typedef", TYPEDEF },
 		{ "struct", STRUCT },
 		{ "union", UNION },
