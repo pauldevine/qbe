@@ -328,9 +328,14 @@ varget(char *v)
 char
 irtyp(unsigned ctyp)
 {
-	if (SIZE(ctyp) == 1) return 'b';
-	if (ctyp & SHORT) return 'h';
-	if (SIZE(ctyp) == 8) return 'l';
+	int k = KIND(ctyp);
+	/* Characters are bytes */
+	if (k == CHR) return 'b';
+	/* Short ints are halfwords - check KIND to avoid false positives from shifted types */
+	if ((ctyp & SHORT) && k == INT) return 'h';
+	/* Pointers, longs, function pointers are 8 bytes */
+	if (k == PTR || k == LNG || SIZE(ctyp) == 8) return 'l';
+	/* Regular ints are words */
 	return 'w';
 }
 
@@ -615,6 +620,15 @@ expr(Node *n)
 		if (s0.t == Con) {
 			/* Enum constant or other constant - use directly */
 			sr = s0;
+		} else if (KIND(s0.ctyp) == FUN) {
+			/* Function name - return its address as function pointer */
+			sr.t = Tmp;
+			sr.u.n = tmp++;
+			sr.ctyp = IDIR(s0.ctyp);  /* Pointer to function */
+			/* Copy function address to temporary */
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =l copy $%s\n", n->u.v);
 		} else if (varh[hash(n->u.v)].isarray) {
 			/* Arrays - don't load, the lvalue IS the pointer */
 			sr = s0;
@@ -624,7 +638,7 @@ expr(Node *n)
 			sr.u.n = tmp++;
 			load(sr, s0);
 			/* Bytes and shorts are extended to words during load */
-			if (KIND(sr.ctyp) == CHR || (sr.ctyp & SHORT)) {
+			if (KIND(sr.ctyp) == CHR || ((sr.ctyp & SHORT) && KIND(sr.ctyp) == INT)) {
 				if (ISUNSIGNED(sr.ctyp))
 					sr.ctyp = INT | UNSIGNED;
 				else
@@ -647,6 +661,43 @@ expr(Node *n)
 
 	case 'C':
 		call(n, &sr);
+		break;
+
+	case 'I':
+		/* Indirect function call: (*fptr)(args) */
+		{
+			Node *a;
+			Symb fptr;
+			unsigned fptr_type;
+
+			/* Evaluate function pointer expression */
+			fptr = expr(n->l);
+
+			/* Check it's a function pointer */
+			if (KIND(fptr.ctyp) != PTR || KIND(DREF(fptr.ctyp)) != FUN)
+				die("invalid indirect call - not a function pointer");
+
+			/* Get return type */
+			fptr_type = DREF(fptr.ctyp);  /* FUN(return_type) */
+			sr.ctyp = DREF(fptr_type);     /* return_type */
+
+			/* Evaluate all arguments */
+			for (a=n->r; a; a=a->r)
+				a->u.s = expr(a->l);
+
+			/* Generate indirect call */
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =%c call ", irtyp(sr.ctyp));
+			psymb(fptr);
+			fprintf(of, "(");
+			for (a=n->r; a; a=a->r) {
+				fprintf(of, "%c ", irtyp(a->u.s.ctyp));
+				psymb(a->u.s);
+				fprintf(of, ", ");
+			}
+			fprintf(of, "...)\n");
+		}
 		break;
 
 	case '@':
@@ -1241,7 +1292,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %type <u> type
 %type <s> stmt stmts
-%type <n> expr exp0 pref post arg0 arg1 par0 par1 initlist
+%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist
 %token <u> TNAME
 
 %%
@@ -1373,6 +1424,13 @@ par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
     | type IDENT          { $$ = param($2->u.v, $1, 0); }
     ;
 
+fptpar0: fptpar1
+       |                  { $$ = 0; }
+       ;
+fptpar1: type ',' fptpar1 { $$ = 0; }
+       | type             { $$ = 0; }
+       ;
+
 
 dcls:
     | dcls type IDENT ';'
@@ -1457,6 +1515,19 @@ dcls:
 			i++;
 		}
 	}
+}
+    | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
+{
+	/* Function pointer declaration: int (*fptr)(int, int); */
+	char *v;
+	unsigned fptr_type;
+
+	if ($2 == NIL)
+		die("invalid void function pointer");
+	v = $5->u.v;
+	fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
+	varadd(v, 0, fptr_type, 0);  /* Not an array */
+	fprintf(of, "\t%%%s =l alloc8 8\n", v);  /* Pointers are 8 bytes */
 }
     ;
 
@@ -1574,8 +1645,12 @@ stmts: stmts stmt { $$ = mkstmt(Seq, $1, $2, 0); }
      |            { $$ = 0; }
      ;
 
+/* TODO: The comma operator is temporarily disabled because it conflicts with
+ * function argument parsing. The proper fix is to create separate expression
+ * levels (e.g., assignment_expression vs expression) like in standard C,
+ * where function arguments use assignment_expression (no comma) and only
+ * top-level expressions use expression (with comma). */
 expr: pref
-    | expr ',' expr     { $$ = mknode(',', $1, $3); }
     | expr '?' expr ':' expr { $$ = mknode('?', $1, mknode(':', $3, $5)); }
     | expr '=' expr     { $$ = mknode('=', $1, $3); }
     | expr ADDEQ expr   { $$ = mknode('=', $1, mknode('+', $1, $3)); }
@@ -1628,6 +1703,7 @@ post: NUM
     | SIZEOF '(' type ')' { $$ = mknode('N', 0, 0); $$->u.n = SIZE($3); }
     | '(' expr ')'        { $$ = $2; }
     | IDENT '(' arg0 ')'  { $$ = mknode('C', $1, $3); }
+    | '(' '*' post ')' '(' arg0 ')'  { $$ = mknode('I', $3, $6); }
     | post '[' expr ']'   { $$ = mkidx($1, $3); }
     | post PP             { $$ = mknode('P', $1, 0); }
     | post MM             { $$ = mknode('M', $1, 0); }

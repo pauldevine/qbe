@@ -1,4 +1,3 @@
-# SKIP: function pointers not yet implemented
 # C89 Extended: function pointers
 # Tests function pointer declarations and calls
 

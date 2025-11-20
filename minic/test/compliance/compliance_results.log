@@ -1,4 +1,12 @@
-Starting compliance test run: Thu Nov 20 05:43:56 UTC 2025
+Starting compliance test run: Thu Nov 20 06:07:04 UTC 2025
+PASS: arrays
+PASS: char_type
+PASS: const_qualifier
+PASS: goto_labels
+PASS: int_type
+PASS: long_type
+PASS: pointers
+PASS: short_type
 PASS: bool_type
 PASS: for_declarations
 PASS: inline_functions
