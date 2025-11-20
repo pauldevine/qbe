@@ -1,12 +1,12 @@
 # MiniC C Standard Compliance Report
 
-**Generated:** Thu Nov 20 05:43:56 UTC 2025
+**Generated:** Thu Nov 20 06:07:07 UTC 2025
 
 ## Summary
 
 | Standard | Total Tests | Passed | Failed | Skipped | Pass Rate |
 |----------|-------------|--------|--------|---------|-----------|
-| **C89**  | 0 | 0 | 0 | 0 | 0% |
+| **C89**  | 8 | 8 | 0 | 0 | 100.0% |
 | **C99**  | 6 | 6 | 0 | 0 | 100.0% |
 | **C11**  | 0 | 0 | 0 | 0 | 0% |
 
@@ -15,6 +15,26 @@
 ### C89/ANSI C (1989)
 
 **Target: 100% compliance with C89 standard**
+
+#### Passed Tests (8)
+- arrays
+- char_type
+- const_qualifier
+- goto_labels
+- int_type
+- long_type
+- pointers
+- short_type
+- bool_type
+- for_declarations
+- inline_functions
+- long_long_type
+- mixed_declarations
+- single_line_comments
+
+#### Failed Tests (0)
+
+#### Skipped Tests (0)
 
 
 ### C99 (1999)
