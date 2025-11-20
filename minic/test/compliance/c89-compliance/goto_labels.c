@@ -1,4 +1,3 @@
-# SKIP: goto and labels not yet implemented
 # C89: goto and labels
 # Tests goto statement and label support
 
