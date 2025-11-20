@@ -23,6 +23,7 @@ enum { /* minic types */
 	UNION_T,   /* union */
 };
 
+#define SHORT     (1 << 7)  /* Short flag for types */
 #define UNSIGNED  (1 << 6)  /* Unsigned flag for types */
 #define IDIR(x) (((x) << 3) + PTR)
 #define FUNC(x) (((x) << 3) + FUN)
@@ -33,6 +34,7 @@ enum { /* minic types */
 #define SIZE(x)                                    \
 	(KIND(x) == NIL ? (die("void has no size"), 0) : \
 	 KIND(x) == CHR ? 1 :  \
+	 ((x) & SHORT) ? 2 :  \
 	 KIND(x) == INT ? 4 : \
 	 (KIND(x) == STRUCT_T || KIND(x) == UNION_T) ? structh[DREF(x)].size : 8)
 
@@ -77,14 +79,18 @@ struct Stmt {
 		Break,
 		Continue,
 		Ret,
+		Goto,
+		Label,
 	} t;
 	void *p1, *p2, *p3;
 	int val; /* for case values */
+	char label[NString]; /* for goto target and label name */
 };
 
 int yylex(void), yyerror(char *);
 Symb expr(Node *), lval(Node *);
 void branch(Node *, int, int);
+int stmt(Stmt *, int);
 
 FILE *of;
 int line;
@@ -96,6 +102,7 @@ struct {
 	unsigned ctyp;
 	int glo;
 	int enumconst; /* -2 means it's an enum constant, glo stores the value */
+	int isarray; /* 1 if this is an array, 0 if it's a regular variable or pointer */
 } varh[NVar];
 
 /* Typedef table */
@@ -165,7 +172,7 @@ varclr()
 }
 
 void
-varadd(char *v, int glo, unsigned ctyp)
+varadd(char *v, int glo, unsigned ctyp, int isarray)
 {
 	unsigned h0, h;
 
@@ -177,6 +184,7 @@ varadd(char *v, int glo, unsigned ctyp)
 			varh[h].glo = glo;
 			varh[h].ctyp = ctyp;
 			varh[h].enumconst = (glo == -2) ? 1 : 0;
+			varh[h].isarray = isarray;
 			return;
 		}
 		if (strcmp(varh[h].v, v) == 0)
@@ -219,7 +227,7 @@ structadd(char *name, int isunion)
 void
 structaddmember(int sidx, char *name, unsigned ctyp)
 {
-	int offset, i;
+	int i;
 	struct Member *m;
 
 	if (structh[sidx].nmembers >= 16)
@@ -321,6 +329,7 @@ char
 irtyp(unsigned ctyp)
 {
 	if (SIZE(ctyp) == 1) return 'b';
+	if (ctyp & SHORT) return 'h';
 	if (SIZE(ctyp) == 8) return 'l';
 	return 'w';
 }
@@ -360,6 +369,23 @@ prom(int op, Symb *l, Symb *r)
 {
 	Symb *t;
 	int sz;
+
+	/* Promote char to int for comparisons (both operands must be int or larger) */
+	if (strchr("ne<l", op) && KIND(l->ctyp) == CHR && KIND(r->ctyp) == CHR) {
+		fprintf(of, "\t%%t%d =w extsb ", tmp);
+		psymb(*l);
+		fprintf(of, "\n");
+		l->t = Tmp;
+		l->ctyp = INT;
+		l->u.n = tmp++;
+		fprintf(of, "\t%%t%d =w extsb ", tmp);
+		psymb(*r);
+		fprintf(of, "\n");
+		r->t = Tmp;
+		r->ctyp = INT;
+		r->u.n = tmp++;
+		return INT;
+	}
 
 	if (l->ctyp == r->ctyp && KIND(l->ctyp) != PTR)
 		return l->ctyp;
@@ -448,7 +474,18 @@ load(Symb d, Symb s)
 	fprintf(of, "\t");
 	psymb(d);
 	t = irtyp(d.ctyp);
-	fprintf(of, " =%c load%c ", t, t);
+
+	/* QBE doesn't support byte/halfword temporaries, load into words */
+	if (t == 'b' || t == 'h') {
+		/* Use word temporary for byte/halfword loads */
+		if (ISUNSIGNED(d.ctyp)) {
+			fprintf(of, " =w loadu%c ", t);
+		} else {
+			fprintf(of, " =w loads%c ", t);
+		}
+	} else {
+		fprintf(of, " =%c load%c ", t, t);
+	}
 	psymb(s);
 	fprintf(of, "\n");
 }
@@ -578,13 +615,21 @@ expr(Node *n)
 		if (s0.t == Con) {
 			/* Enum constant or other constant - use directly */
 			sr = s0;
-		} else if (KIND(s0.ctyp) == PTR) {
-			/* Array/pointer - the lvalue IS the pointer, don't load */
+		} else if (varh[hash(n->u.v)].isarray) {
+			/* Arrays - don't load, the lvalue IS the pointer */
 			sr = s0;
-			sr.ctyp = s0.ctyp;
 		} else {
-			/* Variable - need to load */
+			/* Regular variables and pointer variables - load value */
+			sr.t = Tmp;
+			sr.u.n = tmp++;
 			load(sr, s0);
+			/* Bytes and shorts are extended to words during load */
+			if (KIND(sr.ctyp) == CHR || (sr.ctyp & SHORT)) {
+				if (ISUNSIGNED(sr.ctyp))
+					sr.ctyp = INT | UNSIGNED;
+				else
+					sr.ctyp = INT;
+			}
 		}
 		break;
 
@@ -1064,6 +1109,15 @@ stmt(Stmt *s, int b)
 		if (s->p2)
 			stmt((Stmt*)s->p2, b);
 		return 0;
+	case Goto:
+		fprintf(of, "\tjmp @user_%s\n", s->label);
+		return 1;
+	case Label:
+		fprintf(of, "@user_%s\n", s->label);
+		return stmt(s->p1, b);
+	default:
+		die("unknown statement type");
+		return 0;
 	}
 }
 
@@ -1122,7 +1176,7 @@ param(char *v, unsigned ctyp, Node *pl)
 	if (ctyp == NIL)
 		die("invalid void declaration");
 	n = mknode(0, 0, pl);
-	varadd(v, 0, ctyp);
+	varadd(v, 0, ctyp, 0);
 	strcpy(n->u.v, v);
 	return n;
 }
@@ -1167,8 +1221,8 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TINT TLNG TUNSIGNED
-%token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN
+%token TVOID TCHAR TSHORT TINT TLNG TUNSIGNED CONST
+%token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 
 %left ','
@@ -1207,14 +1261,14 @@ enums: enum
 
 enum: IDENT
 {
-	varadd($1->u.v, enumval, INT);
+	varadd($1->u.v, enumval, INT, 0);
 	varh[hash($1->u.v)].enumconst = 1;
 	enumval++;
 }
     | IDENT '=' NUM
 {
 	enumval = $3->u.n;
-	varadd($1->u.v, enumval, INT);
+	varadd($1->u.v, enumval, INT, 0);
 	varh[hash($1->u.v)].enumconst = 1;
 	enumval++;
 }
@@ -1245,7 +1299,7 @@ smembers:
 
 fdcl: type IDENT '(' ')' ';'
 {
-	varadd($2->u.v, 1, FUNC($1));
+	varadd($2->u.v, 1, FUNC($1), 0);
 };
 
 idcl: type IDENT ';'
@@ -1256,7 +1310,7 @@ idcl: type IDENT ';'
 		die("too many string literals");
 	ini[nglo] = alloc(sizeof "{ x 0 }");
 	sprintf(ini[nglo], "{ %c 0 }", irtyp($1));
-	varadd($2->u.v, nglo++, $1);
+	varadd($2->u.v, nglo++, $1, 0);
 };
 
 init:
@@ -1278,7 +1332,7 @@ prot: IDENT '(' par0 ')'
 	Node *n;
 	int t, m;
 
-	varadd($1->u.v, 1, FUNC(INT));
+	varadd($1->u.v, 1, FUNC(INT), 0);
 	fprintf(of, "export function w $%s(", $1->u.v);
 	n = $3;
 	if (n)
@@ -1321,7 +1375,7 @@ dcls:
 		die("invalid void declaration");
 	v = $3->u.v;
 	s = SIZE($2);
-	varadd(v, 0, $2);
+	varadd(v, 0, $2, 0);
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
 }
     | dcls type IDENT '[' NUM ']' ';'
@@ -1336,7 +1390,7 @@ dcls:
 	n = $5->u.n;  /* array size */
 	s = SIZE($2);  /* element size */
 	total = s * n;
-	varadd(v, 0, IDIR($2));  /* Store as pointer to element type */
+	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, total);
 }
     | dcls type IDENT '[' NUM ']' '=' '{' initlist '}' ';'
@@ -1351,7 +1405,7 @@ dcls:
 	n = $5->u.n;  /* array size */
 	s = SIZE($2);  /* element size */
 	total = s * n;
-	varadd(v, 0, IDIR($2));  /* Store as pointer to element type */
+	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, total);
 
 	/* Generate initialization code */
@@ -1379,13 +1433,24 @@ initlist: pref                    { $$ = mknode(0, $1, 0); }
 
 type: type '*' { $$ = IDIR($1); }
     | TCHAR    { $$ = CHR; }
+    | TSHORT   { $$ = INT | SHORT; }
     | TINT     { $$ = INT; }
     | TLNG     { $$ = LNG; }
     | TVOID    { $$ = NIL; }
-    | TUNSIGNED TCHAR { $$ = CHR | UNSIGNED; }
-    | TUNSIGNED TINT  { $$ = INT | UNSIGNED; }
-    | TUNSIGNED TLNG  { $$ = LNG | UNSIGNED; }
-    | TUNSIGNED       { $$ = INT | UNSIGNED; }
+    | TUNSIGNED TCHAR  { $$ = CHR | UNSIGNED; }
+    | TUNSIGNED TSHORT { $$ = INT | SHORT | UNSIGNED; }
+    | TUNSIGNED TINT   { $$ = INT | UNSIGNED; }
+    | TUNSIGNED TLNG   { $$ = LNG | UNSIGNED; }
+    | TUNSIGNED        { $$ = INT | UNSIGNED; }
+    | CONST TCHAR      { $$ = CHR; }
+    | CONST TSHORT     { $$ = INT | SHORT; }
+    | CONST TINT       { $$ = INT; }
+    | CONST TLNG       { $$ = LNG; }
+    | CONST TUNSIGNED TCHAR  { $$ = CHR | UNSIGNED; }
+    | CONST TUNSIGNED TSHORT { $$ = INT | SHORT | UNSIGNED; }
+    | CONST TUNSIGNED TINT   { $$ = INT | UNSIGNED; }
+    | CONST TUNSIGNED TLNG   { $$ = LNG | UNSIGNED; }
+    | CONST TUNSIGNED        { $$ = INT | UNSIGNED; }
     | STRUCT IDENT {
         int idx = structfind($2->u.v);
         if (idx < 0)
@@ -1406,6 +1471,8 @@ stmt: ';'                            { $$ = 0; }
     | BREAK ';'                      { $$ = mkstmt(Break, 0, 0, 0); }
     | CONTINUE ';'                   { $$ = mkstmt(Continue, 0, 0, 0); }
     | RETURN expr ';'                { $$ = mkstmt(Ret, $2, 0, 0); }
+    | GOTO IDENT ';'                 { Stmt *s = mkstmt(Goto, 0, 0, 0); strcpy(s->label, $2->u.v); $$ = s; }
+    | IDENT ':' stmt                 { Stmt *s = mkstmt(Label, $3, 0, 0); strcpy(s->label, $1->u.v); $$ = s; }
     | expr ';'                       { $$ = mkstmt(Expr, $1, 0, 0); }
     | WHILE '(' expr ')' stmt        { $$ = mkstmt(While, $3, $5, 0); }
     | DO stmt WHILE '(' expr ')' ';' { $$ = mkstmt(DoWhile, $2, $5, 0); }
@@ -1500,9 +1567,11 @@ yylex()
 	} kwds[] = {
 		{ "void", TVOID },
 		{ "char", TCHAR },
+		{ "short", TSHORT },
 		{ "int", TINT },
 		{ "long", TLNG },
 		{ "unsigned", TUNSIGNED },
+		{ "const", CONST },
 		{ "typedef", TYPEDEF },
 		{ "struct", STRUCT },
 		{ "union", UNION },
@@ -1518,6 +1587,7 @@ yylex()
 		{ "return", RETURN },
 		{ "break", BREAK },
 		{ "continue", CONTINUE },
+		{ "goto", GOTO },
 		{ "sizeof", SIZEOF },
 		{ 0, 0 }
 	};
