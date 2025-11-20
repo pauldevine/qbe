@@ -79,9 +79,12 @@ struct Stmt {
 		Break,
 		Continue,
 		Ret,
+		Goto,
+		Label,
 	} t;
 	void *p1, *p2, *p3;
 	int val; /* for case values */
+	char label[NString]; /* for goto target and label name */
 };
 
 int yylex(void), yyerror(char *);
@@ -1106,6 +1109,12 @@ stmt(Stmt *s, int b)
 		if (s->p2)
 			stmt((Stmt*)s->p2, b);
 		return 0;
+	case Goto:
+		fprintf(of, "\tjmp @user_%s\n", s->label);
+		return 1;
+	case Label:
+		fprintf(of, "@user_%s\n", s->label);
+		return stmt(s->p1, b);
 	default:
 		die("unknown statement type");
 		return 0;
@@ -1212,8 +1221,8 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TUNSIGNED
-%token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN
+%token TVOID TCHAR TSHORT TINT TLNG TUNSIGNED CONST
+%token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 
 %left ','
@@ -1433,6 +1442,15 @@ type: type '*' { $$ = IDIR($1); }
     | TUNSIGNED TINT   { $$ = INT | UNSIGNED; }
     | TUNSIGNED TLNG   { $$ = LNG | UNSIGNED; }
     | TUNSIGNED        { $$ = INT | UNSIGNED; }
+    | CONST TCHAR      { $$ = CHR; }
+    | CONST TSHORT     { $$ = INT | SHORT; }
+    | CONST TINT       { $$ = INT; }
+    | CONST TLNG       { $$ = LNG; }
+    | CONST TUNSIGNED TCHAR  { $$ = CHR | UNSIGNED; }
+    | CONST TUNSIGNED TSHORT { $$ = INT | SHORT | UNSIGNED; }
+    | CONST TUNSIGNED TINT   { $$ = INT | UNSIGNED; }
+    | CONST TUNSIGNED TLNG   { $$ = LNG | UNSIGNED; }
+    | CONST TUNSIGNED        { $$ = INT | UNSIGNED; }
     | STRUCT IDENT {
         int idx = structfind($2->u.v);
         if (idx < 0)
@@ -1453,6 +1471,8 @@ stmt: ';'                            { $$ = 0; }
     | BREAK ';'                      { $$ = mkstmt(Break, 0, 0, 0); }
     | CONTINUE ';'                   { $$ = mkstmt(Continue, 0, 0, 0); }
     | RETURN expr ';'                { $$ = mkstmt(Ret, $2, 0, 0); }
+    | GOTO IDENT ';'                 { Stmt *s = mkstmt(Goto, 0, 0, 0); strcpy(s->label, $2->u.v); $$ = s; }
+    | IDENT ':' stmt                 { Stmt *s = mkstmt(Label, $3, 0, 0); strcpy(s->label, $1->u.v); $$ = s; }
     | expr ';'                       { $$ = mkstmt(Expr, $1, 0, 0); }
     | WHILE '(' expr ')' stmt        { $$ = mkstmt(While, $3, $5, 0); }
     | DO stmt WHILE '(' expr ')' ';' { $$ = mkstmt(DoWhile, $2, $5, 0); }
@@ -1551,6 +1571,7 @@ yylex()
 		{ "int", TINT },
 		{ "long", TLNG },
 		{ "unsigned", TUNSIGNED },
+		{ "const", CONST },
 		{ "typedef", TYPEDEF },
 		{ "struct", STRUCT },
 		{ "union", UNION },
@@ -1566,6 +1587,7 @@ yylex()
 		{ "return", RETURN },
 		{ "break", BREAK },
 		{ "continue", CONTINUE },
+		{ "goto", GOTO },
 		{ "sizeof", SIZEOF },
 		{ 0, 0 }
 	};
