@@ -25,17 +25,20 @@ enum { /* minic types */
 
 #define SHORT     (1 << 7)  /* Short flag for types */
 #define UNSIGNED  (1 << 6)  /* Unsigned flag for types */
+#define FLOAT     (1 << 5)  /* Float flag for types (float=INT|FLOAT, double=LNG|FLOAT) */
 #define IDIR(x) (((x) << 3) + PTR)
 #define FUNC(x) (((x) << 3) + FUN)
 #define DREF(x) ((x) >> 3)
 #define KIND(x) ((x) & 7)
 #define ISUNSIGNED(x) ((x) & UNSIGNED)
+#define ISFLOAT(x) ((x) & FLOAT)
 #define BASETYPE(x) (KIND(x) & ~UNSIGNED)
 #define SIZE(x)                                    \
 	(KIND(x) == NIL ? (die("void has no size"), 0) : \
 	 KIND(x) == CHR ? 1 :  \
 	 ((x) & SHORT) ? 2 :  \
 	 KIND(x) == INT ? 4 : \
+	 KIND(x) == LNG ? 8 : \
 	 (KIND(x) == STRUCT_T || KIND(x) == UNION_T) ? structh[DREF(x)].size : 8)
 
 typedef struct Node Node;
@@ -328,14 +331,13 @@ varget(char *v)
 char
 irtyp(unsigned ctyp)
 {
-	int k = KIND(ctyp);
-	/* Characters are bytes */
-	if (k == CHR) return 'b';
-	/* Short ints are halfwords - check KIND to avoid false positives from shifted types */
-	if ((ctyp & SHORT) && k == INT) return 'h';
-	/* Pointers, longs, function pointers are 8 bytes */
-	if (k == PTR || k == LNG || SIZE(ctyp) == 8) return 'l';
-	/* Regular ints are words */
+	if (ISFLOAT(ctyp)) {
+		if (KIND(ctyp) == LNG) return 'd';  /* double */
+		return 's';  /* float */
+	}
+	if (SIZE(ctyp) == 1) return 'b';
+	if (ctyp & SHORT) return 'h';
+	if (SIZE(ctyp) == 8) return 'l';
 	return 'w';
 }
 
@@ -374,6 +376,72 @@ prom(int op, Symb *l, Symb *r)
 {
 	Symb *t;
 	int sz;
+
+	/* Floating-point promotion: if either operand is float/double, promote both */
+	if (ISFLOAT(l->ctyp) || ISFLOAT(r->ctyp)) {
+		unsigned target_type = (LNG | FLOAT);  /* default to double */
+
+		/* If both are float, result is float; otherwise double */
+		if (ISFLOAT(l->ctyp) && ISFLOAT(r->ctyp)) {
+			if (KIND(l->ctyp) == INT && KIND(r->ctyp) == INT)
+				target_type = INT | FLOAT;  /* both float */
+			else
+				target_type = LNG | FLOAT;  /* at least one double */
+		}
+
+		/* Convert integer to floating-point if needed */
+		if (!ISFLOAT(l->ctyp)) {
+			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(target_type));
+			if (KIND(l->ctyp) == LNG)
+				fprintf(of, "sltof ");
+			else
+				fprintf(of, "swtof ");
+			psymb(*l);
+			fprintf(of, "\n");
+			l->t = Tmp;
+			l->ctyp = target_type;
+			l->u.n = tmp++;
+		} else if (l->ctyp != target_type) {
+			/* Convert float to double or vice versa */
+			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(target_type));
+			if (KIND(target_type) == LNG)
+				fprintf(of, "exts ");  /* float to double */
+			else
+				fprintf(of, "truncd ");  /* double to float */
+			psymb(*l);
+			fprintf(of, "\n");
+			l->t = Tmp;
+			l->ctyp = target_type;
+			l->u.n = tmp++;
+		}
+
+		if (!ISFLOAT(r->ctyp)) {
+			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(target_type));
+			if (KIND(r->ctyp) == LNG)
+				fprintf(of, "sltof ");
+			else
+				fprintf(of, "swtof ");
+			psymb(*r);
+			fprintf(of, "\n");
+			r->t = Tmp;
+			r->ctyp = target_type;
+			r->u.n = tmp++;
+		} else if (r->ctyp != target_type) {
+			/* Convert float to double or vice versa */
+			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(target_type));
+			if (KIND(target_type) == LNG)
+				fprintf(of, "exts ");  /* float to double */
+			else
+				fprintf(of, "truncd ");  /* double to float */
+			psymb(*r);
+			fprintf(of, "\n");
+			r->t = Tmp;
+			r->ctyp = target_type;
+			r->u.n = tmp++;
+		}
+
+		return target_type;
+	}
 
 	/* Promote char to int for comparisons (both operands must be int or larger) */
 	if (strchr("ne<l", op) && KIND(l->ctyp) == CHR && KIND(r->ctyp) == CHR) {
@@ -653,6 +721,17 @@ expr(Node *n)
 		sr.ctyp = INT;
 		break;
 
+	case 'F':
+		/* Floating-point literal */
+		/* For now, default to double; we can make this smarter later */
+		sr.t = Tmp;
+		sr.u.n = tmp++;
+		sr.ctyp = LNG | FLOAT;  /* double */
+		fprintf(of, "\t");
+		psymb(sr);
+		fprintf(of, " =d copy d_%s\n", n->u.v);
+		break;
+
 	case 'S':
 		sr.t = Glo;
 		sr.u.n = n->u.n;
@@ -762,6 +841,8 @@ expr(Node *n)
 
 	case '~':
 		s0 = expr(n->l);
+		if (ISFLOAT(s0.ctyp))
+			die("bitwise NOT not supported on floating-point types");
 		sr.ctyp = s0.ctyp;
 		fprintf(of, "\t");
 		psymb(sr);
@@ -785,13 +866,50 @@ expr(Node *n)
 		s1 = lval(n->l);
 		sr = s0;
 		/* Type conversions for assignment */
-		if (KIND(s1.ctyp) == LNG && KIND(s0.ctyp) == INT)
+
+		/* Float/int conversions */
+		if (ISFLOAT(s1.ctyp) && !ISFLOAT(s0.ctyp)) {
+			/* Convert int to float/double */
+			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(s1.ctyp));
+			if (KIND(s0.ctyp) == LNG)
+				fprintf(of, "sltof ");
+			else
+				fprintf(of, "swtof ");
+			psymb(s0);
+			fprintf(of, "\n");
+			s0.t = Tmp;
+			s0.ctyp = s1.ctyp;
+			s0.u.n = tmp++;
+		} else if (!ISFLOAT(s1.ctyp) && ISFLOAT(s0.ctyp)) {
+			/* Convert float/double to int */
+			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(s1.ctyp));
+			if (KIND(s1.ctyp) == LNG)
+				fprintf(of, "dtosi ");
+			else
+				fprintf(of, "stosi ");
+			psymb(s0);
+			fprintf(of, "\n");
+			s0.t = Tmp;
+			s0.ctyp = s1.ctyp;
+			s0.u.n = tmp++;
+		} else if (ISFLOAT(s1.ctyp) && ISFLOAT(s0.ctyp) && s1.ctyp != s0.ctyp) {
+			/* Convert between float and double */
+			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(s1.ctyp));
+			if (KIND(s1.ctyp) == LNG)
+				fprintf(of, "exts ");  /* float to double */
+			else
+				fprintf(of, "truncd ");  /* double to float */
+			psymb(s0);
+			fprintf(of, "\n");
+			s0.t = Tmp;
+			s0.ctyp = s1.ctyp;
+			s0.u.n = tmp++;
+		} else if (KIND(s1.ctyp) == LNG && KIND(s0.ctyp) == INT && !ISFLOAT(s1.ctyp)) {
 			sext(&s0);
-		if (KIND(s1.ctyp) == CHR && KIND(s0.ctyp) == INT) {
+		} else if (KIND(s1.ctyp) == CHR && KIND(s0.ctyp) == INT) {
 			/* Truncate int to char - no explicit conversion needed */
 			/* QBE will handle truncation in storeb */
-		}
-		if (KIND(s1.ctyp) == INT && KIND(s0.ctyp) == CHR) {
+		} else if (KIND(s1.ctyp) == INT && KIND(s0.ctyp) == CHR) {
 			/* Extend char to int */
 			fprintf(of, "\t%%t%d =w extsb ", tmp);
 			psymb(s0);
@@ -802,11 +920,12 @@ expr(Node *n)
 		}
 		if (s0.ctyp != IDIR(NIL) || KIND(s1.ctyp) != PTR)
 		if (s1.ctyp != IDIR(NIL) || KIND(s0.ctyp) != PTR)
-		/* Allow assignment between signed/unsigned variants */
+		/* Allow assignment between signed/unsigned variants and float types */
 		if (s1.ctyp != s0.ctyp
 		    && !(KIND(s1.ctyp) == CHR && KIND(s0.ctyp) == INT)
 		    && !((KIND(s1.ctyp) == KIND(s0.ctyp)) ||
-		         ((KIND(s1.ctyp) & ~UNSIGNED) == (KIND(s0.ctyp) & ~UNSIGNED))))
+		         ((KIND(s1.ctyp) & ~UNSIGNED) == (KIND(s0.ctyp) & ~UNSIGNED))
+		         || ((KIND(s1.ctyp) & ~FLOAT) == (KIND(s0.ctyp) & ~FLOAT))))
 			die("invalid assignment");
 		fprintf(of, "\tstore%c ", irtyp(s1.ctyp));
 		goto Args;
@@ -861,6 +980,17 @@ expr(Node *n)
 		o = n->op;
 	Binop:
 		sr.ctyp = prom(o, &s0, &s1);
+
+		/* Validate operations on floating-point types */
+		if (ISFLOAT(sr.ctyp)) {
+			/* Disallow modulo on floats */
+			if (o == '%')
+				die("modulo operation not supported on floating-point types");
+			/* Disallow bitwise operations on floats */
+			if (strchr("&|^LR", o))
+				die("bitwise operations not supported on floating-point types");
+		}
+
 		if (strchr("ne<l", n->op)) {
 			sprintf(ty, "%c", irtyp(sr.ctyp));
 			sr.ctyp = INT;
@@ -869,10 +999,24 @@ expr(Node *n)
 		fprintf(of, "\t");
 		psymb(sr);
 		fprintf(of, " =%c", irtyp(sr.ctyp));
-		/* Use unsigned comparison if either operand is unsigned */
-		if (strchr("<l", o) && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp))) {
+		/* Handle comparisons based on type */
+		if (ISFLOAT(s0.ctyp)) {
+			/* Floating-point comparison: cXXt where XX is comparison and t is type */
+			if (o == '<')
+				fprintf(of, " clt%s ", ty);
+			else if (o == 'l')  /* <= */
+				fprintf(of, " cle%s ", ty);
+			else if (o == 'e')  /* == */
+				fprintf(of, " ceq%s ", ty);
+			else if (o == 'n')  /* != */
+				fprintf(of, " cne%s ", ty);
+			else
+				fprintf(of, " %s%s ", otoa[o], ty);
+		} else if (strchr("<l", o) && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp))) {
+			/* Unsigned integer comparison */
 			fprintf(of, " %s%s ", o == '<' ? "cult" : "cule", ty);
 		} else {
+			/* Signed integer comparison or other operations */
 			fprintf(of, " %s%s ", otoa[o], ty);
 		}
 	Args:
@@ -1266,13 +1410,14 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 }
 
 %token <n> NUM
+%token <n> FNUM
 %token <n> STR
 %token <n> IDENT
 %token PP MM LE GE SIZEOF SHL SHR
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED CONST TBOOL INLINE STATIC EXTERN
+%token TVOID TCHAR TSHORT TINT TLNG TUNSIGNED TFLOAT TDOUBLE CONST
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 
@@ -1540,8 +1685,8 @@ type: type '*' { $$ = IDIR($1); }
     | TSHORT   { $$ = INT | SHORT; }
     | TINT     { $$ = INT; }
     | TLNG     { $$ = LNG; }
-    | TLNGLNG  { $$ = LNG; }
-    | TBOOL    { $$ = CHR | UNSIGNED; }
+    | TFLOAT   { $$ = INT | FLOAT; }
+    | TDOUBLE  { $$ = LNG | FLOAT; }
     | TVOID    { $$ = NIL; }
     | TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
     | TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }
@@ -1698,6 +1843,7 @@ pref: post
     ;
 
 post: NUM
+    | FNUM
     | STR
     | IDENT
     | SIZEOF '(' type ')' { $$ = mknode('N', 0, 0); $$->u.n = SIZE($3); }
@@ -1732,6 +1878,8 @@ yylex()
 		{ "int", TINT },
 		{ "long", TLNG },
 		{ "unsigned", TUNSIGNED },
+		{ "float", TFLOAT },
+		{ "double", TDOUBLE },
 		{ "const", CONST },
 		{ "_Bool", TBOOL },
 		{ "inline", INLINE },
@@ -1766,25 +1914,26 @@ yylex()
 				;
 		if (c == '/') {
 			c1 = getchar();
-			if (c1 == '/') {
-				/* Single-line comment */
-				while ((c = getchar()) != '\n')
-					;
-			} else if (c1 == '*') {
-				/* Block comment */
-				int prev = 0;
-				while (1) {
-					c = getchar();
+			if (c1 == '*') {
+				/* C-style comment */
+				c = getchar();
+				for (;;) {
 					if (c == EOF)
-						die("unclosed block comment");
+						die("unclosed comment");
 					if (c == '\n')
 						line++;
-					if (prev == '*' && c == '/')
+					if (c == '*' && (c = getchar()) == '/') {
+						c = ' ';  /* Replace comment with space */
 						break;
-					prev = c;
+					}
+					c = getchar();
 				}
-				c = ' ';
+			} else if (c1 == '/') {
+				/* C++-style comment */
+				while ((c = getchar()) != '\n')
+					;
 			} else {
+				/* Not a comment, put back the second character */
 				ungetc(c1, stdin);
 			}
 		}
@@ -1797,10 +1946,25 @@ yylex()
 		return 0;
 
 
-	if (isdigit(c)) {
+	if (isdigit(c) || c == '.') {
+		int isfloat = 0;
+		p = v;
+
+		/* Handle leading dot for numbers like .5 */
+		if (c == '.') {
+			*p++ = c;
+			c = getchar();
+			if (!isdigit(c)) {
+				/* Not a float, just a dot operator */
+				ungetc(c, stdin);
+				return '.';
+			}
+			isfloat = 1;
+		}
+
 		n = 0;
-		/* Check for hex (0x) or octal (0) */
-		if (c == '0') {
+		/* Check for hex (0x) or octal (0) - these can't be floats */
+		if (c == '0' && !isfloat) {
 			c = getchar();
 			if (c == 'x' || c == 'X') {
 				/* Hexadecimal */
@@ -1815,6 +1979,10 @@ yylex()
 						n += c - 'A' + 10;
 					c = getchar();
 				}
+				ungetc(c, stdin);
+				yylval.n = mknode('N', 0, 0);
+				yylval.n->u.n = n;
+				return NUM;
 			} else if (c >= '0' && c <= '7') {
 				/* Octal */
 				while (c >= '0' && c <= '7') {
@@ -1822,28 +1990,79 @@ yylex()
 					n += c - '0';
 					c = getchar();
 				}
-			} else {
-				/* Just 0 */
 				ungetc(c, stdin);
 				yylval.n = mknode('N', 0, 0);
-				yylval.n->u.n = 0;
+				yylval.n->u.n = n;
 				return NUM;
+			} else {
+				/* Could be 0, 0.5, or 0e10 */
+				*p++ = '0';
 			}
-			ungetc(c, stdin);
+		}
+
+		/* Parse integer part */
+		while (isdigit(c)) {
+			if (!isfloat) {
+				n *= 10;
+				n += c - '0';
+			}
+			if (p < v + NString - 1)
+				*p++ = c;
+			c = getchar();
+		}
+
+		/* Check for decimal point */
+		if (c == '.') {
+			isfloat = 1;
+			if (p < v + NString - 1)
+				*p++ = c;
+			c = getchar();
+			/* Parse fractional part */
+			while (isdigit(c)) {
+				if (p < v + NString - 1)
+					*p++ = c;
+				c = getchar();
+			}
+		}
+
+		/* Check for exponent */
+		if (c == 'e' || c == 'E') {
+			isfloat = 1;
+			if (p < v + NString - 1)
+				*p++ = c;
+			c = getchar();
+			/* Handle optional sign */
+			if (c == '+' || c == '-') {
+				if (p < v + NString - 1)
+					*p++ = c;
+				c = getchar();
+			}
+			/* Parse exponent digits */
+			while (isdigit(c)) {
+				if (p < v + NString - 1)
+					*p++ = c;
+				c = getchar();
+			}
+		}
+
+		/* Check for float/double suffix (f/F for float, l/L for long double - treat as double) */
+		if (c == 'f' || c == 'F' || c == 'l' || c == 'L') {
+			isfloat = 1;
+			c = getchar();  /* Consume suffix but don't store it */
+		}
+
+		ungetc(c, stdin);
+
+		if (isfloat) {
+			*p = 0;
+			yylval.n = mknode('F', 0, 0);
+			strcpy(yylval.n->u.v, v);
+			return FNUM;
+		} else {
 			yylval.n = mknode('N', 0, 0);
 			yylval.n->u.n = n;
 			return NUM;
 		}
-		/* Decimal */
-		do {
-			n *= 10;
-			n += c-'0';
-			c = getchar();
-		} while (isdigit(c));
-		ungetc(c, stdin);
-		yylval.n = mknode('N', 0, 0);
-		yylval.n->u.n = n;
-		return NUM;
 	}
 
 	/* Character literals */
@@ -1856,9 +2075,50 @@ yylex()
 			case 't': n = '\t'; break;
 			case 'r': n = '\r'; break;
 			case '0': n = '\0'; break;
+			case 'a': n = '\a'; break;  /* Bell/alert */
+			case 'b': n = '\b'; break;  /* Backspace */
+			case 'f': n = '\f'; break;  /* Form feed */
+			case 'v': n = '\v'; break;  /* Vertical tab */
 			case '\\': n = '\\'; break;
 			case '\'': n = '\''; break;
-			default: n = c; break;
+			case '\"': n = '\"'; break;
+			case 'x': {  /* Hex escape: \xHH */
+				n = 0;
+				c = getchar();
+				while ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+					n *= 16;
+					if (c >= '0' && c <= '9')
+						n += c - '0';
+					else if (c >= 'a' && c <= 'f')
+						n += c - 'a' + 10;
+					else
+						n += c - 'A' + 10;
+					c = getchar();
+				}
+				ungetc(c, stdin);
+				break;
+			}
+			default:
+				/* Check for octal escape: \ooo */
+				if (c >= '0' && c <= '7') {
+					n = c - '0';
+					c = getchar();
+					if (c >= '0' && c <= '7') {
+						n = n * 8 + (c - '0');
+						c = getchar();
+						if (c >= '0' && c <= '7') {
+							n = n * 8 + (c - '0');
+						} else {
+							ungetc(c, stdin);
+						}
+					} else {
+						ungetc(c, stdin);
+					}
+				} else {
+					/* Unknown escape, treat as literal character */
+					n = c;
+				}
+				break;
 			}
 		} else {
 			n = c;
@@ -1878,7 +2138,7 @@ yylex()
 				die("ident too long");
 			*p++ = c;
 			c = getchar();
-		} while (isalpha(c) || c == '_' || isdigit(c));
+		} while (isalpha(c) || isdigit(c) || c == '_');
 		*p = 0;
 		ungetc(c, stdin);
 
