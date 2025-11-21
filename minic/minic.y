@@ -953,13 +953,24 @@ expr(Node *n)
 		fprintf(of, "\t");
 		psymb(sr);
 		fprintf(of, " =%c", irtyp(sr.ctyp));
-		/* Use unsigned comparison if either operand is unsigned */
-		if (strchr("<l", o) && ISFLOAT(s0.ctyp)) {
-			/* Floating-point comparison */
-			fprintf(of, " %s%s ", otoa[o], ty);
+		/* Handle comparisons based on type */
+		if (ISFLOAT(s0.ctyp)) {
+			/* Floating-point comparison: cXXt where XX is comparison and t is type */
+			if (o == '<')
+				fprintf(of, " clt%s ", ty);
+			else if (o == 'l')  /* <= */
+				fprintf(of, " cle%s ", ty);
+			else if (o == 'e')  /* == */
+				fprintf(of, " ceq%s ", ty);
+			else if (o == 'n')  /* != */
+				fprintf(of, " cne%s ", ty);
+			else
+				fprintf(of, " %s%s ", otoa[o], ty);
 		} else if (strchr("<l", o) && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp))) {
+			/* Unsigned integer comparison */
 			fprintf(of, " %s%s ", o == '<' ? "cult" : "cule", ty);
 		} else {
+			/* Signed integer comparison or other operations */
 			fprintf(of, " %s%s ", otoa[o], ty);
 		}
 	Args:
@@ -1743,27 +1754,30 @@ yylex()
 		if (c == '#')
 			while ((c = getchar()) != '\n')
 				;
-		if (c == '/' && (c1 = getchar()) == '*') {
-			/* C-style comment */
-			c = getchar();
-			for (;;) {
-				if (c == EOF)
-					die("unclosed comment");
-				if (c == '\n')
-					line++;
-				if (c == '*' && (c = getchar()) == '/') {
-					c = ' ';  /* Replace comment with space */
-					break;
-				}
+		if (c == '/') {
+			c1 = getchar();
+			if (c1 == '*') {
+				/* C-style comment */
 				c = getchar();
+				for (;;) {
+					if (c == EOF)
+						die("unclosed comment");
+					if (c == '\n')
+						line++;
+					if (c == '*' && (c = getchar()) == '/') {
+						c = ' ';  /* Replace comment with space */
+						break;
+					}
+					c = getchar();
+				}
+			} else if (c1 == '/') {
+				/* C++-style comment */
+				while ((c = getchar()) != '\n')
+					;
+			} else {
+				/* Not a comment, put back the second character */
+				ungetc(c1, stdin);
 			}
-		} else if (c == '/' && c1 == '/') {
-			/* C++-style comment */
-			while ((c = getchar()) != '\n')
-				;
-		} else if (c == '/') {
-			/* Not a comment, put back the second character */
-			ungetc(c1, stdin);
 		}
 		if (c == '\n')
 			line++;
@@ -1959,14 +1973,14 @@ yylex()
 		return NUM;
 	}
 
-	if (isalpha(c)) {
+	if (isalpha(c) || c == '_') {
 		p = v;
 		do {
 			if (p == &v[NString-1])
 				die("ident too long");
 			*p++ = c;
 			c = getchar();
-		} while (isalpha(c) || c == '_');
+		} while (isalpha(c) || isdigit(c) || c == '_');
 		*p = 0;
 		ungetc(c, stdin);
 		for (i=0; kwds[i].s; i++)
