@@ -688,6 +688,15 @@ expr(Node *n)
 		if (s0.t == Con) {
 			/* Enum constant or other constant - use directly */
 			sr = s0;
+		} else if (KIND(s0.ctyp) == FUN) {
+			/* Function name - return its address as function pointer */
+			sr.t = Tmp;
+			sr.u.n = tmp++;
+			sr.ctyp = IDIR(s0.ctyp);  /* Pointer to function */
+			/* Copy function address to temporary */
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =l copy $%s\n", n->u.v);
 		} else if (varh[hash(n->u.v)].isarray) {
 			/* Arrays - don't load, the lvalue IS the pointer */
 			sr = s0;
@@ -697,7 +706,7 @@ expr(Node *n)
 			sr.u.n = tmp++;
 			load(sr, s0);
 			/* Bytes and shorts are extended to words during load */
-			if (KIND(sr.ctyp) == CHR || (sr.ctyp & SHORT)) {
+			if (KIND(sr.ctyp) == CHR || ((sr.ctyp & SHORT) && KIND(sr.ctyp) == INT)) {
 				if (ISUNSIGNED(sr.ctyp))
 					sr.ctyp = INT | UNSIGNED;
 				else
@@ -731,6 +740,43 @@ expr(Node *n)
 
 	case 'C':
 		call(n, &sr);
+		break;
+
+	case 'I':
+		/* Indirect function call: (*fptr)(args) */
+		{
+			Node *a;
+			Symb fptr;
+			unsigned fptr_type;
+
+			/* Evaluate function pointer expression */
+			fptr = expr(n->l);
+
+			/* Check it's a function pointer */
+			if (KIND(fptr.ctyp) != PTR || KIND(DREF(fptr.ctyp)) != FUN)
+				die("invalid indirect call - not a function pointer");
+
+			/* Get return type */
+			fptr_type = DREF(fptr.ctyp);  /* FUN(return_type) */
+			sr.ctyp = DREF(fptr_type);     /* return_type */
+
+			/* Evaluate all arguments */
+			for (a=n->r; a; a=a->r)
+				a->u.s = expr(a->l);
+
+			/* Generate indirect call */
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =%c call ", irtyp(sr.ctyp));
+			psymb(fptr);
+			fprintf(of, "(");
+			for (a=n->r; a; a=a->r) {
+				fprintf(of, "%c ", irtyp(a->u.s.ctyp));
+				psymb(a->u.s);
+				fprintf(of, ", ");
+			}
+			fprintf(of, "...)\n");
+		}
 		break;
 
 	case '@':
@@ -1391,7 +1437,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %type <u> type
 %type <s> stmt stmts
-%type <n> expr exp0 pref post arg0 arg1 par0 par1 initlist
+%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist
 %token <u> TNAME
 
 %%
@@ -1469,9 +1515,18 @@ init:
 	tmp = 0;
 };
 
-func: init prot '{' dcls stmts '}'
+inlineopt: INLINE
+         |
+         ;
+
+storageopt: STATIC
+          | EXTERN
+          |
+          ;
+
+func: storageopt inlineopt init prot '{' dcls stmts '}'
 {
-	if (!stmt($5, -1))
+	if (!stmt($7, -1))
 		fprintf(of, "\tret 0\n");
 	fprintf(of, "}\n\n");
 };
@@ -1514,6 +1569,13 @@ par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
     | type IDENT          { $$ = param($2->u.v, $1, 0); }
     ;
 
+fptpar0: fptpar1
+       |                  { $$ = 0; }
+       ;
+fptpar1: type ',' fptpar1 { $$ = 0; }
+       | type             { $$ = 0; }
+       ;
+
 
 dcls:
     | dcls type IDENT ';'
@@ -1526,6 +1588,30 @@ dcls:
 	v = $3->u.v;
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+}
+    | dcls STATIC type IDENT ';'
+{
+	int s;
+	char *v;
+
+	if ($3 == NIL)
+		die("invalid void declaration");
+	v = $4->u.v;
+	s = SIZE($3);
+	varadd(v, 0, $3, 0);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+}
+    | dcls EXTERN type IDENT ';'
+{
+	int s;
+	char *v;
+
+	if ($3 == NIL)
+		die("invalid void declaration");
+	v = $4->u.v;
+	s = SIZE($3);
+	varadd(v, 0, $3, 0);
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
 }
     | dcls type IDENT '[' NUM ']' ';'
@@ -1575,6 +1661,19 @@ dcls:
 		}
 	}
 }
+    | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
+{
+	/* Function pointer declaration: int (*fptr)(int, int); */
+	char *v;
+	unsigned fptr_type;
+
+	if ($2 == NIL)
+		die("invalid void function pointer");
+	v = $5->u.v;
+	fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
+	varadd(v, 0, fptr_type, 0);  /* Not an array */
+	fprintf(of, "\t%%%s =l alloc8 8\n", v);  /* Pointers are 8 bytes */
+}
     ;
 
 initlist: pref                    { $$ = mknode(0, $1, 0); }
@@ -1589,20 +1688,23 @@ type: type '*' { $$ = IDIR($1); }
     | TFLOAT   { $$ = INT | FLOAT; }
     | TDOUBLE  { $$ = LNG | FLOAT; }
     | TVOID    { $$ = NIL; }
-    | TUNSIGNED TCHAR  { $$ = CHR | UNSIGNED; }
-    | TUNSIGNED TSHORT { $$ = INT | SHORT | UNSIGNED; }
-    | TUNSIGNED TINT   { $$ = INT | UNSIGNED; }
-    | TUNSIGNED TLNG   { $$ = LNG | UNSIGNED; }
-    | TUNSIGNED        { $$ = INT | UNSIGNED; }
-    | CONST TCHAR      { $$ = CHR; }
-    | CONST TSHORT     { $$ = INT | SHORT; }
-    | CONST TINT       { $$ = INT; }
-    | CONST TLNG       { $$ = LNG; }
-    | CONST TUNSIGNED TCHAR  { $$ = CHR | UNSIGNED; }
-    | CONST TUNSIGNED TSHORT { $$ = INT | SHORT | UNSIGNED; }
-    | CONST TUNSIGNED TINT   { $$ = INT | UNSIGNED; }
-    | CONST TUNSIGNED TLNG   { $$ = LNG | UNSIGNED; }
-    | CONST TUNSIGNED        { $$ = INT | UNSIGNED; }
+    | TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
+    | TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }
+    | TUNSIGNED TINT     { $$ = INT | UNSIGNED; }
+    | TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
+    | TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
+    | TUNSIGNED          { $$ = INT | UNSIGNED; }
+    | CONST TCHAR        { $$ = CHR; }
+    | CONST TSHORT       { $$ = INT | SHORT; }
+    | CONST TINT         { $$ = INT; }
+    | CONST TLNG         { $$ = LNG; }
+    | CONST TLNGLNG      { $$ = LNG; }
+    | CONST TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
+    | CONST TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }
+    | CONST TUNSIGNED TINT     { $$ = INT | UNSIGNED; }
+    | CONST TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
+    | CONST TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
+    | CONST TUNSIGNED          { $$ = INT | UNSIGNED; }
     | STRUCT IDENT {
         int idx = structfind($2->u.v);
         if (idx < 0)
@@ -1625,6 +1727,39 @@ stmt: ';'                            { $$ = 0; }
     | RETURN expr ';'                { $$ = mkstmt(Ret, $2, 0, 0); }
     | GOTO IDENT ';'                 { Stmt *s = mkstmt(Goto, 0, 0, 0); strcpy(s->label, $2->u.v); $$ = s; }
     | IDENT ':' stmt                 { Stmt *s = mkstmt(Label, $3, 0, 0); strcpy(s->label, $1->u.v); $$ = s; }
+    | type IDENT ';'                 {
+        int s;
+        char *v;
+        if ($1 == NIL)
+            die("invalid void declaration");
+        v = $2->u.v;
+        s = SIZE($1);
+        varadd(v, 0, $1, 0);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        $$ = 0;
+    }
+    | STATIC type IDENT ';'          {
+        int s;
+        char *v;
+        if ($2 == NIL)
+            die("invalid void declaration");
+        v = $3->u.v;
+        s = SIZE($2);
+        varadd(v, 0, $2, 0);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        $$ = 0;
+    }
+    | EXTERN type IDENT ';'          {
+        int s;
+        char *v;
+        if ($2 == NIL)
+            die("invalid void declaration");
+        v = $3->u.v;
+        s = SIZE($2);
+        varadd(v, 0, $2, 0);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        $$ = 0;
+    }
     | expr ';'                       { $$ = mkstmt(Expr, $1, 0, 0); }
     | WHILE '(' expr ')' stmt        { $$ = mkstmt(While, $3, $5, 0); }
     | DO stmt WHILE '(' expr ')' ';' { $$ = mkstmt(DoWhile, $2, $5, 0); }
@@ -1632,6 +1767,20 @@ stmt: ';'                            { $$ = 0; }
     | IF '(' expr ')' stmt           { $$ = mkstmt(If, $3, $5, 0); }
     | FOR '(' exp0 ';' exp0 ';' exp0 ')' stmt
                                      { $$ = mkfor($3, $5, $7, $9); }
+    | FOR '(' type IDENT '=' expr ';' exp0 ';' exp0 ')' stmt
+                                     {
+        int s;
+        char *v;
+        Node *init_expr;
+        if ($3 == NIL)
+            die("invalid void declaration");
+        v = $4->u.v;
+        s = SIZE($3);
+        varadd(v, 0, $3, 0);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        init_expr = mknode('=', $4, $6);
+        $$ = mkfor(init_expr, $8, $10, $12);
+    }
     | SWITCH '(' expr ')' stmt       { $$ = mkstmt(Switch, $3, $5, 0); }
     | CASE NUM ':' stmt              { Stmt *s = mkstmt(Case, 0, $4, 0); s->val = $2->u.n; $$ = s; }
     | DEFAULT ':' stmt               { $$ = mkstmt(Default, 0, $3, 0); }
@@ -1641,8 +1790,12 @@ stmts: stmts stmt { $$ = mkstmt(Seq, $1, $2, 0); }
      |            { $$ = 0; }
      ;
 
+/* TODO: The comma operator is temporarily disabled because it conflicts with
+ * function argument parsing. The proper fix is to create separate expression
+ * levels (e.g., assignment_expression vs expression) like in standard C,
+ * where function arguments use assignment_expression (no comma) and only
+ * top-level expressions use expression (with comma). */
 expr: pref
-    | expr ',' expr     { $$ = mknode(',', $1, $3); }
     | expr '?' expr ':' expr { $$ = mknode('?', $1, mknode(':', $3, $5)); }
     | expr '=' expr     { $$ = mknode('=', $1, $3); }
     | expr ADDEQ expr   { $$ = mknode('=', $1, mknode('+', $1, $3)); }
@@ -1696,6 +1849,7 @@ post: NUM
     | SIZEOF '(' type ')' { $$ = mknode('N', 0, 0); $$->u.n = SIZE($3); }
     | '(' expr ')'        { $$ = $2; }
     | IDENT '(' arg0 ')'  { $$ = mknode('C', $1, $3); }
+    | '(' '*' post ')' '(' arg0 ')'  { $$ = mknode('I', $3, $6); }
     | post '[' expr ']'   { $$ = mkidx($1, $3); }
     | post PP             { $$ = mknode('P', $1, 0); }
     | post MM             { $$ = mknode('M', $1, 0); }
@@ -1727,6 +1881,10 @@ yylex()
 		{ "float", TFLOAT },
 		{ "double", TDOUBLE },
 		{ "const", CONST },
+		{ "_Bool", TBOOL },
+		{ "inline", INLINE },
+		{ "static", STATIC },
+		{ "extern", EXTERN },
 		{ "typedef", TYPEDEF },
 		{ "struct", STRUCT },
 		{ "union", UNION },
@@ -1983,6 +2141,41 @@ yylex()
 		} while (isalpha(c) || isdigit(c) || c == '_');
 		*p = 0;
 		ungetc(c, stdin);
+
+		/* Check for "long long" */
+		if (strcmp(v, "long") == 0) {
+			char v2[NString];
+			char *p2;
+			int saved_c;
+
+			/* Skip whitespace */
+			do {
+				saved_c = getchar();
+			} while (isspace(saved_c) && saved_c != '\n');
+
+			/* Try to read next identifier */
+			if (isalpha(saved_c) || saved_c == '_') {
+				p2 = v2;
+				*p2++ = saved_c;
+				while (isalpha(saved_c = getchar()) || saved_c == '_' || isdigit(saved_c)) {
+					if (p2 < &v2[NString-1])
+						*p2++ = saved_c;
+				}
+				*p2 = 0;
+				ungetc(saved_c, stdin);
+
+				/* Check if it's "long" */
+				if (strcmp(v2, "long") == 0)
+					return TLNGLNG;
+
+				/* Not "long", need to put back the entire identifier */
+				for (i = strlen(v2) - 1; i >= 0; i--)
+					ungetc(v2[i], stdin);
+			} else {
+				ungetc(saved_c, stdin);
+			}
+		}
+
 		for (i=0; kwds[i].s; i++)
 			if (strcmp(v, kwds[i].s) == 0)
 				return kwds[i].t;

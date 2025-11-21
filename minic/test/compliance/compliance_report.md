@@ -1,13 +1,13 @@
 # MiniC C Standard Compliance Report
 
-**Generated:** Thu Nov 20 01:18:22 UTC 2025
+**Generated:** Thu Nov 20 06:07:07 UTC 2025
 
 ## Summary
 
 | Standard | Total Tests | Passed | Failed | Skipped | Pass Rate |
 |----------|-------------|--------|--------|---------|-----------|
 | **C89**  | 8 | 8 | 0 | 0 | 100.0% |
-| **C99**  | 0 | 0 | 0 | 0 | 0% |
+| **C99**  | 6 | 6 | 0 | 0 | 100.0% |
 | **C11**  | 0 | 0 | 0 | 0 | 0% |
 
 ## Detailed Results
@@ -25,6 +25,12 @@
 - long_type
 - pointers
 - short_type
+- bool_type
+- for_declarations
+- inline_functions
+- long_long_type
+- mixed_declarations
+- single_line_comments
 
 #### Failed Tests (0)
 
@@ -35,7 +41,9 @@
 
 **Target: Future implementation**
 
-No C99 tests yet.
+- Total tests: 6
+- Passed: 6
+- Failed: 0
 
 
 ### C11 (2011)
