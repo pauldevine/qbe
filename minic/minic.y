@@ -1005,13 +1005,24 @@ expr(Node *n)
 		fprintf(of, "\t");
 		psymb(sr);
 		fprintf(of, " =%c", irtyp(sr.ctyp));
-		/* Use unsigned comparison if either operand is unsigned */
-		if (strchr("<l", o) && ISFLOAT(s0.ctyp)) {
-			/* Floating-point comparison */
-			fprintf(of, " %s%s ", otoa[o], ty);
+		/* Handle comparisons based on type */
+		if (ISFLOAT(s0.ctyp)) {
+			/* Floating-point comparison: cXXt where XX is comparison and t is type */
+			if (o == '<')
+				fprintf(of, " clt%s ", ty);
+			else if (o == 'l')  /* <= */
+				fprintf(of, " cle%s ", ty);
+			else if (o == 'e')  /* == */
+				fprintf(of, " ceq%s ", ty);
+			else if (o == 'n')  /* != */
+				fprintf(of, " cne%s ", ty);
+			else
+				fprintf(of, " %s%s ", otoa[o], ty);
 		} else if (strchr("<l", o) && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp))) {
+			/* Unsigned integer comparison */
 			fprintf(of, " %s%s ", o == '<' ? "cult" : "cule", ty);
 		} else {
+			/* Signed integer comparison or other operations */
 			fprintf(of, " %s%s ", otoa[o], ty);
 		}
 	Args:

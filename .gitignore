@@ -4,3 +4,32 @@ config.h
 .comfile
 *.out
 *~
+
+# MiniC compiler build artifacts
+minic/yacc
+minic/minic
+minic/y.tab.c
+minic/y.tab.h
+minic/y.output
+
+# Compiled test programs
+minic/test_*
+minic/simple_*
+minic/char_test
+minic/collatz
+minic/mandel
+minic/queen
+minic/knight
+minic/euler*
+minic/minimal_*
+
+# Intermediate files
+*.ssa
+*.s
+
+# Editor/IDE files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
