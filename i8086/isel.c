@@ -178,9 +178,21 @@ sel(Ins i, Fn *fn)
 		case Ocopy:   /* FP copy/move */
 		case Otruncd: /* Double to single conversion */
 		case Oexts:   /* Single to double conversion */
+		case Oswtof:  /* Signed word to float */
+		case Ouwtof:  /* Unsigned word to float */
 			selfp(i, fn);
 			return;
 		}
+	}
+
+	/* Handle float to int conversions (these produce int results but take FP inputs) */
+	switch (i.op) {
+	case Ostosi:  /* Float to signed int */
+	case Ostoui:  /* Float to unsigned int */
+	case Odtosi:  /* Double to signed int */
+	case Odtoui:  /* Double to unsigned int */
+		selfp(i, fn);
+		return;
 	}
 
 	/* Handle division and remainder specially */
