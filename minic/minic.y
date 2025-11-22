@@ -134,6 +134,8 @@ struct {
 } structh[NStruct];
 int nstruct = 0;
 int curstruct = -1;  /* Index of struct currently being defined */
+int parentstruct = -1;  /* Parent struct for anonymous members */
+int anonstruct_counter = 0;  /* Counter for generating anonymous struct names */
 
 void
 die(char *s)
@@ -258,6 +260,65 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 	}
 
 	structh[sidx].nmembers++;
+}
+
+/* Hoist members from an anonymous struct/union into parent struct */
+void
+hoistanonymous(int parent_sidx, int anon_sidx)
+{
+	int i;
+	int base_offset;
+	int anon_size;
+
+	if (parent_sidx < 0 || anon_sidx < 0)
+		die("invalid struct index for anonymous member");
+
+	/* Base offset for anonymous members in parent struct */
+	base_offset = structh[parent_sidx].size;
+	anon_size = structh[anon_sidx].size;
+
+	/* Copy all members from anonymous struct to parent */
+	for (i = 0; i < structh[anon_sidx].nmembers; i++) {
+		struct Member *anon_mem = &structh[anon_sidx].members[i];
+		struct Member *parent_mem;
+		int j;
+
+		if (structh[parent_sidx].nmembers >= 16)
+			die("too many members in struct (from anonymous)");
+
+		/* Check for duplicate names in parent */
+		for (j = 0; j < structh[parent_sidx].nmembers; j++)
+			if (strcmp(structh[parent_sidx].members[j].name, anon_mem->name) == 0)
+				die("anonymous member name conflicts with parent");
+
+		/* Add member to parent */
+		parent_mem = &structh[parent_sidx].members[structh[parent_sidx].nmembers];
+		strcpy(parent_mem->name, anon_mem->name);
+		parent_mem->ctyp = anon_mem->ctyp;
+
+		if (structh[parent_sidx].isunion) {
+			/* Parent is union - all members at offset 0 */
+			parent_mem->offset = anon_mem->offset;
+		} else if (structh[anon_sidx].isunion) {
+			/* Anonymous union in struct - all at base_offset */
+			parent_mem->offset = base_offset + anon_mem->offset;
+		} else {
+			/* Both are structs - add base offset */
+			parent_mem->offset = base_offset + anon_mem->offset;
+		}
+
+		structh[parent_sidx].nmembers++;
+	}
+
+	/* Update parent size */
+	if (structh[parent_sidx].isunion) {
+		/* Union: size is max of member sizes */
+		if (anon_size > structh[parent_sidx].size)
+			structh[parent_sidx].size = anon_size;
+	} else {
+		/* Struct: add anonymous member size */
+		structh[parent_sidx].size += anon_size;
+	}
 }
 
 void
@@ -1502,6 +1563,38 @@ smembers:
         | smembers type IDENT ';'
 {
 	structaddmember(curstruct, $3->u.v, $2);
+}
+        | smembers STRUCT '{'
+{
+	/* Start anonymous struct */
+	char anonname[32];
+	parentstruct = curstruct;
+	sprintf(anonname, "__anon_struct_%d", anonstruct_counter++);
+	curstruct = structadd(anonname, 0);  /* 0 = struct */
+}
+          smembers '}' ';'
+{
+	/* End anonymous struct - hoist members to parent */
+	int anon_idx = curstruct;
+	curstruct = parentstruct;
+	parentstruct = -1;
+	hoistanonymous(curstruct, anon_idx);
+}
+        | smembers UNION '{'
+{
+	/* Start anonymous union */
+	char anonname[32];
+	parentstruct = curstruct;
+	sprintf(anonname, "__anon_union_%d", anonstruct_counter++);
+	curstruct = structadd(anonname, 1);  /* 1 = union */
+}
+          smembers '}' ';'
+{
+	/* End anonymous union - hoist members to parent */
+	int anon_idx = curstruct;
+	curstruct = parentstruct;
+	parentstruct = -1;
+	hoistanonymous(curstruct, anon_idx);
 }
         ;
 
