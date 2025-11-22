@@ -134,12 +134,15 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 	/* Calculate stack space needed for arguments
 	 * cdecl: all arguments on stack
 	 * Arguments are already in reverse order in the Oarg sequence
+	 * Skip variadic markers (empty arguments)
 	 */
 	stk = 0;
 	nargs = 0;
 	for (i = i0; i < icall; i++) {
 		if (!isarg(i->op))
 			continue;
+		if (req(i->arg[0], R))
+			continue;  /* Skip variadic marker */
 		nargs++;
 		/* Each argument takes at least 2 bytes (one word) */
 		if (i->cls == Kl) {
@@ -179,57 +182,66 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 	/* 3. Emit the call */
 	emit(Ocall, 0, R, icall->arg[0], CALL(cty));
 
-	/* 2. Store arguments to stack (right-to-left for cdecl)
-	 * Process arguments in forward order for correct stack layout
+	/* 2. Pass arguments on stack (right-to-left for cdecl)
+	 *
+	 * FINAL SIMPLIFIED APPROACH for 8086:
+	 * The problem: mov [ax], value is invalid (AX can't be base register)
+	 * The solution: Use BP-relative addressing instead!
+	 *
+	 * After allocating stack space, we can store arguments using
+	 * [BP-offset] addressing, which is valid on 8086.
+	 *
+	 * Example:
+	 *   sub sp, 4      ; Allocate 4 bytes
+	 *   mov [bp-4], 72  ; Store arg1 (at SP position)
+	 *   mov [bp-2], 105 ; Store arg2 (at SP+2 position)
+	 *   call func
+	 *   add sp, 4      ; Clean up
 	 */
 	if (stk > 0) {
-		Ref sp_tmp;
+		/* Emit stores FIRST (so they execute AFTER allocation due to reversal)
+		 * Then emit allocation LAST (so it executes FIRST)
+		 *
+		 * Execution order will be:
+		 * 1. sub sp, stk       (allocate space)
+		 * 2. mov [bp-stk], arg1  (store first argument)
+		 * 3. mov [bp-stk+2], arg2 (store second argument)
+		 * 4. call function
+		 */
 
-		sp_tmp = newtmp("abi", Kw, fn);
-		off = 0;
+		/* Calculate offset for each argument and emit stores
+		 * After "sub sp, stk", the arguments are at [bp-stk], [bp-stk+2], etc.
+		 */
+		off = stk;  /* Start from the bottom of allocated space */
 		for (i = i0; i < icall; i++) {
-			Ref addr;
-
 			if (!isarg(i->op))
 				continue;
-
-			/* Skip variadic marker (Oarg with empty argument) */
 			if (req(i->arg[0], R))
 				continue;
 
-			/* Calculate stack address [sp+off] */
-			if (off == 0) {
-				/* First argument at [sp] - use SP copy directly */
-				addr = sp_tmp;
-			} else {
-				/* Subsequent arguments at [sp+off] */
-				addr = newtmp("abi", Kw, fn);
-			}
+			int arg_size = (i->cls == Kl) ? 4 : 2;
 
-			/* Store argument at calculated address
-			 * Emit store first (executed second) */
-			emit(Ostorew+i->cls, Kw, R, i->arg[0], addr);
+			/* Store this argument at [bp - off]
+			 * Create a memory reference with BP as base and negative offset
+			 */
+			int midx = fn->nmem++;
+			vgrow(&fn->mem, fn->nmem);
+			fn->mem[midx] = (Mem){
+				.base = TMP(RBP),  /* Use BP as base */
+				.index = R,
+				.offset = {.type = CBits, .bits.i = -off},
+				.scale = 0
+			};
+			Ref mem_ref = MEM(midx);
 
-			/* Emit address calculation second (executed first)
-			 * so addr is defined before use
-			 * Use Ocopy then Oadd to compute addr = sp_tmp + off */
-			if (off != 0) {
-				Ref tmp;
-				tmp = newtmp("abi", Kw, fn);
-				emit(Oadd, Kw, addr, tmp, getcon(off, fn));
-				emit(Ocopy, Kw, tmp, sp_tmp, R);
-			}
+			/* Emit store: mov [bp-off], arg_value */
+			emit(Ostorew, Kw, R, i->arg[0], mem_ref);
 
-			/* Move to next stack position */
-			if (i->cls == Kl) {
-				off += 4;
-			} else {
-				off += 2;
-			}
+			off -= arg_size;  /* Move to next argument position */
 		}
 
-		/* Osalloc allocates stack and returns new SP in sp_tmp */
-		emit(Osalloc, Kw, sp_tmp, getcon(stk, fn), R);
+		/* NOW emit allocation (emitted last, executes first) */
+		emit(Osalloc, Kw, R, getcon(stk, fn), R);
 	}
 }
 
