@@ -68,10 +68,10 @@ static struct {
 	{ Ocall,   Kw, "call %0" },
 	{ Osalloc, Kw, "sub sp, %0" },
 
-	/* Stack allocation for locals */
-	{ Oalloc4,  Kl, "; alloc4: handled by ABI" },
-	{ Oalloc8,  Kl, "; alloc8: handled by ABI" },
-	{ Oalloc16, Kl, "; alloc16: handled by ABI" },
+	/* Stack allocation for locals - class 0 (untyped) */
+	{ Oalloc4,  0, "; alloc4 (stack slot allocated in prologue)" },
+	{ Oalloc8,  0, "; alloc8 (stack slot allocated in prologue)" },
+	{ Oalloc16, 0, "; alloc16 (stack slot allocated in prologue)" },
 
 	/* 8087 FPU operations - Single precision (float - 32-bit) */
 	{ Oload,   Ks, "fld dword %M0" },      /* Load float */
@@ -96,6 +96,18 @@ static struct {
 	{ Ocopy,   Kd, "; fp copy (nop - already on FP stack)" },
 	{ Otruncd,  Ks, "; truncd: double to float (handled by load/store size)" },
 	{ Oexts,   Kd, "; exts: float to double (handled by load/store size)" },
+
+	/* 8087 int to float conversions */
+	{ Oswtof,  Ks, "fild word %M0" },     /* Load signed word, convert to float */
+	{ Oswtof,  Kd, "fild word %M0" },     /* Load signed word, convert to double */
+	{ Ouwtof,  Ks, "fild word %M0" },     /* Load unsigned word, convert to float */
+	{ Ouwtof,  Kd, "fild word %M0" },     /* Load unsigned word, convert to double */
+
+	/* 8087 float to int conversions */
+	{ Ostosi,  Kw, "fistp word %M1" },    /* Convert float to signed int, store and pop */
+	{ Ostoui,  Kw, "fistp word %M1" },    /* Convert float to unsigned int, store and pop */
+	{ Odtosi,  Kw, "fistp word %M1" },    /* Convert double to signed int, store and pop */
+	{ Odtoui,  Kw, "fistp word %M1" },    /* Convert double to unsigned int, store and pop */
 
 	/* 8087 FPU comparisons */
 	{ Oceqs,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsete %B=\n\tmovzx %=, %B=" },
