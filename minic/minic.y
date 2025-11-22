@@ -1868,6 +1868,14 @@ post: NUM
     | STR
     | IDENT
     | SIZEOF '(' type ')' { $$ = mknode('N', 0, 0); $$->u.n = SIZE($3); }
+    | '(' type ')' '{' initlist '}' {
+        /* Compound literal: (type){ initializer } - Simplified implementation */
+        /* For now, compound literals are not fully supported */
+        /* This placeholder prevents parse errors */
+        die("compound literals not yet fully implemented");
+        $$ = mknode('N', 0, 0);
+        $$->u.n = 0;
+    }
     | '(' expr ')'        { $$ = $2; }
     | IDENT '(' arg0 ')'  { $$ = mknode('C', $1, $3); }
     | '(' '*' post ')' '(' arg0 ')'  { $$ = mknode('I', $3, $6); }
