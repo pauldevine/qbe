@@ -68,6 +68,11 @@ static struct {
 	{ Ocall,   Kw, "call %0" },
 	{ Osalloc, Kw, "sub sp, %0" },
 
+	/* Stack allocation for locals */
+	{ Oalloc4,  Kl, "; alloc4: handled by ABI" },
+	{ Oalloc8,  Kl, "; alloc8: handled by ABI" },
+	{ Oalloc16, Kl, "; alloc16: handled by ABI" },
+
 	/* 8087 FPU operations - Single precision (float - 32-bit) */
 	{ Oload,   Ks, "fld dword %M0" },      /* Load float */
 	{ Ostores, Ks, "fstp dword %M1" },     /* Store float and pop */
@@ -85,6 +90,12 @@ static struct {
 	{ Omul,    Kd, "fmulp" },              /* ST(0) *= ST(1), pop */
 	{ Odiv,    Kd, "fdivp" },              /* ST(0) /= ST(1), pop */
 	{ Oneg,    Kd, "fchs" },               /* ST(0) = -ST(0) */
+
+	/* 8087 FPU type conversions and copy */
+	{ Ocopy,   Ks, "; fp copy (nop - already on FP stack)" },  /* FP copy is a nop for stack */
+	{ Ocopy,   Kd, "; fp copy (nop - already on FP stack)" },
+	{ Otruncd,  Ks, "; truncd: double to float (handled by load/store size)" },
+	{ Oexts,   Kd, "; exts: float to double (handled by load/store size)" },
 
 	/* 8087 FPU comparisons */
 	{ Oceqs,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsete %B=\n\tmovzx %=, %B=" },

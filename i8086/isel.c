@@ -138,6 +138,21 @@ selshift(Ins i, Fn *fn)
 }
 
 static void
+selfp(Ins i, Fn *fn)
+{
+	Ins *i0;
+
+	/* For 8087 FPU operations, we use stack-based instructions
+	 * The emit phase will handle the actual FP instruction emission
+	 * We just need to ensure arguments are properly handled
+	 */
+	emiti(i);
+	i0 = curi;
+	fixarg(&i0->arg[0], argcls(&i, 0), i0, fn);
+	fixarg(&i0->arg[1], argcls(&i, 1), i0, fn);
+}
+
+static void
 sel(Ins i, Fn *fn)
 {
 	Ins *i0;
@@ -149,12 +164,34 @@ sel(Ins i, Fn *fn)
 		return;
 	}
 
+	/* Handle floating-point operations */
+	if (i.cls == Ks || i.cls == Kd) {
+		switch (i.op) {
+		case Oadd:
+		case Osub:
+		case Omul:
+		case Odiv:
+		case Oneg:
+		case Oload:
+		case Ostores:
+		case Ostored:
+		case Ocopy:   /* FP copy/move */
+		case Otruncd: /* Double to single conversion */
+		case Oexts:   /* Single to double conversion */
+			selfp(i, fn);
+			return;
+		}
+	}
+
 	/* Handle division and remainder specially */
 	switch (i.op) {
 	case Odiv:
 	case Orem:
-		seldiv(i, fn, 1); /* signed */
-		return;
+		if (i.cls != Ks && i.cls != Kd) {
+			seldiv(i, fn, 1); /* signed */
+			return;
+		}
+		break;
 	case Oudiv:
 	case Ourem:
 		seldiv(i, fn, 0); /* unsigned */
