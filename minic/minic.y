@@ -134,6 +134,7 @@ struct {
 } structh[NStruct];
 int nstruct = 0;
 int curstruct = -1;  /* Index of struct currently being defined */
+int parentstruct = -1;  /* Parent struct for anonymous members */
 
 void
 die(char *s)
@@ -258,6 +259,65 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 	}
 
 	structh[sidx].nmembers++;
+}
+
+/* Hoist members from an anonymous struct/union into parent struct */
+void
+hoistanonymous(int parent_sidx, int anon_sidx)
+{
+	int i;
+	int base_offset;
+	int anon_size;
+
+	if (parent_sidx < 0 || anon_sidx < 0)
+		die("invalid struct index for anonymous member");
+
+	/* Base offset for anonymous members in parent struct */
+	base_offset = structh[parent_sidx].size;
+	anon_size = structh[anon_sidx].size;
+
+	/* Copy all members from anonymous struct to parent */
+	for (i = 0; i < structh[anon_sidx].nmembers; i++) {
+		struct Member *anon_mem = &structh[anon_sidx].members[i];
+		struct Member *parent_mem;
+		int j;
+
+		if (structh[parent_sidx].nmembers >= 16)
+			die("too many members in struct (from anonymous)");
+
+		/* Check for duplicate names in parent */
+		for (j = 0; j < structh[parent_sidx].nmembers; j++)
+			if (strcmp(structh[parent_sidx].members[j].name, anon_mem->name) == 0)
+				die("anonymous member name conflicts with parent");
+
+		/* Add member to parent */
+		parent_mem = &structh[parent_sidx].members[structh[parent_sidx].nmembers];
+		strcpy(parent_mem->name, anon_mem->name);
+		parent_mem->ctyp = anon_mem->ctyp;
+
+		if (structh[parent_sidx].isunion) {
+			/* Parent is union - all members at offset 0 */
+			parent_mem->offset = anon_mem->offset;
+		} else if (structh[anon_sidx].isunion) {
+			/* Anonymous union in struct - all at base_offset */
+			parent_mem->offset = base_offset + anon_mem->offset;
+		} else {
+			/* Both are structs - add base offset */
+			parent_mem->offset = base_offset + anon_mem->offset;
+		}
+
+		structh[parent_sidx].nmembers++;
+	}
+
+	/* Update parent size */
+	if (structh[parent_sidx].isunion) {
+		/* Union: size is max of member sizes */
+		if (anon_size > structh[parent_sidx].size)
+			structh[parent_sidx].size = anon_size;
+	} else {
+		/* Struct: add anonymous member size */
+		structh[parent_sidx].size += anon_size;
+	}
 }
 
 void
@@ -1417,9 +1477,10 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TUNSIGNED TFLOAT TDOUBLE CONST
+%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST TBOOL
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
+%token INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF ALIGNAS
 
 %left ','
 %right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
@@ -1442,7 +1503,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %%
 
-prog: func prog | fdcl prog | idcl prog | edcl prog | tdcl prog | sdcl prog | ;
+prog: func prog | fdcl prog | idcl prog | edcl prog | tdcl prog | sdcl prog | static_assert_dcl prog | ;
 
 edcl: enumstart enums '}' ';'
     ;
@@ -1476,6 +1537,17 @@ tdcl: TYPEDEF type IDENT ';'
 }
     ;
 
+static_assert_dcl: STATIC_ASSERT '(' NUM ',' STR ')' ';'
+{
+	/* _Static_assert(constant-expression, string-literal); */
+	if ($3->u.n == 0) {
+		/* Assertion failed */
+		die("static assertion failed");
+	}
+	/* Assertion passed - no code generated */
+}
+    ;
+
 sdcl: structstart smembers '}' ';'
 {
 	curstruct = -1;  /* Done defining this struct */
@@ -1488,6 +1560,53 @@ structstart: STRUCT IDENT '{'  { curstruct = structadd($2->u.v, 0); }
 
 smembers:
         | smembers type IDENT ';'
+{
+	structaddmember(curstruct, $3->u.v, $2);
+}
+        | smembers anonstruct
+        | smembers anonunion
+        ;
+
+anonstruct: anon_s_begin anonmembers anon_s_end
+          ;
+
+anonunion: anon_u_begin anonmembers anon_u_end
+         ;
+
+anon_s_begin: STRUCT '{'
+{
+	parentstruct = curstruct;
+	curstruct = structadd("__anon_s", 0);
+}
+            ;
+
+anon_u_begin: UNION '{'
+{
+	parentstruct = curstruct;
+	curstruct = structadd("__anon_u", 1);
+}
+            ;
+
+anon_s_end: '}' ';'
+{
+	int idx = curstruct;
+	curstruct = parentstruct;
+	parentstruct = -1;
+	hoistanonymous(curstruct, idx);
+}
+          ;
+
+anon_u_end: '}' ';'
+{
+	int idx = curstruct;
+	curstruct = parentstruct;
+	parentstruct = -1;
+	hoistanonymous(curstruct, idx);
+}
+          ;
+
+anonmembers:
+        | anonmembers type IDENT ';'
 {
 	structaddmember(curstruct, $3->u.v, $2);
 }
@@ -1590,6 +1709,56 @@ dcls:
 	varadd(v, 0, $2, 0);
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
 }
+    | dcls ALIGNAS '(' NUM ')' type IDENT ';'
+{
+	/* _Alignas(constant) type var; */
+	int s;
+	char *v;
+	int align;
+
+	if ($6 == NIL)
+		die("invalid void declaration");
+	v = $7->u.v;
+	s = SIZE($6);
+	align = $4->u.n;
+
+	/* Validate alignment is power of 2 */
+	if (align <= 0 || (align & (align - 1)) != 0)
+		die("_Alignas requires power of 2");
+
+	varadd(v, 0, $6, 0);
+	/* Emit comment about alignment requirement */
+	fprintf(of, "\t# _Alignas(%d) for %%%s\n", align, v);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+}
+    | dcls ALIGNAS '(' type ')' type IDENT ';'
+{
+	/* _Alignas(type) type var; */
+	int s;
+	char *v;
+	int align;
+
+	if ($6 == NIL)
+		die("invalid void declaration");
+	v = $7->u.v;
+	s = SIZE($6);
+
+	/* Calculate alignment from type */
+	if (KIND($4) == CHR)
+		align = 1;
+	else if (KIND($4) == LNG || ISFLOAT($4))
+		align = 4;
+	else
+		align = 2;
+
+	varadd(v, 0, $6, 0);
+	/* Emit comment about alignment requirement */
+	fprintf(of, "\t# _Alignas(%s) = %d for %%%s\n",
+		KIND($4) == CHR ? "char" :
+		KIND($4) == LNG ? "long" : "int",
+		align, v);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+}
     | dcls STATIC type IDENT ';'
 {
 	int s;
@@ -1673,6 +1842,13 @@ dcls:
 	fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
 	varadd(v, 0, fptr_type, 0);  /* Not an array */
 	fprintf(of, "\t%%%s =l alloc8 8\n", v);  /* Pointers are 8 bytes */
+}
+    | dcls STATIC_ASSERT '(' NUM ',' STR ')' ';'
+{
+	/* _Static_assert in local scope */
+	if ($4->u.n == 0) {
+		die("static assertion failed");
+	}
 }
     ;
 
@@ -1760,6 +1936,13 @@ stmt: ';'                            { $$ = 0; }
         fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
         $$ = 0;
     }
+    | STATIC_ASSERT '(' NUM ',' STR ')' ';' {
+        /* _Static_assert in statement scope */
+        if ($3->u.n == 0) {
+            die("static assertion failed");
+        }
+        $$ = 0;
+    }
     | expr ';'                       { $$ = mkstmt(Expr, $1, 0, 0); }
     | WHILE '(' expr ')' stmt        { $$ = mkstmt(While, $3, $5, 0); }
     | DO stmt WHILE '(' expr ')' ';' { $$ = mkstmt(DoWhile, $2, $5, 0); }
@@ -1790,11 +1973,6 @@ stmts: stmts stmt { $$ = mkstmt(Seq, $1, $2, 0); }
      |            { $$ = 0; }
      ;
 
-/* TODO: The comma operator is temporarily disabled because it conflicts with
- * function argument parsing. The proper fix is to create separate expression
- * levels (e.g., assignment_expression vs expression) like in standard C,
- * where function arguments use assignment_expression (no comma) and only
- * top-level expressions use expression (with comma). */
 expr: pref
     | expr '?' expr ':' expr { $$ = mknode('?', $1, mknode(':', $3, $5)); }
     | expr '=' expr     { $$ = mknode('=', $1, $3); }
@@ -1847,6 +2025,29 @@ post: NUM
     | STR
     | IDENT
     | SIZEOF '(' type ')' { $$ = mknode('N', 0, 0); $$->u.n = SIZE($3); }
+    | ALIGNOF '(' type ')' {
+        /* _Alignof returns alignment requirement for type */
+        int align;
+        /* For 8086: most types align to 2 bytes (word boundary) */
+        /* Except char which aligns to 1 */
+        if (KIND($3) == CHR)
+            align = 1;
+        else if (KIND($3) == LNG || ISFLOAT($3))
+            align = 4;  /* long and float/double align to 4 bytes */
+        else
+            align = 2;  /* int, short, pointers align to 2 bytes */
+
+        $$ = mknode('N', 0, 0);
+        $$->u.n = align;
+    }
+    | '(' type ')' '{' initlist '}' {
+        /* Compound literal: (type){ initializer } - Simplified implementation */
+        /* For now, compound literals are not fully supported */
+        /* This placeholder prevents parse errors */
+        die("compound literals not yet fully implemented");
+        $$ = mknode('N', 0, 0);
+        $$->u.n = 0;
+    }
     | '(' expr ')'        { $$ = $2; }
     | IDENT '(' arg0 ')'  { $$ = mknode('C', $1, $3); }
     | '(' '*' post ')' '(' arg0 ')'  { $$ = mknode('I', $3, $6); }
@@ -1886,6 +2087,9 @@ yylex()
 		{ "static", STATIC },
 		{ "extern", EXTERN },
 		{ "typedef", TYPEDEF },
+		{ "_Static_assert", STATIC_ASSERT },
+		{ "_Alignof", ALIGNOF },
+		{ "_Alignas", ALIGNAS },
 		{ "struct", STRUCT },
 		{ "union", UNION },
 		{ "enum", ENUM },

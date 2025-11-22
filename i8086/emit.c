@@ -68,6 +68,65 @@ static struct {
 	{ Ocall,   Kw, "call %0" },
 	{ Osalloc, Kw, "sub sp, %0" },
 
+	/* Stack allocation for locals - class 0 (untyped) */
+	{ Oalloc4,  0, "; alloc4 (stack slot allocated in prologue)" },
+	{ Oalloc8,  0, "; alloc8 (stack slot allocated in prologue)" },
+	{ Oalloc16, 0, "; alloc16 (stack slot allocated in prologue)" },
+
+	/* 8087 FPU operations - Single precision (float - 32-bit) */
+	{ Oload,   Ks, "fld dword %M0" },      /* Load float */
+	{ Ostores, Ks, "fstp dword %M1" },     /* Store float and pop */
+	{ Oadd,    Ks, "faddp" },              /* ST(0) += ST(1), pop */
+	{ Osub,    Ks, "fsubp" },              /* ST(0) -= ST(1), pop */
+	{ Omul,    Ks, "fmulp" },              /* ST(0) *= ST(1), pop */
+	{ Odiv,    Ks, "fdivp" },              /* ST(0) /= ST(1), pop */
+	{ Oneg,    Ks, "fchs" },               /* ST(0) = -ST(0) */
+
+	/* 8087 FPU operations - Double precision (double - 64-bit) */
+	{ Oload,   Kd, "fld qword %M0" },      /* Load double */
+	{ Ostored, Kd, "fstp qword %M1" },     /* Store double and pop */
+	{ Oadd,    Kd, "faddp" },              /* ST(0) += ST(1), pop */
+	{ Osub,    Kd, "fsubp" },              /* ST(0) -= ST(1), pop */
+	{ Omul,    Kd, "fmulp" },              /* ST(0) *= ST(1), pop */
+	{ Odiv,    Kd, "fdivp" },              /* ST(0) /= ST(1), pop */
+	{ Oneg,    Kd, "fchs" },               /* ST(0) = -ST(0) */
+
+	/* 8087 FPU type conversions and copy */
+	{ Ocopy,   Ks, "; fp copy (nop - already on FP stack)" },  /* FP copy is a nop for stack */
+	{ Ocopy,   Kd, "; fp copy (nop - already on FP stack)" },
+	{ Otruncd,  Ks, "; truncd: double to float (handled by load/store size)" },
+	{ Oexts,   Kd, "; exts: float to double (handled by load/store size)" },
+
+	/* 8087 int to float conversions */
+	{ Oswtof,  Ks, "fild word %M0" },     /* Load signed word, convert to float */
+	{ Oswtof,  Kd, "fild word %M0" },     /* Load signed word, convert to double */
+	{ Ouwtof,  Ks, "fild word %M0" },     /* Load unsigned word, convert to float */
+	{ Ouwtof,  Kd, "fild word %M0" },     /* Load unsigned word, convert to double */
+
+	/* 8087 float to int conversions */
+	{ Ostosi,  Kw, "fistp word %M1" },    /* Convert float to signed int, store and pop */
+	{ Ostoui,  Kw, "fistp word %M1" },    /* Convert float to unsigned int, store and pop */
+	{ Odtosi,  Kw, "fistp word %M1" },    /* Convert double to signed int, store and pop */
+	{ Odtoui,  Kw, "fistp word %M1" },    /* Convert double to unsigned int, store and pop */
+
+	/* 8087 FPU comparisons */
+	{ Oceqs,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsete %B=\n\tmovzx %=, %B=" },
+	{ Ocges,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsetae %B=\n\tmovzx %=, %B=" },
+	{ Ocgts,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tseta %B=\n\tmovzx %=, %B=" },
+	{ Ocles,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsetbe %B=\n\tmovzx %=, %B=" },
+	{ Oclts,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsetb %B=\n\tmovzx %=, %B=" },
+	{ Ocnes,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsetne %B=\n\tmovzx %=, %B=" },
+
+	{ Oceqd,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsete %B=\n\tmovzx %=, %B=" },
+	{ Ocged,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsetae %B=\n\tmovzx %=, %B=" },
+	{ Ocgtd,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tseta %B=\n\tmovzx %=, %B=" },
+	{ Ocled,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsetbe %B=\n\tmovzx %=, %B=" },
+	{ Ocltd,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsetb %B=\n\tmovzx %=, %B=" },
+	{ Ocned,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsetne %B=\n\tmovzx %=, %B=" },
+
+	/* 8087 type conversions */
+	/* Note: Conversions will be handled in isel.c through load/store operations */
+
 	{ NOp, 0, 0 }
 };
 
@@ -161,6 +220,11 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 			r = i->arg[1];
 			goto Ref;
 		Ref:
+			/* Handle empty reference (R) */
+			if (req(r, R)) {
+				/* Empty reference - don't emit anything */
+				break;
+			}
 			switch (rtype(r)) {
 			case RTmp:
 				fprintf(f, "%s", rname[r.val]);
@@ -182,7 +246,52 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 				offset = slot(r, fn);
 				fprintf(f, "[bp%+ld]", (long)offset);
 				break;
+			case RMem: {
+				/* Memory reference used as operand - emit as memory location */
+				Mem *m = &fn->mem[r.val];
+				int has_offset = (m->offset.type != CUndef);
+				int has_base = !req(m->base, R);
+				int has_index = !req(m->index, R);
+
+				fprintf(f, "word ptr [");
+
+				/* Emit base register if present */
+				if (has_base) {
+					if (rtype(m->base) == RTmp)
+						fprintf(f, "%s", rname[m->base.val]);
+					else if (rtype(m->base) == RSlot) {
+						fprintf(f, "bp%+ld", (long)slot(m->base, fn));
+					}
+				}
+
+				/* Emit index register if present */
+				if (has_index) {
+					if (has_base)
+						fprintf(f, " + ");
+					if (rtype(m->index) == RTmp)
+						fprintf(f, "%s", rname[m->index.val]);
+					/* i8086 doesn't support scale > 1 */
+					if (m->scale != 1 && m->scale != 0)
+						die("i8086 only supports scale of 1");
+				}
+
+				/* Emit offset if present */
+				if (has_offset) {
+					if (has_base || has_index)
+						fprintf(f, " + ");
+					if (m->offset.type == CAddr) {
+						emitaddr(&m->offset, f);
+					} else if (m->offset.type == CBits) {
+						fprintf(f, "%"PRIi64, m->offset.bits.i);
+					}
+				}
+
+				fputc(']', f);
+				break;
+			}
 			default:
+				fprintf(stderr, "Invalid reference type: %d (RTmp=%d, RCon=%d, RSlot=%d, RMem=%d)\n",
+					rtype(r), RTmp, RCon, RSlot, RMem);
 				die("invalid reference type");
 			}
 			break;
