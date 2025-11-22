@@ -161,6 +161,11 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 			r = i->arg[1];
 			goto Ref;
 		Ref:
+			/* Handle empty reference (R) */
+			if (req(r, R)) {
+				/* Empty reference - don't emit anything */
+				break;
+			}
 			switch (rtype(r)) {
 			case RTmp:
 				fprintf(f, "%s", rname[r.val]);
@@ -182,7 +187,52 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 				offset = slot(r, fn);
 				fprintf(f, "[bp%+ld]", (long)offset);
 				break;
+			case RMem: {
+				/* Memory reference used as operand - emit as memory location */
+				Mem *m = &fn->mem[r.val];
+				int has_offset = (m->offset.type != CUndef);
+				int has_base = !req(m->base, R);
+				int has_index = !req(m->index, R);
+
+				fprintf(f, "word ptr [");
+
+				/* Emit base register if present */
+				if (has_base) {
+					if (rtype(m->base) == RTmp)
+						fprintf(f, "%s", rname[m->base.val]);
+					else if (rtype(m->base) == RSlot) {
+						fprintf(f, "bp%+ld", (long)slot(m->base, fn));
+					}
+				}
+
+				/* Emit index register if present */
+				if (has_index) {
+					if (has_base)
+						fprintf(f, " + ");
+					if (rtype(m->index) == RTmp)
+						fprintf(f, "%s", rname[m->index.val]);
+					/* i8086 doesn't support scale > 1 */
+					if (m->scale != 1 && m->scale != 0)
+						die("i8086 only supports scale of 1");
+				}
+
+				/* Emit offset if present */
+				if (has_offset) {
+					if (has_base || has_index)
+						fprintf(f, " + ");
+					if (m->offset.type == CAddr) {
+						emitaddr(&m->offset, f);
+					} else if (m->offset.type == CBits) {
+						fprintf(f, "%"PRIi64, m->offset.bits.i);
+					}
+				}
+
+				fputc(']', f);
+				break;
+			}
 			default:
+				fprintf(stderr, "Invalid reference type: %d (RTmp=%d, RCon=%d, RSlot=%d, RMem=%d)\n",
+					rtype(r), RTmp, RCon, RSlot, RMem);
 				die("invalid reference type");
 			}
 			break;
