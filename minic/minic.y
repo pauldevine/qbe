@@ -1798,11 +1798,6 @@ stmts: stmts stmt { $$ = mkstmt(Seq, $1, $2, 0); }
      |            { $$ = 0; }
      ;
 
-/* TODO: The comma operator is temporarily disabled because it conflicts with
- * function argument parsing. The proper fix is to create separate expression
- * levels (e.g., assignment_expression vs expression) like in standard C,
- * where function arguments use assignment_expression (no comma) and only
- * top-level expressions use expression (with comma). */
 expr: pref
     | expr '?' expr ':' expr { $$ = mknode('?', $1, mknode(':', $3, $5)); }
     | expr '=' expr     { $$ = mknode('=', $1, $3); }
