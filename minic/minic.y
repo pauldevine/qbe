@@ -1473,7 +1473,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token <n> FNUM
 %token <n> STR
 %token <n> IDENT
-%token PP MM LE GE SIZEOF SHL SHR
+%token PP MM LE GE SIZEOF SHL SHR ARROW
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
@@ -2055,6 +2055,11 @@ post: NUM
     | post PP             { $$ = mknode('P', $1, 0); }
     | post MM             { $$ = mknode('M', $1, 0); }
     | post '.' IDENT      { $$ = mknode('.', $1, $3); }
+    | post ARROW IDENT    {
+        /* Desugar ptr->member to (*ptr).member */
+        Node *deref = mknode('@', $1, 0);  /* Dereference pointer */
+        $$ = mknode('.', deref, $3);       /* Member access */
+    }
     ;
 
 arg0: arg1
@@ -2437,6 +2442,7 @@ yylex()
 	case DI('>','='): return GE;
 	case DI('+','='): return ADDEQ;
 	case DI('-','='): return SUBEQ;
+	case DI('-','>'): return ARROW;
 	case DI('*','='): return MULEQ;
 	case DI('/','='): return DIVEQ;
 	case DI('%','='): return MODEQ;
