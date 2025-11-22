@@ -3,7 +3,8 @@
 
 main() {
     int version;
-    int major, minor;
+    int major;
+    int minor;
     char ver_str[16];
 
     dos_puts("=== System Information ===\r\n\r\n");

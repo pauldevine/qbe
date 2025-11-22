@@ -1,6 +1,7 @@
 main() {
     int version;
-    int major, minor;
+    int major;
+    int minor;
 
     dos_puts("=== System Information ===\r\n\r\n");
 
