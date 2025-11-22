@@ -1420,7 +1420,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST TBOOL
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
-%token INLINE STATIC EXTERN
+%token INLINE STATIC EXTERN STATIC_ASSERT
 
 %left ','
 %right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
@@ -1443,7 +1443,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %%
 
-prog: func prog | fdcl prog | idcl prog | edcl prog | tdcl prog | sdcl prog | ;
+prog: func prog | fdcl prog | idcl prog | edcl prog | tdcl prog | sdcl prog | static_assert_dcl prog | ;
 
 edcl: enumstart enums '}' ';'
     ;
@@ -1474,6 +1474,17 @@ enum: IDENT
 tdcl: TYPEDEF type IDENT ';'
 {
 	typhadd($3->u.v, $2);
+}
+    ;
+
+static_assert_dcl: STATIC_ASSERT '(' NUM ',' STR ')' ';'
+{
+	/* _Static_assert(constant-expression, string-literal); */
+	if ($3->u.n == 0) {
+		/* Assertion failed */
+		die("static assertion failed");
+	}
+	/* Assertion passed - no code generated */
 }
     ;
 
@@ -1675,6 +1686,13 @@ dcls:
 	varadd(v, 0, fptr_type, 0);  /* Not an array */
 	fprintf(of, "\t%%%s =l alloc8 8\n", v);  /* Pointers are 8 bytes */
 }
+    | dcls STATIC_ASSERT '(' NUM ',' STR ')' ';'
+{
+	/* _Static_assert in local scope */
+	if ($4->u.n == 0) {
+		die("static assertion failed");
+	}
+}
     ;
 
 initlist: pref                    { $$ = mknode(0, $1, 0); }
@@ -1759,6 +1777,13 @@ stmt: ';'                            { $$ = 0; }
         s = SIZE($2);
         varadd(v, 0, $2, 0);
         fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        $$ = 0;
+    }
+    | STATIC_ASSERT '(' NUM ',' STR ')' ';' {
+        /* _Static_assert in statement scope */
+        if ($3->u.n == 0) {
+            die("static assertion failed");
+        }
         $$ = 0;
     }
     | expr ';'                       { $$ = mkstmt(Expr, $1, 0, 0); }
@@ -1882,6 +1907,7 @@ yylex()
 		{ "static", STATIC },
 		{ "extern", EXTERN },
 		{ "typedef", TYPEDEF },
+		{ "_Static_assert", STATIC_ASSERT },
 		{ "struct", STRUCT },
 		{ "union", UNION },
 		{ "enum", ENUM },
