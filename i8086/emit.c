@@ -68,6 +68,42 @@ static struct {
 	{ Ocall,   Kw, "call %0" },
 	{ Osalloc, Kw, "sub sp, %0" },
 
+	/* 8087 FPU operations - Single precision (float - 32-bit) */
+	{ Oload,   Ks, "fld dword %M0" },      /* Load float */
+	{ Ostores, Ks, "fstp dword %M1" },     /* Store float and pop */
+	{ Oadd,    Ks, "faddp" },              /* ST(0) += ST(1), pop */
+	{ Osub,    Ks, "fsubp" },              /* ST(0) -= ST(1), pop */
+	{ Omul,    Ks, "fmulp" },              /* ST(0) *= ST(1), pop */
+	{ Odiv,    Ks, "fdivp" },              /* ST(0) /= ST(1), pop */
+	{ Oneg,    Ks, "fchs" },               /* ST(0) = -ST(0) */
+
+	/* 8087 FPU operations - Double precision (double - 64-bit) */
+	{ Oload,   Kd, "fld qword %M0" },      /* Load double */
+	{ Ostored, Kd, "fstp qword %M1" },     /* Store double and pop */
+	{ Oadd,    Kd, "faddp" },              /* ST(0) += ST(1), pop */
+	{ Osub,    Kd, "fsubp" },              /* ST(0) -= ST(1), pop */
+	{ Omul,    Kd, "fmulp" },              /* ST(0) *= ST(1), pop */
+	{ Odiv,    Kd, "fdivp" },              /* ST(0) /= ST(1), pop */
+	{ Oneg,    Kd, "fchs" },               /* ST(0) = -ST(0) */
+
+	/* 8087 FPU comparisons */
+	{ Oceqs,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsete %B=\n\tmovzx %=, %B=" },
+	{ Ocges,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsetae %B=\n\tmovzx %=, %B=" },
+	{ Ocgts,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tseta %B=\n\tmovzx %=, %B=" },
+	{ Ocles,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsetbe %B=\n\tmovzx %=, %B=" },
+	{ Oclts,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsetb %B=\n\tmovzx %=, %B=" },
+	{ Ocnes,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsetne %B=\n\tmovzx %=, %B=" },
+
+	{ Oceqd,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsete %B=\n\tmovzx %=, %B=" },
+	{ Ocged,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsetae %B=\n\tmovzx %=, %B=" },
+	{ Ocgtd,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tseta %B=\n\tmovzx %=, %B=" },
+	{ Ocled,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsetbe %B=\n\tmovzx %=, %B=" },
+	{ Ocltd,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsetb %B=\n\tmovzx %=, %B=" },
+	{ Ocned,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsetne %B=\n\tmovzx %=, %B=" },
+
+	/* 8087 type conversions */
+	/* Note: Conversions will be handled in isel.c through load/store operations */
+
 	{ NOp, 0, 0 }
 };
 
