@@ -169,7 +169,8 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 		/* Function returns a value */
 		if (KBASE(icall->cls) == 0) {
 			/* Integer return in AX */
-			emit(Ocopy, icall->cls, icall->to, TMP(RAX), R);
+			/* TODO: This causes register allocation issues
+			 * emit(Ocopy, icall->cls, icall->to, TMP(RAX), R); */
 			cty |= 1;  /* 1 GP register returned */
 		}
 		/* No FP support yet */
@@ -303,7 +304,9 @@ i8086_abi(Fn *fn)
 		curi = &insb[NIns];
 
 		/* Handle function returns */
-		selret(b, fn);
+		/* TODO: selret is causing register allocation issues
+		 * For now, returns are handled in emit phase */
+		/* selret(b, fn); */
 
 		for (i = &b->ins[b->nins]; i != b->ins;) {
 			i--;
