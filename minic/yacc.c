@@ -269,8 +269,10 @@ iclose(Item *i)
 			if (s < Sym0 || s == S)
 				continue;
 			r = rfind(s);
-			if (!r)
+			if (!r) {
+				fprintf(stderr, "undefined non-terminal: %s\n", is[s].name);
 				die("some non-terminals are not defined");
+			}
 			tszero(&t1.lk);
 			first(&t1.lk, rem, &t->lk);
 			m = smap[s-Sym0];

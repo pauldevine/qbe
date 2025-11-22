@@ -1417,9 +1417,10 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TUNSIGNED TFLOAT TDOUBLE CONST
+%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST TBOOL
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
+%token INLINE STATIC EXTERN
 
 %left ','
 %right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
@@ -1790,11 +1791,6 @@ stmts: stmts stmt { $$ = mkstmt(Seq, $1, $2, 0); }
      |            { $$ = 0; }
      ;
 
-/* TODO: The comma operator is temporarily disabled because it conflicts with
- * function argument parsing. The proper fix is to create separate expression
- * levels (e.g., assignment_expression vs expression) like in standard C,
- * where function arguments use assignment_expression (no comma) and only
- * top-level expressions use expression (with comma). */
 expr: pref
     | expr '?' expr ':' expr { $$ = mknode('?', $1, mknode(':', $3, $5)); }
     | expr '=' expr     { $$ = mknode('=', $1, $3); }
