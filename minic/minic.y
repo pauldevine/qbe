@@ -1483,7 +1483,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST TBOOL INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF ALIGNAS
+%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST VOLATILE TBOOL INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF ALIGNAS
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 
@@ -1888,6 +1888,17 @@ type: type '*' { $$ = IDIR($1); }
     | CONST TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
     | CONST TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
     | CONST TUNSIGNED          { $$ = INT | UNSIGNED; }
+    | VOLATILE TCHAR        { $$ = CHR; }
+    | VOLATILE TSHORT       { $$ = INT | SHORT; }
+    | VOLATILE TINT         { $$ = INT; }
+    | VOLATILE TLNG         { $$ = LNG; }
+    | VOLATILE TLNGLNG      { $$ = LNG; }
+    | VOLATILE TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
+    | VOLATILE TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }
+    | VOLATILE TUNSIGNED TINT     { $$ = INT | UNSIGNED; }
+    | VOLATILE TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
+    | VOLATILE TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
+    | VOLATILE TUNSIGNED          { $$ = INT | UNSIGNED; }
     | STRUCT IDENT {
         int idx = structfind($2->u.v);
         if (idx < 0)
@@ -2094,6 +2105,7 @@ yylex()
 		{ "float", TFLOAT },
 		{ "double", TDOUBLE },
 		{ "const", CONST },
+		{ "volatile", VOLATILE },
 		{ "_Bool", TBOOL },
 		{ "inline", INLINE },
 		{ "static", STATIC },
