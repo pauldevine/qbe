@@ -1420,7 +1420,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST TBOOL
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
-%token INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF
+%token INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF ALIGNAS
 
 %left ','
 %right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
@@ -1600,6 +1600,56 @@ dcls:
 	v = $3->u.v;
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+}
+    | dcls ALIGNAS '(' NUM ')' type IDENT ';'
+{
+	/* _Alignas(constant) type var; */
+	int s;
+	char *v;
+	int align;
+
+	if ($6 == NIL)
+		die("invalid void declaration");
+	v = $7->u.v;
+	s = SIZE($6);
+	align = $4->u.n;
+
+	/* Validate alignment is power of 2 */
+	if (align <= 0 || (align & (align - 1)) != 0)
+		die("_Alignas requires power of 2");
+
+	varadd(v, 0, $6, 0);
+	/* Emit comment about alignment requirement */
+	fprintf(of, "\t# _Alignas(%d) for %%%s\n", align, v);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+}
+    | dcls ALIGNAS '(' type ')' type IDENT ';'
+{
+	/* _Alignas(type) type var; */
+	int s;
+	char *v;
+	int align;
+
+	if ($6 == NIL)
+		die("invalid void declaration");
+	v = $7->u.v;
+	s = SIZE($6);
+
+	/* Calculate alignment from type */
+	if (KIND($4) == CHR)
+		align = 1;
+	else if (KIND($4) == LNG || ISFLOAT($4))
+		align = 4;
+	else
+		align = 2;
+
+	varadd(v, 0, $6, 0);
+	/* Emit comment about alignment requirement */
+	fprintf(of, "\t# _Alignas(%s) = %d for %%%s\n",
+		KIND($4) == CHR ? "char" :
+		KIND($4) == LNG ? "long" : "int",
+		align, v);
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
 }
     | dcls STATIC type IDENT ';'
@@ -1932,6 +1982,7 @@ yylex()
 		{ "typedef", TYPEDEF },
 		{ "_Static_assert", STATIC_ASSERT },
 		{ "_Alignof", ALIGNOF },
+		{ "_Alignas", ALIGNAS },
 		{ "struct", STRUCT },
 		{ "union", UNION },
 		{ "enum", ENUM },
