@@ -192,6 +192,10 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 			if (!isarg(i->op))
 				continue;
 
+			/* Skip variadic marker (Oarg with empty argument) */
+			if (req(i->arg[0], R))
+				continue;
+
 			/* Calculate stack address [sp+off] */
 			if (off == 0) {
 				/* First argument at [sp] - use SP copy directly */
@@ -226,6 +230,33 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 		/* Osalloc allocates stack and returns new SP in sp_tmp */
 		emit(Osalloc, Kw, sp_tmp, getcon(stk, fn), R);
 	}
+}
+
+static void
+selret(Blk *b, Fn *fn)
+{
+	int j;
+	Ref r0;
+
+	j = b->jmp.type;
+
+	/* Only handle returns with values */
+	if (!isret(j) || j == Jret0)
+		return;
+
+	r0 = b->jmp.arg;
+	b->jmp.type = Jret0;
+
+	/* Move return value to AX (word) or DX:AX (long) */
+	if (j == Jretw) {
+		/* Word return - copy to AX */
+		emit(Ocopy, Kw, TMP(RAX), r0, R);
+	} else if (j == Jretl) {
+		/* Long return - DX:AX */
+		/* For now, just copy to AX (need to handle DX:AX pair) */
+		emit(Ocopy, Kw, TMP(RAX), r0, R);
+	}
+	/* No support for float returns yet */
 }
 
 void
@@ -270,6 +301,9 @@ i8086_abi(Fn *fn)
 	 */
 	for (b = fn->start; b; b = b->link) {
 		curi = &insb[NIns];
+
+		/* Handle function returns */
+		selret(b, fn);
 
 		for (i = &b->ins[b->nins]; i != b->ins;) {
 			i--;
