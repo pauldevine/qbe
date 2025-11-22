@@ -1420,7 +1420,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST TBOOL
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
-%token INLINE STATIC EXTERN STATIC_ASSERT
+%token INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF
 
 %left ','
 %right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
@@ -1868,6 +1868,21 @@ post: NUM
     | STR
     | IDENT
     | SIZEOF '(' type ')' { $$ = mknode('N', 0, 0); $$->u.n = SIZE($3); }
+    | ALIGNOF '(' type ')' {
+        /* _Alignof returns alignment requirement for type */
+        int align;
+        /* For 8086: most types align to 2 bytes (word boundary) */
+        /* Except char which aligns to 1 */
+        if (KIND($3) == CHR)
+            align = 1;
+        else if (KIND($3) == LNG || ISFLOAT($3))
+            align = 4;  /* long and float/double align to 4 bytes */
+        else
+            align = 2;  /* int, short, pointers align to 2 bytes */
+
+        $$ = mknode('N', 0, 0);
+        $$->u.n = align;
+    }
     | '(' type ')' '{' initlist '}' {
         /* Compound literal: (type){ initializer } - Simplified implementation */
         /* For now, compound literals are not fully supported */
@@ -1916,6 +1931,7 @@ yylex()
 		{ "extern", EXTERN },
 		{ "typedef", TYPEDEF },
 		{ "_Static_assert", STATIC_ASSERT },
+		{ "_Alignof", ALIGNOF },
 		{ "struct", STRUCT },
 		{ "union", UNION },
 		{ "enum", ENUM },
