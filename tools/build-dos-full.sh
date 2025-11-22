@@ -355,11 +355,22 @@ _itoa:
 EOF
 
 # Append generated code (skip directives and library function dups)
+# Also fix external function call references to add underscore prefix
 grep -v "^\.text" "$ASM_FILE" | \
     grep -v "^\.balign" | \
     grep -v "^\.section" | \
     grep -v "^\.globl" | \
-    sed 's/^\/\* /; /g' >> "$FULL_ASM"
+    sed 's/^\/\* /; /g' | \
+    sed 's/call dos_/call _dos_/g' | \
+    sed 's/call str/call _str/g' | \
+    sed 's/call mem/call _mem/g' | \
+    sed 's/call ato/call _ato/g' | \
+    sed 's/call ito/call _ito/g' | \
+    sed 's/call is/call _is/g' | \
+    sed 's/call to/call _to/g' | \
+    sed 's/call abs/call _abs/g' | \
+    sed 's/call put/call _put/g' | \
+    sed 's/call get/call _get/g' >> "$FULL_ASM"
 
 echo "  Generated: $FULL_ASM"
 

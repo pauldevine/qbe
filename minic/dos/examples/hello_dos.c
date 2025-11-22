@@ -1,9 +1,5 @@
 # Hello World for DOS using direct syscall
-# Phase 1 - First program with visible output
-
-dos_putchar(int ch) {
-	# Implemented in assembly
-}
+# Phase 3 - Using DOS runtime library
 
 main() {
 	# Print "Hi!" using DOS INT 21h AH=02h
