@@ -135,7 +135,6 @@ struct {
 int nstruct = 0;
 int curstruct = -1;  /* Index of struct currently being defined */
 int parentstruct = -1;  /* Parent struct for anonymous members */
-int anonstruct_counter = 0;  /* Counter for generating anonymous struct names */
 
 void
 die(char *s)
@@ -1564,37 +1563,52 @@ smembers:
 {
 	structaddmember(curstruct, $3->u.v, $2);
 }
-        | smembers STRUCT '{'
+        | smembers anonstruct
+        | smembers anonunion
+        ;
+
+anonstruct: anon_s_begin anonmembers anon_s_end
+          ;
+
+anonunion: anon_u_begin anonmembers anon_u_end
+         ;
+
+anon_s_begin: STRUCT '{'
 {
-	/* Start anonymous struct */
-	char anonname[32];
 	parentstruct = curstruct;
-	sprintf(anonname, "__anon_struct_%d", anonstruct_counter++);
-	curstruct = structadd(anonname, 0);  /* 0 = struct */
+	curstruct = structadd("__anon_s", 0);
 }
-          smembers '}' ';'
+            ;
+
+anon_u_begin: UNION '{'
 {
-	/* End anonymous struct - hoist members to parent */
-	int anon_idx = curstruct;
+	parentstruct = curstruct;
+	curstruct = structadd("__anon_u", 1);
+}
+            ;
+
+anon_s_end: '}' ';'
+{
+	int idx = curstruct;
 	curstruct = parentstruct;
 	parentstruct = -1;
-	hoistanonymous(curstruct, anon_idx);
+	hoistanonymous(curstruct, idx);
 }
-        | smembers UNION '{'
+          ;
+
+anon_u_end: '}' ';'
 {
-	/* Start anonymous union */
-	char anonname[32];
-	parentstruct = curstruct;
-	sprintf(anonname, "__anon_union_%d", anonstruct_counter++);
-	curstruct = structadd(anonname, 1);  /* 1 = union */
-}
-          smembers '}' ';'
-{
-	/* End anonymous union - hoist members to parent */
-	int anon_idx = curstruct;
+	int idx = curstruct;
 	curstruct = parentstruct;
 	parentstruct = -1;
-	hoistanonymous(curstruct, anon_idx);
+	hoistanonymous(curstruct, idx);
+}
+          ;
+
+anonmembers:
+        | anonmembers type IDENT ';'
+{
+	structaddmember(curstruct, $3->u.v, $2);
 }
         ;
 
