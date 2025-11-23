@@ -89,8 +89,18 @@ REMOVE_DIRECTIVES='/^#pragma/d'
 
 if [ -z "$OUTPUT" ]; then
     # Output to stdout
-    cpp -nostdinc -I"$INCLUDE_DIR" -P "$INPUT" | sed "$REMOVE_DIRECTIVES" | sed "$NORMALIZE_TYPES" | sed "$STRIP_TYPES" | "$MINIC"
+    cpp -nostdinc -I"$INCLUDE_DIR" -P "$INPUT" | \
+        sed "$REMOVE_DIRECTIVES" | \
+        sed "$NORMALIZE_TYPES" | \
+        perl -0777 -pe 's/,(\s*\})/\1/g' | \
+        sed "$STRIP_TYPES" | \
+        "$MINIC"
 else
     # Output to file
-    cpp -nostdinc -I"$INCLUDE_DIR" -P "$INPUT" | sed "$REMOVE_DIRECTIVES" | sed "$NORMALIZE_TYPES" | sed "$STRIP_TYPES" | "$MINIC" > "$OUTPUT"
+    cpp -nostdinc -I"$INCLUDE_DIR" -P "$INPUT" | \
+        sed "$REMOVE_DIRECTIVES" | \
+        sed "$NORMALIZE_TYPES" | \
+        perl -0777 -pe 's/,(\s*\})/\1/g' | \
+        sed "$STRIP_TYPES" | \
+        "$MINIC" > "$OUTPUT"
 fi

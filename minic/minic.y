@@ -135,6 +135,7 @@ struct {
 int nstruct = 0;
 int curstruct = -1;  /* Index of struct currently being defined */
 int parentstruct = -1;  /* Parent struct for anonymous members */
+int typedefanoncount = 0;  /* Counter for anonymous typedef structs/unions */
 
 void
 die(char *s)
@@ -1535,7 +1536,74 @@ tdcl: TYPEDEF type IDENT ';'
 {
 	typhadd($3->u.v, $2);
 }
+    | TYPEDEF typedefenum    {}
+    | TYPEDEF typedefstruct  {}
+    | TYPEDEF typedefunion   {}
     ;
+
+typedefenum: typedefenumstart enums '}' IDENT ';'
+{
+	/* Enum constants already added by enums rule */
+	/* Typedef the enum type name to int (enums are ints in C) */
+	typhadd($4->u.v, INT);
+}
+           ;
+
+typedefenumstart: ENUM '{'
+{
+	enumval = 0;
+}
+                | ENUM IDENT '{'
+{
+	enumval = 0;
+}
+                ;
+
+typedefstruct: typedefstructstart smembers '}' IDENT ';'
+{
+	/* Create typedef to the struct */
+	int idx = curstruct;
+	curstruct = -1;
+	typhadd($4->u.v, (idx << 3) + STRUCT_T);
+}
+             ;
+
+typedefstructstart: STRUCT '{'
+{
+	/* Anonymous struct typedef */
+	char anonname[32];
+	sprintf(anonname, "__typedef_anon_s_%d", typedefanoncount++);
+	curstruct = structadd(anonname, 0);
+}
+                  | STRUCT IDENT '{'
+{
+	/* Tagged struct typedef */
+	curstruct = structadd($2->u.v, 0);
+}
+                  ;
+
+typedefunion: typedefunionstart smembers '}' IDENT ';'
+{
+	/* Create typedef to the union */
+	int idx = curstruct;
+	curstruct = -1;
+	typhadd($4->u.v, (idx << 3) + UNION_T);
+}
+            ;
+
+typedefunionstart: UNION '{'
+{
+	/* Anonymous union typedef */
+	char anonname[32];
+	sprintf(anonname, "__typedef_anon_u_%d", typedefanoncount++);
+	curstruct = structadd(anonname, 1);
+}
+                 | UNION IDENT '{'
+{
+	/* Tagged union typedef */
+	curstruct = structadd($2->u.v, 1);
+}
+                 ;
 
 static_assert_dcl: STATIC_ASSERT '(' NUM ',' STR ')' ';'
 {

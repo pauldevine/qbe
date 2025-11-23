@@ -18,7 +18,4 @@ typedef unsigned int uint32_t;
 typedef long int64_t;
 typedef unsigned long uint64_t;
 
-/* Other common types */
-typedef unsigned long size_t;
-
 #endif /* _STDINT_H */
