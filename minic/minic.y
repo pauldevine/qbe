@@ -135,6 +135,7 @@ struct {
 int nstruct = 0;
 int curstruct = -1;  /* Index of struct currently being defined */
 int parentstruct = -1;  /* Parent struct for anonymous members */
+int typedefanoncount = 0;  /* Counter for anonymous typedef structs/unions */
 
 void
 die(char *s)
@@ -1473,11 +1474,11 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token <n> FNUM
 %token <n> STR
 %token <n> IDENT
-%token PP MM LE GE SIZEOF SHL SHR
+%token PP MM LE GE SIZEOF SHL SHR ARROW
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST TBOOL
+%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST VOLATILE TBOOL
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 %token INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF ALIGNAS
@@ -1535,7 +1536,74 @@ tdcl: TYPEDEF type IDENT ';'
 {
 	typhadd($3->u.v, $2);
 }
+    | TYPEDEF typedefenum    {}
+    | TYPEDEF typedefstruct  {}
+    | TYPEDEF typedefunion   {}
     ;
+
+typedefenum: typedefenumstart enums '}' IDENT ';'
+{
+	/* Enum constants already added by enums rule */
+	/* Typedef the enum type name to int (enums are ints in C) */
+	typhadd($4->u.v, INT);
+}
+           ;
+
+typedefenumstart: ENUM '{'
+{
+	enumval = 0;
+}
+                | ENUM IDENT '{'
+{
+	enumval = 0;
+}
+                ;
+
+typedefstruct: typedefstructstart smembers '}' IDENT ';'
+{
+	/* Create typedef to the struct */
+	int idx = curstruct;
+	curstruct = -1;
+	typhadd($4->u.v, (idx << 3) + STRUCT_T);
+}
+             ;
+
+typedefstructstart: STRUCT '{'
+{
+	/* Anonymous struct typedef */
+	char anonname[32];
+	sprintf(anonname, "__typedef_anon_s_%d", typedefanoncount++);
+	curstruct = structadd(anonname, 0);
+}
+                  | STRUCT IDENT '{'
+{
+	/* Tagged struct typedef */
+	curstruct = structadd($2->u.v, 0);
+}
+                  ;
+
+typedefunion: typedefunionstart smembers '}' IDENT ';'
+{
+	/* Create typedef to the union */
+	int idx = curstruct;
+	curstruct = -1;
+	typhadd($4->u.v, (idx << 3) + UNION_T);
+}
+            ;
+
+typedefunionstart: UNION '{'
+{
+	/* Anonymous union typedef */
+	char anonname[32];
+	sprintf(anonname, "__typedef_anon_u_%d", typedefanoncount++);
+	curstruct = structadd(anonname, 1);
+}
+                 | UNION IDENT '{'
+{
+	/* Tagged union typedef */
+	curstruct = structadd($2->u.v, 1);
+}
+                 ;
 
 static_assert_dcl: STATIC_ASSERT '(' NUM ',' STR ')' ';'
 {
@@ -1881,6 +1949,17 @@ type: type '*' { $$ = IDIR($1); }
     | CONST TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
     | CONST TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
     | CONST TUNSIGNED          { $$ = INT | UNSIGNED; }
+    | VOLATILE TCHAR        { $$ = CHR; }
+    | VOLATILE TSHORT       { $$ = INT | SHORT; }
+    | VOLATILE TINT         { $$ = INT; }
+    | VOLATILE TLNG         { $$ = LNG; }
+    | VOLATILE TLNGLNG      { $$ = LNG; }
+    | VOLATILE TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
+    | VOLATILE TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }
+    | VOLATILE TUNSIGNED TINT     { $$ = INT | UNSIGNED; }
+    | VOLATILE TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
+    | VOLATILE TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
+    | VOLATILE TUNSIGNED          { $$ = INT | UNSIGNED; }
     | STRUCT IDENT {
         int idx = structfind($2->u.v);
         if (idx < 0)
@@ -2055,6 +2134,11 @@ post: NUM
     | post PP             { $$ = mknode('P', $1, 0); }
     | post MM             { $$ = mknode('M', $1, 0); }
     | post '.' IDENT      { $$ = mknode('.', $1, $3); }
+    | post ARROW IDENT    {
+        /* Desugar ptr->member to (*ptr).member */
+        Node *deref = mknode('@', $1, 0);  /* Dereference pointer */
+        $$ = mknode('.', deref, $3);       /* Member access */
+    }
     ;
 
 arg0: arg1
@@ -2082,6 +2166,7 @@ yylex()
 		{ "float", TFLOAT },
 		{ "double", TDOUBLE },
 		{ "const", CONST },
+		{ "volatile", VOLATILE },
 		{ "_Bool", TBOOL },
 		{ "inline", INLINE },
 		{ "static", STATIC },
@@ -2437,6 +2522,7 @@ yylex()
 	case DI('>','='): return GE;
 	case DI('+','='): return ADDEQ;
 	case DI('-','='): return SUBEQ;
+	case DI('-','>'): return ARROW;
 	case DI('*','='): return MULEQ;
 	case DI('/','='): return DIVEQ;
 	case DI('%','='): return MODEQ;

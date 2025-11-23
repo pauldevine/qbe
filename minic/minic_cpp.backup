@@ -1,0 +1,66 @@
+#!/bin/bash
+# MiniC Preprocessor Wrapper
+# Uses system C preprocessor (cpp) before compiling with MiniC
+# Also strips function return types since MiniC doesn't support them
+#
+# Usage: minic_cpp input.c output.ssa
+#        minic_cpp input.c          (outputs to stdout)
+
+set -e
+
+INPUT="$1"
+OUTPUT="$2"
+
+if [ -z "$INPUT" ]; then
+    echo "Usage: $0 input.c [output.ssa]" >&2
+    echo "" >&2
+    echo "Preprocesses C source with cpp and compiles with MiniC" >&2
+    echo "" >&2
+    echo "Examples:" >&2
+    echo "  $0 program.c program.ssa    # Preprocess and compile to file" >&2
+    echo "  $0 program.c | qbe          # Pipe directly to QBE" >&2
+    exit 1
+fi
+
+if [ ! -f "$INPUT" ]; then
+    echo "Error: File '$INPUT' not found" >&2
+    exit 1
+fi
+
+# Get the directory of this script to find minic
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MINIC="$SCRIPT_DIR/minic"
+
+if [ ! -x "$MINIC" ]; then
+    echo "Error: minic not found or not executable at $MINIC" >&2
+    echo "Run 'make' in $SCRIPT_DIR first" >&2
+    exit 1
+fi
+
+# Preprocess with cpp, then strip function return types, then compile with minic
+# -P: Don't generate #line directives
+# -traditional-cpp: Use traditional (less strict) preprocessing
+#
+# Function return type stripping:
+# Transform "type funcname(" to "funcname(" for function definitions
+# This handles: void, int, long, char, unsigned types, stdint types, etc.
+STRIP_TYPES='
+s/^[ \t]*void[ \t]\+\([a-zA-Z_][a-zA-Z0-9_]*\)[ \t]*(/\1(/
+s/^[ \t]*int[ \t]\+\([a-zA-Z_][a-zA-Z0-9_]*\)[ \t]*(/\1(/
+s/^[ \t]*long[ \t]\+\([a-zA-Z_][a-zA-Z0-9_]*\)[ \t]*(/\1(/
+s/^[ \t]*char[ \t]\+\([a-zA-Z_][a-zA-Z0-9_]*\)[ \t]*(/\1(/
+s/^[ \t]*short[ \t]\+\([a-zA-Z_][a-zA-Z0-9_]*\)[ \t]*(/\1(/
+s/^[ \t]*unsigned[ \t]\+[a-z]\+[ \t]\+\([a-zA-Z_][a-zA-Z0-9_]*\)[ \t]*(/\1(/
+s/^[ \t]*uint[0-9]\+_t[ \t]\+\([a-zA-Z_][a-zA-Z0-9_]*\)[ \t]*(/\1(/
+s/^[ \t]*int[0-9]\+_t[ \t]\+\([a-zA-Z_][a-zA-Z0-9_]*\)[ \t]*(/\1(/
+s/^[ \t]*size_t[ \t]\+\([a-zA-Z_][a-zA-Z0-9_]*\)[ \t]*(/\1(/
+s/^[ \t]*bool[ \t]\+\([a-zA-Z_][a-zA-Z0-9_]*\)[ \t]*(/\1(/
+'
+
+if [ -z "$OUTPUT" ]; then
+    # Output to stdout
+    cpp -P -traditional-cpp "$INPUT" | sed "$STRIP_TYPES" | "$MINIC"
+else
+    # Output to file
+    cpp -P -traditional-cpp "$INPUT" | sed "$STRIP_TYPES" | "$MINIC" > "$OUTPUT"
+fi
