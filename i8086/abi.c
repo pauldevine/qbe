@@ -250,6 +250,8 @@ selret(Blk *b, Fn *fn)
 	int j, ca;
 	Ref r0;
 
+	(void)fn;  /* unused */
+
 	j = b->jmp.type;
 
 	/* Only handle returns with values */
@@ -265,9 +267,9 @@ selret(Blk *b, Fn *fn)
 		emit(Ocopy, Kw, TMP(RAX), r0, R);
 		ca = 1;  /* 1 GP register used for return */
 	} else if (j == Jretl) {
-		/* Long return - DX:AX */
-		/* For now, just copy to AX (need to handle DX:AX pair) */
-		emit(Ocopy, Kl, TMP(RAX), r0, R);
+		/* Long return - DX:AX pair */
+		emit(Ocopy, Kw, TMP(RDX), r0, R);  /* High word */
+		emit(Ocopy, Kw, TMP(RAX), r0, R);  /* Low word */
 		ca = 2;  /* 2 GP registers used for return (DX:AX) */
 	} else {
 		/* No support for float returns yet */
