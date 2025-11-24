@@ -172,8 +172,7 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 		/* Function returns a value */
 		if (KBASE(icall->cls) == 0) {
 			/* Integer return in AX */
-			/* TODO: This causes register allocation issues
-			 * emit(Ocopy, icall->cls, icall->to, TMP(RAX), R); */
+			emit(Ocopy, icall->cls, icall->to, TMP(RAX), R);
 			cty |= 1;  /* 1 GP register returned */
 		}
 		/* No FP support yet */

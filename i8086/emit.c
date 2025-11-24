@@ -535,6 +535,37 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		return;
 	}
 
+	/* Special handling for Ocall (function calls) */
+	if (i->op == Ocall) {
+		Ref target = i->arg[0];
+
+		/* Call target must be either:
+		 * 1. RTmp (register) for indirect calls
+		 * 2. RCon with CAddr (function name) for direct calls
+		 */
+		fprintf(f, "\tcall ");
+
+		if (rtype(target) == RTmp) {
+			/* Indirect call through register */
+			fprintf(f, "%s\n", rname[target.val]);
+		} else if (rtype(target) == RCon) {
+			/* Direct call to function */
+			Con *c = &fn->con[target.val];
+			if (c->type == CAddr) {
+				/* Function name */
+				emitaddr(c, f);
+				fputc('\n', f);
+			} else {
+				die("call with non-address constant");
+			}
+		} else {
+			/* Invalid call target - must load into register first */
+			die("invalid call target type (must be register or function name)");
+		}
+
+		return;
+	}
+
 	/* Special handling for Osalloc (stack allocation) */
 	if (i->op == Osalloc) {
 		Con *c;
