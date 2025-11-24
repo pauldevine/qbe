@@ -172,8 +172,7 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 		/* Function returns a value */
 		if (KBASE(icall->cls) == 0) {
 			/* Integer return in AX */
-			/* TODO: This causes register allocation issues
-			 * emit(Ocopy, icall->cls, icall->to, TMP(RAX), R); */
+			emit(Ocopy, icall->cls, icall->to, TMP(RAX), R);
 			cty |= 1;  /* 1 GP register returned */
 		}
 		/* No FP support yet */
@@ -248,7 +247,7 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 static void
 selret(Blk *b, Fn *fn)
 {
-	int j;
+	int j, ca;
 	Ref r0;
 
 	j = b->jmp.type;
@@ -264,12 +263,19 @@ selret(Blk *b, Fn *fn)
 	if (j == Jretw) {
 		/* Word return - copy to AX */
 		emit(Ocopy, Kw, TMP(RAX), r0, R);
+		ca = 1;  /* 1 GP register used for return */
 	} else if (j == Jretl) {
 		/* Long return - DX:AX */
 		/* For now, just copy to AX (need to handle DX:AX pair) */
-		emit(Ocopy, Kw, TMP(RAX), r0, R);
+		emit(Ocopy, Kl, TMP(RAX), r0, R);
+		ca = 2;  /* 2 GP registers used for return (DX:AX) */
+	} else {
+		/* No support for float returns yet */
+		return;
 	}
-	/* No support for float returns yet */
+
+	/* Tell register allocator that return uses these registers */
+	b->jmp.arg = CALL(ca);
 }
 
 void
@@ -316,9 +322,7 @@ i8086_abi(Fn *fn)
 		curi = &insb[NIns];
 
 		/* Handle function returns */
-		/* TODO: selret is causing register allocation issues
-		 * For now, returns are handled in emit phase */
-		/* selret(b, fn); */
+		selret(b, fn);
 
 		for (i = &b->ins[b->nins]; i != b->ins;) {
 			i--;
