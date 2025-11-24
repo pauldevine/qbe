@@ -172,8 +172,7 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 		/* Function returns a value */
 		if (KBASE(icall->cls) == 0) {
 			/* Integer return in AX */
-			/* TODO: This causes register allocation issues
-			 * emit(Ocopy, icall->cls, icall->to, TMP(RAX), R); */
+			emit(Ocopy, icall->cls, icall->to, TMP(RAX), R);
 			cty |= 1;  /* 1 GP register returned */
 		}
 		/* No FP support yet */
@@ -248,7 +247,7 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 static void
 selret(Blk *b, Fn *fn)
 {
-	int j, cty;
+	int j, ca;
 	Ref r0;
 
 	(void)fn;  /* unused */
@@ -266,19 +265,19 @@ selret(Blk *b, Fn *fn)
 	if (j == Jretw) {
 		/* Word return - copy to AX */
 		emit(Ocopy, Kw, TMP(RAX), r0, R);
-		cty = 1;  /* 1 GP register used (AX) */
+		ca = 1;  /* 1 GP register used for return */
 	} else if (j == Jretl) {
-		/* Long return - DX:AX */
+		/* Long return - DX:AX pair */
 		emit(Ocopy, Kw, TMP(RDX), r0, R);  /* High word */
 		emit(Ocopy, Kw, TMP(RAX), r0, R);  /* Low word */
-		cty = 2;  /* 2 GP registers used (DX:AX) */
+		ca = 2;  /* 2 GP registers used for return (DX:AX) */
 	} else {
-		/* Jrets, Jretd - floating point */
-		cty = 0;  /* TODO: FPU support */
+		/* No support for float returns yet */
+		return;
 	}
 
-	/* Encode which registers contain return value */
-	b->jmp.arg = CALL(cty);
+	/* Tell register allocator that return uses these registers */
+	b->jmp.arg = CALL(ca);
 }
 
 void
