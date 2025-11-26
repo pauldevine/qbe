@@ -1,0 +1,356 @@
+# Test 32-bit long operations for QBE backend
+# Tests arithmetic, bitwise, and comparison operations
+
+# Test 32-bit addition
+export function w $test_add() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+    %c =l alloc4 4
+
+    # Store 0x10000 (65536) to a
+    storel 65536, %a
+
+    # Store 0x20000 (131072) to b
+    storel 131072, %b
+
+    # c = a + b = 196608 (0x30000)
+    %va =l loadl %a
+    %vb =l loadl %b
+    %sum =l add %va, %vb
+    storel %sum, %c
+
+    # Check result
+    %vc =l loadl %c
+    %eq =w ceql %vc, 196608
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 1
+}
+
+# Test 32-bit subtraction
+export function w $test_sub() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+    %c =l alloc4 4
+
+    # Store 200000 to a
+    storel 200000, %a
+
+    # Store 100000 to b
+    storel 100000, %b
+
+    # c = a - b = 100000
+    %va =l loadl %a
+    %vb =l loadl %b
+    %diff =l sub %va, %vb
+    storel %diff, %c
+
+    # Check result
+    %vc =l loadl %c
+    %eq =w ceql %vc, 100000
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 2
+}
+
+# Test 32-bit multiplication (16x16 -> 32)
+export function w $test_mul() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+    %c =l alloc4 4
+
+    # Store 1000 to a
+    storel 1000, %a
+
+    # Store 1000 to b
+    storel 1000, %b
+
+    # c = a * b = 1000000
+    %va =l loadl %a
+    %vb =l loadl %b
+    %prod =l mul %va, %vb
+    storel %prod, %c
+
+    # Check result
+    %vc =l loadl %c
+    %eq =w ceql %vc, 1000000
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 3
+}
+
+# Test 32-bit bitwise AND
+export function w $test_and() {
+@start
+    %a =l alloc4 4
+    %c =l alloc4 4
+
+    # Store 0xFFFF0000 to a
+    storel 4294901760, %a
+
+    # c = a & 0xFF00FF00
+    %va =l loadl %a
+    %res =l and %va, 4278255360
+    storel %res, %c
+
+    # Check result = 0xFF000000
+    %vc =l loadl %c
+    %eq =w ceql %vc, 4278190080
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 4
+}
+
+# Test 32-bit bitwise OR
+export function w $test_or() {
+@start
+    %a =l alloc4 4
+    %c =l alloc4 4
+
+    # Store 0xFF000000 to a
+    storel 4278190080, %a
+
+    # c = a | 0x000000FF
+    %va =l loadl %a
+    %res =l or %va, 255
+    storel %res, %c
+
+    # Check result = 0xFF0000FF
+    %vc =l loadl %c
+    %eq =w ceql %vc, 4278190335
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 5
+}
+
+# Test 32-bit equality
+export function w $test_eq() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+
+    # Store same value to both
+    storel 123456789, %a
+    storel 123456789, %b
+
+    %va =l loadl %a
+    %vb =l loadl %b
+    %eq =w ceql %va, %vb
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 6
+}
+
+# Test 32-bit inequality
+export function w $test_ne() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+
+    # Store different values
+    storel 100000, %a
+    storel 200000, %b
+
+    %va =l loadl %a
+    %vb =l loadl %b
+    %ne =w cnel %va, %vb
+    jnz %ne, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 7
+}
+
+# Test 32-bit signed less than
+export function w $test_slt() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+
+    # Store 100000 < 200000
+    storel 100000, %a
+    storel 200000, %b
+
+    %va =l loadl %a
+    %vb =l loadl %b
+    %lt =w csltl %va, %vb
+    jnz %lt, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 8
+}
+
+# Test 32-bit signed greater than
+export function w $test_sgt() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+
+    # Store 200000 > 100000
+    storel 200000, %a
+    storel 100000, %b
+
+    %va =l loadl %a
+    %vb =l loadl %b
+    %gt =w csgtl %va, %vb
+    jnz %gt, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 9
+}
+
+# Test 32-bit left shift
+export function w $test_shl() {
+@start
+    %a =l alloc4 4
+    %c =l alloc4 4
+
+    # Store 1 to a
+    storel 1, %a
+
+    # c = a << 20 = 0x100000 = 1048576
+    %va =l loadl %a
+    %res =l shl %va, 20
+    storel %res, %c
+
+    # Check result
+    %vc =l loadl %c
+    %eq =w ceql %vc, 1048576
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 10
+}
+
+# Test 32-bit right shift
+export function w $test_shr() {
+@start
+    %a =l alloc4 4
+    %c =l alloc4 4
+
+    # Store 0x10000000 to a
+    storel 268435456, %a
+
+    # c = a >> 8 = 0x100000 = 1048576
+    %va =l loadl %a
+    %res =l shr %va, 8
+    storel %res, %c
+
+    # Check result
+    %vc =l loadl %c
+    %eq =w ceql %vc, 1048576
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 11
+}
+
+# Main test runner
+export function w $test() {
+@start
+    %r1 =w call $test_add()
+    %c1 =w ceqw %r1, 0
+    jnz %c1, @t2, @fail
+
+@t2
+    %r2 =w call $test_sub()
+    %c2 =w ceqw %r2, 0
+    jnz %c2, @t3, @fail
+
+@t3
+    %r3 =w call $test_mul()
+    %c3 =w ceqw %r3, 0
+    jnz %c3, @t4, @fail
+
+@t4
+    %r4 =w call $test_and()
+    %c4 =w ceqw %r4, 0
+    jnz %c4, @t5, @fail
+
+@t5
+    %r5 =w call $test_or()
+    %c5 =w ceqw %r5, 0
+    jnz %c5, @t6, @fail
+
+@t6
+    %r6 =w call $test_eq()
+    %c6 =w ceqw %r6, 0
+    jnz %c6, @t7, @fail
+
+@t7
+    %r7 =w call $test_ne()
+    %c7 =w ceqw %r7, 0
+    jnz %c7, @t8, @fail
+
+@t8
+    %r8 =w call $test_slt()
+    %c8 =w ceqw %r8, 0
+    jnz %c8, @t9, @fail
+
+@t9
+    %r9 =w call $test_sgt()
+    %c9 =w ceqw %r9, 0
+    jnz %c9, @t10, @fail
+
+@t10
+    %r10 =w call $test_shl()
+    %c10 =w ceqw %r10, 0
+    jnz %c10, @t11, @fail
+
+@t11
+    %r11 =w call $test_shr()
+    %c11 =w ceqw %r11, 0
+    jnz %c11, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 1
+}
+
+# >>> driver
+# extern int test(void);
+# int main() { return test(); }
+# <<<
