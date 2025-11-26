@@ -1107,6 +1107,62 @@ expr(Node *n)
 		}
 		break;
 
+	case 'G':
+		/* _Generic: compile-time type selection
+		 * The controlling expression's type is determined without
+		 * integer promotion, so we need to check the underlying type.
+		 */
+		{
+			Node *assoc;
+			Node *default_assoc = 0;
+			Node *matched = 0;
+			unsigned ctrl_type;
+
+			/* Get the original type of the controlling expression
+			 * For variables, use the declared type (not promoted type)
+			 */
+			if (n->l->op == 'V' || (n->l->op == 0 && n->l->l && n->l->l->u.v[0])) {
+				/* Variable reference - get declared type */
+				Symb *sv = varget(n->l->u.v);
+				if (sv) {
+					ctrl_type = sv->ctyp;
+				} else {
+					/* Unknown variable - evaluate to get type */
+					Symb ctrl = expr(n->l);
+					ctrl_type = ctrl.ctyp;
+				}
+			} else {
+				/* Expression - evaluate to get type */
+				Symb ctrl = expr(n->l);
+				ctrl_type = ctrl.ctyp;
+			}
+
+			/* Search through associations for matching type */
+			for (assoc = n->r; assoc; assoc = assoc->r) {
+				int assoc_type = assoc->u.n;
+				if (assoc_type == -1) {
+					/* Default association */
+					default_assoc = assoc;
+				} else if ((unsigned)assoc_type == ctrl_type) {
+					/* Exact type match */
+					matched = assoc;
+					break;
+				}
+			}
+
+			/* Use matched type, or default, or error */
+			if (!matched) {
+				if (default_assoc)
+					matched = default_assoc;
+				else
+					die("_Generic: no matching type and no default");
+			}
+
+			/* Evaluate the selected expression */
+			sr = expr(matched->l);
+		}
+		break;
+
 	case '@':
 		s0 = expr(n->l);
 		if (KIND(s0.ctyp) != PTR)
@@ -1980,7 +2036,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST VOLATILE TBOOL INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF ALIGNAS
+%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST VOLATILE TBOOL INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF ALIGNAS GENERIC
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 
@@ -2000,7 +2056,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %type <u> type
 %type <s> stmt stmts
-%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem
+%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc
 %token <u> TNAME
 
 %%
@@ -2716,6 +2772,32 @@ post: NUM
         Node *deref = mknode('@', $1, 0);  /* Dereference pointer */
         $$ = mknode('.', deref, $3);       /* Member access */
     }
+    | GENERIC '(' expr ',' generic_list ')' {
+        /* _Generic(controlling-expr, type1: expr1, ..., default: exprN)
+         * Node 'G' stores: l = controlling expr, r = association list
+         */
+        $$ = mknode('G', $3, $5);
+    }
+    ;
+
+generic_list: generic_assoc                     { $$ = $1; }
+            | generic_assoc ',' generic_list    { $1->r = $3; $$ = $1; }
+            ;
+
+generic_assoc: type ':' expr {
+        /* Type association: type: expression
+         * Node 'g' stores: u.n = type, l = expression, r = next (set later)
+         */
+        $$ = mknode('g', $3, 0);
+        $$->u.n = (int)$1;
+    }
+    | DEFAULT ':' expr {
+        /* Default association: default: expression
+         * Use -1 to indicate default
+         */
+        $$ = mknode('g', $3, 0);
+        $$->u.n = -1;
+    }
     ;
 
 arg0: arg1
@@ -2752,6 +2834,7 @@ yylex()
 		{ "_Static_assert", STATIC_ASSERT },
 		{ "_Alignof", ALIGNOF },
 		{ "_Alignas", ALIGNAS },
+		{ "_Generic", GENERIC },
 		{ "struct", STRUCT },
 		{ "union", UNION },
 		{ "enum", ENUM },
