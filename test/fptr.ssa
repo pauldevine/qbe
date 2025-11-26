@@ -1,0 +1,63 @@
+# Test indirect function calls (function pointers)
+# This tests calling a function through a pointer/temporary
+
+export function w $add(w %a, w %b) {
+@start
+	%r =w add %a, %b
+	ret %r
+}
+
+export function w $sub(w %a, w %b) {
+@start
+	%r =w sub %a, %b
+	ret %r
+}
+
+export function w $mul(w %a, w %b) {
+@start
+	%r =w mul %a, %b
+	ret %r
+}
+
+# Higher-order function: applies operation to two numbers
+export function w $apply(l %op, w %x, w %y) {
+@start
+	%r =w call %op(w %x, w %y)
+	ret %r
+}
+
+# Test function that uses function pointers
+export function w $test() {
+@start
+	# Test 1: indirect call to add (10 + 5 = 15)
+	%r1 =w call $apply(l $add, w 10, w 5)
+	%c1 =w ceqw %r1, 15
+	jnz %c1, @test2, @fail
+
+@test2
+	# Test 2: indirect call to sub (20 - 8 = 12)
+	%r2 =w call $apply(l $sub, w 20, w 8)
+	%c2 =w ceqw %r2, 12
+	jnz %c2, @test3, @fail
+
+@test3
+	# Test 3: indirect call to mul (6 * 7 = 42)
+	%r3 =w call $apply(l $mul, w 6, w 7)
+	%c3 =w ceqw %r3, 42
+	jnz %c3, @pass, @fail
+
+@pass
+	ret 0
+
+@fail
+	ret 1
+}
+
+# >>> driver
+# extern int add(int, int);
+# extern int sub(int, int);
+# extern int mul(int, int);
+# extern int apply(int (*)(int, int), int, int);
+# extern int test(void);
+# int main() { return test(); }
+# <<<
