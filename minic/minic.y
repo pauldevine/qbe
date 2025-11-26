@@ -26,7 +26,7 @@ enum { /* minic types */
 #define SHORT     (1 << 7)  /* Short flag for types */
 #define UNSIGNED  (1 << 6)  /* Unsigned flag for types */
 #define FLOAT     (1 << 5)  /* Float flag for types (float=INT|FLOAT, double=LNG|FLOAT) */
-#define FAR       (1 << 4)  /* Far pointer flag (32-bit segment:offset) */
+#define FAR       (1 << 24) /* Far pointer flag (32-bit segment:offset) - bit 24 to avoid conflict with IDIR encoding */
 #define IDIR(x) (((x) << 3) + PTR)
 #define IDIR_FAR(x) ((((x) << 3) + PTR) | FAR)  /* Far pointer to type */
 #define FUNC(x) (((x) << 3) + FUN)
