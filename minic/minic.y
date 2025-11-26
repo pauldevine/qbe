@@ -140,6 +140,7 @@ int nstruct = 0;
 int curstruct = -1;  /* Index of struct currently being defined */
 int parentstruct = -1;  /* Parent struct for anonymous members */
 int typedefanoncount = 0;  /* Counter for anonymous typedef structs/unions */
+int clit = 0;  /* Counter for compound literal temporaries */
 
 void
 die(char *s)
@@ -466,6 +467,17 @@ irtyp(unsigned ctyp)
 	if (ctyp & SHORT) return 'h';
 	if (SIZE(ctyp) == 8) return 'l';
 	return 'w';
+}
+
+/* Return QBE alignment for alloc instruction (4, 8, or 16) */
+int
+iralign(unsigned ctyp)
+{
+	int s = SIZE(ctyp);
+	if (s <= 4) return 4;
+	if (s <= 8) return 8;
+	/* For larger types, use 4-byte alignment (struct members are typically 4-byte aligned) */
+	return 4;
 }
 
 void
@@ -896,6 +908,127 @@ expr(Node *n)
 		sr.t = Glo;
 		sr.u.n = n->u.n;
 		sr.ctyp = IDIR(INT);
+		break;
+
+	case 'L':
+		/* Compound literal: (type){ initializer }
+		 * Allocate temporary storage, initialize it, return value
+		 */
+		{
+			unsigned ctyp = (unsigned)n->u.n;
+			int s = SIZE(ctyp);
+			int clitnum = clit++;
+			Node *init;
+			int i;
+
+			/* Allocate temporary storage */
+			fprintf(of, "\t%%_clit%d =l alloc%d %d\n", clitnum, iralign(ctyp), s);
+
+			if (KIND(ctyp) == STRUCT_T || KIND(ctyp) == UNION_T) {
+				/* Struct/union initialization */
+				int sidx = DREF(ctyp);
+				init = n->l;
+				i = 0;
+
+				/* Zero-initialize first */
+				for (int j = 0; j < s; j += 4) {
+					if (j == 0)
+						fprintf(of, "\tstorew 0, %%_clit%d\n", clitnum);
+					else {
+						fprintf(of, "\t%%t%d =l add %%_clit%d, %d\n", tmp, clitnum, j);
+						fprintf(of, "\tstorew 0, %%t%d\n", tmp);
+						tmp++;
+					}
+				}
+
+				/* Initialize each member from initlist */
+				while (init && i < structh[sidx].nmembers) {
+					struct Member *m = &structh[sidx].members[i];
+					Symb val = expr(init->l);
+
+					/* Compute member address */
+					if (m->offset > 0) {
+						fprintf(of, "\t%%t%d =l add %%_clit%d, %d\n", tmp, clitnum, m->offset);
+						fprintf(of, "\tstore%c ", irtyp(m->ctyp));
+						psymb(val);
+						fprintf(of, ", %%t%d\n", tmp);
+						tmp++;
+					} else {
+						fprintf(of, "\tstore%c ", irtyp(m->ctyp));
+						psymb(val);
+						fprintf(of, ", %%_clit%d\n", clitnum);
+					}
+
+					init = init->r;
+					i++;
+				}
+
+				/* For structs, load the struct value (like struct variables) */
+				sr.t = Tmp;
+				sr.u.n = tmp++;
+				sr.ctyp = ctyp;
+				fprintf(of, "\t");
+				psymb(sr);
+				fprintf(of, " =%c load%c %%_clit%d\n", irtyp(ctyp), irtyp(ctyp), clitnum);
+			} else if (KIND(ctyp) == PTR) {
+				/* Array compound literal - initialize elements */
+				unsigned elemtyp = DREF(ctyp);
+				int elems = SIZE(elemtyp);
+				init = n->l;
+				i = 0;
+
+				while (init) {
+					Symb val = expr(init->l);
+					if (i == 0) {
+						fprintf(of, "\tstore%c ", irtyp(elemtyp));
+						psymb(val);
+						fprintf(of, ", %%_clit%d\n", clitnum);
+					} else {
+						fprintf(of, "\t%%t%d =l add %%_clit%d, %d\n", tmp, clitnum, i * elems);
+						fprintf(of, "\tstore%c ", irtyp(elemtyp));
+						psymb(val);
+						fprintf(of, ", %%t%d\n", tmp);
+						tmp++;
+					}
+					init = init->r;
+					i++;
+				}
+
+				/* For arrays, return the address as a pointer */
+				sr.t = Tmp;
+				sr.u.n = tmp++;
+				sr.ctyp = ctyp;
+				fprintf(of, "\t");
+				psymb(sr);
+				fprintf(of, " =l copy %%_clit%d\n", clitnum);
+			} else {
+				/* Scalar compound literal - store and load value */
+				char t = irtyp(ctyp);
+				init = n->l;
+				if (init) {
+					Symb val = expr(init->l);
+					fprintf(of, "\tstore%c ", t);
+					psymb(val);
+					fprintf(of, ", %%_clit%d\n", clitnum);
+				}
+
+				/* Load the scalar value (QBE doesn't support byte/halfword temps) */
+				sr.t = Tmp;
+				sr.u.n = tmp++;
+				sr.ctyp = ctyp;
+				fprintf(of, "\t");
+				psymb(sr);
+				if (t == 'b' || t == 'h') {
+					/* Byte/halfword loads go into words */
+					if (ISUNSIGNED(ctyp))
+						fprintf(of, " =w loadu%c %%_clit%d\n", t, clitnum);
+					else
+						fprintf(of, " =w loads%c %%_clit%d\n", t, clitnum);
+				} else {
+					fprintf(of, " =%c load%c %%_clit%d\n", t, t, clitnum);
+				}
+			}
+		}
 		break;
 
 	case 'C':
@@ -1366,6 +1499,75 @@ lval(Node *n)
 		if (!varget(n->u.v))
 			die("undefined variable");
 		sr = *varget(n->u.v);
+		break;
+	case 'L':
+		/* Compound literal as lvalue - allocate and initialize, return address */
+		{
+			unsigned ctyp = (unsigned)n->u.n;
+			int s = SIZE(ctyp);
+			int clitnum = clit++;
+			Node *init;
+			int i;
+
+			/* Allocate temporary storage */
+			fprintf(of, "\t%%_clit%d =l alloc%d %d\n", clitnum, iralign(ctyp), s);
+
+			if (KIND(ctyp) == STRUCT_T || KIND(ctyp) == UNION_T) {
+				/* Struct/union initialization */
+				int sidx = DREF(ctyp);
+				init = n->l;
+				i = 0;
+
+				/* Zero-initialize first */
+				for (int j = 0; j < s; j += 4) {
+					if (j == 0)
+						fprintf(of, "\tstorew 0, %%_clit%d\n", clitnum);
+					else {
+						fprintf(of, "\t%%t%d =l add %%_clit%d, %d\n", tmp, clitnum, j);
+						fprintf(of, "\tstorew 0, %%t%d\n", tmp);
+						tmp++;
+					}
+				}
+
+				/* Initialize each member from initlist */
+				while (init && i < structh[sidx].nmembers) {
+					struct Member *m = &structh[sidx].members[i];
+					Symb val = expr(init->l);
+
+					if (m->offset > 0) {
+						fprintf(of, "\t%%t%d =l add %%_clit%d, %d\n", tmp, clitnum, m->offset);
+						fprintf(of, "\tstore%c ", irtyp(m->ctyp));
+						psymb(val);
+						fprintf(of, ", %%t%d\n", tmp);
+						tmp++;
+					} else {
+						fprintf(of, "\tstore%c ", irtyp(m->ctyp));
+						psymb(val);
+						fprintf(of, ", %%_clit%d\n", clitnum);
+					}
+
+					init = init->r;
+					i++;
+				}
+			} else {
+				/* Scalar initialization */
+				init = n->l;
+				if (init) {
+					Symb val = expr(init->l);
+					fprintf(of, "\tstore%c ", irtyp(ctyp));
+					psymb(val);
+					fprintf(of, ", %%_clit%d\n", clitnum);
+				}
+			}
+
+			/* Return address as lvalue */
+			sr.t = Tmp;
+			sr.u.n = tmp++;
+			sr.ctyp = ctyp;
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =l copy %%_clit%d\n", clitnum);
+		}
 		break;
 	case '@':
 		sr = expr(n->l);
@@ -1961,6 +2163,7 @@ init:
 {
 	varclr();
 	tmp = 0;
+	clit = 0;
 };
 
 inlineopt: INLINE
@@ -2004,7 +2207,7 @@ prot: IDENT '(' par0 ')'
 	for (t=0, n=$3; n; t++, n=n->r) {
 		s = varget(n->u.v);
 		m = SIZE(s->ctyp);
-		fprintf(of, "\t%%%s =l alloc%d %d\n", n->u.v, m, m);
+		fprintf(of, "\t%%%s =l alloc%d %d\n", n->u.v, iralign(s->ctyp), m);
 		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
 		fprintf(of, ", %%%s\n", n->u.v);
 	}
@@ -2046,7 +2249,7 @@ dcls:
 	v = $3->u.v;
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), s);
 
 	/* Zero-initialize struct/union for bitfield support */
 	if (KIND($2) == STRUCT_T || KIND($2) == UNION_T) {
@@ -2080,7 +2283,7 @@ dcls:
 	varadd(v, 0, $6, 0);
 	/* Emit comment about alignment requirement */
 	fprintf(of, "\t# _Alignas(%d) for %%%s\n", align, v);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, align, s);
 }
     | dcls ALIGNAS '(' type ')' type IDENT ';'
 {
@@ -2108,7 +2311,7 @@ dcls:
 		KIND($4) == CHR ? "char" :
 		KIND($4) == LNG ? "long" : "int",
 		align, v);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, align, s);
 }
     | dcls STATIC type IDENT ';'
 {
@@ -2120,7 +2323,7 @@ dcls:
 	v = $4->u.v;
 	s = SIZE($3);
 	varadd(v, 0, $3, 0);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($3), s);
 }
     | dcls EXTERN type IDENT ';'
 {
@@ -2132,7 +2335,7 @@ dcls:
 	v = $4->u.v;
 	s = SIZE($3);
 	varadd(v, 0, $3, 0);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($3), s);
 }
     | dcls type IDENT '[' NUM ']' ';'
 {
@@ -2147,7 +2350,7 @@ dcls:
 	s = SIZE($2);  /* element size */
 	total = s * n;
 	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, total);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), total);
 }
     | dcls type IDENT '[' NUM ']' '=' '{' initlist '}' ';'
 {
@@ -2162,7 +2365,7 @@ dcls:
 	s = SIZE($2);  /* element size */
 	total = s * n;
 	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, total);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), total);
 
 	/* Generate initialization code */
 	{
@@ -2273,7 +2476,7 @@ stmt: ';'                            { $$ = 0; }
         v = $2->u.v;
         s = SIZE($1);
         varadd(v, 0, $1, 0);
-        fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($1), s);
         $$ = 0;
     }
     | STATIC type IDENT ';'          {
@@ -2284,7 +2487,7 @@ stmt: ';'                            { $$ = 0; }
         v = $3->u.v;
         s = SIZE($2);
         varadd(v, 0, $2, 0);
-        fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), s);
         $$ = 0;
     }
     | EXTERN type IDENT ';'          {
@@ -2295,7 +2498,7 @@ stmt: ';'                            { $$ = 0; }
         v = $3->u.v;
         s = SIZE($2);
         varadd(v, 0, $2, 0);
-        fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), s);
         $$ = 0;
     }
     | STATIC_ASSERT '(' NUM ',' STR ')' ';' {
@@ -2322,7 +2525,7 @@ stmt: ';'                            { $$ = 0; }
         v = $4->u.v;
         s = SIZE($3);
         varadd(v, 0, $3, 0);
-        fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($3), s);
         init_expr = mknode('=', $4, $6);
         $$ = mkfor(init_expr, $8, $10, $12);
     }
@@ -2403,12 +2606,12 @@ post: NUM
         $$->u.n = align;
     }
     | '(' type ')' '{' initlist '}' {
-        /* Compound literal: (type){ initializer } - Simplified implementation */
-        /* For now, compound literals are not fully supported */
-        /* This placeholder prevents parse errors */
-        die("compound literals not yet fully implemented");
-        $$ = mknode('N', 0, 0);
-        $$->u.n = 0;
+        /* Compound literal: (type){ initializer }
+         * Creates a temporary with the given type and initializes it.
+         * Node 'L' stores: u.n = type, l = initlist
+         */
+        $$ = mknode('L', $5, 0);
+        $$->u.n = (int)$2;  /* Store type */
     }
     | '(' expr ')'        { $$ = $2; }
     | IDENT '(' arg0 ')'  { $$ = mknode('C', $1, $3); }
