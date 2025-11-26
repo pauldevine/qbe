@@ -150,6 +150,98 @@ static char *rname8[] = {
 	[RBX] = "bl",
 };
 
+/* Memory model names for comments */
+static char *memmodel_name[] = {
+	[Mflat]    = "flat",
+	[Mtiny]    = "tiny",
+	[Msmall]   = "small",
+	[Mmedium]  = "medium",
+	[Mcompact] = "compact",
+	[Mlarge]   = "large",
+	[Mhuge]    = "huge",
+};
+
+/* Emit memory model directive/comment at start of module
+ * This is called once at the start of code emission
+ */
+static int model_header_emitted = 0;
+
+static void
+emit_model_header(FILE *f)
+{
+	if (model_header_emitted)
+		return;
+	model_header_emitted = 1;
+
+	fprintf(f, "; Memory model: %s\n", memmodel_name[T.memmodel]);
+
+	switch (T.memmodel) {
+	case Mtiny:
+		/* Tiny model (.COM): Single 64KB segment for everything
+		 * Code starts at 100h (PSP is at 0-FFh)
+		 * CS = DS = ES = SS
+		 */
+		fprintf(f, "; Tiny model: .COM format, org 100h\n");
+		fprintf(f, ".model tiny\n");
+		fprintf(f, ".code\n");
+		fprintf(f, "org 100h\n");
+		break;
+
+	case Msmall:
+		/* Small model: Near code, near data
+		 * Code < 64KB, Data < 64KB
+		 * DS != CS, but SS = DS
+		 */
+		fprintf(f, "; Small model: near code, near data\n");
+		fprintf(f, ".model small\n");
+		fprintf(f, ".code\n");
+		break;
+
+	case Mmedium:
+		/* Medium model: Far code, near data
+		 * Code > 64KB (multiple segments), Data < 64KB
+		 * Uses CALL FAR and RETF
+		 */
+		fprintf(f, "; Medium model: far code, near data\n");
+		fprintf(f, ".model medium\n");
+		fprintf(f, ".code\n");
+		break;
+
+	case Mcompact:
+		/* Compact model: Near code, far data
+		 * Code < 64KB, Data > 64KB
+		 */
+		fprintf(f, "; Compact model: near code, far data\n");
+		fprintf(f, ".model compact\n");
+		fprintf(f, ".code\n");
+		break;
+
+	case Mlarge:
+		/* Large model: Far code, far data
+		 * Code > 64KB, Data > 64KB
+		 */
+		fprintf(f, "; Large model: far code, far data\n");
+		fprintf(f, ".model large\n");
+		fprintf(f, ".code\n");
+		break;
+
+	case Mhuge:
+		/* Huge model: Far code, far data, single items > 64KB
+		 * Like large, but arrays can exceed 64KB
+		 */
+		fprintf(f, "; Huge model: far code, far data, large arrays\n");
+		fprintf(f, ".model huge\n");
+		fprintf(f, ".code\n");
+		break;
+
+	default:
+		/* Flat model (non-8086) - just emit code section */
+		fprintf(f, ".text\n");
+		break;
+	}
+	fprintf(f, "\n");
+}
+
 static int64_t
 slot(Ref r, Fn *fn)
 {
@@ -2313,7 +2405,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		return;
 	}
 
-	/* Special handling for Ocall (function calls) */
+	/* Special handling for Ocall (near function calls) */
 	if (i->op == Ocall) {
 		Ref target = i->arg[0];
 
@@ -2339,6 +2431,37 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		} else {
 			/* Invalid call target - must load into register first */
 			die("invalid call target type (must be register or function name)");
+		}
+
+		return;
+	}
+
+	/* Special handling for Ocallfar (far function calls - inter-segment)
+	 * Used in medium/large/huge memory models where code spans multiple segments.
+	 * Far calls push both CS (code segment) and IP (instruction pointer) onto stack.
+	 */
+	if (i->op == Ocallfar) {
+		Ref target = i->arg[0];
+
+		if (rtype(target) == RTmp) {
+			/* Indirect far call through 32-bit pointer in memory or register pair
+			 * For now, we assume the far pointer is in a register pair or memory location
+			 * Format: call far [address] or call far seg:offset
+			 */
+			fprintf(f, "\tcall far word ptr [%s]\n", rname[target.val]);
+		} else if (rtype(target) == RCon) {
+			/* Direct far call to function */
+			Con *c = &fn->con[target.val];
+			if (c->type == CAddr) {
+				/* Far call with segment prefix - linker resolves the segment */
+				fprintf(f, "\tcall far ");
+				emitaddr(c, f);
+				fputc('\n', f);
+			} else {
+				die("far call with non-address constant");
+			}
+		} else {
+			die("invalid far call target type");
 		}
 
 		return;
@@ -2398,10 +2521,26 @@ i8086_emitfn(Fn *fn, FILE *f)
 	Blk *b;
 	Ins *i;
 
+	/* Emit memory model header (once per output file) */
+	emit_model_header(f);
+
 	/* Function header */
 	fprintf(f, "\n");
 	emitfnlnk(fn->name, &fn->lnk, f);
-	fprintf(f, "%s:\n", fn->name);
+
+	/* For MASM compatibility, emit proc directive with near/far attribute */
+	switch (T.memmodel) {
+	case Mmedium:
+	case Mlarge:
+	case Mhuge:
+		/* Far procedure - uses RETF */
+		fprintf(f, "%s proc far\n", fn->name);
+		break;
+	default:
+		/* Near procedure - uses RET */
+		fprintf(f, "%s proc near\n", fn->name);
+		break;
+	}
 
 	/* Function prologue */
 	fprintf(f, "\tpush bp\n");
@@ -2422,9 +2561,20 @@ i8086_emitfn(Fn *fn, FILE *f)
 		case Jret0:
 		case Jretw:
 		case Jretl:
+			/* Near return - for tiny/small memory models */
 			fprintf(f, "\tmov sp, bp\n");
 			fprintf(f, "\tpop bp\n");
 			fprintf(f, "\tret\n");
+			break;
+		case Jretf0:
+		case Jretfw:
+		case Jretfl:
+			/* Far return - for medium/large/huge memory models
+			 * RETF pops both IP and CS from stack (4 bytes total)
+			 */
+			fprintf(f, "\tmov sp, bp\n");
+			fprintf(f, "\tpop bp\n");
+			fprintf(f, "\tretf\n");
 			break;
 		case Jjmp:
 			if (b->s1 != b->link)
@@ -2493,4 +2643,7 @@ i8086_emitfn(Fn *fn, FILE *f)
 			break;
 		}
 	}
+
+	/* Function end directive for MASM compatibility */
+	fprintf(f, "%s endp\n", fn->name);
 }

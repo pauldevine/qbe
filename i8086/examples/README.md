@@ -78,6 +78,27 @@ Tests various arithmetic operations: addition, subtraction, multiplication.
 - Multiple arithmetic operations
 - Register allocation for temporaries
 
+### 10_memory_models.ssa
+Tests all six 8086 memory models (tiny, small, medium, compact, large, huge).
+
+**Key features:**
+- Demonstrates near vs far procedure calls
+- Shows parameter offset differences between near and far calls
+- Works correctly with all memory model flags
+
+**Usage:**
+```bash
+# Near code models (tiny/small/compact) - use RET
+./qbe -t i8086 -m tiny i8086/examples/10_memory_models.ssa
+./qbe -t i8086 -m small i8086/examples/10_memory_models.ssa
+./qbe -t i8086 -m compact i8086/examples/10_memory_models.ssa
+
+# Far code models (medium/large/huge) - use RETF
+./qbe -t i8086 -m medium i8086/examples/10_memory_models.ssa
+./qbe -t i8086 -m large i8086/examples/10_memory_models.ssa
+./qbe -t i8086 -m huge i8086/examples/10_memory_models.ssa
+```
+
 ## Assembly Output Format
 
 The i8086 backend generates MASM/NASM compatible assembly with:
