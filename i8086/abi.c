@@ -104,6 +104,14 @@ selpar(Fn *fn, Ins *i0, Ins *i1)
 				/* 32-bit parameter (takes 4 bytes = 2 words) */
 				emit(Oload, Kl, i->to, SLOT(s), R);
 				s -= 2;  /* Next parameter is 4 bytes higher */
+			} else if (i->cls == Ks) {
+				/* Float parameter (4 bytes) - load from stack */
+				emit(Oload, Ks, i->to, SLOT(s), R);
+				s -= 2;  /* Float takes 4 bytes = 2 words */
+			} else if (i->cls == Kd) {
+				/* Double parameter (8 bytes) - load from stack */
+				emit(Oload, Kd, i->to, SLOT(s), R);
+				s -= 4;  /* Double takes 8 bytes = 4 words */
 			} else {
 				/* Byte/half-word parameters - still take at least 2 bytes on stack */
 				emit(Oload, i->cls, i->to, SLOT(s), R);
@@ -147,6 +155,10 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 		/* Each argument takes at least 2 bytes (one word) */
 		if (i->cls == Kl) {
 			stk += 4;  /* 32-bit long takes 4 bytes */
+		} else if (i->cls == Ks) {
+			stk += 4;  /* float takes 4 bytes */
+		} else if (i->cls == Kd) {
+			stk += 8;  /* double takes 8 bytes */
 		} else {
 			stk += 2;  /* 16-bit word or smaller */
 		}
@@ -218,7 +230,11 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 			if (req(i->arg[0], R))
 				continue;
 
-			int arg_size = (i->cls == Kl) ? 4 : 2;
+			int arg_size;
+			if (i->cls == Kl) arg_size = 4;
+			else if (i->cls == Ks) arg_size = 4;
+			else if (i->cls == Kd) arg_size = 8;
+			else arg_size = 2;
 
 			/* Store this argument at [bp - off]
 			 * Create a memory reference with BP as base and negative offset
@@ -233,8 +249,13 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 			};
 			Ref mem_ref = MEM(midx);
 
-			/* Emit store: mov [bp-off], arg_value */
-			emit(Ostorew, Kw, R, i->arg[0], mem_ref);
+			/* Emit store based on type */
+			if (i->cls == Ks)
+				emit(Ostores, Ks, R, i->arg[0], mem_ref);
+			else if (i->cls == Kd)
+				emit(Ostored, Kd, R, i->arg[0], mem_ref);
+			else
+				emit(Ostorew, Kw, R, i->arg[0], mem_ref);
 
 			off -= arg_size;  /* Move to next argument position */
 		}

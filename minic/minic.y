@@ -120,7 +120,9 @@ enum { NMember = 256 };
 struct Member {
 	char name[NString];
 	unsigned ctyp;
-	int offset;
+	int offset;      /* Byte offset within struct */
+	int bitwidth;    /* Bit width (0 = not a bitfield) */
+	int bitoffset;   /* Bit offset within the storage unit */
 };
 
 /* Struct/union definition table */
@@ -131,6 +133,8 @@ struct {
 	int nmembers;
 	struct Member members[16];  /* Max 16 members per struct */
 	int size;
+	int curbfoffset;  /* Current bit offset for bitfield packing */
+	int curbfbase;    /* Byte offset of current bitfield storage unit */
 } structh[NStruct];
 int nstruct = 0;
 int curstruct = -1;  /* Index of struct currently being defined */
@@ -226,6 +230,8 @@ structadd(char *name, int isunion)
 	structh[idx].isunion = isunion;
 	structh[idx].nmembers = 0;
 	structh[idx].size = 0;
+	structh[idx].curbfoffset = 0;  /* No bitfield in progress */
+	structh[idx].curbfbase = 0;
 	return idx;
 }
 
@@ -243,9 +249,15 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 		if (strcmp(structh[sidx].members[i].name, name) == 0)
 			die("duplicate member name");
 
+	/* Non-bitfield member resets bitfield packing state */
+	structh[sidx].curbfoffset = 0;
+	structh[sidx].curbfbase = 0;
+
 	m = &structh[sidx].members[structh[sidx].nmembers];
 	strcpy(m->name, name);
 	m->ctyp = ctyp;
+	m->bitwidth = 0;    /* Not a bitfield */
+	m->bitoffset = 0;
 
 	if (structh[sidx].isunion) {
 		/* Union: all members at offset 0 */
@@ -258,6 +270,55 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 		m->offset = structh[sidx].size;
 		structh[sidx].size += SIZE(ctyp);
 	}
+
+	structh[sidx].nmembers++;
+}
+
+/* Add a bitfield member to a struct */
+void
+structaddbitfield(int sidx, char *name, unsigned ctyp, int width)
+{
+	int i;
+	struct Member *m;
+	int unitsize;      /* Size of storage unit in bits */
+	int unitbytes;     /* Size of storage unit in bytes */
+
+	if (structh[sidx].nmembers >= 16)
+		die("too many members in struct/union");
+
+	/* Check for duplicate member names */
+	for (i = 0; i < structh[sidx].nmembers; i++)
+		if (strcmp(structh[sidx].members[i].name, name) == 0)
+			die("duplicate member name");
+
+	/* Calculate storage unit size based on declared type */
+	unitbytes = SIZE(ctyp);
+	unitsize = unitbytes * 8;
+
+	/* Validate width */
+	if (width <= 0)
+		die("bitfield width must be positive");
+	if (width > unitsize)
+		die("bitfield width exceeds type size");
+
+	/* Check if this bitfield fits in current storage unit */
+	if (structh[sidx].curbfoffset == 0 ||
+	    structh[sidx].curbfoffset + width > unitsize) {
+		/* Start a new storage unit */
+		structh[sidx].curbfbase = structh[sidx].size;
+		structh[sidx].curbfoffset = 0;
+		structh[sidx].size += unitbytes;
+	}
+
+	m = &structh[sidx].members[structh[sidx].nmembers];
+	strcpy(m->name, name);
+	m->ctyp = ctyp;
+	m->offset = structh[sidx].curbfbase;  /* Points to storage unit base */
+	m->bitwidth = width;
+	m->bitoffset = structh[sidx].curbfoffset;
+
+	/* Advance bit offset for next bitfield */
+	structh[sidx].curbfoffset += width;
 
 	structh[sidx].nmembers++;
 }
@@ -392,6 +453,11 @@ varget(char *v)
 char
 irtyp(unsigned ctyp)
 {
+	/* Check pointer/function types first - they are always 'l' (64-bit) */
+	/* This must come before ISFLOAT check because type composition can */
+	/* accidentally set the FLOAT bit */
+	if (KIND(ctyp) == PTR || KIND(ctyp) == FUN)
+		return 'l';
 	if (ISFLOAT(ctyp)) {
 		if (KIND(ctyp) == LNG) return 'd';  /* double */
 		return 's';  /* float */
@@ -630,10 +696,43 @@ call(Node *n, Symb *sr)
 	Node *a;
 	char *f;
 	unsigned ft;
+	Symb *sv;
 
 	f = n->l->u.v;
-	if (varget(f)) {
-		ft = varget(f)->ctyp;
+	sv = varget(f);
+	if (sv) {
+		ft = sv->ctyp;
+		/* Check if this is a function pointer - if so, do indirect call */
+		if (KIND(ft) == PTR && KIND(DREF(ft)) == FUN) {
+			/* Function pointer: generate indirect call */
+			Symb fptr;
+			unsigned fptr_type = DREF(ft);  /* FUN(return_type) */
+			sr->ctyp = DREF(fptr_type);     /* return_type */
+
+			/* Load the function pointer value */
+			fptr.t = Tmp;
+			fptr.u.n = tmp++;
+			fptr.ctyp = ft;
+			load(fptr, *sv);
+
+			/* Evaluate all arguments */
+			for (a=n->r; a; a=a->r)
+				a->u.s = expr(a->l);
+
+			/* Generate indirect call */
+			fprintf(of, "\t");
+			psymb(*sr);
+			fprintf(of, " =%c call ", irtyp(sr->ctyp));
+			psymb(fptr);
+			fprintf(of, "(");
+			for (a=n->r; a; a=a->r) {
+				fprintf(of, "%c ", irtyp(a->u.s.ctyp));
+				psymb(a->u.s);
+				fprintf(of, ", ");
+			}
+			fprintf(of, "...)\n");
+			return;
+		}
 		if (KIND(ft) != FUN)
 			die("invalid call");
 	} else
@@ -897,6 +996,37 @@ expr(Node *n)
 			sr.u.n = tmp++;
 			sr.ctyp = m->ctyp;
 			load(sr, addr);
+
+			/* Handle bitfield extraction */
+			if (m->bitwidth > 0) {
+				Symb shifted, masked;
+				unsigned long bitmask;
+
+				/* Shift right to bring bits to position 0 */
+				if (m->bitoffset > 0) {
+					shifted.t = Tmp;
+					shifted.u.n = tmp++;
+					shifted.ctyp = m->ctyp;
+					fprintf(of, "\t");
+					psymb(shifted);
+					fprintf(of, " =%c shr ", irtyp(m->ctyp));
+					psymb(sr);
+					fprintf(of, ", %d\n", m->bitoffset);
+					sr = shifted;
+				}
+
+				/* Mask to extract only the bitfield bits */
+				bitmask = (1UL << m->bitwidth) - 1;
+				masked.t = Tmp;
+				masked.u.n = tmp++;
+				masked.ctyp = m->ctyp;
+				fprintf(of, "\t");
+				psymb(masked);
+				fprintf(of, " =%c and ", irtyp(m->ctyp));
+				psymb(sr);
+				fprintf(of, ", %lu\n", bitmask);
+				sr = masked;
+			}
 		}
 		break;
 
@@ -923,6 +1053,123 @@ expr(Node *n)
 		break;
 
 	case '=':
+		/* Check for bitfield assignment */
+		if (n->l->op == '.') {
+			/* Get the struct and member info */
+			Symb s_struct = lval(n->l->l);
+			if (KIND(s_struct.ctyp) == STRUCT_T || KIND(s_struct.ctyp) == UNION_T) {
+				int sidx = DREF(s_struct.ctyp);
+				char *mname = n->l->r->u.v;
+				int i;
+				struct Member *m = NULL;
+
+				/* Find member */
+				for (i = 0; i < structh[sidx].nmembers; i++) {
+					if (strcmp(structh[sidx].members[i].name, mname) == 0) {
+						m = &structh[sidx].members[i];
+						break;
+					}
+				}
+
+				if (m && m->bitwidth > 0) {
+					/* Bitfield assignment - read-modify-write */
+					Symb addr, oldval, newval, clearmask, shifted, merged;
+					unsigned long mask, invmask;
+
+					/* Get the storage unit address */
+					if (m->offset > 0) {
+						addr.t = Tmp;
+						addr.u.n = tmp++;
+						addr.ctyp = IDIR(m->ctyp);
+						fprintf(of, "\t");
+						psymb(addr);
+						fprintf(of, " =l add ");
+						psymb(s_struct);
+						fprintf(of, ", %d\n", m->offset);
+					} else {
+						addr = s_struct;
+						addr.ctyp = IDIR(m->ctyp);
+					}
+
+					/* Evaluate RHS */
+					s0 = expr(n->r);
+
+					/* Load current storage unit value */
+					oldval.t = Tmp;
+					oldval.u.n = tmp++;
+					oldval.ctyp = m->ctyp;
+					load(oldval, addr);
+
+					/* Create masks */
+					mask = (1UL << m->bitwidth) - 1;
+					invmask = ~(mask << m->bitoffset);
+					/* Truncate invmask to type size */
+					if (SIZE(m->ctyp) == 1)
+						invmask &= 0xFF;
+					else if (SIZE(m->ctyp) == 2)
+						invmask &= 0xFFFF;
+					else if (SIZE(m->ctyp) == 4)
+						invmask &= 0xFFFFFFFF;
+
+					/* Clear old bitfield bits: oldval & ~(mask << offset) */
+					clearmask.t = Tmp;
+					clearmask.u.n = tmp++;
+					clearmask.ctyp = m->ctyp;
+					fprintf(of, "\t");
+					psymb(clearmask);
+					fprintf(of, " =%c and ", irtyp(m->ctyp));
+					psymb(oldval);
+					fprintf(of, ", %lu\n", invmask);
+
+					/* Mask the new value: newval & mask */
+					newval.t = Tmp;
+					newval.u.n = tmp++;
+					newval.ctyp = m->ctyp;
+					fprintf(of, "\t");
+					psymb(newval);
+					fprintf(of, " =%c and ", irtyp(m->ctyp));
+					psymb(s0);
+					fprintf(of, ", %lu\n", mask);
+
+					/* Shift new value to position: newval << offset */
+					if (m->bitoffset > 0) {
+						shifted.t = Tmp;
+						shifted.u.n = tmp++;
+						shifted.ctyp = m->ctyp;
+						fprintf(of, "\t");
+						psymb(shifted);
+						fprintf(of, " =%c shl ", irtyp(m->ctyp));
+						psymb(newval);
+						fprintf(of, ", %d\n", m->bitoffset);
+					} else {
+						shifted = newval;
+					}
+
+					/* Merge: cleared | shifted */
+					merged.t = Tmp;
+					merged.u.n = tmp++;
+					merged.ctyp = m->ctyp;
+					fprintf(of, "\t");
+					psymb(merged);
+					fprintf(of, " =%c or ", irtyp(m->ctyp));
+					psymb(clearmask);
+					fprintf(of, ", ");
+					psymb(shifted);
+					fprintf(of, "\n");
+
+					/* Store back */
+					fprintf(of, "\tstore%c ", irtyp(m->ctyp));
+					psymb(merged);
+					fprintf(of, ", ");
+					psymb(addr);
+					fprintf(of, "\n");
+
+					sr = s0;  /* Assignment returns the assigned value */
+					break;
+				}
+			}
+		}
+
 		s0 = expr(n->r);
 		s1 = lval(n->l);
 		sr = s0;
@@ -1539,6 +1786,12 @@ tdcl: TYPEDEF type IDENT ';'
     | TYPEDEF typedefenum    {}
     | TYPEDEF typedefstruct  {}
     | TYPEDEF typedefunion   {}
+    | TYPEDEF type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
+{
+	/* Function pointer typedef: typedef int (*callback_t)(int, int); */
+	unsigned fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
+	typhadd($5->u.v, fptr_type);
+}
     ;
 
 typedefenum: typedefenumstart enums '}' IDENT ';'
@@ -1631,6 +1884,10 @@ smembers:
 {
 	structaddmember(curstruct, $3->u.v, $2);
 }
+        | smembers type IDENT ':' NUM ';'
+{
+	structaddbitfield(curstruct, $3->u.v, $2, $5->u.n);
+}
         | smembers anonstruct
         | smembers anonunion
         ;
@@ -1677,6 +1934,10 @@ anonmembers:
         | anonmembers type IDENT ';'
 {
 	structaddmember(curstruct, $3->u.v, $2);
+}
+        | anonmembers type IDENT ':' NUM ';'
+{
+	structaddbitfield(curstruct, $3->u.v, $2, $5->u.n);
 }
         ;
 
@@ -1754,6 +2015,16 @@ par0: par1
     ;
 par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
     | type IDENT          { $$ = param($2->u.v, $1, 0); }
+    | type '(' '*' IDENT ')' '(' fptpar0 ')' ',' par1 {
+        /* Function pointer parameter: int (*callback)(int, int), ... */
+        unsigned fptr_type = IDIR(FUNC($1));
+        $$ = param($4->u.v, fptr_type, $10);
+    }
+    | type '(' '*' IDENT ')' '(' fptpar0 ')' {
+        /* Function pointer parameter: int (*callback)(int, int) */
+        unsigned fptr_type = IDIR(FUNC($1));
+        $$ = param($4->u.v, fptr_type, 0);
+    }
     ;
 
 fptpar0: fptpar1
@@ -1767,7 +2038,7 @@ fptpar1: type ',' fptpar1 { $$ = 0; }
 dcls:
     | dcls type IDENT ';'
 {
-	int s;
+	int s, i;
 	char *v;
 
 	if ($2 == NIL)
@@ -1776,6 +2047,18 @@ dcls:
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, s, s);
+
+	/* Zero-initialize struct/union for bitfield support */
+	if (KIND($2) == STRUCT_T || KIND($2) == UNION_T) {
+		/* Store 0 to each word of the struct */
+		for (i = 0; i < s; i += 4) {
+			if (i == 0)
+				fprintf(of, "\tstorew 0, %%%s\n", v);
+			else
+				fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n\tstorew 0, %%_zinit%d\n", tmp, v, i, tmp);
+			tmp++;
+		}
+	}
 }
     | dcls ALIGNAS '(' NUM ')' type IDENT ';'
 {

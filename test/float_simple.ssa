@@ -1,0 +1,329 @@
+# Simple Floating Point Test for i8086 8087 FPU Support
+# Returns 0 if tests pass, non-zero on failure
+
+# Test float addition: 3.0 + 2.0 = 5.0
+# We test by converting to int and checking (5 == 5)
+export function w $test_add_s() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+    %c =l alloc4 4
+
+    # Store integer 3 and 2, convert to float
+    storew 3, %a
+    storew 2, %b
+
+    %ia =w loadw %a
+    %fa =s swtof %ia
+    stores %fa, %a
+
+    %ib =w loadw %b
+    %fb =s swtof %ib
+    stores %fb, %b
+
+    # c = a + b
+    %va =s load %a
+    %vb =s load %b
+    %vc =s add %va, %vb
+    stores %vc, %c
+
+    # Convert result back to int
+    %vr =s load %c
+    %ir =w stosi %vr
+
+    # Check if result is 5
+    %eq =w ceqw %ir, 5
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 1
+}
+
+# Test float subtraction: 5.0 - 2.0 = 3.0
+export function w $test_sub_s() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+    %c =l alloc4 4
+
+    storew 5, %a
+    storew 2, %b
+
+    %ia =w loadw %a
+    %fa =s swtof %ia
+    stores %fa, %a
+
+    %ib =w loadw %b
+    %fb =s swtof %ib
+    stores %fb, %b
+
+    %va =s load %a
+    %vb =s load %b
+    %vc =s sub %va, %vb
+    stores %vc, %c
+
+    %vr =s load %c
+    %ir =w stosi %vr
+
+    %eq =w ceqw %ir, 3
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 2
+}
+
+# Test float multiplication: 3.0 * 4.0 = 12.0
+export function w $test_mul_s() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+    %c =l alloc4 4
+
+    storew 3, %a
+    storew 4, %b
+
+    %ia =w loadw %a
+    %fa =s swtof %ia
+    stores %fa, %a
+
+    %ib =w loadw %b
+    %fb =s swtof %ib
+    stores %fb, %b
+
+    %va =s load %a
+    %vb =s load %b
+    %vc =s mul %va, %vb
+    stores %vc, %c
+
+    %vr =s load %c
+    %ir =w stosi %vr
+
+    %eq =w ceqw %ir, 12
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 3
+}
+
+# Test float division: 12.0 / 4.0 = 3.0
+export function w $test_div_s() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+    %c =l alloc4 4
+
+    storew 12, %a
+    storew 4, %b
+
+    %ia =w loadw %a
+    %fa =s swtof %ia
+    stores %fa, %a
+
+    %ib =w loadw %b
+    %fb =s swtof %ib
+    stores %fb, %b
+
+    %va =s load %a
+    %vb =s load %b
+    %vc =s div %va, %vb
+    stores %vc, %c
+
+    %vr =s load %c
+    %ir =w stosi %vr
+
+    %eq =w ceqw %ir, 3
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 4
+}
+
+# Test float negation: -5.0
+export function w $test_neg_s() {
+@start
+    %a =l alloc4 4
+    %c =l alloc4 4
+
+    storew 5, %a
+
+    %ia =w loadw %a
+    %fa =s swtof %ia
+    stores %fa, %a
+
+    %va =s load %a
+    %vc =s neg %va
+    stores %vc, %c
+
+    %vr =s load %c
+    %ir =w stosi %vr
+
+    # -5 as signed int
+    %eq =w ceqw %ir, -5
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 5
+}
+
+# Test int to float to int round trip
+export function w $test_conv() {
+@start
+    %a =l alloc4 4
+    %f =l alloc4 4
+
+    storew 42, %a
+
+    # Convert int to float
+    %ia =w loadw %a
+    %fa =s swtof %ia
+    stores %fa, %f
+
+    # Convert back to int
+    %vf =s load %f
+    %ir =w stosi %vf
+
+    %eq =w ceqw %ir, 42
+    jnz %eq, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 6
+}
+
+# Test float comparison: less than
+export function w $test_cmp_lt() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+
+    storew 2, %a
+    storew 5, %b
+
+    %ia =w loadw %a
+    %fa =s swtof %ia
+    stores %fa, %a
+
+    %ib =w loadw %b
+    %fb =s swtof %ib
+    stores %fb, %b
+
+    %va =s load %a
+    %vb =s load %b
+
+    # 2.0 < 5.0 should be true
+    %lt =w clts %va, %vb
+    jnz %lt, @test2, @fail
+
+@test2
+    # 5.0 < 2.0 should be false
+    %lt2 =w clts %vb, %va
+    jnz %lt2, @fail, @pass
+
+@pass
+    ret 0
+
+@fail
+    ret 7
+}
+
+# Test float comparison: greater than
+export function w $test_cmp_gt() {
+@start
+    %a =l alloc4 4
+    %b =l alloc4 4
+
+    storew 5, %a
+    storew 2, %b
+
+    %ia =w loadw %a
+    %fa =s swtof %ia
+    stores %fa, %a
+
+    %ib =w loadw %b
+    %fb =s swtof %ib
+    stores %fb, %b
+
+    %va =s load %a
+    %vb =s load %b
+
+    # 5.0 > 2.0 should be true
+    %gt =w cgts %va, %vb
+    jnz %gt, @test2, @fail
+
+@test2
+    # 2.0 > 5.0 should be false
+    %gt2 =w cgts %vb, %va
+    jnz %gt2, @fail, @pass
+
+@pass
+    ret 0
+
+@fail
+    ret 8
+}
+
+# Main test function
+export function w $test() {
+@start
+    %r =w call $test_add_s()
+    %ok =w ceqw %r, 0
+    jnz %ok, @t2, @fail
+
+@t2
+    %r2 =w call $test_sub_s()
+    %ok2 =w ceqw %r2, 0
+    jnz %ok2, @t3, @fail
+
+@t3
+    %r3 =w call $test_mul_s()
+    %ok3 =w ceqw %r3, 0
+    jnz %ok3, @t4, @fail
+
+@t4
+    %r4 =w call $test_div_s()
+    %ok4 =w ceqw %r4, 0
+    jnz %ok4, @t5, @fail
+
+@t5
+    %r5 =w call $test_neg_s()
+    %ok5 =w ceqw %r5, 0
+    jnz %ok5, @t6, @fail
+
+@t6
+    %r6 =w call $test_conv()
+    %ok6 =w ceqw %r6, 0
+    jnz %ok6, @t7, @fail
+
+@t7
+    %r7 =w call $test_cmp_lt()
+    %ok7 =w ceqw %r7, 0
+    jnz %ok7, @t8, @fail
+
+@t8
+    %r8 =w call $test_cmp_gt()
+    %ok8 =w ceqw %r8, 0
+    jnz %ok8, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 1
+}
