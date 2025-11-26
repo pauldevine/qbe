@@ -1,0 +1,126 @@
+# Test bitfield operations using shift/mask patterns
+# This tests the backend's handling of shift and mask operations
+# which are used for bitfield implementation
+
+# Simulate writing to a 3-bit bitfield at offset 0
+# struct { int a:3; int b:4; int c:5; }
+# a at bits 0-2, b at bits 3-6, c at bits 7-11
+
+export function w $test_write_a() {
+@start
+    # Allocate and zero-init a word
+    %p =l alloc4 4
+    storew 0, %p
+
+    # Write value 5 to bits 0-2 (bitfield 'a')
+    %old =w loadw %p
+    %cleared =w and %old, 4294967288  # ~7
+    %newval =w and 5, 7               # mask value
+    %merged =w or %cleared, %newval
+    storew %merged, %p
+
+    # Read back and verify
+    %v =w loadw %p
+    %extracted =w and %v, 7
+    %eq =w ceqw %extracted, 5
+    jnz %eq, @pass, @fail
+@pass
+    ret 0
+@fail
+    ret 1
+}
+
+# Simulate writing to a 4-bit bitfield at offset 3
+export function w $test_write_b() {
+@start
+    %p =l alloc4 4
+    storew 0, %p
+
+    # Write value 10 to bits 3-6 (bitfield 'b')
+    %old =w loadw %p
+    %cleared =w and %old, 4294967175  # ~(0xF << 3) = ~120
+    %newval =w and 10, 15             # mask value
+    %shifted =w shl %newval, 3        # shift to position
+    %merged =w or %cleared, %shifted
+    storew %merged, %p
+
+    # Read back and verify
+    %v =w loadw %p
+    %shifted2 =w shr %v, 3
+    %extracted =w and %shifted2, 15
+    %eq =w ceqw %extracted, 10
+    jnz %eq, @pass, @fail
+@pass
+    ret 0
+@fail
+    ret 2
+}
+
+# Test that writing to one bitfield doesn't affect another
+export function w $test_independence() {
+@start
+    %p =l alloc4 4
+    storew 0, %p
+
+    # Write 5 to 'a' (bits 0-2)
+    %old1 =w loadw %p
+    %cleared1 =w and %old1, 4294967288
+    %v1 =w and 5, 7
+    %merged1 =w or %cleared1, %v1
+    storew %merged1, %p
+
+    # Write 10 to 'b' (bits 3-6)
+    %old2 =w loadw %p
+    %cleared2 =w and %old2, 4294967175
+    %v2 =w and 10, 15
+    %shifted2 =w shl %v2, 3
+    %merged2 =w or %cleared2, %shifted2
+    storew %merged2, %p
+
+    # Verify 'a' is still 5
+    %v =w loadw %p
+    %a =w and %v, 7
+    %eq_a =w ceqw %a, 5
+    jnz %eq_a, @check_b, @fail_a
+@check_b
+    # Verify 'b' is 10
+    %shifted3 =w shr %v, 3
+    %b =w and %shifted3, 15
+    %eq_b =w ceqw %b, 10
+    jnz %eq_b, @pass, @fail_b
+@pass
+    ret 0
+@fail_a
+    ret 3
+@fail_b
+    ret 4
+}
+
+# Main test function
+export function w $test() {
+@start
+    %r1 =w call $test_write_a()
+    %c1 =w ceqw %r1, 0
+    jnz %c1, @test2, @fail
+
+@test2
+    %r2 =w call $test_write_b()
+    %c2 =w ceqw %r2, 0
+    jnz %c2, @test3, @fail
+
+@test3
+    %r3 =w call $test_independence()
+    %c3 =w ceqw %r3, 0
+    jnz %c3, @pass, @fail
+
+@pass
+    ret 0
+
+@fail
+    ret 1
+}
+
+# >>> driver
+# extern int test(void);
+# int main() { return test(); }
+# <<<
