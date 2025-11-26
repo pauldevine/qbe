@@ -392,6 +392,11 @@ varget(char *v)
 char
 irtyp(unsigned ctyp)
 {
+	/* Check pointer/function types first - they are always 'l' (64-bit) */
+	/* This must come before ISFLOAT check because type composition can */
+	/* accidentally set the FLOAT bit */
+	if (KIND(ctyp) == PTR || KIND(ctyp) == FUN)
+		return 'l';
 	if (ISFLOAT(ctyp)) {
 		if (KIND(ctyp) == LNG) return 'd';  /* double */
 		return 's';  /* float */
@@ -630,10 +635,43 @@ call(Node *n, Symb *sr)
 	Node *a;
 	char *f;
 	unsigned ft;
+	Symb *sv;
 
 	f = n->l->u.v;
-	if (varget(f)) {
-		ft = varget(f)->ctyp;
+	sv = varget(f);
+	if (sv) {
+		ft = sv->ctyp;
+		/* Check if this is a function pointer - if so, do indirect call */
+		if (KIND(ft) == PTR && KIND(DREF(ft)) == FUN) {
+			/* Function pointer: generate indirect call */
+			Symb fptr;
+			unsigned fptr_type = DREF(ft);  /* FUN(return_type) */
+			sr->ctyp = DREF(fptr_type);     /* return_type */
+
+			/* Load the function pointer value */
+			fptr.t = Tmp;
+			fptr.u.n = tmp++;
+			fptr.ctyp = ft;
+			load(fptr, *sv);
+
+			/* Evaluate all arguments */
+			for (a=n->r; a; a=a->r)
+				a->u.s = expr(a->l);
+
+			/* Generate indirect call */
+			fprintf(of, "\t");
+			psymb(*sr);
+			fprintf(of, " =%c call ", irtyp(sr->ctyp));
+			psymb(fptr);
+			fprintf(of, "(");
+			for (a=n->r; a; a=a->r) {
+				fprintf(of, "%c ", irtyp(a->u.s.ctyp));
+				psymb(a->u.s);
+				fprintf(of, ", ");
+			}
+			fprintf(of, "...)\n");
+			return;
+		}
 		if (KIND(ft) != FUN)
 			die("invalid call");
 	} else
@@ -1539,6 +1577,12 @@ tdcl: TYPEDEF type IDENT ';'
     | TYPEDEF typedefenum    {}
     | TYPEDEF typedefstruct  {}
     | TYPEDEF typedefunion   {}
+    | TYPEDEF type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
+{
+	/* Function pointer typedef: typedef int (*callback_t)(int, int); */
+	unsigned fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
+	typhadd($5->u.v, fptr_type);
+}
     ;
 
 typedefenum: typedefenumstart enums '}' IDENT ';'
@@ -1754,6 +1798,16 @@ par0: par1
     ;
 par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
     | type IDENT          { $$ = param($2->u.v, $1, 0); }
+    | type '(' '*' IDENT ')' '(' fptpar0 ')' ',' par1 {
+        /* Function pointer parameter: int (*callback)(int, int), ... */
+        unsigned fptr_type = IDIR(FUNC($1));
+        $$ = param($4->u.v, fptr_type, $10);
+    }
+    | type '(' '*' IDENT ')' '(' fptpar0 ')' {
+        /* Function pointer parameter: int (*callback)(int, int) */
+        unsigned fptr_type = IDIR(FUNC($1));
+        $$ = param($4->u.v, fptr_type, 0);
+    }
     ;
 
 fptpar0: fptpar1
