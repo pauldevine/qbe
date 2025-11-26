@@ -457,12 +457,89 @@ You can assemble the output with:
 
 ## Memory Models
 
-Currently, the backend assumes **small memory model**:
-- Code < 64KB (near code pointers)
-- Data < 64KB (near data pointers)
-- Stack < 64KB
+The i8086 backend supports all six classic DOS memory models. Use the `-m` option to select:
 
-Support for tiny, compact, medium, large, and huge models is planned but not yet implemented.
+```bash
+./qbe -t i8086 -m <model> input.ssa > output.asm
+```
+
+### Supported Models
+
+| Model | Code | Data | Description |
+|-------|------|------|-------------|
+| **tiny** | < 64KB | < 64KB | Single segment (.COM files). CS=DS=SS. Uses `ret`. |
+| **small** | < 64KB | < 64KB | Separate code/data segments. Default. Uses `ret`. |
+| **compact** | < 64KB | > 64KB | Near code, far data. Uses `ret`. |
+| **medium** | > 64KB | < 64KB | Far code, near data. Uses `retf`. |
+| **large** | > 64KB | > 64KB | Far code, far data. Uses `retf`. |
+| **huge** | > 64KB | > 64KB | Like large, but arrays can exceed 64KB. Uses `retf`. |
+
+### Stack Layout Differences
+
+**Near calls (tiny/small/compact)**:
+```
+[bp+0]  saved BP
+[bp+2]  return address (2 bytes: offset only)
+[bp+4]  first parameter
+[bp+6]  second parameter
+```
+
+**Far calls (medium/large/huge)**:
+```
+[bp+0]  saved BP
+[bp+2]  return offset
+[bp+4]  return segment
+[bp+6]  first parameter
+[bp+8]  second parameter
+```
+
+### Example Output
+
+**Small model** (default):
+```asm
+; Memory model: small
+.model small
+.code
+
+add proc near
+    push bp
+    mov bp, sp
+    mov cx, word ptr [bp+6]    ; second param
+    mov ax, word ptr [bp+4]    ; first param
+    add ax, cx
+    mov sp, bp
+    pop bp
+    ret                        ; near return
+add endp
+```
+
+**Medium model**:
+```asm
+; Memory model: medium
+.model medium
+.code
+
+add proc far
+    push bp
+    mov bp, sp
+    mov cx, word ptr [bp+8]    ; second param (offset by 2 for far ret)
+    mov ax, word ptr [bp+6]    ; first param
+    add ax, cx
+    mov sp, bp
+    pop bp
+    retf                       ; far return
+add endp
+```
+
+### Far Pointers
+
+Far pointers (32-bit segment:offset pairs) are supported for data access in all memory models using the far pointer operations:
+- `loadfb`, `loadfh`, `loadfw` - Load byte/half/word through far pointer
+- `storefb`, `storefh`, `storefw` - Store byte/half/word through far pointer
+- `mkfar` - Create far pointer from segment:offset
+- `farseg`, `faroff` - Extract segment/offset from far pointer
+
+See the MiniC documentation for how to use the `far` keyword in C code.
 
 ## Building for DOS
 
@@ -496,8 +573,11 @@ tlink program.obj, program.exe
 | Memory load/store | ✓ Working | loadb/w/l, storeb/w/l with all addressing modes |
 | Parameter reception | ✓ Working | Functions receive params from stack correctly |
 | Function calls | ✓ Working | Full cdecl calling convention with stack arguments |
-| Floating point | ✗ TODO | 8087 support needed |
-| 32-bit operations | ✗ TODO | Limited support |
+| **Memory models** | ✓ Working | tiny, small, medium, compact, large, huge |
+| **Far code** | ✓ Working | CALL FAR, RETF for medium/large/huge models |
+| **Far pointers** | ✓ Working | Far data access for all models |
+| Floating point | ⚠ Partial | Basic 8087 FPU support |
+| 32-bit operations | ⚠ Partial | Limited support |
 | Optimizations | ✗ TODO | None yet |
 
 ## Architecture
@@ -512,15 +592,15 @@ The i8086 backend consists of:
 
 ## Contributing
 
-The i8086 backend is functional with core features complete. Contributions are welcome for:
+The i8086 backend is functional with core features complete including all memory models. Contributions are welcome for:
 
-- Adding 8087 FPU support for floating point operations
+- Improving 8087 FPU support for floating point operations
 - Improving 32-bit (long) operations (Kl class)
-- Adding memory model support (tiny, compact, medium, large, huge)
 - Optimizing code generation (peephole optimizations, better register allocation)
 - Implementing bit rotations (rol, ror, rcl, rcr)
 - Adding conditional move support (for 80386+)
 - Better instruction selection for complex patterns
+- Huge model segment arithmetic for large arrays
 
 ## References
 

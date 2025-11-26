@@ -9,14 +9,31 @@
  * - Caller-save: AX, CX, DX
  * - All arguments passed on stack (no register args in cdecl)
  *
- * Stack layout after prologue:
+ * Stack layout after prologue (near call - tiny/small models):
  *   [bp+6]  arg1 (second parameter)
  *   [bp+4]  arg0 (first parameter)
- *   [bp+2]  return address
+ *   [bp+2]  return address (2 bytes: offset only)
+ *   [bp+0]  saved BP  <-- BP points here
+ *   [bp-2]  local variable
+ *   ...
+ *
+ * Stack layout after prologue (far call - medium/large/huge models):
+ *   [bp+8]  arg1 (second parameter)
+ *   [bp+6]  arg0 (first parameter)
+ *   [bp+2]  return address (4 bytes: segment:offset)
  *   [bp+0]  saved BP  <-- BP points here
  *   [bp-2]  local variable
  *   ...
  */
+
+/* Check if current memory model uses far code (requires RETF, CALL FAR) */
+static int
+uses_far_code(void)
+{
+	return T.memmodel == Mmedium ||
+	       T.memmodel == Mlarge ||
+	       T.memmodel == Mhuge;
+}
 
 /* layout of call's second argument (RCall)
  *
@@ -72,18 +89,29 @@ selpar(Fn *fn, Ins *i0, Ins *i1)
 
 	curi = &insb[NIns];
 
-	/* Parameters start at [bp+4]:
+	/* Parameters start at [bp+4] for near calls, [bp+6] for far calls:
+	 *
+	 * Near call (tiny/small models):
 	 *   [bp+0] = saved BP
-	 *   [bp+2] = return address (near call)
+	 *   [bp+2] = return address (2 bytes: offset only)
 	 *   [bp+4] = first parameter  (slot -2, since 2*-(-2)=4)
 	 *   [bp+6] = second parameter (slot -3, since 2*-(-3)=6)
-	 *   etc.
+	 *
+	 * Far call (medium/large/huge models):
+	 *   [bp+0] = saved BP
+	 *   [bp+2] = return address offset
+	 *   [bp+4] = return address segment
+	 *   [bp+6] = first parameter  (slot -3, since 2*-(-3)=6)
+	 *   [bp+8] = second parameter (slot -4, since 2*-(-4)=8)
 	 *
 	 * The slot() function in emit.c converts:
 	 *   s < 0: return 2 * -s  (parameters)
 	 *   s >= 0: return -2 * (fn->slot - s)  (locals)
 	 */
-	s = -2;  /* Start at slot -2 for first parameter */
+	if (uses_far_code())
+		s = -3;  /* Far call: params start at [bp+6] */
+	else
+		s = -2;  /* Near call: params start at [bp+4] */
 
 	/* Process each parameter instruction */
 	for (i = i0; i < i1; i++) {
@@ -190,8 +218,11 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 		/* No FP support yet */
 	}
 
-	/* 3. Emit the call */
-	emit(Ocall, 0, R, icall->arg[0], CALL(cty));
+	/* 3. Emit the call (far call for medium/large/huge models) */
+	if (uses_far_code())
+		emit(Ocallfar, 0, R, icall->arg[0], CALL(cty));
+	else
+		emit(Ocall, 0, R, icall->arg[0], CALL(cty));
 
 	/* 2. Pass arguments on stack (right-to-left for cdecl)
 	 *
@@ -270,30 +301,41 @@ selret(Blk *b, Fn *fn)
 {
 	int j, ca;
 	Ref r0;
+	int farret;
 
 	(void)fn;  /* unused */
 
 	j = b->jmp.type;
+	farret = uses_far_code();
+
+	/* Handle void returns - convert to far return if needed */
+	if (j == Jret0) {
+		if (farret)
+			b->jmp.type = Jretf0;
+		return;
+	}
 
 	/* Only handle returns with values */
-	if (!isret(j) || j == Jret0)
+	if (!isret(j))
 		return;
 
 	r0 = b->jmp.arg;
-	b->jmp.type = Jret0;
 
 	/* Move return value to AX (word) or DX:AX (long) */
 	if (j == Jretw) {
 		/* Word return - copy to AX */
 		emit(Ocopy, Kw, TMP(RAX), r0, R);
 		ca = 1;  /* 1 GP register used for return */
+		b->jmp.type = farret ? Jretfw : Jret0;
 	} else if (j == Jretl) {
 		/* Long return - DX:AX pair */
 		emit(Ocopy, Kw, TMP(RDX), r0, R);  /* High word */
 		emit(Ocopy, Kw, TMP(RAX), r0, R);  /* Low word */
 		ca = 2;  /* 2 GP registers used for return (DX:AX) */
+		b->jmp.type = farret ? Jretfl : Jret0;
 	} else {
-		/* No support for float returns yet */
+		/* No support for float returns yet - convert to void return */
+		b->jmp.type = farret ? Jretf0 : Jret0;
 		return;
 	}
 

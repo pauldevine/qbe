@@ -1,0 +1,55 @@
+# Memory Model Test - 10_memory_models.ssa
+#
+# This example demonstrates QBE's support for all 8086 memory models.
+# Compile with different memory models using the -m flag:
+#
+#   ./qbe -t i8086 -m tiny 10_memory_models.ssa    # .COM format
+#   ./qbe -t i8086 -m small 10_memory_models.ssa   # Near code, near data (default)
+#   ./qbe -t i8086 -m medium 10_memory_models.ssa  # Far code, near data
+#   ./qbe -t i8086 -m compact 10_memory_models.ssa # Near code, far data
+#   ./qbe -t i8086 -m large 10_memory_models.ssa   # Far code, far data
+#   ./qbe -t i8086 -m huge 10_memory_models.ssa    # Far code, far data, large arrays
+#
+# Memory Model Summary:
+# ---------------------
+# Model    Code    Data    Call/Ret    Parameters
+# tiny     near    near    call/ret    [bp+4], [bp+6], ...
+# small    near    near    call/ret    [bp+4], [bp+6], ...
+# compact  near    far     call/ret    [bp+4], [bp+6], ...
+# medium   far     near    call far/retf [bp+6], [bp+8], ...
+# large    far     far     call far/retf [bp+6], [bp+8], ...
+# huge     far     far     call far/retf [bp+6], [bp+8], ...
+#
+# In tiny/small/compact models:
+#   - Return address is 2 bytes (offset only)
+#   - Parameters start at [bp+4]
+#
+# In medium/large/huge models:
+#   - Return address is 4 bytes (segment:offset)
+#   - Parameters start at [bp+6]
+
+# Simple function to add two numbers
+# Works correctly in all memory models
+export function w $add(w %a, w %b) {
+@start
+    %c =w add %a, %b
+    ret %c
+}
+
+# Function that calls another function
+# Demonstrates near vs far call handling
+export function w $double_add(w %x, w %y) {
+@start
+    %sum =w call $add(w %x, w %y)
+    %result =w add %sum, %sum
+    ret %result
+}
+
+# Main entry point
+export function w $main() {
+@start
+    %a =w copy 10
+    %b =w copy 20
+    %result =w call $double_add(w %a, w %b)
+    ret %result
+}

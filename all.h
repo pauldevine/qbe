@@ -46,9 +46,41 @@ enum {
 	NBit    = CHAR_BIT * sizeof(bits),
 };
 
+/* 8086 Memory Models for real mode
+ *
+ * Tiny:   All code+data+stack in single 64KB segment (.COM files)
+ *         Near pointers only. CS=DS=SS.
+ *
+ * Small:  Code < 64KB, Data < 64KB (separate segments)
+ *         Near code, near data pointers. CS != DS, SS=DS.
+ *
+ * Medium: Code > 64KB (multiple segments), Data < 64KB
+ *         Far code (segment:offset), near data pointers.
+ *         Functions use RETF.
+ *
+ * Compact: Code < 64KB, Data > 64KB
+ *          Near code, far data pointers. (Not commonly used)
+ *
+ * Large:  Code > 64KB, Data > 64KB
+ *         Far code, far data pointers.
+ *
+ * Huge:   Like Large, but single data items can exceed 64KB.
+ *         Requires segment arithmetic for large arrays.
+ */
+enum MemModel {
+	Mflat = 0,  /* 32/64-bit flat memory (non-8086) */
+	Mtiny,      /* .COM: single 64KB segment */
+	Msmall,     /* Near code, near data (default for 8086) */
+	Mmedium,    /* Far code, near data */
+	Mcompact,   /* Near code, far data */
+	Mlarge,     /* Far code, far data */
+	Mhuge,      /* Far code, far data, large arrays */
+};
+
 struct Target {
 	char name[16];
 	char apple;
+	enum MemModel memmodel; /* Memory model (for 8086) */
 	int gpr0;   /* first general purpose reg */
 	int ngpr;
 	int fpr0;   /* first floating point reg */
@@ -168,7 +200,9 @@ enum J {
 	X(jfisle) X(jfislt) X(jfiuge) X(jfiugt) \
 	X(jfiule) X(jfiult) X(jffeq)  X(jffge)  \
 	X(jffgt)  X(jffle)  X(jfflt)  X(jffne)  \
-	X(jffo)   X(jffuo)  X(hlt)
+	X(jffo)   X(jffuo)  X(hlt)              \
+	/* Far returns for 8086 medium/large/huge models */ \
+	X(retfw)  X(retfl)  X(retf0)
 #define X(j) J##j,
 	JMPS(X)
 #undef X
@@ -202,9 +236,11 @@ enum {
 #define ispar(o) INRANGE(o, Opar, Opare)
 #define isarg(o) INRANGE(o, Oarg, Oargv)
 #define isret(j) INRANGE(j, Jretw, Jret0)
+#define isretfar(j) INRANGE(j, Jretfw, Jretf0)  /* 8086 far returns */
 #define isparbh(o) INRANGE(o, Oparsb, Oparuh)
 #define isargbh(o) INRANGE(o, Oargsb, Oarguh)
 #define isretbh(j) INRANGE(j, Jretsb, Jretuh)
+#define iscall(o) ((o) == Ocall || (o) == Ocallfar)  /* near or far call */
 
 enum {
 	Kx = -1, /* "top" class (see usecheck() and clsmerge()) */

@@ -187,6 +187,7 @@ O(argc,    T(e,x,e,e, e,l,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
 O(arge,    T(e,l,e,e, e,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
 O(argv,    T(x,x,x,x, x,x,x,x), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
 O(call,    T(m,m,m,m, x,x,x,x), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
+O(callfar, T(m,m,m,m, x,x,x,x), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)  /* 8086 far call (inter-segment) */
 
 /* Flags Setting */
 O(flagieq,  T(x,x,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,1) V(0)
