@@ -145,6 +145,9 @@ int curstruct = -1;  /* Index of struct currently being defined */
 int parentstruct = -1;  /* Parent struct for anonymous members */
 int typedefanoncount = 0;  /* Counter for anonymous typedef structs/unions */
 int clit = 0;  /* Counter for compound literal temporaries */
+unsigned curfntyp = INT;  /* Current function return type (defaults to INT for K&R style) */
+unsigned parsed_type = INT;  /* Stores type parsed in typed_decl for later use */
+char parsed_ident[NString];  /* Stores identifier parsed in typed_decl */
 
 void
 die(char *s)
@@ -486,6 +489,20 @@ irtyp(unsigned ctyp)
 	return 'w';
 }
 
+/* QBE return type - for function return types which must be w, l, s, d */
+char
+irtyp_ret(unsigned ctyp)
+{
+	if (KIND(ctyp) == PTR || KIND(ctyp) == FUN)
+		return 'l';
+	if (ISFLOAT(ctyp)) {
+		if (KIND(ctyp) == LNG) return 'd';  /* double */
+		return 's';  /* float */
+	}
+	if (SIZE(ctyp) == 8) return 'l';
+	return 'w';  /* char, short, int all return as 'w' */
+}
+
 /* Return QBE alignment for alloc instruction (4, 8, or 16) */
 int
 iralign(unsigned ctyp)
@@ -800,11 +817,18 @@ call(Node *n, Symb *sr)
 				a->u.s = expr(a->l);
 
 			/* Generate indirect call */
-			fprintf(of, "\t");
-			psymb(*sr);
-			fprintf(of, " =%c call ", irtyp(sr->ctyp));
-			psymb(fptr);
-			fprintf(of, "(");
+			if (sr->ctyp == NIL) {
+				/* Void function pointer - no return value */
+				fprintf(of, "\tcall ");
+				psymb(fptr);
+				fprintf(of, "(");
+			} else {
+				fprintf(of, "\t");
+				psymb(*sr);
+				fprintf(of, " =%c call ", irtyp_ret(sr->ctyp));
+				psymb(fptr);
+				fprintf(of, "(");
+			}
 			for (a=n->r; a; a=a->r) {
 				fprintf(of, "%c ", irtyp(a->u.s.ctyp));
 				psymb(a->u.s);
@@ -820,9 +844,14 @@ call(Node *n, Symb *sr)
 	sr->ctyp = DREF(ft);
 	for (a=n->r; a; a=a->r)
 		a->u.s = expr(a->l);
-	fprintf(of, "\t");
-	psymb(*sr);
-	fprintf(of, " =%c call $%s(", irtyp(sr->ctyp), f);
+	if (sr->ctyp == NIL) {
+		/* Void function - no return value */
+		fprintf(of, "\tcall $%s(", f);
+	} else {
+		fprintf(of, "\t");
+		psymb(*sr);
+		fprintf(of, " =%c call $%s(", irtyp_ret(sr->ctyp), f);
+	}
 	for (a=n->r; a; a=a->r) {
 		fprintf(of, "%c ", irtyp(a->u.s.ctyp));
 		psymb(a->u.s);
@@ -1146,7 +1175,7 @@ expr(Node *n)
 			/* Generate indirect call */
 			fprintf(of, "\t");
 			psymb(sr);
-			fprintf(of, " =%c call ", irtyp(sr.ctyp));
+			fprintf(of, " =%c call ", irtyp_ret(sr.ctyp));
 			psymb(fptr);
 			fprintf(of, "(");
 			for (a=n->r; a; a=a->r) {
@@ -1957,10 +1986,14 @@ stmt(Stmt *s, int b)
 
 	switch (s->t) {
 	case Ret:
-		x = expr(s->p1);
-		fprintf(of, "\tret ");
-		psymb(x);
-		fprintf(of, "\n");
+		if (s->p1) {
+			x = expr(s->p1);
+			fprintf(of, "\tret ");
+			psymb(x);
+			fprintf(of, "\n");
+		} else {
+			fprintf(of, "\tret\n");
+		}
 		return 1;
 	case Break:
 		if (b < 0)
@@ -2164,7 +2197,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %%
 
-prog: func prog | fdcl prog | idcl prog | edcl prog | tdcl prog | sdcl prog | static_assert_dcl prog | ;
+prog: kfunc prog | typed_decl prog | edcl prog | tdcl prog | sdcl prog | static_assert_dcl prog | ;
 
 edcl: enumstart enums '}' ';'
     ;
@@ -2354,20 +2387,86 @@ anonmembers:
 }
         ;
 
-fdcl: type IDENT '(' ')' ';'
+typed_decl: type_and_ident typed_decl_rest
 {
-	varadd($2->u.v, 1, FUNC($1), 0);
+	/* type_and_ident saves to globals, typed_decl_rest uses them */
 };
 
-idcl: type IDENT ';'
+type_and_ident: type IDENT
 {
-	if ($1 == NIL)
+	parsed_type = $1;
+	strcpy(parsed_ident, $2->u.v);
+};
+
+typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
+{
+	/* ANSI function body */
+	if (!stmt($4, -1)) {
+		if (curfntyp == NIL)
+			fprintf(of, "\tret\n");
+		else
+			fprintf(of, "\tret 0\n");
+	}
+	fprintf(of, "}\n\n");
+}
+               | '(' ')' ';'
+{
+	/* Forward declaration */
+	varadd(parsed_ident, 1, FUNC(parsed_type), 0);
+}
+               | ';'
+{
+	/* Global variable */
+	if (parsed_type == NIL)
 		die("invalid void declaration");
 	if (nglo == NGlo)
 		die("too many string literals");
 	ini[nglo] = alloc(sizeof "{ x 0 }");
-	sprintf(ini[nglo], "{ %c 0 }", irtyp($1));
-	varadd($2->u.v, nglo++, $1, 0);
+	sprintf(ini[nglo], "{ %c 0 }", irtyp(parsed_type));
+	varadd(parsed_ident, nglo++, parsed_type, 0);
+}
+               ;
+
+ansi_func_proto: '(' init_ansi par0 ')'
+{
+	Symb *s;
+	Node *n;
+	int t, m;
+
+	curfntyp = parsed_type;
+	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
+	if (curfntyp == NIL)
+		fprintf(of, "export function $%s(", parsed_ident);
+	else
+		fprintf(of, "export function %c $%s(", irtyp_ret(curfntyp), parsed_ident);
+	n = $3;
+	if (n)
+		for (;;) {
+			s = varget(n->u.v);
+			fprintf(of, "%c ", irtyp_ret(s->ctyp));
+			fprintf(of, "%%t%d", tmp++);
+			n = n->r;
+			if (n)
+				fprintf(of, ", ");
+			else
+				break;
+		}
+	fprintf(of, ") {\n");
+	fprintf(of, "@l%d\n", lbl++);
+	for (t=0, n=$3; n; t++, n=n->r) {
+		s = varget(n->u.v);
+		m = SIZE(s->ctyp);
+		fprintf(of, "\t%%%s =l alloc%d %d\n", n->u.v, iralign(s->ctyp), m);
+		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
+		fprintf(of, ", %%%s\n", n->u.v);
+	}
+};
+
+init_ansi:
+{
+	varclr();
+	tmp = 0;
+	clit = 0;
 };
 
 init:
@@ -2386,26 +2485,27 @@ storageopt: STATIC
           |
           ;
 
-func: storageopt inlineopt init prot '{' dcls stmts '}'
+kfunc: storageopt inlineopt init prot_knr '{' dcls stmts '}'
 {
 	if (!stmt($7, -1))
 		fprintf(of, "\tret 0\n");
 	fprintf(of, "}\n\n");
 };
 
-prot: IDENT '(' par0 ')'
+prot_knr: IDENT '(' par0 ')'
 {
 	Symb *s;
 	Node *n;
 	int t, m;
 
+	curfntyp = INT;
 	varadd($1->u.v, 1, FUNC(INT), 0);
 	fprintf(of, "export function w $%s(", $1->u.v);
 	n = $3;
 	if (n)
 		for (;;) {
 			s = varget(n->u.v);
-			fprintf(of, "%c ", irtyp(s->ctyp));
+			fprintf(of, "%c ", irtyp_ret(s->ctyp));
 			fprintf(of, "%%t%d", tmp++);
 			n = n->r;
 			if (n)
@@ -2425,6 +2525,7 @@ prot: IDENT '(' par0 ')'
 };
 
 par0: par1
+    | TVOID               { $$ = 0; }
     |                     { $$ = 0; }
     ;
 par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
@@ -2716,6 +2817,7 @@ stmt: ';'                            { $$ = 0; }
     | BREAK ';'                      { $$ = mkstmt(Break, 0, 0, 0); }
     | CONTINUE ';'                   { $$ = mkstmt(Continue, 0, 0, 0); }
     | RETURN expr ';'                { $$ = mkstmt(Ret, $2, 0, 0); }
+    | RETURN ';'                     { $$ = mkstmt(Ret, 0, 0, 0); }
     | GOTO IDENT ';'                 { Stmt *s = mkstmt(Goto, 0, 0, 0); strcpy(s->label, $2->u.v); $$ = s; }
     | IDENT ':' stmt                 { Stmt *s = mkstmt(Label, $3, 0, 0); strcpy(s->label, $1->u.v); $$ = s; }
     | type IDENT ';'                 {
