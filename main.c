@@ -41,6 +41,20 @@ static Target *tlist[] = {
 static FILE *outf;
 static int dbg;
 
+/* Memory model names for command line */
+static struct {
+	char *name;
+	enum MemModel model;
+} mmodels[] = {
+	{ "tiny",    Mtiny },
+	{ "small",   Msmall },
+	{ "medium",  Mmedium },
+	{ "compact", Mcompact },
+	{ "large",   Mlarge },
+	{ "huge",    Mhuge },
+	{ 0, 0 }
+};
+
 static void
 data(Dat *d)
 {
@@ -128,11 +142,12 @@ main(int ac, char *av[])
 	Target **t;
 	FILE *inf, *hf;
 	char *f, *sep;
-	int c;
+	int c, m;
+	enum MemModel memmodel = Mflat; /* Will be set properly after target selection */
 
 	T = Deftgt;
 	outf = stdout;
-	while ((c = getopt(ac, av, "hd:o:t:")) != -1)
+	while ((c = getopt(ac, av, "hd:m:o:t:")) != -1)
 		switch (c) {
 		case 'd':
 			for (; *optarg; optarg++)
@@ -140,6 +155,20 @@ main(int ac, char *av[])
 					debug[toupper(*optarg)] = 1;
 					dbg = 1;
 				}
+			break;
+		case 'm':
+			/* Memory model selection (for 8086 target) */
+			for (m=0;; m++) {
+				if (!mmodels[m].name) {
+					fprintf(stderr, "unknown memory model '%s'\n", optarg);
+					fprintf(stderr, "valid models: tiny, small, medium, compact, large, huge\n");
+					exit(1);
+				}
+				if (strcmp(optarg, mmodels[m].name) == 0) {
+					memmodel = mmodels[m].model;
+					break;
+				}
+			}
 			break;
 		case 'o':
 			if (strcmp(optarg, "-") != 0) {
@@ -180,9 +209,19 @@ main(int ac, char *av[])
 					fputs(" (default)", hf);
 			}
 			fprintf(hf, "\n");
+			fprintf(hf, "\t%-11s memory model for i8086:\n", "-m <model>");
+			fprintf(hf, "\t%-11s tiny, small, medium, compact, large, huge\n", "");
 			fprintf(hf, "\t%-11s dump debug information\n", "-d <flags>");
 			exit(c != 'h');
 		}
+
+	/* Apply memory model if specified */
+	if (memmodel != Mflat) {
+		if (strcmp(T.name, "i8086") != 0) {
+			fprintf(stderr, "warning: memory model only applies to i8086 target\n");
+		}
+		T.memmodel = memmodel;
+	}
 
 	do {
 		f = av[optind];

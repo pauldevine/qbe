@@ -279,7 +279,7 @@ dopm(Blk *b, Ins *i, BSet *v)
 		bsset(v, i->arg[0].val);
 	} while (i != b->ins && regcpy(i-1));
 	bscopy(u, v);
-	if (i != b->ins && (i-1)->op == Ocall) {
+	if (i != b->ins && iscall((i-1)->op)) {
 		v->t[0] &= ~T.retregs((i-1)->arg[1], 0);
 		limit2(v, T.nrsave[0], T.nrsave[1], 0);
 		for (n=0, r=0; T.rsave[n]>=0; n++)
