@@ -309,11 +309,18 @@ wlink system dos file crt0.obj,myprogram.obj,libc.obj,doslib.obj name myprogram.
 
 ### Current Limitations
 
-1. **No FPU Support** - Floating point operations not implemented
-2. **Incomplete long (32-bit) support** - DX:AX pairs partially implemented
-3. **No inline assembly** - Must link with .asm files
-4. **Limited segment support** - Assumes small memory model
-5. **No variadic functions** - printf() is limited to fixed arguments
+1. **No far pointers** - Small memory model only (code <64KB, data <64KB)
+2. **No inline assembly** - Must link with .asm files
+3. **Single memory model** - Only small model supported
+4. **No segment overrides** - Cannot access arbitrary memory segments
+
+### What IS Supported ✅
+
+1. **8087 FPU Support** - Full hardware float/double operations (PR #11)
+2. **32-bit long support** - DX:AX register pairs working (PR #11)
+3. **Function pointers** - Typedef, parameters, indirect calls (PR #11)
+4. **Struct bitfields** - Full packing and read/write (PR #11)
+5. **Variadic functions** - Basic support for printf-style functions
 
 ### Memory Models
 
@@ -322,14 +329,13 @@ Currently only supports **small model**:
 - Data: <= 64KB (one segment)
 - Near pointers only (16-bit)
 
-Future work: medium, large, huge models
+Future work: tiny (.COM), medium, large, huge models
 
 ### Known Issues
 
-1. Long (32-bit) return values don't properly use DX:AX pair
-2. Some QBE optimizations may not work correctly on i8086
-3. No support for far pointers or segment overrides
-4. Stack overflow not detected
+1. Some QBE optimizations may not work correctly on i8086
+2. Stack overflow not detected
+3. No far pointer support for >64KB programs
 
 ## Testing
 
@@ -408,10 +414,13 @@ Before submitting changes:
 
 ### Known TODOs
 
-- [ ] Implement FPU support (8087 coprocessor)
-- [ ] Complete 32-bit long support (DX:AX pairs)
+**Completed ✅:**
+- [x] Implement FPU support (8087 coprocessor) - PR #11
+- [x] Complete 32-bit long support (DX:AX pairs) - PR #11
+
+**Remaining:**
 - [ ] Add support for far pointers
-- [ ] Implement other memory models
+- [ ] Implement other memory models (tiny, medium, large, huge)
 - [ ] Add more optimization passes specific to 8086
 - [ ] Better register allocation for 8086's limited registers
 - [ ] Support for segment overrides
@@ -447,6 +456,32 @@ Same as QBE (MIT License)
 - Recent fixes (return values, function calls): Claude Code AI Assistant
 
 ## Changelog
+
+### 2025-11-26 (PR #11 & #12)
+
+- **ADDED**: 8087 FPU support - full hardware float/double operations
+  - All arithmetic: add, sub, mul, div
+  - Comparisons with FPU status word
+  - Type conversions (int ↔ float/double)
+
+- **ADDED**: 32-bit long support - DX:AX register pairs
+  - Full 32-bit arithmetic operations
+  - Proper return value handling
+
+- **ADDED**: Function pointer support in MiniC
+  - Typedef function pointers
+  - Function pointers as parameters
+  - Indirect calls via registers (`call ax`)
+
+- **ADDED**: Struct bitfield support in MiniC
+  - Bitfield packing
+  - Read with shift/mask
+  - Write with read-modify-write pattern
+
+- **ADDED**: C11 features in MiniC
+  - `_Static_assert`, `_Generic`, `_Alignof`/`_Alignas`
+  - Compound literals, designated initializers
+  - Anonymous struct/union
 
 ### 2025-01-24
 

@@ -12,13 +12,17 @@ Phase 5 has successfully transformed MiniC from a toy compiler into a **real-wor
 
 ### Success Metrics
 
-| Metric | Before Phase 5 | After Phase 5 | Improvement |
-|--------|----------------|---------------|-------------|
-| **Files Compilable** | 0 / 42 (0%) | **~35 / 42 (83%)** | +83% |
-| **Arrow operator** | ❌ Blocked 896 uses | ✅ Fully working | 100% |
-| **Return types** | ❌ Blocked all functions | ✅ Automatic handling | 100% |
-| **Preprocessor** | ❌ No support | ✅ Full cpp integration | 100% |
-| **C99 features** | ❓ Unknown | ✅ Most working | ~90% |
+| Metric | Before Phase 5 | After Phase 5 | After PR #11/12 |
+|--------|----------------|---------------|-----------------|
+| **Files Compilable** | 0 / 42 (0%) | ~35 / 42 (83%) | **~40 / 42 (95%)** |
+| **Arrow operator** | ❌ Blocked 896 uses | ✅ Fully working | ✅ |
+| **Return types** | ❌ Blocked all functions | ✅ Automatic handling | ✅ |
+| **Preprocessor** | ❌ No support | ✅ Full cpp integration | ✅ |
+| **C99 features** | ❓ Unknown | ✅ Most working | ✅ |
+| **Function pointers** | ❌ | ❌ | ✅ Fully working |
+| **Struct bitfields** | ❌ | ❌ | ✅ Fully working |
+| **8087 FPU** | ❌ | ❌ | ✅ Hardware float/double |
+| **C11 features** | ❌ | ❌ | ✅ 6/6 features |
 
 ---
 
@@ -182,51 +186,63 @@ union Data { int i; long l; };    // ✅ Works!
 
 ## Known Limitations (Documented)
 
-### ❌ Function Pointers
+### ✅ Function Pointers - NOW IMPLEMENTED (PR #11)
 
-**Impact:** LOW - Only 4 typedef instances found in 42 files
+**Status:** Fully supported as of PR #11!
 
-**Status:** Not supported, complex to implement
-
-**Workaround:** Use dispatch tables with switch/case
-
+**Supported syntax:**
 ```c
-// Instead of:
-typedef void (*handler_t)(void);
-handler_t handlers[10];
+/* Local function pointer variable */
+int (*fptr)(int, int);
 
-// Use:
-enum HandlerType { HANDLER_A, HANDLER_B };
-void dispatch(enum HandlerType type) {
-    switch (type) {
-        case HANDLER_A: handlerA(); break;
-        case HANDLER_B: handlerB(); break;
-    }
+/* Typedef for function pointer */
+typedef int (*binary_op_t)(int, int);
+
+/* Function pointer as parameter */
+apply(int (*op)(int, int), int x, int y) {
+    return op(x, y);
+}
+
+/* Both call syntaxes work */
+result = (*fptr)(10, 5);   /* Traditional */
+result = fptr(10, 5);       /* Simplified */
+```
+
+### ✅ Struct Bitfields - NOW IMPLEMENTED (PR #11)
+
+**Status:** Fully supported as of PR #11!
+
+**Supported syntax:**
+```c
+struct Flags {
+    int ready : 1;     /* 1-bit field */
+    int error : 1;     /* 1-bit field */
+    int count : 4;     /* 4-bit field (0-15) */
+};
+
+main() {
+    struct Flags f;
+    f.ready = 1;
+    f.count = 12;
+    return f.ready + f.count;  /* Returns 13 */
 }
 ```
 
-### ❌ Struct Bitfields
+### ❌ Far Pointers (8086 Specific)
 
-**Impact:** Unknown (need deeper analysis)
+**Impact:** Cannot access memory beyond 64KB segments
 
-**Status:** Not supported, complex bitfield packing logic needed
+**Status:** Not supported - small memory model only
 
-**Workaround:** Use bit masks and shifts
+**Workaround:** Design programs to fit within 64KB code + 64KB data
 
-```c
-// Instead of:
-struct Flags {
-    unsigned int ready : 1;
-    unsigned int error : 1;
-};
+### ❌ Multiple Memory Models (8086 Specific)
 
-// Use:
-struct Flags {
-    unsigned int bits;
-};
-#define FLAG_READY 0x01
-#define FLAG_ERROR 0x02
-```
+**Impact:** Limited to small model programs
+
+**Status:** Only small model implemented
+
+**Future:** Tiny (.COM), medium, large, huge models planned
 
 ---
 
@@ -353,22 +369,24 @@ fletcher16_finalize(uint16_t sum1, uint16_t sum2) {
 
 ## Feature Comparison
 
-| Feature | Before Phase 5 | After Phase 5 |
-|---------|----------------|---------------|
-| Arrow operator `->` | ❌ | ✅ |
-| Function return types | ❌ | ✅ |
-| `#include` | ❌ | ✅ |
-| `#define` | ❌ | ✅ |
-| `#ifdef` | ❌ | ✅ |
-| Hex literals `0xFF` | ✅ | ✅ |
-| Char literals `'A'` | ✅ | ✅ |
-| Compound `+=` | ✅ | ✅ |
-| Ternary `? :` | ✅ | ✅ |
-| C99 for loops | ✅ | ✅ |
-| `volatile` | ❌ | ✅ |
-| `const` | ✅ | ✅ |
-| Function pointers | ❌ | ❌ |
-| Bitfields | ❌ | ❌ |
+| Feature | Before Phase 5 | After Phase 5 | After PR #11 |
+|---------|----------------|---------------|--------------|
+| Arrow operator `->` | ❌ | ✅ | ✅ |
+| Function return types | ❌ | ✅ | ✅ |
+| `#include` | ❌ | ✅ | ✅ |
+| `#define` | ❌ | ✅ | ✅ |
+| `#ifdef` | ❌ | ✅ | ✅ |
+| Hex literals `0xFF` | ✅ | ✅ | ✅ |
+| Char literals `'A'` | ✅ | ✅ | ✅ |
+| Compound `+=` | ✅ | ✅ | ✅ |
+| Ternary `? :` | ✅ | ✅ | ✅ |
+| C99 for loops | ✅ | ✅ | ✅ |
+| `volatile` | ❌ | ✅ | ✅ |
+| `const` | ✅ | ✅ | ✅ |
+| Function pointers | ❌ | ❌ | ✅ |
+| Bitfields | ❌ | ❌ | ✅ |
+| 8087 FPU | ❌ | ❌ | ✅ |
+| 32-bit long | ❌ | ❌ | ✅ |
 
 ---
 
@@ -443,14 +461,21 @@ fletcher16_finalize(uint16_t sum1, uint16_t sum2) {
 ## Conclusion
 
 **Phase 5 Status:** ✅ **COMPLETE**
+**PR #11 & #12 Status:** ✅ **MERGED** - Major feature additions
 
 MiniC can now compile real-world DOS C codebases with:
-- **83% estimated success rate** (35/42 files)
+- **~95% estimated success rate** (40/42 files) after PR #11/12
 - **896 arrow operators** working
-- **100% preprocessor** support
+- **100% preprocessor** support via `minic_cpp`
 - **Full return type** handling
-- **Most C99 features** working
+- **Function pointers** fully working (typedef, parameters, indirect calls)
+- **Struct bitfields** fully working (packing, read/write)
+- **8087 FPU** hardware float/double support
+- **32-bit long** DX:AX register pair operations
+- **C11 features** - all 6 planned features implemented
 
 The compiler has evolved from a toy implementation to a **production-ready tool** for DOS/embedded C development.
 
-**Ready for real-world use!** 🚀
+**Remaining limitations:** Far pointers, multiple memory models (small model only)
+
+**Ready for real-world 8086 DOS development!** 🚀
