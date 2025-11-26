@@ -19,6 +19,12 @@ enum I8086Reg {
 	RBP,            /* BP - base pointer (frame pointer) */
 	RSP,            /* SP - stack pointer */
 
+	/* Segment registers (for far pointer support) */
+	RES,            /* ES - Extra Segment (used for far data access) */
+	RDS,            /* DS - Data Segment */
+	/* Note: CS (Code Segment) is not directly accessible */
+	/* Note: SS (Stack Segment) is implicitly BP/SP relative */
+
 	/* No FPU registers initially - can add 8087 support later */
 
 	NFPR = 0,       /* no floating point registers */
@@ -26,6 +32,7 @@ enum I8086Reg {
 	NGPS = RDX - RAX + 1,  /* caller-save GPRs */
 	NFPS = 0,
 	NCLR = RDI - RBX + 1,  /* callee-save GPRs */
+	NSEG = RDS - RES + 1,  /* segment registers */
 };
 MAKESURE(reg_not_tmp, RSP < (int)Tmp0);
 
