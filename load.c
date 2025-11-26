@@ -58,9 +58,9 @@ int
 storesz(Ins *s)
 {
 	switch (s->op) {
-	case Ostoreb: return 1;
-	case Ostoreh: return 2;
-	case Ostorew: case Ostores: return 4;
+	case Ostoreb: case Ostorefb: return 1;
+	case Ostoreh: case Ostorefh: return 2;
+	case Ostorew: case Ostores: case Ostorefw: return 4;
 	case Ostorel: case Ostored: return 8;
 	}
 	die("unreachable");

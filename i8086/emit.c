@@ -1360,6 +1360,33 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
 			return;
 
+		case Omkfar:
+			/*
+			 * Make far pointer from segment and offset
+			 * arg[0] = segment (word), arg[1] = offset (word)
+			 * Result: far pointer stored as segment:offset (DX:AX)
+			 */
+			/* Load segment to DX */
+			if (rtype(r0) == RTmp)
+				fprintf(f, "\tmov dx, %s\n", rname[r0.val]);
+			else if (rtype(r0) == RSlot)
+				fprintf(f, "\tmov dx, word ptr [bp%+ld]\n", (long)slot(r0, fn));
+			else if (rtype(r0) == RCon)
+				fprintf(f, "\tmov dx, %d\n", (int)(fn->con[r0.val].bits.i & 0xFFFF));
+			/* Load offset to AX */
+			if (rtype(r1) == RTmp)
+				fprintf(f, "\tmov ax, %s\n", rname[r1.val]);
+			else if (rtype(r1) == RSlot)
+				fprintf(f, "\tmov ax, word ptr [bp%+ld]\n", (long)slot(r1, fn));
+			else if (rtype(r1) == RCon)
+				fprintf(f, "\tmov ax, %d\n", (int)(fn->con[r1.val].bits.i & 0xFFFF));
+			/* Store to destination if slot */
+			if (rtype(i->to) == RSlot) {
+				fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+				fprintf(f, "\tmov word ptr [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
+			}
+			return;
+
 		default:
 			/* Fall through to generic handling for unsupported 32-bit ops */
 			fprintf(f, "\t; TODO: 32-bit op %d\n", i->op);
@@ -1993,6 +2020,204 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			}
 		}
 		return;
+	}
+
+	/*
+	 * Far Pointer Operations (i8086 specific)
+	 *
+	 * Far pointers are 32-bit values stored as segment:offset pairs.
+	 * In memory, they are stored as offset (low word) then segment (high word).
+	 *
+	 * To access memory through a far pointer:
+	 * 1. Load segment into ES (or another segment register)
+	 * 2. Load offset into a base register (BX, SI, DI, BP)
+	 * 3. Use segment override: mov al, es:[bx]
+	 *
+	 * Far pointer layout in memory (little-endian):
+	 *   [ptr+0]: offset low byte
+	 *   [ptr+1]: offset high byte
+	 *   [ptr+2]: segment low byte
+	 *   [ptr+3]: segment high byte
+	 */
+	switch (i->op) {
+	case Oloadfb:
+		/*
+		 * Load byte through far pointer
+		 * arg[0] = far pointer (32-bit: segment:offset)
+		 * result = byte value (zero-extended to word)
+		 */
+		r0 = i->arg[0];
+		/* Load far pointer components into ES:BX */
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tmov bx, word ptr [bp%+ld]\n", (long)slot(r0, fn));      /* offset */
+			fprintf(f, "\tmov es, word ptr [bp%+ld]\n", (long)slot(r0, fn) + 2);  /* segment */
+		} else if (rtype(r0) == RCon) {
+			int64_t val = fn->con[r0.val].bits.i;
+			fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));           /* offset */
+			fprintf(f, "\tmov ax, %d\n", (int)((val >> 16) & 0xFFFF));   /* segment */
+			fprintf(f, "\tmov es, ax\n");
+		} else if (rtype(r0) == RTmp) {
+			/* Far pointer in DX:AX (segment:offset) */
+			fprintf(f, "\tmov bx, ax\n");  /* offset in AX -> BX */
+			fprintf(f, "\tmov es, dx\n");  /* segment in DX -> ES */
+		}
+		/* Load byte through ES:BX */
+		fprintf(f, "\tmov al, byte ptr es:[bx]\n");
+		fprintf(f, "\txor ah, ah\n");  /* zero-extend to word */
+		/* Store result */
+		if (rtype(i->to) == RTmp)
+			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+		else if (rtype(i->to) == RSlot)
+			fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+		return;
+
+	case Oloadfh:
+	case Oloadfw:
+		/*
+		 * Load word through far pointer
+		 * arg[0] = far pointer (32-bit: segment:offset)
+		 * result = word value
+		 */
+		r0 = i->arg[0];
+		/* Load far pointer components into ES:BX */
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tmov bx, word ptr [bp%+ld]\n", (long)slot(r0, fn));      /* offset */
+			fprintf(f, "\tmov es, word ptr [bp%+ld]\n", (long)slot(r0, fn) + 2);  /* segment */
+		} else if (rtype(r0) == RCon) {
+			int64_t val = fn->con[r0.val].bits.i;
+			fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));           /* offset */
+			fprintf(f, "\tmov ax, %d\n", (int)((val >> 16) & 0xFFFF));   /* segment */
+			fprintf(f, "\tmov es, ax\n");
+		} else if (rtype(r0) == RTmp) {
+			/* Far pointer in DX:AX (segment:offset) */
+			fprintf(f, "\tmov bx, ax\n");  /* offset in AX -> BX */
+			fprintf(f, "\tmov es, dx\n");  /* segment in DX -> ES */
+		}
+		/* Load word through ES:BX */
+		fprintf(f, "\tmov ax, word ptr es:[bx]\n");
+		/* Store result */
+		if (rtype(i->to) == RTmp)
+			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+		else if (rtype(i->to) == RSlot)
+			fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+		return;
+
+	case Ostorefb:
+		/*
+		 * Store byte through far pointer
+		 * arg[0] = value to store (word, low byte used)
+		 * arg[1] = far pointer (32-bit: segment:offset)
+		 */
+		r0 = i->arg[0];  /* value */
+		r1 = i->arg[1];  /* far pointer */
+		/* Load value to store into CL (to preserve AX for far pointer) */
+		if (rtype(r0) == RTmp)
+			fprintf(f, "\tmov cl, %s\n", rname8[r0.val]);
+		else if (rtype(r0) == RSlot)
+			fprintf(f, "\tmov cl, byte ptr [bp%+ld]\n", (long)slot(r0, fn));
+		else if (rtype(r0) == RCon)
+			fprintf(f, "\tmov cl, %d\n", (int)(fn->con[r0.val].bits.i & 0xFF));
+		/* Load far pointer into ES:BX */
+		if (rtype(r1) == RSlot) {
+			fprintf(f, "\tmov bx, word ptr [bp%+ld]\n", (long)slot(r1, fn));      /* offset */
+			fprintf(f, "\tmov es, word ptr [bp%+ld]\n", (long)slot(r1, fn) + 2);  /* segment */
+		} else if (rtype(r1) == RCon) {
+			int64_t val = fn->con[r1.val].bits.i;
+			fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));
+			fprintf(f, "\tmov ax, %d\n", (int)((val >> 16) & 0xFFFF));
+			fprintf(f, "\tmov es, ax\n");
+		} else if (rtype(r1) == RTmp) {
+			/* Far pointer in DX:AX (segment:offset) */
+			fprintf(f, "\tmov bx, ax\n");  /* offset in AX -> BX */
+			fprintf(f, "\tmov es, dx\n");  /* segment in DX -> ES */
+		}
+		/* Store byte through ES:BX */
+		fprintf(f, "\tmov byte ptr es:[bx], cl\n");
+		return;
+
+	case Ostorefh:
+	case Ostorefw:
+		/*
+		 * Store word through far pointer
+		 * arg[0] = value to store (word)
+		 * arg[1] = far pointer (32-bit: segment:offset)
+		 */
+		r0 = i->arg[0];  /* value */
+		r1 = i->arg[1];  /* far pointer */
+		/* Load value to store into CX (preserve AX for segment load) */
+		if (rtype(r0) == RTmp)
+			fprintf(f, "\tmov cx, %s\n", rname[r0.val]);
+		else if (rtype(r0) == RSlot)
+			fprintf(f, "\tmov cx, word ptr [bp%+ld]\n", (long)slot(r0, fn));
+		else if (rtype(r0) == RCon)
+			fprintf(f, "\tmov cx, %d\n", (int)(fn->con[r0.val].bits.i & 0xFFFF));
+		/* Load far pointer into ES:BX */
+		if (rtype(r1) == RSlot) {
+			fprintf(f, "\tmov bx, word ptr [bp%+ld]\n", (long)slot(r1, fn));      /* offset */
+			fprintf(f, "\tmov es, word ptr [bp%+ld]\n", (long)slot(r1, fn) + 2);  /* segment */
+		} else if (rtype(r1) == RCon) {
+			int64_t val = fn->con[r1.val].bits.i;
+			fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));
+			fprintf(f, "\tmov ax, %d\n", (int)((val >> 16) & 0xFFFF));
+			fprintf(f, "\tmov es, ax\n");
+		} else if (rtype(r1) == RTmp) {
+			/* Far pointer in DX:AX (segment:offset) */
+			fprintf(f, "\tmov bx, ax\n");  /* offset in AX -> BX */
+			fprintf(f, "\tmov es, dx\n");  /* segment in DX -> ES */
+		}
+		/* Store word through ES:BX */
+		fprintf(f, "\tmov word ptr es:[bx], cx\n");
+		return;
+
+	case Ofarseg:
+		/*
+		 * Extract segment from far pointer
+		 * arg[0] = far pointer (32-bit)
+		 * result = segment (word)
+		 */
+		r0 = i->arg[0];
+		/* Load segment (high word of far pointer) */
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tmov ax, word ptr [bp%+ld]\n", (long)slot(r0, fn) + 2);
+		} else if (rtype(r0) == RCon) {
+			int64_t val = fn->con[r0.val].bits.i;
+			fprintf(f, "\tmov ax, %d\n", (int)((val >> 16) & 0xFFFF));
+		} else if (rtype(r0) == RTmp) {
+			/* Far pointer in DX:AX - segment is in DX */
+			fprintf(f, "\tmov ax, dx\n");
+		}
+		/* Store result */
+		if (rtype(i->to) == RTmp)
+			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+		else if (rtype(i->to) == RSlot)
+			fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+		return;
+
+	case Ofaroff:
+		/*
+		 * Extract offset from far pointer
+		 * arg[0] = far pointer (32-bit)
+		 * result = offset (word)
+		 */
+		r0 = i->arg[0];
+		/* Load offset (low word of far pointer) */
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tmov ax, word ptr [bp%+ld]\n", (long)slot(r0, fn));
+		} else if (rtype(r0) == RCon) {
+			int64_t val = fn->con[r0.val].bits.i;
+			fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
+		} else if (rtype(r0) == RTmp) {
+			/* Far pointer in DX:AX - offset is already in AX, nothing needed */
+		}
+		/* Store result */
+		if (rtype(i->to) == RTmp)
+			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+		else if (rtype(i->to) == RSlot)
+			fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+		return;
+
+	default:
+		break;
 	}
 
 	/* Special handling for division and remainder */

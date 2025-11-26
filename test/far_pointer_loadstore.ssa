@@ -1,0 +1,90 @@
+# Test far pointer load/store operations (i8086 specific)
+# These tests verify the syntax and code generation for far pointer access
+
+# Global data for testing - simulates far memory buffer
+data $buffer = align 4 { w 0, w 0, w 0, w 0 }
+
+# Test far pointer byte load
+# Note: This test verifies code generation structure
+# Actual far memory access requires proper segment setup on i8086
+export function w $test_loadfb(l %farptr) {
+@start
+	%v =w loadfb %farptr
+	ret %v
+}
+
+# Test far pointer word load
+export function w $test_loadfw(l %farptr) {
+@start
+	%v =w loadfw %farptr
+	ret %v
+}
+
+# Test far pointer byte store
+export function $test_storefb(w %val, l %farptr) {
+@start
+	storefb %val, %farptr
+	ret
+}
+
+# Test far pointer word store
+export function $test_storefw(w %val, l %farptr) {
+@start
+	storefw %val, %farptr
+	ret
+}
+
+# Test creating and manipulating far pointers
+export function w $test_far_manipulation() {
+@start
+	# Create a far pointer: segment=0xB800 (video mem), offset=0
+	%seg =w copy 47104    # 0xB800 - video segment
+	%off =w copy 0
+	%farptr =l mkfar %seg, %off
+
+	# Verify we can extract the components back
+	%got_seg =w farseg %farptr
+	%got_off =w faroff %farptr
+
+	# Check segment
+	%c1 =w ceqw %got_seg, 47104
+	jnz %c1, @check_off, @fail
+
+@check_off
+	# Check offset
+	%c2 =w ceqw %got_off, 0
+	jnz %c2, @test_offset_add, @fail
+
+@test_offset_add
+	# Create far pointer with different offset
+	%off2 =w copy 160     # 80 chars * 2 bytes (next line)
+	%farptr2 =l mkfar %seg, %off2
+	%got_off2 =w faroff %farptr2
+	%c3 =w ceqw %got_off2, 160
+	jnz %c3, @pass, @fail
+
+@pass
+	ret 0
+
+@fail
+	ret 1
+}
+
+# Main test entry point
+export function w $test() {
+@start
+	%r1 =w call $test_far_manipulation()
+	%c1 =w ceqw %r1, 0
+	jnz %c1, @pass, @fail
+
+@pass
+	ret 0
+
+@fail
+	ret 1
+}
+
+# >>> driver
+# extern int test(void);
+# int main() { return test(); }
+# <<<
