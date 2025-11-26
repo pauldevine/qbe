@@ -383,6 +383,17 @@ hoistanonymous(int parent_sidx, int anon_sidx)
 	}
 }
 
+/* Find a member by name in a struct, returns member index or -1 if not found */
+int
+structfindmember(int sidx, char *name)
+{
+	int i;
+	for (i = 0; i < structh[sidx].nmembers; i++)
+		if (strcmp(structh[sidx].members[i].name, name) == 0)
+			return i;
+	return -1;
+}
+
 void
 typhadd(char *v, unsigned ctyp)
 {
@@ -941,12 +952,31 @@ expr(Node *n)
 					}
 				}
 
-				/* Initialize each member from initlist */
-				while (init && i < structh[sidx].nmembers) {
-					struct Member *m = &structh[sidx].members[i];
-					Symb val = expr(init->l);
+				/* Initialize members from initlist with designator support */
+				while (init) {
+					Node *item = init->l;
+					int midx;
+					struct Member *m;
+					Symb val;
 
-					/* Compute member address */
+					if (item->op == 'D') {
+						/* Designated field initializer: .field = value */
+						midx = structfindmember(sidx, item->r->u.v);
+						if (midx < 0)
+							die("unknown member in designated initializer");
+						m = &structh[sidx].members[midx];
+						val = expr(item->l);
+						i = midx + 1;  /* Continue from after this member */
+					} else {
+						/* Sequential initializer */
+						if (i >= structh[sidx].nmembers)
+							die("too many initializers for struct");
+						m = &structh[sidx].members[i];
+						val = expr(item);
+						i++;
+					}
+
+					/* Compute member address and store */
 					if (m->offset > 0) {
 						fprintf(of, "\t%%t%d =l add %%_clit%d, %d\n", tmp, clitnum, m->offset);
 						fprintf(of, "\tstore%c ", irtyp(m->ctyp));
@@ -960,7 +990,6 @@ expr(Node *n)
 					}
 
 					init = init->r;
-					i++;
 				}
 
 				/* For structs, load the struct value (like struct variables) */
@@ -1529,10 +1558,29 @@ lval(Node *n)
 					}
 				}
 
-				/* Initialize each member from initlist */
-				while (init && i < structh[sidx].nmembers) {
-					struct Member *m = &structh[sidx].members[i];
-					Symb val = expr(init->l);
+				/* Initialize members from initlist with designator support */
+				while (init) {
+					Node *item = init->l;
+					int midx;
+					struct Member *m;
+					Symb val;
+
+					if (item->op == 'D') {
+						/* Designated field initializer: .field = value */
+						midx = structfindmember(sidx, item->r->u.v);
+						if (midx < 0)
+							die("unknown member in designated initializer");
+						m = &structh[sidx].members[midx];
+						val = expr(item->l);
+						i = midx + 1;
+					} else {
+						/* Sequential initializer */
+						if (i >= structh[sidx].nmembers)
+							die("too many initializers for struct");
+						m = &structh[sidx].members[i];
+						val = expr(item);
+						i++;
+					}
 
 					if (m->offset > 0) {
 						fprintf(of, "\t%%t%d =l add %%_clit%d, %d\n", tmp, clitnum, m->offset);
@@ -1547,7 +1595,6 @@ lval(Node *n)
 					}
 
 					init = init->r;
-					i++;
 				}
 			} else {
 				/* Scalar initialization */
@@ -1948,7 +1995,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %type <u> type
 %type <s> stmt stmts
-%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist
+%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem
 %token <u> TNAME
 
 %%
@@ -2367,20 +2414,52 @@ dcls:
 	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), total);
 
-	/* Generate initialization code */
+	/* Zero-initialize the array first */
+	{
+		int j;
+		for (j = 0; j < n; j++) {
+			fprintf(of, "\t%%t%d =l add ", tmp);
+			fprintf(of, "%%%s, %d\n", v, j * s);
+			fprintf(of, "\tstore%c 0, %%t%d\n", irtyp($2), tmp);
+			tmp++;
+		}
+	}
+
+	/* Generate initialization code with designated initializer support */
 	{
 		Node *init = $9;
 		int i = 0;
-		while (init && i < n) {
-			Symb val = expr(init->l);
+		while (init) {
+			Node *item = init->l;
+			int idx;
+			Symb val;
+
+			if (item->op == 'd') {
+				/* Designated array initializer: [index] = value */
+				idx = item->r->u.n;
+				if (idx < 0 || idx >= n)
+					die("array index out of bounds in initializer");
+				val = expr(item->l);
+			} else {
+				/* Regular initializer at current index */
+				idx = i;
+				if (idx >= n)
+					die("too many initializers for array");
+				val = expr(item);
+				i++;  /* Only increment for non-designated */
+			}
+
 			fprintf(of, "\t%%t%d =l add ", tmp);
-			fprintf(of, "%%%s, %d\n", v, i * s);
+			fprintf(of, "%%%s, %d\n", v, idx * s);
 			fprintf(of, "\tstore%c ", irtyp($2));
 			psymb(val);
 			fprintf(of, ", %%t%d\n", tmp);
 			tmp++;
 			init = init->r;
-			i++;
+
+			/* After a designated initializer, continue from that index */
+			if (item->op == 'd')
+				i = idx + 1;
 		}
 	}
 }
@@ -2406,8 +2485,13 @@ dcls:
 }
     ;
 
-initlist: pref                    { $$ = mknode(0, $1, 0); }
-        | pref ',' initlist       { $$ = mknode(0, $1, $3); }
+inititem: pref                        { $$ = $1; }
+        | '.' IDENT '=' pref          { $$ = mknode('D', $4, $2); }
+        | '[' NUM ']' '=' pref        { $$ = mknode('d', $5, $2); }
+        ;
+
+initlist: inititem                    { $$ = mknode(0, $1, 0); }
+        | inititem ',' initlist       { $$ = mknode(0, $1, $3); }
         ;
 
 type: type '*' { $$ = IDIR($1); }
