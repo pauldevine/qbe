@@ -1367,6 +1367,634 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 	}
 
+	/*
+	 * Special handling for 8087 FPU operations (Ks = float, Kd = double)
+	 *
+	 * The 8087 uses a stack-based architecture with registers ST(0) through ST(7).
+	 * Operations typically work on ST(0) and ST(1), with results left on ST(0).
+	 *
+	 * For binary operations (add, sub, mul, div):
+	 *   1. Load first operand -> ST(0)
+	 *   2. Load second operand -> ST(0), first becomes ST(1)
+	 *   3. Execute operation with pop (e.g., faddp) -> result in ST(0)
+	 *   4. Store result (fstp) -> pops ST(0) to memory
+	 *
+	 * Memory sizes:
+	 *   - Float (Ks): 4 bytes (dword)
+	 *   - Double (Kd): 8 bytes (qword)
+	 */
+	if (i->cls == Ks || i->cls == Kd) {
+		int isdbl = (i->cls == Kd);
+		char *szp = isdbl ? "qword" : "dword";  /* size prefix */
+		int sz = isdbl ? 8 : 4;  /* byte size */
+
+		r0 = i->arg[0];
+		r1 = i->arg[1];
+
+		switch (i->op) {
+		case Oadd:
+		case Osub:
+		case Omul:
+		case Odiv:
+			/*
+			 * Binary FP operation: result = arg0 op arg1
+			 * Load both operands, perform operation, store result
+			 */
+			/* Load first operand to ST(0) */
+			if (rtype(r0) == RSlot) {
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			} else if (rtype(r0) == RCon) {
+				/* FP constant - need to load from memory */
+				Con *c = &fn->con[r0.val];
+				if (c->type == CAddr) {
+					fprintf(f, "\tfld %s ptr [", szp);
+					emitaddr(c, f);
+					fprintf(f, "]\n");
+				} else {
+					/* Integer constant treated as FP bits */
+					fprintf(f, "\t; TODO: FP immediate constant\n");
+				}
+			}
+
+			/* Load second operand to ST(0), first becomes ST(1) */
+			if (rtype(r1) == RSlot) {
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r1, fn));
+			} else if (rtype(r1) == RCon) {
+				Con *c = &fn->con[r1.val];
+				if (c->type == CAddr) {
+					fprintf(f, "\tfld %s ptr [", szp);
+					emitaddr(c, f);
+					fprintf(f, "]\n");
+				} else {
+					fprintf(f, "\t; TODO: FP immediate constant\n");
+				}
+			}
+
+			/* Perform operation: ST(1) op ST(0), pop, result in ST(0) */
+			switch (i->op) {
+			case Oadd:
+				fprintf(f, "\tfaddp st(1), st\n");
+				break;
+			case Osub:
+				/* fsubp: ST(1) - ST(0), pop */
+				fprintf(f, "\tfsubp st(1), st\n");
+				break;
+			case Omul:
+				fprintf(f, "\tfmulp st(1), st\n");
+				break;
+			case Odiv:
+				/* fdivp: ST(1) / ST(0), pop */
+				fprintf(f, "\tfdivp st(1), st\n");
+				break;
+			default:
+				break;
+			}
+
+			/* Store result from ST(0) to destination */
+			if (rtype(i->to) == RSlot) {
+				fprintf(f, "\tfstp %s ptr [bp%+ld]\n", szp, (long)slot(i->to, fn));
+			}
+			return;
+
+		case Oneg:
+			/*
+			 * Unary negation: result = -arg0
+			 * Load, change sign, store
+			 */
+			if (rtype(r0) == RSlot) {
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			}
+			fprintf(f, "\tfchs\n");
+			if (rtype(i->to) == RSlot) {
+				fprintf(f, "\tfstp %s ptr [bp%+ld]\n", szp, (long)slot(i->to, fn));
+			}
+			return;
+
+		case Oload:
+			/*
+			 * Load FP value from memory to FP stack slot
+			 * In register-less mode, we store immediately to destination
+			 */
+			if (rtype(r0) == RSlot) {
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			} else if (rtype(r0) == RCon) {
+				Con *c = &fn->con[r0.val];
+				if (c->type == CAddr) {
+					fprintf(f, "\tfld %s ptr [", szp);
+					emitaddr(c, f);
+					fprintf(f, "]\n");
+				}
+			}
+			/* Store to destination slot */
+			if (rtype(i->to) == RSlot) {
+				fprintf(f, "\tfstp %s ptr [bp%+ld]\n", szp, (long)slot(i->to, fn));
+			}
+			return;
+
+		case Ostores:
+		case Ostored:
+			/*
+			 * Store FP value from arg0 to memory location in arg1
+			 */
+			/* Load source to FPU stack */
+			if (rtype(r0) == RSlot) {
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			} else if (rtype(r0) == RCon) {
+				Con *c = &fn->con[r0.val];
+				if (c->type == CAddr) {
+					fprintf(f, "\tfld %s ptr [", szp);
+					emitaddr(c, f);
+					fprintf(f, "]\n");
+				} else {
+					/* Store FP constant bits directly */
+					fprintf(f, "\t; TODO: store FP immediate\n");
+				}
+			}
+			/* Store to destination address */
+			if (rtype(r1) == RSlot) {
+				fprintf(f, "\tfstp %s ptr [bp%+ld]\n", szp, (long)slot(r1, fn));
+			} else if (rtype(r1) == RCon) {
+				Con *c = &fn->con[r1.val];
+				if (c->type == CAddr) {
+					fprintf(f, "\tfstp %s ptr [", szp);
+					emitaddr(c, f);
+					fprintf(f, "]\n");
+				}
+			}
+			return;
+
+		case Ocopy:
+			/*
+			 * Copy FP value from source to destination
+			 * Load from source, store to destination
+			 */
+			if (rtype(r0) == RSlot) {
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			} else if (rtype(r0) == RCon) {
+				Con *c = &fn->con[r0.val];
+				if (c->type == CAddr) {
+					fprintf(f, "\tfld %s ptr [", szp);
+					emitaddr(c, f);
+					fprintf(f, "]\n");
+				} else if (c->type == CBits) {
+					/* FP constant encoded as bits - store to temp then load */
+					if (isdbl) {
+						int64_t bits = c->bits.i;
+						fprintf(f, "\tmov word ptr [bp-2], %d\n", (int)(bits & 0xFFFF));
+						fprintf(f, "\tmov word ptr [bp-4], %d\n", (int)((bits >> 16) & 0xFFFF));
+						fprintf(f, "\tmov word ptr [bp-6], %d\n", (int)((bits >> 32) & 0xFFFF));
+						fprintf(f, "\tmov word ptr [bp-8], %d\n", (int)((bits >> 48) & 0xFFFF));
+						fprintf(f, "\tfld qword ptr [bp-8]\n");
+					} else {
+						int32_t bits = (int32_t)c->bits.i;
+						fprintf(f, "\tmov word ptr [bp-2], %d\n", (int)(bits & 0xFFFF));
+						fprintf(f, "\tmov word ptr [bp-4], %d\n", (int)((bits >> 16) & 0xFFFF));
+						fprintf(f, "\tfld dword ptr [bp-4]\n");
+					}
+				}
+			}
+			if (rtype(i->to) == RSlot) {
+				fprintf(f, "\tfstp %s ptr [bp%+ld]\n", szp, (long)slot(i->to, fn));
+			}
+			return;
+
+		case Oexts:
+			/*
+			 * Extend float to double: load as float, store as double
+			 * The 8087 internally uses 80-bit extended precision,
+			 * so conversion is implicit in load/store sizes
+			 */
+			if (rtype(r0) == RSlot) {
+				fprintf(f, "\tfld dword ptr [bp%+ld]\n", (long)slot(r0, fn));
+			}
+			if (rtype(i->to) == RSlot) {
+				fprintf(f, "\tfstp qword ptr [bp%+ld]\n", (long)slot(i->to, fn));
+			}
+			return;
+
+		case Otruncd:
+			/*
+			 * Truncate double to float: load as double, store as float
+			 */
+			if (rtype(r0) == RSlot) {
+				fprintf(f, "\tfld qword ptr [bp%+ld]\n", (long)slot(r0, fn));
+			}
+			if (rtype(i->to) == RSlot) {
+				fprintf(f, "\tfstp dword ptr [bp%+ld]\n", (long)slot(i->to, fn));
+			}
+			return;
+
+		/* FP comparisons - return integer result */
+		case Oceqs:
+		case Oceqd:
+			/*
+			 * Floating point equality comparison
+			 * Load both operands, compare, get flags, set result
+			 */
+			if (rtype(r0) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			if (rtype(r1) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r1, fn));
+
+			/* Compare ST(0) with ST(1) and pop both */
+			fprintf(f, "\tfcompp\n");
+			/* Transfer FPU status word to AX */
+			fprintf(f, "\tfstsw ax\n");
+			/* Transfer AH flags to CPU flags */
+			fprintf(f, "\tsahf\n");
+			/* Set result based on zero flag (equal) */
+			fprintf(f, "\tmov ax, 0\n");
+			fprintf(f, "\tje .Lceq_true_%p\n", (void*)i);
+			fprintf(f, "\tjmp .Lceq_done_%p\n", (void*)i);
+			fprintf(f, ".Lceq_true_%p:\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			fprintf(f, ".Lceq_done_%p:\n", (void*)i);
+
+			if (rtype(i->to) == RTmp)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			else if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+			return;
+
+		case Ocnes:
+		case Ocned:
+			/* Not equal */
+			if (rtype(r0) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			if (rtype(r1) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r1, fn));
+			fprintf(f, "\tfcompp\n");
+			fprintf(f, "\tfstsw ax\n");
+			fprintf(f, "\tsahf\n");
+			fprintf(f, "\tmov ax, 0\n");
+			fprintf(f, "\tjne .Lcne_true_%p\n", (void*)i);
+			fprintf(f, "\tjmp .Lcne_done_%p\n", (void*)i);
+			fprintf(f, ".Lcne_true_%p:\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			fprintf(f, ".Lcne_done_%p:\n", (void*)i);
+			if (rtype(i->to) == RTmp)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			else if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+			return;
+
+		case Ocgts:
+		case Ocgtd:
+			/* Greater than: ST(1) > ST(0) after loading arg0, arg1 */
+			if (rtype(r0) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			if (rtype(r1) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r1, fn));
+			fprintf(f, "\tfcompp\n");
+			fprintf(f, "\tfstsw ax\n");
+			fprintf(f, "\tsahf\n");
+			/* After fcompp with arg0, arg1: flags set for ST(1) vs ST(0) = arg0 vs arg1 */
+			fprintf(f, "\tmov ax, 0\n");
+			fprintf(f, "\tja .Lcgt_true_%p\n", (void*)i);  /* above = greater (unsigned compare of FP status) */
+			fprintf(f, "\tjmp .Lcgt_done_%p\n", (void*)i);
+			fprintf(f, ".Lcgt_true_%p:\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			fprintf(f, ".Lcgt_done_%p:\n", (void*)i);
+			if (rtype(i->to) == RTmp)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			else if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+			return;
+
+		case Ocges:
+		case Ocged:
+			/* Greater or equal */
+			if (rtype(r0) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			if (rtype(r1) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r1, fn));
+			fprintf(f, "\tfcompp\n");
+			fprintf(f, "\tfstsw ax\n");
+			fprintf(f, "\tsahf\n");
+			fprintf(f, "\tmov ax, 0\n");
+			fprintf(f, "\tjae .Lcge_true_%p\n", (void*)i);  /* above or equal */
+			fprintf(f, "\tjmp .Lcge_done_%p\n", (void*)i);
+			fprintf(f, ".Lcge_true_%p:\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			fprintf(f, ".Lcge_done_%p:\n", (void*)i);
+			if (rtype(i->to) == RTmp)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			else if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+			return;
+
+		case Oclts:
+		case Ocltd:
+			/* Less than */
+			if (rtype(r0) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			if (rtype(r1) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r1, fn));
+			fprintf(f, "\tfcompp\n");
+			fprintf(f, "\tfstsw ax\n");
+			fprintf(f, "\tsahf\n");
+			fprintf(f, "\tmov ax, 0\n");
+			fprintf(f, "\tjb .Lclt_true_%p\n", (void*)i);  /* below = less than */
+			fprintf(f, "\tjmp .Lclt_done_%p\n", (void*)i);
+			fprintf(f, ".Lclt_true_%p:\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			fprintf(f, ".Lclt_done_%p:\n", (void*)i);
+			if (rtype(i->to) == RTmp)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			else if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+			return;
+
+		case Ocles:
+		case Ocled:
+			/* Less or equal */
+			if (rtype(r0) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			if (rtype(r1) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r1, fn));
+			fprintf(f, "\tfcompp\n");
+			fprintf(f, "\tfstsw ax\n");
+			fprintf(f, "\tsahf\n");
+			fprintf(f, "\tmov ax, 0\n");
+			fprintf(f, "\tjbe .Lcle_true_%p\n", (void*)i);  /* below or equal */
+			fprintf(f, "\tjmp .Lcle_done_%p\n", (void*)i);
+			fprintf(f, ".Lcle_true_%p:\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			fprintf(f, ".Lcle_done_%p:\n", (void*)i);
+			if (rtype(i->to) == RTmp)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			else if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+			return;
+
+		case Ocos:
+		case Ocod:
+			/* Ordered (neither is NaN) */
+			if (rtype(r0) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			if (rtype(r1) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r1, fn));
+			fprintf(f, "\tfcompp\n");
+			fprintf(f, "\tfstsw ax\n");
+			fprintf(f, "\tsahf\n");
+			/* Parity flag is set if unordered (NaN) */
+			fprintf(f, "\tmov ax, 1\n");
+			fprintf(f, "\tjnp .Lcord_done_%p\n", (void*)i);  /* not parity = ordered */
+			fprintf(f, "\txor ax, ax\n");
+			fprintf(f, ".Lcord_done_%p:\n", (void*)i);
+			if (rtype(i->to) == RTmp)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			else if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+			return;
+
+		case Ocuos:
+		case Ocuod:
+			/* Unordered (at least one is NaN) */
+			if (rtype(r0) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r0, fn));
+			if (rtype(r1) == RSlot)
+				fprintf(f, "\tfld %s ptr [bp%+ld]\n", szp, (long)slot(r1, fn));
+			fprintf(f, "\tfcompp\n");
+			fprintf(f, "\tfstsw ax\n");
+			fprintf(f, "\tsahf\n");
+			/* Parity flag is set if unordered (NaN) */
+			fprintf(f, "\tmov ax, 0\n");
+			fprintf(f, "\tjp .Lcuord_true_%p\n", (void*)i);  /* parity = unordered */
+			fprintf(f, "\tjmp .Lcuord_done_%p\n", (void*)i);
+			fprintf(f, ".Lcuord_true_%p:\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			fprintf(f, ".Lcuord_done_%p:\n", (void*)i);
+			if (rtype(i->to) == RTmp)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			else if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+			return;
+
+		default:
+			/* Fall through to check for int/float conversions or generic handling */
+			break;
+		}
+	}
+
+	/*
+	 * Integer to/from floating point conversions
+	 * These are handled separately because they cross between Ks/Kd and Kw/Kl classes
+	 */
+	switch (i->op) {
+	case Oswtof:
+		/*
+		 * Signed word to float/double
+		 * fild loads a signed integer and converts to FP
+		 */
+		r0 = i->arg[0];
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tfild word ptr [bp%+ld]\n", (long)slot(r0, fn));
+		} else if (rtype(r0) == RTmp) {
+			/* Need to store register to temp location first */
+			fprintf(f, "\tpush %s\n", rname[r0.val]);
+			fprintf(f, "\tfild word ptr [sp]\n");
+			fprintf(f, "\tadd sp, 2\n");
+		}
+		/* Store result based on destination class */
+		if (rtype(i->to) == RSlot) {
+			if (i->cls == Kd)
+				fprintf(f, "\tfstp qword ptr [bp%+ld]\n", (long)slot(i->to, fn));
+			else
+				fprintf(f, "\tfstp dword ptr [bp%+ld]\n", (long)slot(i->to, fn));
+		}
+		return;
+
+	case Ouwtof:
+		/*
+		 * Unsigned word to float/double
+		 * 8087 only has signed integer loads, so we need to handle unsigned specially
+		 * For 16-bit unsigned, extend to 32-bit signed and load as dword
+		 */
+		r0 = i->arg[0];
+		if (rtype(r0) == RSlot) {
+			/* Load as word, zero-extend mentally (push 0 for high word) */
+			fprintf(f, "\tpush word ptr 0\n");
+			fprintf(f, "\tpush word ptr [bp%+ld]\n", (long)slot(r0, fn));
+			fprintf(f, "\tfild dword ptr [sp]\n");
+			fprintf(f, "\tadd sp, 4\n");
+		} else if (rtype(r0) == RTmp) {
+			fprintf(f, "\tpush word ptr 0\n");
+			fprintf(f, "\tpush %s\n", rname[r0.val]);
+			fprintf(f, "\tfild dword ptr [sp]\n");
+			fprintf(f, "\tadd sp, 4\n");
+		}
+		if (rtype(i->to) == RSlot) {
+			if (i->cls == Kd)
+				fprintf(f, "\tfstp qword ptr [bp%+ld]\n", (long)slot(i->to, fn));
+			else
+				fprintf(f, "\tfstp dword ptr [bp%+ld]\n", (long)slot(i->to, fn));
+		}
+		return;
+
+	case Osltof:
+		/*
+		 * Signed long (32-bit) to float/double
+		 */
+		r0 = i->arg[0];
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tfild dword ptr [bp%+ld]\n", (long)slot(r0, fn));
+		}
+		if (rtype(i->to) == RSlot) {
+			if (i->cls == Kd)
+				fprintf(f, "\tfstp qword ptr [bp%+ld]\n", (long)slot(i->to, fn));
+			else
+				fprintf(f, "\tfstp dword ptr [bp%+ld]\n", (long)slot(i->to, fn));
+		}
+		return;
+
+	case Oultof:
+		/*
+		 * Unsigned long (32-bit) to float/double
+		 * Need to handle as 64-bit signed to avoid sign issues
+		 */
+		r0 = i->arg[0];
+		if (rtype(r0) == RSlot) {
+			/* Push 0 for high 32 bits, then the unsigned 32-bit value */
+			fprintf(f, "\tpush word ptr 0\n");
+			fprintf(f, "\tpush word ptr 0\n");
+			fprintf(f, "\tpush word ptr [bp%+ld]\n", (long)slot(r0, fn) + 2);
+			fprintf(f, "\tpush word ptr [bp%+ld]\n", (long)slot(r0, fn));
+			fprintf(f, "\tfild qword ptr [sp]\n");
+			fprintf(f, "\tadd sp, 8\n");
+		}
+		if (rtype(i->to) == RSlot) {
+			if (i->cls == Kd)
+				fprintf(f, "\tfstp qword ptr [bp%+ld]\n", (long)slot(i->to, fn));
+			else
+				fprintf(f, "\tfstp dword ptr [bp%+ld]\n", (long)slot(i->to, fn));
+		}
+		return;
+
+	case Ostosi:
+		/*
+		 * Float to signed word
+		 * fistp stores and pops FP stack as integer
+		 */
+		r0 = i->arg[0];
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tfld dword ptr [bp%+ld]\n", (long)slot(r0, fn));
+		}
+		if (rtype(i->to) == RSlot) {
+			fprintf(f, "\tfistp word ptr [bp%+ld]\n", (long)slot(i->to, fn));
+		} else if (rtype(i->to) == RTmp) {
+			fprintf(f, "\tsub sp, 2\n");
+			fprintf(f, "\tfistp word ptr [sp]\n");
+			fprintf(f, "\tpop %s\n", rname[i->to.val]);
+		}
+		return;
+
+	case Odtosi:
+		/*
+		 * Double to signed word
+		 */
+		r0 = i->arg[0];
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tfld qword ptr [bp%+ld]\n", (long)slot(r0, fn));
+		}
+		if (rtype(i->to) == RSlot) {
+			fprintf(f, "\tfistp word ptr [bp%+ld]\n", (long)slot(i->to, fn));
+		} else if (rtype(i->to) == RTmp) {
+			fprintf(f, "\tsub sp, 2\n");
+			fprintf(f, "\tfistp word ptr [sp]\n");
+			fprintf(f, "\tpop %s\n", rname[i->to.val]);
+		}
+		return;
+
+	case Ostoui:
+		/*
+		 * Float to unsigned word
+		 * 8087 only has signed integer store, need to handle range
+		 * For simplicity, treat as signed (works for values < 32768)
+		 */
+		r0 = i->arg[0];
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tfld dword ptr [bp%+ld]\n", (long)slot(r0, fn));
+		}
+		/* Store as dword to handle full unsigned range, take low word */
+		fprintf(f, "\tsub sp, 4\n");
+		fprintf(f, "\tfistp dword ptr [sp]\n");
+		if (rtype(i->to) == RSlot) {
+			fprintf(f, "\tpop word ptr [bp%+ld]\n", (long)slot(i->to, fn));
+			fprintf(f, "\tadd sp, 2\n");
+		} else if (rtype(i->to) == RTmp) {
+			fprintf(f, "\tpop %s\n", rname[i->to.val]);
+			fprintf(f, "\tadd sp, 2\n");
+		}
+		return;
+
+	case Odtoui:
+		/*
+		 * Double to unsigned word
+		 */
+		r0 = i->arg[0];
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tfld qword ptr [bp%+ld]\n", (long)slot(r0, fn));
+		}
+		fprintf(f, "\tsub sp, 4\n");
+		fprintf(f, "\tfistp dword ptr [sp]\n");
+		if (rtype(i->to) == RSlot) {
+			fprintf(f, "\tpop word ptr [bp%+ld]\n", (long)slot(i->to, fn));
+			fprintf(f, "\tadd sp, 2\n");
+		} else if (rtype(i->to) == RTmp) {
+			fprintf(f, "\tpop %s\n", rname[i->to.val]);
+			fprintf(f, "\tadd sp, 2\n");
+		}
+		return;
+
+	case Ocast:
+		/*
+		 * Bitwise cast between integer and floating point
+		 * For Kw->Ks or Ks->Kw: 32-bit reinterpret
+		 * For Kl->Kd or Kd->Kl: 64-bit reinterpret
+		 */
+		r0 = i->arg[0];
+		if (i->cls == Ks) {
+			/* Integer to float bitcast */
+			if (rtype(r0) == RSlot) {
+				/* Just copy the bytes */
+				fprintf(f, "\tmov ax, word ptr [bp%+ld]\n", (long)slot(r0, fn));
+				fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+				fprintf(f, "\tmov ax, word ptr [bp%+ld]\n", (long)slot(r0, fn) + 2);
+				fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn) + 2);
+			}
+		} else if (i->cls == Kd) {
+			/* Long to double bitcast */
+			if (rtype(r0) == RSlot && rtype(i->to) == RSlot) {
+				for (int j = 0; j < 4; j++) {
+					fprintf(f, "\tmov ax, word ptr [bp%+ld]\n", (long)slot(r0, fn) + j*2);
+					fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn) + j*2);
+				}
+			}
+		} else if (i->cls == Kw) {
+			/* Float to integer bitcast */
+			if (rtype(r0) == RSlot) {
+				fprintf(f, "\tmov ax, word ptr [bp%+ld]\n", (long)slot(r0, fn));
+				if (rtype(i->to) == RSlot)
+					fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn));
+				else if (rtype(i->to) == RTmp)
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				fprintf(f, "\tmov ax, word ptr [bp%+ld]\n", (long)slot(r0, fn) + 2);
+				if (rtype(i->to) == RSlot)
+					fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn) + 2);
+			}
+		} else if (i->cls == Kl) {
+			/* Double to long bitcast */
+			if (rtype(r0) == RSlot && rtype(i->to) == RSlot) {
+				for (int j = 0; j < 4; j++) {
+					fprintf(f, "\tmov ax, word ptr [bp%+ld]\n", (long)slot(r0, fn) + j*2);
+					fprintf(f, "\tmov word ptr [bp%+ld], ax\n", (long)slot(i->to, fn) + j*2);
+				}
+			}
+		}
+		return;
+	}
+
 	/* Special handling for division and remainder */
 	if (i->op == Odiv || i->op == Orem) {
 		/* Signed division/remainder
