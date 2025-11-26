@@ -26,12 +26,15 @@ enum { /* minic types */
 #define SHORT     (1 << 7)  /* Short flag for types */
 #define UNSIGNED  (1 << 6)  /* Unsigned flag for types */
 #define FLOAT     (1 << 5)  /* Float flag for types (float=INT|FLOAT, double=LNG|FLOAT) */
+#define FAR       (1 << 4)  /* Far pointer flag (32-bit segment:offset) */
 #define IDIR(x) (((x) << 3) + PTR)
+#define IDIR_FAR(x) ((((x) << 3) + PTR) | FAR)  /* Far pointer to type */
 #define FUNC(x) (((x) << 3) + FUN)
 #define DREF(x) ((x) >> 3)
 #define KIND(x) ((x) & 7)
 #define ISUNSIGNED(x) ((x) & UNSIGNED)
 #define ISFLOAT(x) ((x) & FLOAT)
+#define ISFAR(x) ((x) & FAR)
 #define BASETYPE(x) (KIND(x) & ~UNSIGNED)
 #define SIZE(x)                                    \
 	(KIND(x) == NIL ? (die("void has no size"), 0) : \
@@ -39,7 +42,8 @@ enum { /* minic types */
 	 ((x) & SHORT) ? 2 :  \
 	 KIND(x) == INT ? 4 : \
 	 KIND(x) == LNG ? 8 : \
-	 (KIND(x) == STRUCT_T || KIND(x) == UNION_T) ? structh[DREF(x)].size : 8)
+	 (KIND(x) == STRUCT_T || KIND(x) == UNION_T) ? structh[DREF(x)].size : \
+	 (KIND(x) == PTR && ISFAR(x)) ? 4 : 8)  /* Far pointers are 4 bytes */
 
 typedef struct Node Node;
 typedef struct Symb Symb;
@@ -465,9 +469,11 @@ varget(char *v)
 char
 irtyp(unsigned ctyp)
 {
-	/* Check pointer/function types first - they are always 'l' (64-bit) */
+	/* Check pointer/function types first - they are always 'l' (64-bit for QBE) */
 	/* This must come before ISFLOAT check because type composition can */
 	/* accidentally set the FLOAT bit */
+	/* Note: Far pointers are 32-bit (segment:offset) but we use 'l' in QBE IL */
+	/* The i8086 backend handles the actual size difference */
 	if (KIND(ctyp) == PTR || KIND(ctyp) == FUN)
 		return 'l';
 	if (ISFLOAT(ctyp)) {
@@ -710,6 +716,57 @@ load(Symb d, Symb s)
 		fprintf(of, " =%c load%c ", t, t);
 	}
 	psymb(s);
+	fprintf(of, "\n");
+}
+
+/*
+ * Load through a far pointer (segment:offset)
+ * Uses the loadfb/loadfh/loadfw operations for i8086 far memory access
+ */
+void
+loadfar(Symb d, Symb s)
+{
+	char t;
+
+	fprintf(of, "\t");
+	psymb(d);
+	t = irtyp(d.ctyp);
+
+	/* Far pointer loads - use loadfb/loadfh/loadfw */
+	if (t == 'b') {
+		fprintf(of, " =w loadfb ");
+	} else if (t == 'h') {
+		fprintf(of, " =w loadfh ");
+	} else {
+		fprintf(of, " =w loadfw ");  /* Word (16-bit) load through far ptr */
+	}
+	psymb(s);
+	fprintf(of, "\n");
+}
+
+/*
+ * Store through a far pointer (segment:offset)
+ * Uses the storefb/storefh/storefw operations for i8086 far memory access
+ */
+void
+storefar(Symb d, Symb s)
+{
+	char t;
+
+	t = irtyp(d.ctyp);
+
+	fprintf(of, "\t");
+	/* Far pointer stores - use storefb/storefh/storefw */
+	if (t == 'b') {
+		fprintf(of, "storefb ");
+	} else if (t == 'h') {
+		fprintf(of, "storefh ");
+	} else {
+		fprintf(of, "storefw ");  /* Word (16-bit) store through far ptr */
+	}
+	psymb(d);  /* value to store */
+	fprintf(of, ", ");
+	psymb(s);  /* far pointer address */
 	fprintf(of, "\n");
 }
 
@@ -1162,7 +1219,12 @@ expr(Node *n)
 		if (KIND(s0.ctyp) != PTR)
 			die("dereference of a non-pointer");
 		sr.ctyp = DREF(s0.ctyp);
-		load(sr, s0);
+		/* Check if dereferencing a far pointer */
+		if (ISFAR(s0.ctyp)) {
+			loadfar(sr, s0);
+		} else {
+			load(sr, s0);
+		}
 		break;
 
 	case 'A':
@@ -1447,13 +1509,24 @@ expr(Node *n)
 		if (s0.ctyp != IDIR(NIL) || KIND(s1.ctyp) != PTR)
 		if (s1.ctyp != IDIR(NIL) || KIND(s0.ctyp) != PTR)
 		/* Allow assignment between signed/unsigned variants and float types */
-		if (s1.ctyp != s0.ctyp
+		if ((s1.ctyp & ~FAR) != (s0.ctyp & ~FAR)
 		    && !(KIND(s1.ctyp) == CHR && KIND(s0.ctyp) == INT)
 		    && !((KIND(s1.ctyp) == KIND(s0.ctyp)) ||
 		         ((KIND(s1.ctyp) & ~UNSIGNED) == (KIND(s0.ctyp) & ~UNSIGNED))
 		         || ((KIND(s1.ctyp) & ~FLOAT) == (KIND(s0.ctyp) & ~FLOAT))))
 			die("invalid assignment");
-		fprintf(of, "\tstore%c ", irtyp(s1.ctyp));
+		/* Check if storing through a far pointer */
+		if (ISFAR(s1.ctyp)) {
+			char t = irtyp(s1.ctyp);
+			if (t == 'b')
+				fprintf(of, "\tstorefb ");
+			else if (t == 'h')
+				fprintf(of, "\tstorefh ");
+			else
+				fprintf(of, "\tstorefw ");
+		} else {
+			fprintf(of, "\tstore%c ", irtyp(s1.ctyp));
+		}
 		goto Args;
 
 	case 'p':
@@ -1463,8 +1536,13 @@ expr(Node *n)
 		sl = lval(n->l);
 		s0.t = Tmp;
 		s0.u.n = tmp++;
-		s0.ctyp = sl.ctyp;
-		load(s0, sl);
+		s0.ctyp = sl.ctyp & ~FAR;  /* Remove FAR for value type */
+		/* Load current value (handle far pointer) */
+		if (ISFAR(sl.ctyp)) {
+			loadfar(s0, sl);
+		} else {
+			load(s0, sl);
+		}
 		s1.t = Con;
 		s1.u.n = 1;
 		s1.ctyp = INT;
@@ -1477,8 +1555,18 @@ expr(Node *n)
 		fprintf(of, ", ");
 		psymb(s1);
 		fprintf(of, "\n");
-		/* Store new value */
-		fprintf(of, "\tstore%c ", irtyp(sl.ctyp));
+		/* Store new value (handle far pointer) */
+		if (ISFAR(sl.ctyp)) {
+			char t = irtyp(sl.ctyp);
+			if (t == 'b')
+				fprintf(of, "\tstorefb ");
+			else if (t == 'h')
+				fprintf(of, "\tstorefh ");
+			else
+				fprintf(of, "\tstorefw ");
+		} else {
+			fprintf(of, "\tstore%c ", irtyp(sl.ctyp));
+		}
 		psymb(sr);
 		fprintf(of, ", ");
 		psymb(sl);
@@ -1493,8 +1581,13 @@ expr(Node *n)
 		sl = lval(n->l);
 		s0.t = Tmp;
 		s0.u.n = tmp++;
-		s0.ctyp = sl.ctyp;
-		load(s0, sl);
+		s0.ctyp = sl.ctyp & ~FAR;  /* Remove FAR for value type */
+		/* Load current value (handle far pointer) */
+		if (ISFAR(sl.ctyp)) {
+			loadfar(s0, sl);
+		} else {
+			load(s0, sl);
+		}
 		s1.t = Con;
 		s1.u.n = 1;
 		s1.ctyp = INT;
@@ -1562,7 +1655,18 @@ expr(Node *n)
 		sr.u.n = tmp++;
 	}
 	if (n->op == 'P' || n->op == 'M') {
-		fprintf(of, "\tstore%c ", irtyp(sl.ctyp));
+		/* Store new value (handle far pointer) */
+		if (ISFAR(sl.ctyp)) {
+			char t = irtyp(sl.ctyp);
+			if (t == 'b')
+				fprintf(of, "\tstorefb ");
+			else if (t == 'h')
+				fprintf(of, "\tstorefh ");
+			else
+				fprintf(of, "\tstorefw ");
+		} else {
+			fprintf(of, "\tstore%c ", irtyp(sl.ctyp));
+		}
 		psymb(sr);
 		fprintf(of, ", ");
 		psymb(sl);
@@ -1676,7 +1780,11 @@ lval(Node *n)
 		sr = expr(n->l);
 		if (KIND(sr.ctyp) != PTR)
 			die("dereference of a non-pointer");
-		sr.ctyp = DREF(sr.ctyp);
+		/* Preserve FAR flag to indicate this address came from far pointer dereference */
+		{
+			unsigned far_flag = ISFAR(sr.ctyp) ? FAR : 0;
+			sr.ctyp = DREF(sr.ctyp) | far_flag;
+		}
 		break;
 	case '.':
 		/* Member access is also an lvalue - compute address */
@@ -2030,7 +2138,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST VOLATILE TBOOL
+%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST VOLATILE TBOOL TFAR
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 %token INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF ALIGNAS GENERIC
@@ -2550,9 +2658,11 @@ initlist: inititem                    { $$ = mknode(0, $1, 0); }
         | inititem ',' initlist       { $$ = mknode(0, $1, $3); }
         ;
 
-type: type '*' { $$ = IDIR($1); }
-    | TCHAR    { $$ = CHR; }
-    | TSHORT   { $$ = INT | SHORT; }
+type: type TFAR '*'                  { $$ = IDIR_FAR($1); }
+        | type '*' TFAR              { $$ = IDIR_FAR($1); }
+        | type '*'                   { $$ = IDIR($1); }
+        | TCHAR                      { $$ = CHR; }
+        | TSHORT                     { $$ = INT | SHORT; }
     | TINT     { $$ = INT; }
     | TLNG     { $$ = LNG; }
     | TFLOAT   { $$ = INT | FLOAT; }
@@ -2820,6 +2930,8 @@ yylex()
 		{ "const", CONST },
 		{ "volatile", VOLATILE },
 		{ "_Bool", TBOOL },
+		{ "far", TFAR },
+		{ "__far", TFAR },
 		{ "inline", INLINE },
 		{ "static", STATIC },
 		{ "extern", EXTERN },

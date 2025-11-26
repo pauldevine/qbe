@@ -1,0 +1,81 @@
+# Test far pointer operations (i8086 specific)
+# Far pointers are 32-bit segment:offset pairs for accessing memory
+# outside the current 64KB data segment in small memory model
+
+# Test 1: mkfar - create far pointer from segment and offset
+export function l $test_mkfar() {
+@start
+	# Create a far pointer with segment 0x1000 and offset 0x0100
+	%seg =w copy 4096     # segment 0x1000
+	%off =w copy 256      # offset 0x0100
+	%far =l mkfar %seg, %off
+
+	# Extract segment - should be 0x1000
+	%s =w farseg %far
+	%c1 =w ceqw %s, 4096
+	jnz %c1, @test2, @fail
+
+@test2
+	# Extract offset - should be 0x0100
+	%o =w faroff %far
+	%c2 =w ceqw %o, 256
+	jnz %c2, @pass, @fail
+
+@pass
+	ret 0
+
+@fail
+	ret 1
+}
+
+# Test 2: Far pointer arithmetic (construct from constant)
+export function l $test_far_const() {
+@start
+	# Far pointer as 32-bit constant: 0x10000100 (seg:0x1000, off:0x0100)
+	%far =l copy 268435712
+
+	# Extract components
+	%seg =w farseg %far
+	%off =w faroff %far
+
+	# Verify segment
+	%c1 =w ceqw %seg, 4096
+	jnz %c1, @check_off, @fail
+
+@check_off
+	# Verify offset
+	%c2 =w ceqw %off, 256
+	jnz %c2, @pass, @fail
+
+@pass
+	ret 0
+
+@fail
+	ret 1
+}
+
+# Test function that uses all far pointer operations
+export function w $test() {
+@start
+	# Run test 1
+	%r1 =l call $test_mkfar()
+	%c1 =w ceqw %r1, 0
+	jnz %c1, @test2, @fail
+
+@test2
+	# Run test 2
+	%r2 =l call $test_far_const()
+	%c2 =w ceqw %r2, 0
+	jnz %c2, @pass, @fail
+
+@pass
+	ret 0
+
+@fail
+	ret 1
+}
+
+# >>> driver
+# extern int test(void);
+# int main() { return test(); }
+# <<<
