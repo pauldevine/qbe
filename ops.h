@@ -136,6 +136,9 @@ O(copy,    T(w,l,s,d, x,x,x,x), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,1) V(0)
 /* Debug */
 O(dbgloc,  T(w,e,e,e, w,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)
 
+/* Inline Assembly - arg[0] is index into asmstr table, pinned */
+O(asm,     T(w,w,w,w, x,x,x,x), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
+
 /* Far Pointer Operations (i8086 specific - public for IL input) */
 /* Far pointers are 32-bit segment:offset pairs (small memory model) */
 O(loadfb,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* load byte through far ptr */
