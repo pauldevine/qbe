@@ -416,6 +416,9 @@ struct Fn {
 	char leaf;
 	char name[NString];
 	Lnk lnk;
+	/* Inline assembly support */
+	char **asmstr;   /* array of inline asm strings */
+	int nasmstr;     /* number of asm strings */
 };
 
 struct Typ {

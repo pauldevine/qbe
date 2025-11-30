@@ -88,10 +88,27 @@ struct Stmt {
 		Ret,
 		Goto,
 		Label,
+		Asm,
 	} t;
 	void *p1, *p2, *p3;
 	int val; /* for case values */
 	char label[NString]; /* for goto target and label name */
+};
+
+/* Inline assembly operand */
+struct AsmOperand {
+	char constraint[NString];  /* "=m", "m", "r", etc. */
+	Node *expr;                /* The C expression for this operand */
+};
+
+/* Inline assembly statement data */
+struct AsmStmt {
+	char code[1024];           /* Assembly code template */
+	int noutputs;              /* Number of output operands */
+	int ninputs;               /* Number of input operands */
+	struct AsmOperand outputs[4];  /* Up to 4 output operands */
+	struct AsmOperand inputs[4];   /* Up to 4 input operands */
+	int isvolatile;            /* 1 if volatile */
 };
 
 int yylex(void), yyerror(char *);
@@ -219,6 +236,34 @@ structfind(char *name)
 		if (strcmp(structh[i].name, name) == 0)
 			return i;
 	return -1;
+}
+
+/* Extract the actual string content from a string literal (stored in ini[] with QBE format)
+ * Format is: { b "actual string", b 0 }
+ * We skip 5 chars prefix and 8 chars suffix
+ */
+void
+getstrlit(int idx, char *buf, int bufsz)
+{
+	char *src = ini[idx];
+	char *dst = buf;
+	int len;
+
+	/* Skip prefix: { b " */
+	src += 5;
+
+	/* Find the closing quote - copy until we hit ", b 0 } */
+	len = strlen(src);
+	if (len > 8)
+		len -= 8;  /* Remove suffix: ", b 0 } */
+	else
+		len = 0;
+
+	if (len >= bufsz)
+		len = bufsz - 1;
+
+	strncpy(dst, src, len);
+	dst[len] = '\0';
 }
 
 int
@@ -2064,6 +2109,69 @@ stmt(Stmt *s, int b)
 	case Label:
 		fprintf(of, "@user_%s\n", s->label);
 		return stmt(s->p1, b);
+	case Asm: {
+		struct AsmStmt *a = (struct AsmStmt *)s->p1;
+		char processed[2048];
+		char *src = a->code;
+		char *dst = processed;
+		int opnum;
+
+		/*
+		 * Process inline assembly:
+		 * 1. For basic asm (no operands), emit directly
+		 * 2. For extended asm with operands, substitute %0, %1, etc.
+		 */
+		if (a->noutputs == 0 && a->ninputs == 0) {
+			/* Simple inline assembly - emit directly */
+			fprintf(of, "\tasm \"%s\"\n", a->code);
+		} else {
+			/*
+			 * Extended inline assembly with operands
+			 * Process the template and substitute operand references
+			 */
+			while (*src && (dst - processed) < (int)sizeof(processed) - 100) {
+				if (*src == '%' && isdigit(*(src+1))) {
+					/* Operand reference %N */
+					opnum = *(src+1) - '0';
+					src += 2;
+
+					if (opnum < a->noutputs) {
+						/* Output operand */
+						Symb s = lval(a->outputs[opnum].expr);
+						if (s.t == Var) {
+							/* Local variable - use stack-relative addressing */
+							dst += sprintf(dst, "[bp-%%%s]", s.u.v);
+						} else if (s.t == Glo) {
+							/* Global variable - use NASM syntax with underscore prefix */
+							dst += sprintf(dst, "[_glo%d]", s.u.n);
+						} else {
+							dst += sprintf(dst, "[unknown]");
+						}
+					} else {
+						/* Input operand (indexed after outputs) */
+						int inpidx = opnum - a->noutputs;
+						if (inpidx < a->ninputs) {
+							Symb s = lval(a->inputs[inpidx].expr);
+							if (s.t == Var) {
+								/* Local variable - use stack-relative addressing */
+								dst += sprintf(dst, "[bp-%%%s]", s.u.v);
+							} else if (s.t == Glo) {
+								/* Global variable - use NASM syntax with underscore prefix */
+								dst += sprintf(dst, "[_glo%d]", s.u.n);
+							} else {
+								dst += sprintf(dst, "[unknown]");
+							}
+						}
+					}
+				} else {
+					*dst++ = *src++;
+				}
+			}
+			*dst = '\0';
+			fprintf(of, "\tasm \"%s\"\n", processed);
+		}
+		return 0;
+	}
 	default:
 		die("unknown statement type");
 		return 0;
@@ -2175,6 +2283,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 %token INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF ALIGNAS GENERIC
+%token ASM
 
 %left ','
 %right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
@@ -2191,8 +2300,9 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %left '*' '/' '%'
 
 %type <u> type
-%type <s> stmt stmts
+%type <s> stmt stmts asmstmt
 %type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc
+%type <n> asmoutputs asmoutputlist asmoutput asminputs asminputlist asminput
 %token <u> TNAME
 
 %%
@@ -2884,6 +2994,165 @@ stmt: ';'                            { $$ = 0; }
     | SWITCH '(' expr ')' stmt       { $$ = mkstmt(Switch, $3, $5, 0); }
     | CASE NUM ':' stmt              { Stmt *s = mkstmt(Case, 0, $4, 0); s->val = $2->u.n; $$ = s; }
     | DEFAULT ':' stmt               { $$ = mkstmt(Default, 0, $3, 0); }
+    | asmstmt                        { $$ = $1; }
+    ;
+
+asmstmt: ASM '(' STR ')' ';' {
+        /* Simple inline assembly: asm("code"); */
+        struct AsmStmt *a = alloc(sizeof *a);
+        Stmt *s = mkstmt(Asm, a, 0, 0);
+        getstrlit($3->u.n, a->code, sizeof(a->code));
+        a->noutputs = 0;
+        a->ninputs = 0;
+        a->isvolatile = 0;
+        $$ = s;
+    }
+    | ASM VOLATILE '(' STR ')' ';' {
+        /* Volatile inline assembly: asm volatile("code"); */
+        struct AsmStmt *a = alloc(sizeof *a);
+        Stmt *s = mkstmt(Asm, a, 0, 0);
+        getstrlit($4->u.n, a->code, sizeof(a->code));
+        a->noutputs = 0;
+        a->ninputs = 0;
+        a->isvolatile = 1;
+        $$ = s;
+    }
+    | ASM '(' STR ':' asmoutputs ')' ';' {
+        /* Inline assembly with outputs: asm("code" : outputs); */
+        struct AsmStmt *a = (struct AsmStmt *)$5;
+        Stmt *s = mkstmt(Asm, a, 0, 0);
+        getstrlit($3->u.n, a->code, sizeof(a->code));
+        a->isvolatile = 0;
+        $$ = s;
+    }
+    | ASM VOLATILE '(' STR ':' asmoutputs ')' ';' {
+        /* Volatile inline assembly with outputs: asm volatile("code" : outputs); */
+        struct AsmStmt *a = (struct AsmStmt *)$6;
+        Stmt *s = mkstmt(Asm, a, 0, 0);
+        getstrlit($4->u.n, a->code, sizeof(a->code));
+        a->isvolatile = 1;
+        $$ = s;
+    }
+    | ASM '(' STR ':' asmoutputs ':' asminputs ')' ';' {
+        /* Inline assembly with outputs and inputs: asm("code" : outputs : inputs); */
+        struct AsmStmt *a = (struct AsmStmt *)$5;
+        struct AsmStmt *ainputs = (struct AsmStmt *)$7;
+        Stmt *s;
+        /* Merge inputs into a */
+        a->ninputs = ainputs->ninputs;
+        for (int i = 0; i < ainputs->ninputs; i++) {
+            a->inputs[i] = ainputs->inputs[i];
+        }
+        getstrlit($3->u.n, a->code, sizeof(a->code));
+        a->isvolatile = 0;
+        s = mkstmt(Asm, a, 0, 0);
+        $$ = s;
+    }
+    | ASM VOLATILE '(' STR ':' asmoutputs ':' asminputs ')' ';' {
+        /* Volatile inline assembly with outputs and inputs */
+        struct AsmStmt *a = (struct AsmStmt *)$6;
+        struct AsmStmt *ainputs = (struct AsmStmt *)$8;
+        Stmt *s;
+        /* Merge inputs into a */
+        a->ninputs = ainputs->ninputs;
+        for (int i = 0; i < ainputs->ninputs; i++) {
+            a->inputs[i] = ainputs->inputs[i];
+        }
+        getstrlit($4->u.n, a->code, sizeof(a->code));
+        a->isvolatile = 1;
+        s = mkstmt(Asm, a, 0, 0);
+        $$ = s;
+    }
+    | ASM '(' STR ':' ':' asminputs ')' ';' {
+        /* Inline assembly with inputs only: asm("code" :: inputs); */
+        struct AsmStmt *a = (struct AsmStmt *)$6;
+        Stmt *s = mkstmt(Asm, a, 0, 0);
+        getstrlit($3->u.n, a->code, sizeof(a->code));
+        a->noutputs = 0;
+        a->isvolatile = 0;
+        $$ = s;
+    }
+    | ASM VOLATILE '(' STR ':' ':' asminputs ')' ';' {
+        /* Volatile inline assembly with inputs only: asm volatile("code" :: inputs); */
+        struct AsmStmt *a = (struct AsmStmt *)$7;
+        Stmt *s = mkstmt(Asm, a, 0, 0);
+        getstrlit($4->u.n, a->code, sizeof(a->code));
+        a->noutputs = 0;
+        a->isvolatile = 1;
+        $$ = s;
+    }
+    ;
+
+asmoutputs:
+        {
+        struct AsmStmt *a = alloc(sizeof *a);
+        a->noutputs = 0;
+        a->ninputs = 0;
+        $$ = (Node *)a;
+    }
+    | asmoutputlist {
+        $$ = $1;
+    }
+    ;
+
+asmoutputlist: asmoutput {
+        $$ = $1;
+    }
+    | asmoutputlist ',' asmoutput {
+        struct AsmStmt *a = (struct AsmStmt *)$1;
+        struct AsmStmt *b = (struct AsmStmt *)$3;
+        if (a->noutputs < 4) {
+            a->outputs[a->noutputs] = b->outputs[0];
+            a->noutputs++;
+        }
+        $$ = (Node *)a;
+    }
+    ;
+
+asmoutput: STR '(' expr ')' {
+        struct AsmStmt *a = alloc(sizeof *a);
+        a->noutputs = 1;
+        a->ninputs = 0;
+        getstrlit($1->u.n, a->outputs[0].constraint, NString);
+        a->outputs[0].expr = $3;
+        $$ = (Node *)a;
+    }
+    ;
+
+asminputs:
+        {
+        struct AsmStmt *a = alloc(sizeof *a);
+        a->noutputs = 0;
+        a->ninputs = 0;
+        $$ = (Node *)a;
+    }
+    | asminputlist {
+        $$ = $1;
+    }
+    ;
+
+asminputlist: asminput {
+        $$ = $1;
+    }
+    | asminputlist ',' asminput {
+        struct AsmStmt *a = (struct AsmStmt *)$1;
+        struct AsmStmt *b = (struct AsmStmt *)$3;
+        if (a->ninputs < 4) {
+            a->inputs[a->ninputs] = b->inputs[0];
+            a->ninputs++;
+        }
+        $$ = (Node *)a;
+    }
+    ;
+
+asminput: STR '(' expr ')' {
+        struct AsmStmt *a = alloc(sizeof *a);
+        a->noutputs = 0;
+        a->ninputs = 1;
+        getstrlit($1->u.n, a->inputs[0].constraint, NString);
+        a->inputs[0].expr = $3;
+        $$ = (Node *)a;
+    }
     ;
 
 stmts: stmts stmt { $$ = mkstmt(Seq, $1, $2, 0); }
@@ -3058,6 +3327,10 @@ yylex()
 		{ "continue", CONTINUE },
 		{ "goto", GOTO },
 		{ "sizeof", SIZEOF },
+		{ "asm", ASM },
+		{ "__asm__", ASM },
+		{ "__asm", ASM },
+		{ "__volatile__", VOLATILE },
 		{ 0, 0 }
 	};
 	int i, c, c1, n;
