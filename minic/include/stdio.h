@@ -8,9 +8,10 @@
 typedef unsigned long size_t;
 
 /* Function declarations - implementations in runtime library */
-int printf(const char *format, ...);
-int sprintf(char *str, const char *format, ...);
+/* Note: MiniC doesn't support const or variadic functions (...) */
+int printf(char *format);
+int sprintf(char *str, char *format);
 int putchar(int c);
-int puts(const char *s);
+int puts(char *s);
 
 #endif /* _STDIO_H */
