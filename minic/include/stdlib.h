@@ -9,6 +9,7 @@ typedef unsigned long size_t;
 
 /* Memory allocation - must be provided by runtime */
 void *malloc(size_t size);
+void *calloc(size_t nmemb, size_t size);
 void free(void *ptr);
 
 /* Other standard functions */
