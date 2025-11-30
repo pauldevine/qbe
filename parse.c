@@ -697,6 +697,30 @@ parseline(PState ps)
 		} else
 			arg[1] = INT(0);
 		goto Ins;
+	case Oasm:
+		/* Inline assembly: asm "string" */
+		op = t;
+		k = Kw;
+		r = R;
+		expect(Tstr);
+		{
+			char *str;
+			int idx;
+			/* Allocate and store the asm string */
+			str = tokval.str;
+			/* Strip quotes from string */
+			if (str[0] == '"') {
+				str++;
+				str[strlen(str)-1] = '\0';
+			}
+			/* Add to function's asm string table */
+			idx = curf->nasmstr++;
+			curf->asmstr = realloc(curf->asmstr, curf->nasmstr * sizeof(char*));
+			curf->asmstr[idx] = strdup(str);
+			arg[0] = INT(idx);
+			arg[1] = R;
+		}
+		goto Ins;
 	}
 	if (op == Tcall) {
 		curf->leaf = 0;

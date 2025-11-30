@@ -484,6 +484,34 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	Ref r0, r1;
 	char *shiftop;
 
+	/* Handle inline assembly */
+	if (i->op == Oasm) {
+		int idx = rsval(i->arg[0]);
+		if (idx >= 0 && idx < fn->nasmstr && fn->asmstr[idx]) {
+			/* Emit the raw assembly code */
+			/* Handle escape sequences in the string */
+			char *s = fn->asmstr[idx];
+			while (*s) {
+				if (*s == '\\' && *(s+1) == 'n') {
+					fputc('\n', f);
+					s += 2;
+				} else if (*s == '\\' && *(s+1) == 't') {
+					fputc('\t', f);
+					s += 2;
+				} else if (*s == '%' && *(s+1) == '%') {
+					/* %% in GCC asm becomes single % */
+					fputc('%', f);
+					s += 2;
+				} else {
+					fputc(*s, f);
+					s++;
+				}
+			}
+			fputc('\n', f);
+		}
+		return;
+	}
+
 	/* Special handling for shift operations */
 	if (i->op == Oshl || i->op == Oshr || i->op == Osar) {
 		/* Determine shift operation mnemonic */
