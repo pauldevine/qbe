@@ -1,31 +1,73 @@
 # QBE C11 8086 Compiler: Implementation Roadmap
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Timeline:** 10-12 weeks to production release
-**Last Updated:** 2025-11-21
+**Original Timeline:** 10-12 weeks to production release
+**Actual Progress:** ~70-80% Complete (as of 2025-12-01)
+**Last Updated:** 2025-12-01
 
 ---
 
-## Overview
+## ⚠️ DOCUMENTATION NOTE
 
-This roadmap outlines the phased implementation of a complete C11 compiler targeting 8086 real-mode DOS binaries. The project builds on existing components (MiniC compiler and i8086 backend) and adds critical missing features (8087 FPU support, DOS runtime, C11 features).
-
-**Current Status:**
-- ✅ MiniC compiler: Complete (C89/C99 compliant, float/double support)
-- ✅ i8086 backend: Functional (integer ops, function calls, memory addressing)
-- ❌ 8087 FPU: Missing (blocks float/double compilation to DOS)
-- ❌ DOS runtime: Missing (printf, file I/O, etc.)
-- ❌ C11 features: Missing (~60% target compliance)
+This roadmap was created on 2025-11-21 as a **plan** for implementation. However, **significant work has been completed since then** that was not documented in this file. See the "Actual Current Status" section below for accurate status.
 
 ---
 
-## Phase 0: Validation & Setup (Week 1)
+## Actual Current Status (Updated 2025-12-01)
+
+**Component Status:**
+
+| Component | Status | Details | Evidence |
+|-----------|--------|---------|----------|
+| **MiniC Compiler** | ✅ Complete | C89/C99 + C11 features | minic/minic.y |
+| **i8086 Backend** | ✅ Complete | All integer + FPU ops | i8086/*.c |
+| **8087 FPU Support** | ✅ **COMPLETE** | Full hardware float/double (PR #11) | i8086/emit.c:76-131 |
+| **Inline Assembly** | ✅ **COMPLETE** | GCC-style extended asm (commits d44ea80, c0ddbff) | minic/minic.y:2124-3292 |
+| **C11 Features** | ✅ **COMPLETE** | All 6 target features (PR #12) | minic/test/c11/ |
+| **Far Pointers** | ✅ **COMPLETE** | Small model support (PR #13) | commit 6492370 |
+| **ANSI Functions** | ✅ **COMPLETE** | Function definitions (PR #15) | commit 03d0b81 |
+| **32-bit Long** | ✅ Complete | DX:AX pairs working | i8086/README.md:320 |
+| **Function Pointers** | ✅ Complete | Full support with typedef | i8086/README.md:321 |
+| **Struct Bitfields** | ✅ Complete | Packing and read/write | i8086/README.md:322 |
+| **DOS Runtime** | ⚠️ **PARTIAL** | crt0.asm exists, needs expansion | minic/dos/ |
+| **Memory Models** | ⚠️ Small only | Tiny/medium/large missing | i8086/README.md:310-316 |
+| **DOS API Library** | ⚠️ Minimal | Need full printf, file I/O, malloc | - |
+
+**Phase Completion (vs original plan):**
+- Phase 0 (Validation): ✅ **100% COMPLETE**
+- Phase 1 (Integer DOS): ✅ **~80% COMPLETE** (crt0 exists, needs full runtime)
+- Phase 2 (8087 FPU): ✅ **100% COMPLETE** (fully implemented in PR #11)
+- Phase 3 (DOS Integration): ⚠️ **~30% COMPLETE** (basic runtime, need full DOS API)
+- Phase 4 (C11 Features): ✅ **100% COMPLETE** (all features in PR #12)
+
+**Completed Features NOT in Original Roadmap:**
+- ✅ Inline assembly with clobber lists
+- ✅ Far pointer support
+- ✅ ANSI C function definitions
+- ✅ Variadic function support
+
+**What's Actually Missing:**
+1. **Complete DOS Runtime Library** - Full printf, file I/O, malloc/free
+2. **Memory Models** - Tiny (.COM), medium, large, huge models
+3. **DOS API Wrappers** - Video functions, keyboard/mouse, interrupts
+4. **Example Programs** - Only 9 examples exist (target: 10-20)
+
+---
+
+## Original Planned Roadmap (for reference)
+
+The sections below show the **original plan** from 2025-11-21. Many of these phases have been completed ahead of schedule.
+
+---
+
+## Phase 0: Validation & Setup (Week 1) ✅ COMPLETE
 
 **Goal:** Verify the integer-only pipeline works end-to-end
+**Status:** ✅ All tasks completed
 
 ### Tasks
 
-- [ ] **Build QBE with i8086 backend**
+- [x] **Build QBE with i8086 backend** ✅
   ```bash
   make clean && make
   ./qbe -h  # Verify i8086 target listed
@@ -33,7 +75,7 @@ This roadmap outlines the phased implementation of a complete C11 compiler targe
   **Owner:** Build system
   **Time:** 1 hour
 
-- [ ] **Build MiniC compiler**
+- [x] **Build MiniC compiler** ✅
   ```bash
   cd minic && make
   ./minic < test/simple_test.c > test.ssa
@@ -41,7 +83,7 @@ This roadmap outlines the phased implementation of a complete C11 compiler targe
   **Owner:** Frontend
   **Time:** 1 hour
 
-- [ ] **Test integer-only compilation**
+- [x] **Test integer-only compilation** ✅
   ```bash
   # Create simple test: hello_int.c
   echo 'int main() { return 42; }' > test.c
@@ -52,14 +94,14 @@ This roadmap outlines the phased implementation of a complete C11 compiler targe
   **Owner:** Integration
   **Time:** 2 hours
 
-- [ ] **Install DOS toolchain**
+- [x] **Install DOS toolchain** ✅
   - NASM: `sudo apt-get install nasm` or download from nasm.us
   - OpenWatcom: Download v2 from github.com/open-watcom/open-watcom-v2
   - DOSBox: `sudo apt-get install dosbox`
   **Owner:** DevOps
   **Time:** 2 hours
 
-- [ ] **Assemble and link test program**
+- [x] **Assemble and link test program** ✅
   ```bash
   nasm -f obj test.asm -o test.obj
   # Note: Will fail without crt0.obj - that's expected for now
@@ -79,9 +121,10 @@ This roadmap outlines the phased implementation of a complete C11 compiler targe
 
 ---
 
-## Phase 1: Integer-Only DOS Compilation (Week 2)
+## Phase 1: Integer-Only DOS Compilation (Week 2) ⚠️ ~80% COMPLETE
 
 **Goal:** Full integer C programs compile and run on DOS
+**Status:** ⚠️ crt0.asm exists, need complete DOS runtime library
 
 ### Task 1.1: DOS Startup Code (crt0.asm)
 
@@ -274,9 +317,11 @@ Currently incomplete in i8086 backend. Add DX:AX register pair operations.
 
 ---
 
-## Phase 2: 8087 Floating-Point Support (Weeks 3-5)
+## Phase 2: 8087 Floating-Point Support (Weeks 3-5) ✅ COMPLETE
 
 **Goal:** Full float/double support matching MiniC's capabilities
+**Status:** ✅ Fully implemented in PR #11 (commit e01104b)
+**Evidence:** i8086/emit.c:76-131, i8086/isel.c:141-196, i8086/examples/09_float.c
 
 ### Week 3: Foundation
 
@@ -676,9 +721,11 @@ Currently only small model (code + data < 64K each). Add:
 
 ---
 
-## Phase 4: C11 Features (Weeks 9-12)
+## Phase 4: C11 Features (Weeks 9-12) ✅ COMPLETE
 
 **Goal:** 60% C11 compliance with DOS-relevant features
+**Status:** ✅ All 6 target features implemented in PR #12
+**Evidence:** minic/minic.y (lines 1240, 2460, 3468), minic/test/c11/, NEW_FEATURES_DOCUMENTATION.md
 
 ### Week 9: High-Priority Features
 
@@ -945,7 +992,38 @@ Complete documentation:
 
 ---
 
-**Roadmap Version:** 1.0
-**Last Updated:** 2025-11-21
-**Status:** Ready to Begin Phase 0
-**Next Review:** End of Week 2 (Milestone 1)
+---
+
+## Addendum: Features Completed Outside Original Roadmap
+
+The following features were implemented but were not part of the original roadmap:
+
+### Inline Assembly Support ✅ COMPLETE
+**Commits:** d44ea80, c0ddbff
+**Evidence:** minic/minic.y:2124-3292, minic/test/asm_clobber_test.c
+
+- GCC-style extended inline assembly
+- Support for output/input operands
+- Clobber lists with `__asm__` and `__asm__ volatile` keywords
+- Full test suite demonstrating all features
+
+### Far Pointer Support ✅ COMPLETE
+**PR:** #13 (commit 6492370)
+**Evidence:** i8086/ backend code
+
+- Far pointer support for i8086 small memory model
+- Proper handling of segment:offset addressing
+
+### ANSI C Function Definitions ✅ COMPLETE
+**PR:** #15 (commit 03d0b81)
+
+- ANSI C-style function parameter declarations
+- Compatibility with modern C syntax
+
+---
+
+**Roadmap Version:** 2.0 (Updated with actual status)
+**Last Updated:** 2025-12-01
+**Original Date:** 2025-11-21
+**Actual Status:** ~70-80% Complete (Phases 0, 2, 4 done; Phase 1 ~80%, Phase 3 ~30%)
+**Next Priority:** Complete DOS runtime library (Phase 3)
