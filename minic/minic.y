@@ -106,8 +106,10 @@ struct AsmStmt {
 	char code[1024];           /* Assembly code template */
 	int noutputs;              /* Number of output operands */
 	int ninputs;               /* Number of input operands */
+	int nclobbers;             /* Number of clobber specifications */
 	struct AsmOperand outputs[4];  /* Up to 4 output operands */
 	struct AsmOperand inputs[4];   /* Up to 4 input operands */
+	char clobbers[8][NString];     /* Up to 8 clobber specs ("ax", "memory", etc.) */
 	int isvolatile;            /* 1 if volatile */
 };
 
@@ -120,6 +122,8 @@ FILE *of;
 int line;
 int lbl, tmp, nglo;
 int enumval; /* Current enum value */
+int cur_fn_interrupt; /* 1 if current function has __attribute__((interrupt)) */
+int cur_fn_weak;      /* 1 if current function has __attribute__((weak)) */
 char *ini[NGlo];
 struct {
 	char v[NString];
@@ -2120,6 +2124,7 @@ stmt(Stmt *s, int b)
 		 * Process inline assembly:
 		 * 1. For basic asm (no operands), emit directly
 		 * 2. For extended asm with operands, substitute %0, %1, etc.
+		 * 3. Emit clobbers as a comment for documentation
 		 */
 		if (a->noutputs == 0 && a->ninputs == 0) {
 			/* Simple inline assembly - emit directly */
@@ -2169,6 +2174,14 @@ stmt(Stmt *s, int b)
 			}
 			*dst = '\0';
 			fprintf(of, "\tasm \"%s\"\n", processed);
+		}
+		/* Emit clobbers as a comment for documentation/debugging */
+		if (a->nclobbers > 0) {
+			fprintf(of, "# clobbers:");
+			for (int i = 0; i < a->nclobbers; i++) {
+				fprintf(of, " %s", a->clobbers[i]);
+			}
+			fprintf(of, "\n");
 		}
 		return 0;
 	}
@@ -2283,7 +2296,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 %token INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF ALIGNAS GENERIC
-%token ASM
+%token ASM ATTRIBUTE
 
 %left ','
 %right '=' ADDEQ SUBEQ MULEQ DIVEQ MODEQ ANDEQ OREQ XOREQ SHLEQ SHREQ
@@ -2302,12 +2315,40 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %type <u> type
 %type <s> stmt stmts asmstmt
 %type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc
-%type <n> asmoutputs asmoutputlist asmoutput asminputs asminputlist asminput
+%type <n> asmoutputs asmoutputlist asmoutput asminputs asminputlist asminput asmclobbers asmclobberlist
 %token <u> TNAME
 
 %%
 
-prog: kfunc prog | typed_decl prog | edcl prog | tdcl prog | sdcl prog | static_assert_dcl prog | ;
+prog: kfunc prog | attr_kfunc prog | typed_decl prog | attr_typed_decl prog | edcl prog | tdcl prog | sdcl prog | static_assert_dcl prog | ;
+
+attr_kfunc: attrspec storageopt inlineopt init_attr prot_knr '{' dcls stmts '}'
+{
+	if (cur_fn_interrupt) {
+		/* Interrupt handler - emit iret instead of ret */
+		if (!stmt($8, -1))
+			fprintf(of, "\tasm \"iret\"\n");
+		else
+			fprintf(of, "\tasm \"iret\"\n");
+	} else {
+		if (!stmt($8, -1))
+			fprintf(of, "\tret 0\n");
+	}
+	fprintf(of, "}\n\n");
+};
+
+attr_typed_decl: attrspec type_and_ident_noattr typed_decl_rest
+{
+	/* __attribute__((xxx)) type ident ... - attributes already set by attrspec */
+};
+
+attrspec: ATTRIBUTE '(' '(' attrreset attrlist ')' ')';
+
+type_and_ident_noattr: type IDENT
+{
+	parsed_type = $1;
+	strcpy(parsed_ident, $2->u.v);
+};
 
 edcl: enumstart enums '}' ';'
     ;
@@ -2504,18 +2545,34 @@ typed_decl: type_and_ident typed_decl_rest
 
 type_and_ident: type IDENT
 {
+	cur_fn_interrupt = 0;
+	cur_fn_weak = 0;
 	parsed_type = $1;
 	strcpy(parsed_ident, $2->u.v);
+}
+              | type attropt IDENT
+{
+	/* type __attribute__((xxx)) ident - attributes already set by attropt */
+	parsed_type = $1;
+	strcpy(parsed_ident, $3->u.v);
 };
 
 typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 {
 	/* ANSI function body */
-	if (!stmt($4, -1)) {
-		if (curfntyp == NIL)
-			fprintf(of, "\tret\n");
+	if (cur_fn_interrupt) {
+		/* Interrupt handler - emit iret */
+		if (!stmt($4, -1))
+			fprintf(of, "\tasm \"iret\"\n");
 		else
-			fprintf(of, "\tret 0\n");
+			fprintf(of, "\tasm \"iret\"\n");
+	} else {
+		if (!stmt($4, -1)) {
+			if (curfntyp == NIL)
+				fprintf(of, "\tret\n");
+			else
+				fprintf(of, "\tret 0\n");
+		}
 	}
 	fprintf(of, "}\n\n");
 }
@@ -2584,7 +2641,11 @@ init:
 	varclr();
 	tmp = 0;
 	clit = 0;
+	cur_fn_interrupt = 0;
+	cur_fn_weak = 0;
 };
+
+init_attr: { varclr(); tmp = 0; clit = 0; };
 
 inlineopt: INLINE
          |
@@ -2595,10 +2656,39 @@ storageopt: STATIC
           |
           ;
 
-kfunc: storageopt inlineopt init prot_knr '{' dcls stmts '}'
+attrreset: { cur_fn_interrupt = 0; cur_fn_weak = 0; };
+
+attropt: ATTRIBUTE '(' '(' attrreset attrlist ')' ')'
+       | attrreset
+       ;
+
+attrlist: attritem
+        | attrlist ',' attritem
+        ;
+
+attritem: IDENT {
+        /* Handle specific attributes */
+        if (strcmp($1->u.v, "interrupt") == 0) {
+            cur_fn_interrupt = 1;
+        } else if (strcmp($1->u.v, "weak") == 0) {
+            cur_fn_weak = 1;
+        }
+        /* Other attributes are silently ignored for compatibility */
+    }
+    ;
+
+kfunc: storageopt inlineopt attropt init prot_knr '{' dcls stmts '}'
 {
-	if (!stmt($7, -1))
-		fprintf(of, "\tret 0\n");
+	if (cur_fn_interrupt) {
+		/* Interrupt handler - emit iret instead of ret */
+		if (!stmt($8, -1))
+			fprintf(of, "\tasm \"iret\"\n");
+		else
+			fprintf(of, "\tasm \"iret\"\n");
+	} else {
+		if (!stmt($8, -1))
+			fprintf(of, "\tret 0\n");
+	}
 	fprintf(of, "}\n\n");
 };
 
@@ -3004,6 +3094,7 @@ asmstmt: ASM '(' STR ')' ';' {
         getstrlit($3->u.n, a->code, sizeof(a->code));
         a->noutputs = 0;
         a->ninputs = 0;
+        a->nclobbers = 0;
         a->isvolatile = 0;
         $$ = s;
     }
@@ -3014,6 +3105,7 @@ asmstmt: ASM '(' STR ')' ';' {
         getstrlit($4->u.n, a->code, sizeof(a->code));
         a->noutputs = 0;
         a->ninputs = 0;
+        a->nclobbers = 0;
         a->isvolatile = 1;
         $$ = s;
     }
@@ -3081,6 +3173,132 @@ asmstmt: ASM '(' STR ')' ';' {
         a->isvolatile = 1;
         $$ = s;
     }
+    | ASM '(' STR ':' asmoutputs ':' asminputs ':' asmclobbers ')' ';' {
+        /* Inline assembly with outputs, inputs, and clobbers: asm("code" : outputs : inputs : clobbers); */
+        struct AsmStmt *a = (struct AsmStmt *)$5;
+        struct AsmStmt *ainputs = (struct AsmStmt *)$7;
+        struct AsmStmt *aclobbers = (struct AsmStmt *)$9;
+        Stmt *s;
+        /* Merge inputs into a */
+        a->ninputs = ainputs->ninputs;
+        for (int i = 0; i < ainputs->ninputs; i++) {
+            a->inputs[i] = ainputs->inputs[i];
+        }
+        /* Merge clobbers into a */
+        a->nclobbers = aclobbers->nclobbers;
+        for (int i = 0; i < aclobbers->nclobbers; i++) {
+            strcpy(a->clobbers[i], aclobbers->clobbers[i]);
+        }
+        getstrlit($3->u.n, a->code, sizeof(a->code));
+        a->isvolatile = 0;
+        s = mkstmt(Asm, a, 0, 0);
+        $$ = s;
+    }
+    | ASM VOLATILE '(' STR ':' asmoutputs ':' asminputs ':' asmclobbers ')' ';' {
+        /* Volatile inline assembly with outputs, inputs, and clobbers */
+        struct AsmStmt *a = (struct AsmStmt *)$6;
+        struct AsmStmt *ainputs = (struct AsmStmt *)$8;
+        struct AsmStmt *aclobbers = (struct AsmStmt *)$10;
+        Stmt *s;
+        /* Merge inputs into a */
+        a->ninputs = ainputs->ninputs;
+        for (int i = 0; i < ainputs->ninputs; i++) {
+            a->inputs[i] = ainputs->inputs[i];
+        }
+        /* Merge clobbers into a */
+        a->nclobbers = aclobbers->nclobbers;
+        for (int i = 0; i < aclobbers->nclobbers; i++) {
+            strcpy(a->clobbers[i], aclobbers->clobbers[i]);
+        }
+        getstrlit($4->u.n, a->code, sizeof(a->code));
+        a->isvolatile = 1;
+        s = mkstmt(Asm, a, 0, 0);
+        $$ = s;
+    }
+    | ASM '(' STR ':' ':' asminputs ':' asmclobbers ')' ';' {
+        /* Inline assembly with inputs and clobbers only: asm("code" :: inputs : clobbers); */
+        struct AsmStmt *a = (struct AsmStmt *)$6;
+        struct AsmStmt *aclobbers = (struct AsmStmt *)$8;
+        Stmt *s;
+        /* Merge clobbers into a */
+        a->nclobbers = aclobbers->nclobbers;
+        for (int i = 0; i < aclobbers->nclobbers; i++) {
+            strcpy(a->clobbers[i], aclobbers->clobbers[i]);
+        }
+        getstrlit($3->u.n, a->code, sizeof(a->code));
+        a->noutputs = 0;
+        a->isvolatile = 0;
+        s = mkstmt(Asm, a, 0, 0);
+        $$ = s;
+    }
+    | ASM VOLATILE '(' STR ':' ':' asminputs ':' asmclobbers ')' ';' {
+        /* Volatile inline assembly with inputs and clobbers only */
+        struct AsmStmt *a = (struct AsmStmt *)$7;
+        struct AsmStmt *aclobbers = (struct AsmStmt *)$9;
+        Stmt *s;
+        /* Merge clobbers into a */
+        a->nclobbers = aclobbers->nclobbers;
+        for (int i = 0; i < aclobbers->nclobbers; i++) {
+            strcpy(a->clobbers[i], aclobbers->clobbers[i]);
+        }
+        getstrlit($4->u.n, a->code, sizeof(a->code));
+        a->noutputs = 0;
+        a->isvolatile = 1;
+        s = mkstmt(Asm, a, 0, 0);
+        $$ = s;
+    }
+    | ASM '(' STR ':' asmoutputs ':' ':' asmclobbers ')' ';' {
+        /* Inline assembly with outputs and clobbers only: asm("code" : outputs : : clobbers); */
+        struct AsmStmt *a = (struct AsmStmt *)$5;
+        struct AsmStmt *aclobbers = (struct AsmStmt *)$8;
+        Stmt *s;
+        /* Merge clobbers into a */
+        a->nclobbers = aclobbers->nclobbers;
+        for (int i = 0; i < aclobbers->nclobbers; i++) {
+            strcpy(a->clobbers[i], aclobbers->clobbers[i]);
+        }
+        getstrlit($3->u.n, a->code, sizeof(a->code));
+        a->isvolatile = 0;
+        s = mkstmt(Asm, a, 0, 0);
+        $$ = s;
+    }
+    | ASM VOLATILE '(' STR ':' asmoutputs ':' ':' asmclobbers ')' ';' {
+        /* Volatile inline assembly with outputs and clobbers only */
+        struct AsmStmt *a = (struct AsmStmt *)$6;
+        struct AsmStmt *aclobbers = (struct AsmStmt *)$9;
+        Stmt *s;
+        /* Merge clobbers into a */
+        a->nclobbers = aclobbers->nclobbers;
+        for (int i = 0; i < aclobbers->nclobbers; i++) {
+            strcpy(a->clobbers[i], aclobbers->clobbers[i]);
+        }
+        getstrlit($4->u.n, a->code, sizeof(a->code));
+        a->isvolatile = 1;
+        s = mkstmt(Asm, a, 0, 0);
+        $$ = s;
+    }
+    | ASM '(' STR ':' ':' ':' asmclobbers ')' ';' {
+        /* Inline assembly with clobbers only: asm("code" ::: clobbers); */
+        struct AsmStmt *a = (struct AsmStmt *)$7;
+        Stmt *s;
+        getstrlit($3->u.n, a->code, sizeof(a->code));
+        a->noutputs = 0;
+        a->ninputs = 0;
+        a->isvolatile = 0;
+        s = mkstmt(Asm, a, 0, 0);
+        $$ = s;
+    }
+    | ASM VOLATILE '(' STR ':' ':' ':' asmclobbers ')' ';' {
+        /* Volatile inline assembly with clobbers only: asm volatile("code" ::: clobbers); */
+        struct AsmStmt *a = (struct AsmStmt *)$8;
+        Stmt *s;
+        getstrlit($4->u.n, a->code, sizeof(a->code));
+        a->noutputs = 0;
+        a->ninputs = 0;
+        a->isvolatile = 1;
+        s = mkstmt(Asm, a, 0, 0);
+        $$ = s;
+    }
     ;
 
 asmoutputs:
@@ -3088,6 +3306,7 @@ asmoutputs:
         struct AsmStmt *a = alloc(sizeof *a);
         a->noutputs = 0;
         a->ninputs = 0;
+        a->nclobbers = 0;
         $$ = (Node *)a;
     }
     | asmoutputlist {
@@ -3113,6 +3332,7 @@ asmoutput: STR '(' expr ')' {
         struct AsmStmt *a = alloc(sizeof *a);
         a->noutputs = 1;
         a->ninputs = 0;
+        a->nclobbers = 0;
         getstrlit($1->u.n, a->outputs[0].constraint, NString);
         a->outputs[0].expr = $3;
         $$ = (Node *)a;
@@ -3124,6 +3344,7 @@ asminputs:
         struct AsmStmt *a = alloc(sizeof *a);
         a->noutputs = 0;
         a->ninputs = 0;
+        a->nclobbers = 0;
         $$ = (Node *)a;
     }
     | asminputlist {
@@ -3149,8 +3370,40 @@ asminput: STR '(' expr ')' {
         struct AsmStmt *a = alloc(sizeof *a);
         a->noutputs = 0;
         a->ninputs = 1;
+        a->nclobbers = 0;
         getstrlit($1->u.n, a->inputs[0].constraint, NString);
         a->inputs[0].expr = $3;
+        $$ = (Node *)a;
+    }
+    ;
+
+asmclobbers:
+        {
+        struct AsmStmt *a = alloc(sizeof *a);
+        a->noutputs = 0;
+        a->ninputs = 0;
+        a->nclobbers = 0;
+        $$ = (Node *)a;
+    }
+    | asmclobberlist {
+        $$ = $1;
+    }
+    ;
+
+asmclobberlist: STR {
+        struct AsmStmt *a = alloc(sizeof *a);
+        a->noutputs = 0;
+        a->ninputs = 0;
+        a->nclobbers = 1;
+        getstrlit($1->u.n, a->clobbers[0], NString);
+        $$ = (Node *)a;
+    }
+    | asmclobberlist ',' STR {
+        struct AsmStmt *a = (struct AsmStmt *)$1;
+        if (a->nclobbers < 8) {
+            getstrlit($3->u.n, a->clobbers[a->nclobbers], NString);
+            a->nclobbers++;
+        }
         $$ = (Node *)a;
     }
     ;
@@ -3331,6 +3584,8 @@ yylex()
 		{ "__asm__", ASM },
 		{ "__asm", ASM },
 		{ "__volatile__", VOLATILE },
+		{ "__attribute__", ATTRIBUTE },
+		{ "__attribute", ATTRIBUTE },
 		{ 0, 0 }
 	};
 	int i, c, c1, n;
