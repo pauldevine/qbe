@@ -84,7 +84,24 @@ extern char *Nextscreen;
 extern LPTR *Filemem;
 extern LPTR *Fileend;
 extern LPTR *Topchar;
+extern LPTR *Botchar;
 extern LPTR *Curschar;
+extern int Cursrow;
+extern int Curscol;
+extern int Cursvcol;
+extern int Curswant;
+extern bool_t set_want_col;
+extern int Prenum;
+extern LPTR *Insstart;
+extern bool_t Changed;
+extern char *Redobuff;
+extern char *Undobuff;
+extern char *Insbuff;
+extern LPTR *Uncurschar;
+extern int Ninsert;
+extern int Undelchars;
+extern char *Insptr;
+extern char *Filename;
 
 /*
  * Note: MiniC does not support function prototypes with pointer return types

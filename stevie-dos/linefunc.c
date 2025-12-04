@@ -5,6 +5,7 @@
  *
  * Savaged to compile under modern gcc and improved (haha) by: George Nakos  ggn@atari.org
  *
+ * DOS port for MiniC/QBE 8086 compiler
  */
 
 #include "stevie.h"
@@ -16,11 +17,9 @@
  * referenced by 'curr'. Return NULL if there is no next line (at EOF).
  */
 
-LPTR *
-nextline(curr)
-LPTR *curr;
+LPTR *nextline(LPTR *curr)
 {
-    static	LPTR	next;
+    static LPTR next;
 
     if (curr->linep->next != Fileend->linep)
     {
@@ -38,13 +37,11 @@ LPTR *curr;
  * referenced by 'curr'. Return NULL if there is no prior line.
  */
 
-LPTR *
-prevline(curr)
-LPTR *curr;
+LPTR *prevline(LPTR *curr)
 {
-    static	LPTR	prev;
+    static LPTR prev;
 
-    if (curr->linep->prev != NULL)
+    if (curr->linep->prev != (LINE *)NULL)
     {
         prev.index = 0;
         prev.linep = curr->linep->prev;
@@ -59,13 +56,11 @@ LPTR *curr;
  * Try to advance to the specified column, starting at p.
  */
 
-LPTR *
-coladvance(p, col)
-LPTR	*p;
-int	col;
+LPTR *coladvance(LPTR *p, int col)
 {
-    static	LPTR	lp;
-    int	c, in;
+    static LPTR lp;
+    int c;
+    int in;
 
     lp.linep = p->linep;
     lp.index = p->index;
@@ -74,14 +69,15 @@ int	col;
     if (lp.linep->s[lp.index] == '\0')
         return &lp;
     /* try to advance to the specified column */
-    for ( c = 0; col-- > 0; c++ )
-    {
+    c = 0;
+    while (col > 0) {
+        col = col - 1;
         /* Count a tab for what it's worth (if list mode not on) */
-        if ( gchar(&lp) == TAB && !P(P_LS) )
+        if (gchar(&lp) == TAB && !P(P_LS))
         {
             in = ((P(P_TS) - 1) - c % P(P_TS));
-            col -= in;
-            c += in;
+            col = col - in;
+            c = c + in;
         }
         /* Don't go past the end of */
         /* the file or the line. */
@@ -90,7 +86,7 @@ int	col;
             dec(&lp);
             break;
         }
+        c = c + 1;
     }
     return &lp;
 }
-

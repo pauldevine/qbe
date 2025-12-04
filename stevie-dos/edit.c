@@ -3,12 +3,10 @@
  *
  * Extensive modifications by:  Tony Andrews       onecom!wldrdg!tony
  *
- * Savaged to compile under modern gcc and improved (haha) by: George Nakos  ggn@atari.org
- *
+ * DOS port for MiniC/QBE 8086 compiler
  */
 
 #include "stevie.h"
-void insertchar(int c);
 
 /*
  * This flag is used to make auto-indent work right on lines where only
@@ -16,27 +14,92 @@ void insertchar(int c);
  * and reset when any other editting is done on the line. If an <ESC>
  * or <RETURN> is received, and did_ai is TRUE, the line is truncated.
  */
-bool_t	did_ai = FALSE;
+bool_t did_ai;
 
-void
-edit()
+/*
+ * MiniC doesn't support local struct variables, use globals
+ */
+LPTR *edit_p_tmp;
+LPTR *edit_np;
+
+/*
+ * Special characters in this context are those that need processing other
+ * than the simple insertion that can be performed here. This includes ESC
+ * which terminates the insert, and CR/NL which need special processing to
+ * open up a new line. This routine tries to optimize insertions performed
+ * by the "redo" command, so it needs to know when it should stop and defer
+ * processing to the "normal" mechanism.
+ */
+int isspecial(int c)
+{
+	return c == NL || c == CR || c == ESC;
+}
+
+void insertchar(int c)
+{
+	char *p;
+
+	if (!anyinput())
+	{
+		inschar(c);
+		*Insptr = c;
+		Insptr = Insptr + 1;
+		Ninsert = Ninsert + 1;
+		/*
+		 * The following kludge avoids overflowing the statically
+		 * allocated insert buffer. Just dump the user back into
+		 * command mode, and print a message.
+		 */
+		if (Insptr + 10 >= &Insbuff[1024])
+		{
+			stuffin((char *)mkstr(ESC));
+			emsg("No buffer space - returning to command mode");
+			sleep(2);
+		}
+	}
+	else
+	{
+		/* If there's any pending input, grab it all at once. */
+		p = Insptr;
+		*Insptr = c;
+		Insptr = Insptr + 1;
+		Ninsert = Ninsert + 1;
+		c = vpeekc();
+		while (!isspecial(c))
+		{
+			c = vgetc();
+			*Insptr = c;
+			Insptr = Insptr + 1;
+			Ninsert = Ninsert + 1;
+			c = vpeekc();
+		}
+		*Insptr = 0;
+		insstr(p);
+	}
+	updateline();
+}
+
+void edit(void)
 {
 	int c;
-	char *p, *q;
+	char *p;
+	char *q;
 
+	did_ai = FALSE;
 	Prenum = 0;
 
 	/* position the display and the cursor at the top of the file. */
 	*Topchar = *Filemem;
 	*Curschar = *Filemem;
-	Cursrow = Curscol = 0;
+	Cursrow = 0;
+	Curscol = 0;
 
-	for ( ;; ) {
+	while (1) {
 
 	/* Figure out where the cursor is based on Curschar. */
 	cursupdate();
 
-	windgoto(Cursrow,Curscol);
+	windgoto(Cursrow, Curscol);
 
 	c = vgetc();
 
@@ -45,8 +108,8 @@ edit()
 		/* We're in the normal (non-insert) mode. */
 
 		/* Pick up any leading digits and compute 'Prenum' */
-		if ( (Prenum>0 && isdigit(c)) || (isdigit(c) && c!='0') ){
-			Prenum = Prenum*10 + (c-'0');
+		if ((Prenum > 0 && isdigit(c)) || (isdigit(c) && c != '0')) {
+			Prenum = Prenum * 10 + (c - '0');
 			continue;
 		}
 		/* execute the command */
@@ -79,16 +142,20 @@ edit()
 			Undelchars = Ninsert;
 			/* Undobuff[0] = '\0'; */
 			/* construct the Redo buffer */
-			p=Redobuff;
-			q=Insbuff;
-			while ( q < Insptr )
-				*p++ = *q++;
-			*p++ = ESC;
+			p = Redobuff;
+			q = Insbuff;
+			while ((int)q < (int)Insptr) {
+				*p = *q;
+				p = p + 1;
+				q = q + 1;
+			}
+			*p = ESC;
+			p = p + 1;
 			*p = NUL;
 			updatescreen();
 			break;
 
-		case CTRL('D'):
+		case 4:	/* CTRL('D') */
 			/*
 			 * Control-D is treated as a backspace in insert
 			 * mode to make auto-indent easier. This isn't
@@ -114,16 +181,17 @@ edit()
 			did_ai = FALSE;
 			dec(Curschar);
 			delchar(TRUE);
-			Insptr--;
-			Ninsert--;
+			Insptr = Insptr - 1;
+			Ninsert = Ninsert - 1;
 			cursupdate();
 			updateline();
 			break;
 
 		case CR:
 		case NL:
-			*Insptr++ = NL;
-			Ninsert++;
+			*Insptr = NL;
+			Insptr = Insptr + 1;
+			Ninsert = Ninsert + 1;
 			opencmd(FORWARD, TRUE);		/* open a new line */
 			cursupdate();
 			updatescreen();
@@ -138,107 +206,62 @@ edit()
 	}
 }
 
-/*
- * Special characters in this context are those that need processing other
- * than the simple insertion that can be performed here. This includes ESC
- * which terminates the insert, and CR/NL which need special processing to
- * open up a new line. This routine tries to optimize insertions performed
- * by the "redo" command, so it needs to know when it should stop and defer
- * processing to the "normal" mechanism.
- */
-#define	ISSPECIAL(c)	((c) == NL || (c) == CR || (c) == ESC)
-
-void
-insertchar(c)
-int c;
+void getout(void)
 {
-	char *p;
-
-if ( ! anyinput() )
-{
-    inschar(c);
-    *Insptr++ = c;
-    Ninsert++;
-    /*
-     * The following kludge avoids overflowing the statically
-     * allocated insert buffer. Just dump the user back into
-     * command mode, and print a message.
-     */
-    if (Insptr + 10 >= &Insbuff[1024])
-    {
-        stuffin(mkstr(ESC));
-        emsg("No buffer space - returning to command mode");
-        sleep(2);
-    }
-}
-else
-{
-    /* If there's any pending input, grab it all at once. */
-    p = Insptr;
-    *Insptr++ = c;
-    Ninsert++;
-    for (c = vpeekc(); !ISSPECIAL(c) ; c = vpeekc())
-    {
-        c = vgetc();
-        *Insptr++ = c;
-        Ninsert++;
-    }
-    *Insptr = '\0';
-    insstr(p);
-}
-updateline();
+	windgoto(Rows - 1, 0);
+	putchar(13);
+	putchar(10);
+	windexit(0);
 }
 
-void
-getout()
+void scrolldown(int nlines)
 {
-    windgoto(Rows - 1, 0);
-    putchar('\r');
-    putchar('\n');
-    windexit(0);
+	LPTR *p;
+	LPTR *tmp;
+	int done;	/* total # of physical lines done */
+
+	done = 0;
+
+	/* Scroll up 'nlines' lines. */
+	while (nlines > 0)
+	{
+		nlines = nlines - 1;
+		p = (LPTR *)prevline(Topchar);
+		if (p == NULL)
+			break;
+		done = done + plines(p);
+		*Topchar = *p;
+		if (Curschar->linep == Botchar->linep->prev)
+		{
+			tmp = (LPTR *)prevline(Curschar);
+			*Curschar = *tmp;
+		}
+	}
+	s_ins(0, done);
 }
 
-void
-scrolldown(nlines)
-int nlines;
+void scrollup(int nlines)
 {
-    register LPTR	*p;
-    register int	done = 0;	/* total # of physical lines done */
+	LPTR *p;
+	int done;	/* total # of physical lines done */
+	int pl;		/* # of plines for the current line */
 
-    /* Scroll up 'nlines' lines. */
-    while (nlines--)
-    {
-        if ((p = prevline(Topchar)) == NULL)
-            break;
-        done += plines(p);
-        *Topchar = *p;
-        if (Curschar->linep == Botchar->linep->prev)
-            *Curschar = *prevline(Curschar);
-    }
-    s_ins(0, done);
-}
+	done = 0;
 
-void
-scrollup(nlines)
-int nlines;
-{
-    register LPTR	*p;
-    register int	done = 0;	/* total # of physical lines done */
-    register int	pl;		/* # of plines for the current line */
-
-    /* Scroll down 'nlines' lines. */
-    while (nlines--)
-    {
-        pl = plines(Topchar);
-        if ((p = nextline(Topchar)) == NULL)
-            break;
-        done += pl;
-        if (Curschar->linep == Topchar->linep)
-            *Curschar = *p;
-        *Topchar = *p;
-
-    }
-    s_del(0, done);
+	/* Scroll down 'nlines' lines. */
+	while (nlines > 0)
+	{
+		nlines = nlines - 1;
+		pl = plines(Topchar);
+		p = (LPTR *)nextline(Topchar);
+		if (p == NULL)
+			break;
+		done = done + pl;
+		if (Curschar->linep == Topchar->linep)
+			*Curschar = *p;
+		*Topchar = *p;
+	}
+	s_del(0, done);
 }
 
 /*
@@ -251,109 +274,111 @@ int nlines;
  * sucessful, FALSE when we hit a boundary (of a line, or the file).
  */
 
-bool_t
-oneright()
+bool_t oneright(void)
 {
-    set_want_col = TRUE;
+	int result;
 
-    switch (inc(Curschar))
-    {
+	set_want_col = TRUE;
 
-    case 0:
-        return TRUE;
+	result = inc(Curschar);
+	if (result == 0)
+		return TRUE;
 
-    case 1:
-        dec(Curschar);		/* crossed a line, so back up */
-    /* fall through */
-    case -1:
-        return FALSE;
-    }
+	if (result == 1)
+		dec(Curschar);		/* crossed a line, so back up */
+	return FALSE;
 }
 
-bool_t
-oneleft()
+bool_t oneleft(void)
 {
-    set_want_col = TRUE;
+	int result;
 
-    switch (dec(Curschar))
-    {
+	set_want_col = TRUE;
 
-    case 0:
-        return TRUE;
+	result = dec(Curschar);
+	if (result == 0)
+		return TRUE;
 
-    case 1:
-        inc(Curschar);		/* crossed a line, so back up */
-    /* fall through */
-    case -1:
-        return FALSE;
-    }
+	if (result == 1)
+		inc(Curschar);		/* crossed a line, so back up */
+	return FALSE;
 }
 
-void
-beginline(flag)
-bool_t	flag;
+void beginline(bool_t flag)
 {
-    while ( oneleft() )
-        ;
-    if (flag)
-    {
-        while (isspace(gchar(Curschar)) && oneright())
-            ;
-    }
-    set_want_col = TRUE;
+	while (oneleft())
+		;
+	if (flag)
+	{
+		while (isspace(gchar(Curschar)) && oneright())
+			;
+	}
+	set_want_col = TRUE;
 }
 
-bool_t
-oneup(n)
+bool_t oneup(int n)
 {
-    LPTR p, *np;
-    int k;
+	LPTR *np;
+	int k;
 
-    p = *Curschar;
-    for ( k = 0; k < n; k++ )
-    {
-        /* Look for the previous line */
-        if ( (np = prevline(&p)) == NULL )
-        {
-            /* If we've at least backed up a little .. */
-            if ( k > 0 )
-                break;	/* to update the cursor, etc. */
-            else
-                return FALSE;
-        }
-        p = *np;
-    }
-    *Curschar = p;
-    /* This makes sure Topchar gets updated so the complete line */
-    /* is one the screen. */
-    cursupdate();
-    /* try to advance to the column we want to be at */
-    *Curschar = *coladvance(&p, Curswant);
-    return TRUE;
+	/* Allocate temp LPTR on first use */
+	if (edit_p_tmp == NULL)
+		edit_p_tmp = (LPTR *)alloc(16);
+
+	*edit_p_tmp = *Curschar;
+	k = 0;
+	while (k < n)
+	{
+		/* Look for the previous line */
+		np = (LPTR *)prevline(edit_p_tmp);
+		if (np == NULL)
+		{
+			/* If we've at least backed up a little .. */
+			if (k > 0)
+				break;	/* to update the cursor, etc. */
+			else
+				return FALSE;
+		}
+		*edit_p_tmp = *np;
+		k = k + 1;
+	}
+	*Curschar = *edit_p_tmp;
+	/* This makes sure Topchar gets updated so the complete line */
+	/* is one the screen. */
+	cursupdate();
+	/* try to advance to the column we want to be at */
+	np = (LPTR *)coladvance(edit_p_tmp, Curswant);
+	*Curschar = *np;
+	return TRUE;
 }
 
-bool_t
-onedown(n)
+bool_t onedown(int n)
 {
-    LPTR p, *np;
-    int k;
+	LPTR *np;
+	int k;
 
-    p = *Curschar;
-    for ( k = 0; k < n; k++ )
-    {
-        /* Look for the next line */
-        if ( (np = nextline(&p)) == NULL )
-        {
-            if ( k > 0 )
-                break;
-            else
-                return FALSE;
-        }
-        p = *np;
-    }
-    /* try to advance to the column we want to be at */
-    *Curschar = *coladvance(&p, Curswant);
-    return TRUE;
+	/* Allocate temp LPTR on first use */
+	if (edit_p_tmp == NULL)
+		edit_p_tmp = (LPTR *)alloc(16);
+
+	*edit_p_tmp = *Curschar;
+	k = 0;
+	while (k < n)
+	{
+		/* Look for the next line */
+		np = (LPTR *)nextline(edit_p_tmp);
+		if (np == NULL)
+		{
+			if (k > 0)
+				break;
+			else
+				return FALSE;
+		}
+		*edit_p_tmp = *np;
+		k = k + 1;
+	}
+	/* try to advance to the column we want to be at */
+	np = (LPTR *)coladvance(edit_p_tmp, Curswant);
+	*Curschar = *np;
+	return TRUE;
 }
-
-
