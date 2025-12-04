@@ -207,8 +207,15 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 			varh[h].isextern = 0;
 			return;
 		}
-		if (strcmp(varh[h].v, v) == 0)
+		if (strcmp(varh[h].v, v) == 0) {
+			/* Allow definition after extern declaration */
+			if (varh[h].isextern && glo > 0) {
+				varh[h].glo = glo;  /* Update to actual glo value */
+				varh[h].isextern = 0;  /* Now it's a real definition */
+				return;
+			}
 			die("double definition");
+		}
 		h = (h+1) % NVar;
 	} while(h != h0);
 	die("too many variables");
@@ -231,8 +238,12 @@ varaddextern(char *v, unsigned ctyp, int isarray)
 			varh[h].isextern = 1;  /* Mark as extern */
 			return;
 		}
-		if (strcmp(varh[h].v, v) == 0)
+		if (strcmp(varh[h].v, v) == 0) {
+			/* Allow multiple extern declarations, or extern after definition */
+			if (varh[h].isextern || varh[h].glo == 1)
+				return;  /* Already declared/defined */
 			die("double definition");
+		}
 		h = (h+1) % NVar;
 	} while(h != h0);
 	die("too many variables");

@@ -3,34 +3,23 @@
  *
  * Extensive modifications by:  Tony Andrews       onecom!wldrdg!tony
  *
- * Savaged to compile under modern gcc and improved (haha) by: George Nakos  ggn@atari.org
- *
+ * DOS port for MiniC/QBE 8086 compiler
  */
 
 #include "stevie.h"
 
-static void openfwd();
-static void openbwd();
-
 /*
- * opencmd
- *
- * Add a blank line above or below the current line.
+ * MiniC doesn't support local struct variables, use global pointers
  */
+LPTR *misc_gotoline_l;
+LPTR *misc_csave;
 
-void opencmd(int dir, int can_ai /* if true, consider auto-indent */)
+void openfwd(int can_ai)
 {
-	if (dir == FORWARD)
-		openfwd(can_ai);
-	else
-		openbwd(can_ai);
-}
-
-static void openfwd(int can_ai)
-{
-	LINE	*l;
-	LPTR	*next;
-	char	*s;		/* string to be moved to new line, if any */
+	LINE *l;
+	LPTR *next;
+	char *s;		/* string to be moved to new line, if any */
+	int lnum;		/* for line number calculation */
 
 	/*
 	 * If we're in insert mode, we need to move the remainder of the
@@ -42,30 +31,23 @@ static void openfwd(int can_ai)
 	else
 		s = "";
 
-	if ((next = nextline(Curschar)) == NULL)	/* open on last line */
+	next = (LPTR *)nextline(Curschar);
+	if (next == NULL)	/* open on last line */
 		next = Fileend;
 
 	/*
 	 * By asking for as much space as the prior line had we make sure
 	 * that we'll have enough space for any auto-indenting.
 	 */
-	if ((l = newline(strlen(Curschar->linep->s) + SLOP)) == NULL)
+	l = (LINE *)newline(strlen(Curschar->linep->s) + SLOP);
+	if (l == NULL)
 		return;
 
 	if (*s != NUL)
 		strcpy(l->s, s);		/* copy string to new line */
-#if 0
-	else if (can_ai && P(P_AI)) {
-		/*
-		 * Auto-indent removed due to buggy implementation...
-		 */
-		 did_ai = TRUE;
-	}
-#endif
 
 	if (State == INSERT)		/* truncate current line at cursor */
 		*s = NUL;
-			
 
 	Curschar->linep->next = l;	/* link neighbors to new line */
 	next->linep->prev = l;
@@ -80,29 +62,31 @@ static void openfwd(int can_ai)
 		renum();
 
 	else {					/* stick it in the middle */
-		unsigned long	lnum;
-		lnum = ((long)l->prev->num + (long)l->next->num) / 2;
+		lnum = (l->prev->num + l->next->num) / 2;
 		l->num = lnum;
 	}
 
-	*Curschar = *nextline(Curschar);	/* cursor moves down */
+	next = (LPTR *)nextline(Curschar);
+	*Curschar = *next;	/* cursor moves down */
 	Curschar->index = 0;
 
-	s_ins(Cursrow+1, 1);	/* insert a physical line */
+	s_ins(Cursrow + 1, 1);	/* insert a physical line */
 
 	updatescreen();		/* because Botchar is now invalid... */
 
 	cursupdate();		/* update Cursrow before insert */
 }
 
-static void openbwd(int can_ai)
+void openbwd(int can_ai)
 {
-	LINE	*l;
-	LPTR	*prev;
+	LINE *l;
+	LPTR *prev;
+	LPTR *tmp;
 
-	prev = prevline(Curschar);
+	prev = (LPTR *)prevline(Curschar);
 
-	if ((l = newline(strlen(Curschar->linep->s) + SLOP)) == NULL)
+	l = (LINE *)newline(strlen(Curschar->linep->s) + SLOP);
+	if (l == NULL)
 		return;
 
 	Curschar->linep->prev = l;	/* link neighbors to new line */
@@ -113,91 +97,117 @@ static void openbwd(int can_ai)
 	if (prev != NULL)
 		l->prev = prev->linep;
 
-#if 0
-if (can_ai && P(P_AI))
-{
-    did_ai = TRUE;
-}
-#endif
+	tmp = (LPTR *)prevline(Curschar);
+	*Curschar = *tmp;	/* cursor moves up */
+	Curschar->index = 0;
 
-*Curschar = *prevline(Curschar);	/* cursor moves up */
-Curschar->index = 0;
+	if (prev == NULL)			/* new start of file */
+		Filemem->linep = l;
 
-if (prev == NULL)			/* new start of file */
-    Filemem->linep = l;
+	renum();	/* keep it simple - we don't do this often */
 
-renum();	/* keep it simple - we don't do this often */
+	cursupdate();			/* update Cursrow before insert */
+	if (Cursrow != 0)
+		s_ins(Cursrow, 1);		/* insert a physical line */
 
-cursupdate();			/* update Cursrow before insert */
-if (Cursrow != 0)
-    s_ins(Cursrow, 1);		/* insert a physical line */
-
-updatescreen();
+	updatescreen();
 }
 
-int
-cntllines(pbegin, pend)
-LPTR *pbegin, *pend;
+/*
+ * opencmd
+ *
+ * Add a blank line above or below the current line.
+ */
+void opencmd(int dir, int can_ai)
 {
-    LINE *lp;
-    int lnum = 1;
+	if (dir == FORWARD)
+		openfwd(can_ai);
+	else
+		openbwd(can_ai);
+}
 
-    for (lp = pbegin->linep; lp != pend->linep ; lp = lp->next)
-        lnum++;
+int cntllines(LPTR *pbegin, LPTR *pend)
+{
+	LINE *lp;
+	int lnum;
 
-    return(lnum);
+	lnum = 1;
+	lp = pbegin->linep;
+	while (lp != pend->linep)
+	{
+		lnum = lnum + 1;
+		lp = lp->next;
+	}
+
+	return lnum;
 }
 
 /*
  * plines(p) - return the number of physical screen lines taken by line 'p'
  */
-int
-plines(p)
-LPTR	*p;
+int plines(LPTR *p)
 {
-    register int	col;
-    register char	*s;
+	int col;
+	char *s;
 
-    s = p->linep->s;
+	s = p->linep->s;
 
-    if (*s == NUL)		/* empty line */
-        return 1;
+	if (*s == NUL)		/* empty line */
+		return 1;
 
-    /*
-     * If list mode is on, then the '$' at the end of
-     * the line takes up one extra column.
-     */
-    col = P(P_LS) ? 1 : 0;
+	/*
+	 * If list mode is on, then the '$' at the end of
+	 * the line takes up one extra column.
+	 */
+	if (P(P_LS))
+		col = 1;
+	else
+		col = 0;
 
-    for (; *s != NUL ; s++)
-    {
-        if ( *s == TAB && !P(P_LS))
-            col += P(P_TS) - (col % P(P_TS));
-        else
-            col += chars[(unsigned)(*s & 0xff)].ch_size;
-    }
-    return ((col + (Columns - 1)) / Columns);
+	while (*s != NUL)
+	{
+		if (*s == TAB && !P(P_LS))
+			col = col + P(P_TS) - (col % P(P_TS));
+		else
+			col = col + chars[(int)(*s & 255)].ch_size;
+		s = s + 1;
+	}
+	return ((col + (Columns - 1)) / Columns);
 }
 
-void
-fileinfo()
+void fileinfo(void)
 {
-    long	l1, l2;
-    char	buf[80];
+	long l1;
+	long l2;
+	char *buf;
 
-    if (bufempty())
-    {
-        msg("Buffer Empty");
-        return;
-    }
+	buf = (char *)alloc(80);
 
-    l1 = cntllines(Filemem, Curschar);
-    l2 = cntllines(Filemem, Fileend) - 1;
-    sprintf(buf, "\"%s\"%s line %ld of %ld -- %ld %% --",
-            (Filename != NULL) ? Filename : "No File",
-            Changed ? " [Modified]" : "",
-            l1, l2, (l1 * 100) / l2);
-    msg(buf);
+	if (bufempty())
+	{
+		msg("Buffer Empty");
+		free(buf);
+		return;
+	}
+
+	l1 = cntllines(Filemem, Curschar);
+	l2 = cntllines(Filemem, Fileend) - 1;
+	if (Filename != NULL)
+	{
+		if (Changed)
+			sprintf(buf, "\"%s\" [Modified] line %ld of %ld -- %ld %% --",
+				Filename, l1, l2, (l1 * 100) / l2);
+		else
+			sprintf(buf, "\"%s\" line %ld of %ld -- %ld %% --",
+				Filename, l1, l2, (l1 * 100) / l2);
+	}
+	else
+	{
+		sprintf(buf, "\"No File\" line %ld of %ld -- %ld %% --",
+			l1, l2, (l1 * 100) / l2);
+	}
+	msg(buf);
+	free(buf);
 }
 
 /*
@@ -206,201 +216,230 @@ fileinfo()
  * Returns a pointer to the last line of the file if n is zero, or
  * beyond the end of the file.
  */
-LPTR *
-gotoline(n)
-int n;
+LPTR *gotoline(int n)
 {
-    static	LPTR	l;
+	LPTR *p;
 
-    l.index = 0;
+	/* Allocate static LPTR on first use */
+	if (misc_gotoline_l == NULL)
+		misc_gotoline_l = (LPTR *)alloc(16);
 
-    if ( n == 0 )
-        l = *prevline(Fileend);
-    else
-    {
-        LPTR	*p;
+	misc_gotoline_l->index = 0;
 
-        for (l = *Filemem; --n > 0 ; l = *p)
-            if ((p = nextline(&l)) == NULL)
-                break;
-    }
-    return &l;
+	if (n == 0)
+	{
+		p = (LPTR *)prevline(Fileend);
+		*misc_gotoline_l = *p;
+	}
+	else
+	{
+		*misc_gotoline_l = *Filemem;
+		n = n - 1;
+		while (n > 0)
+		{
+			p = (LPTR *)nextline(misc_gotoline_l);
+			if (p == NULL)
+				break;
+			*misc_gotoline_l = *p;
+			n = n - 1;
+		}
+	}
+	return misc_gotoline_l;
 }
 
-void
-inschar(c)
-int	c;
+void inschar(int c)
 {
-    register char	*p, *pend;
+	char *p;
+	char *pend;
+	LPTR *lpos;
 
-    /* make room for the new char. */
-    if ( ! canincrease(1) )
-        return;
+	/* make room for the new char. */
+	if (!canincrease(1))
+		return;
 
-    p = &Curschar->linep->s[strlen(Curschar->linep->s) + 1];
-    pend = &Curschar->linep->s[Curschar->index];
+	p = &Curschar->linep->s[strlen(Curschar->linep->s) + 1];
+	pend = &Curschar->linep->s[Curschar->index];
 
-    for (; p > pend ; p--)
-        *p = *(p - 1);
+	while (p > pend)
+	{
+		*p = *(p - 1);
+		p = p - 1;
+	}
 
-    *p = c;
+	*p = c;
 
-    /*
-     * If we're in insert mode and showmatch mode is set, then
-     * check for right parens and braces. If there isn't a match,
-     * then beep. If there is a match AND it's on the screen, then
-     * flash to it briefly. If it isn't on the screen, don't do anything.
-     */
-    if (P(P_SM) && State == INSERT && (c == ')' || c == '}' || c == ']'))
-    {
-        LPTR	*lpos, csave;
+	/*
+	 * If we're in insert mode and showmatch mode is set, then
+	 * check for right parens and braces. If there isn't a match,
+	 * then beep. If there is a match AND it's on the screen, then
+	 * flash to it briefly. If it isn't on the screen, don't do anything.
+	 */
+	if (P(P_SM) && State == INSERT && (c == ')' || c == '}' || c == ']'))
+	{
+		lpos = (LPTR *)showmatch();
+		if (lpos == NULL)	/* no match, so beep */
+			beep();
+		else if (LINEOF(lpos) >= LINEOF(Topchar))
+		{
+			/* Allocate csave on first use */
+			if (misc_csave == NULL)
+				misc_csave = (LPTR *)alloc(16);
 
-        if ((lpos = showmatch()) == NULL)	/* no match, so beep */
-            beep();
-        else if (LINEOF(lpos) >= LINEOF(Topchar))
-        {
-            updatescreen();		/* show the new char first */
-            csave = *Curschar;
-            *Curschar = *lpos;	/* move to matching char */
-            cursupdate();
-            windgoto(Cursrow, Curscol);
-            delay();		/* brief pause */
-            *Curschar = csave;	/* restore cursor position */
-            cursupdate();
-        }
-    }
+			updatescreen();		/* show the new char first */
+			*misc_csave = *Curschar;
+			*Curschar = *lpos;	/* move to matching char */
+			cursupdate();
+			windgoto(Cursrow, Curscol);
+			delay();		/* brief pause */
+			*Curschar = *misc_csave;	/* restore cursor position */
+			cursupdate();
+		}
+	}
 
-    inc(Curschar);
-    CHANGED;
+	inc(Curschar);
+	CHANGED;
 }
 
-void
-insstr(s)
-register char *s;
+void insstr(char *s)
 {
-    register char *p, *endp;
-    register int k, n = strlen(s);
+	char *p;
+	char *endp;
+	int k;
+	int n;
 
-    /* Move everything in the file over to make */
-    /* room for the new string. */
-    if (!canincrease(n))
-        return;
+	n = strlen(s);
 
-    endp = &Curschar->linep->s[Curschar->index];
-    p = Curschar->linep->s + strlen(Curschar->linep->s) + 1 + n;
+	/* Move everything in the file over to make */
+	/* room for the new string. */
+	if (!canincrease(n))
+		return;
 
-    for (; p > endp ; p--)
-        *p = *(p - n);
+	endp = &Curschar->linep->s[Curschar->index];
+	p = Curschar->linep->s + strlen(Curschar->linep->s) + 1 + n;
 
-    p = &Curschar->linep->s[Curschar->index];
-    for ( k = 0; k < n; k++ )
-    {
-        *p++ = *s++;
-        inc(Curschar);
-    }
-    CHANGED;
+	while (p > endp)
+	{
+		*p = *(p - n);
+		p = p - 1;
+	}
+
+	p = &Curschar->linep->s[Curschar->index];
+	k = 0;
+	while (k < n)
+	{
+		*p = *s;
+		p = p + 1;
+		s = s + 1;
+		inc(Curschar);
+		k = k + 1;
+	}
+	CHANGED;
 }
 
-bool_t
-delchar(fixpos)
-bool_t	fixpos;		/* if TRUE, fix the cursor position when done */
+bool_t delchar(bool_t fixpos)
 {
-    register int i;
+	int i;
 
-    /* Check for degenerate case; there's nothing in the file. */
-    if (bufempty())
-        return FALSE;
+	/* Check for degenerate case; there's nothing in the file. */
+	if (bufempty())
+		return FALSE;
 
-    if (lineempty())	/* can't do anything */
-        return FALSE;
+	if (lineempty())	/* can't do anything */
+		return FALSE;
 
-    /* Delete the char. at Curschar by shifting everything */
-    /* in the line down. */
-    for ( i = Curschar->index + 1; i < Curschar->linep->size ; i++)
-        Curschar->linep->s[i - 1] = Curschar->linep->s[i];
+	/* Delete the char. at Curschar by shifting everything */
+	/* in the line down. */
+	i = Curschar->index + 1;
+	while (i < Curschar->linep->size)
+	{
+		Curschar->linep->s[i - 1] = Curschar->linep->s[i];
+		i = i + 1;
+	}
 
-    /* If we just took off the last character of a non-blank line, */
-    /* we don't want to end up positioned at the newline. */
-    if (fixpos)
-    {
-        if (gchar(Curschar) == NUL && Curschar->index > 0 && State != INSERT)
-            Curschar->index--;
-    }
-    CHANGED;
+	/* If we just took off the last character of a non-blank line, */
+	/* we don't want to end up positioned at the newline. */
+	if (fixpos)
+	{
+		if (gchar(Curschar) == NUL && Curschar->index > 0 && State != INSERT)
+			Curschar->index = Curschar->index - 1;
+	}
+	CHANGED;
 
-    return TRUE;
+	return TRUE;
 }
 
 
-void
-delline(nlines)
+void delline(int nlines)
 {
-    register LINE *p, *q;
-    int	doscreen = TRUE;	/* if true, update the screen */
+	LINE *p;
+	LINE *q;
+	int doscreen;	/* if true, update the screen */
 
-    /*
-     * There's no point in keeping the screen updated if we're
-     * deleting more than a screen's worth of lines.
-     */
-    if (nlines > (Rows - 1))
-    {
-        doscreen = FALSE;
-        s_del(Cursrow, Rows - 1);	/* flaky way to clear rest of screen */
-    }
+	doscreen = TRUE;
 
-    while ( nlines-- > 0 )
-    {
+	/*
+	 * There's no point in keeping the screen updated if we're
+	 * deleting more than a screen's worth of lines.
+	 */
+	if (nlines > (Rows - 1))
+	{
+		doscreen = FALSE;
+		s_del(Cursrow, Rows - 1);	/* flaky way to clear rest of screen */
+	}
 
-        if (bufempty())			/* nothing to delete */
-            break;
+	while (nlines > 0)
+	{
+		nlines = nlines - 1;
 
-        if (buf1line())  		/* just clear the line */
-        {
-            Curschar->linep->s[0] = NUL;
-            Curschar->index = 0;
-            break;
-        }
+		if (bufempty())			/* nothing to delete */
+			break;
 
-        p = Curschar->linep->prev;
-        q = Curschar->linep->next;
+		if (buf1line())		/* just clear the line */
+		{
+			Curschar->linep->s[0] = NUL;
+			Curschar->index = 0;
+			break;
+		}
 
-        if (p == NULL)  		/* first line of file so... */
-        {
-            Filemem->linep = q;	/* adjust start of file */
-            Topchar->linep = q;	/* and screen */
-        }
-        else
-            p->next = q;
-        q->prev = p;
+		p = Curschar->linep->prev;
+		q = Curschar->linep->next;
 
-        clrmark(Curschar->linep);	/* clear marks for the line */
+		if (p == NULL)		/* first line of file so... */
+		{
+			Filemem->linep = q;	/* adjust start of file */
+			Topchar->linep = q;	/* and screen */
+		}
+		else
+			p->next = q;
+		q->prev = p;
 
-        /*
-         * Delete the correct number of physical lines on the screen
-         */
-        if (doscreen)
-            s_del(Cursrow, plines(Curschar));
+		clrmark(Curschar->linep);	/* clear marks for the line */
 
-        /*
-         * If deleting the top line on the screen, adjust Topchar
-         */
-        if (Topchar->linep == Curschar->linep)
-            Topchar->linep = q;
+		/*
+		 * Delete the correct number of physical lines on the screen
+		 */
+		if (doscreen)
+			s_del(Cursrow, plines(Curschar));
 
-        free(Curschar->linep->s);
-        free(Curschar->linep);
+		/*
+		 * If deleting the top line on the screen, adjust Topchar
+		 */
+		if (Topchar->linep == Curschar->linep)
+			Topchar->linep = q;
 
-        Curschar->linep = q;
-        Curschar->index = 0;		/* is this right? */
-        CHANGED;
+		free(Curschar->linep->s);
+		free(Curschar->linep);
 
-        /* If we delete the last line in the file, back up */
-        if ( Curschar->linep == Fileend->linep)
-        {
-            Curschar->linep = Curschar->linep->prev;
-            /* and don't try to delete any more lines */
-            break;
-        }
-    }
+		Curschar->linep = q;
+		Curschar->index = 0;		/* is this right? */
+		CHANGED;
+
+		/* If we delete the last line in the file, back up */
+		if (Curschar->linep == Fileend->linep)
+		{
+			Curschar->linep = Curschar->linep->prev;
+			/* and don't try to delete any more lines */
+			break;
+		}
+	}
 }
-

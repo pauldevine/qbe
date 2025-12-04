@@ -3,8 +3,7 @@
  *
  * Extensive modifications by:  Tony Andrews       onecom!wldrdg!tony
  *
- * Savaged to compile under modern gcc and improved (haha) by: George Nakos  ggn@atari.org
- *
+ * DOS port for MiniC/QBE 8086 compiler
  */
 
 #include "stevie.h"
@@ -14,137 +13,65 @@
  * approach is something of an overkill. It's a remnant from the
  * original code that isn't worth messing with for now. TABS are
  * special-cased depending on the value of the "list" parameter.
+ *
+ * MiniC doesn't support global struct array initializers, so we
+ * initialize the chars array dynamically in init_chars().
  */
 
-struct charinfo chars[] =
+void init_char(int i, char sz, char *str)
 {
-    /* 000 */	1, NULL,
-    /* 001 */	2, "^A",
-    /* 002 */	2, "^B",
-    /* 003 */	2, "^C",
-    /* 004 */	2, "^D",
-    /* 005 */	2, "^E",
-    /* 006 */	2, "^F",
-    /* 007 */	2, "^G",
-    /* 010 */	2, "^H",
-    /* 011 */	2, "^I",
-    /* 012 */	7, "[ERROR]",	/* shouldn't occur */
-    /* 013 */	2, "^K",
-    /* 014 */	2, "^L",
-    /* 015 */	2, "^M",
-    /* 016 */	2, "^N",
-    /* 017 */	2, "^O",
-    /* 020 */	2, "^P",
-    /* 021 */	2, "^Q",
-    /* 022 */	2, "^R",
-    /* 023 */	2, "^S",
-    /* 024 */	2, "^T",
-    /* 025 */	2, "^U",
-    /* 026 */	2, "^V",
-    /* 027 */	2, "^W",
-    /* 030 */	2, "^X",
-    /* 031 */	2, "^Y",
-    /* 032 */	2, "^Z",
-    /* 033 */	2, "^[",
-    /* 034 */	2, "^\\",
-    /* 035 */	2, "^]",
-    /* 036 */	2, "^^",
-    /* 037 */	2, "^_",
-    /* 040 */	1, NULL,
-    /* 041 */	1, NULL,
-    /* 042 */	1, NULL,
-    /* 043 */	1, NULL,
-    /* 044 */	1, NULL,
-    /* 045 */	1, NULL,
-    /* 046 */	1, NULL,
-    /* 047 */	1, NULL,
-    /* 050 */	1, NULL,
-    /* 051 */	1, NULL,
-    /* 052 */	1, NULL,
-    /* 053 */	1, NULL,
-    /* 054 */	1, NULL,
-    /* 055 */	1, NULL,
-    /* 056 */	1, NULL,
-    /* 057 */	1, NULL,
-    /* 060 */	1, NULL,
-    /* 061 */	1, NULL,
-    /* 062 */	1, NULL,
-    /* 063 */	1, NULL,
-    /* 064 */	1, NULL,
-    /* 065 */	1, NULL,
-    /* 066 */	1, NULL,
-    /* 067 */	1, NULL,
-    /* 070 */	1, NULL,
-    /* 071 */	1, NULL,
-    /* 072 */	1, NULL,
-    /* 073 */	1, NULL,
-    /* 074 */	1, NULL,
-    /* 075 */	1, NULL,
-    /* 076 */	1, NULL,
-    /* 077 */	1, NULL,
-    /* 100 */	1, NULL,
-    /* 101 */	1, NULL,
-    /* 102 */	1, NULL,
-    /* 103 */	1, NULL,
-    /* 104 */	1, NULL,
-    /* 105 */	1, NULL,
-    /* 106 */	1, NULL,
-    /* 107 */	1, NULL,
-    /* 110 */	1, NULL,
-    /* 111 */	1, NULL,
-    /* 112 */	1, NULL,
-    /* 113 */	1, NULL,
-    /* 114 */	1, NULL,
-    /* 115 */	1, NULL,
-    /* 116 */	1, NULL,
-    /* 117 */	1, NULL,
-    /* 120 */	1, NULL,
-    /* 121 */	1, NULL,
-    /* 122 */	1, NULL,
-    /* 123 */	1, NULL,
-    /* 124 */	1, NULL,
-    /* 125 */	1, NULL,
-    /* 126 */	1, NULL,
-    /* 127 */	1, NULL,
-    /* 130 */	1, NULL,
-    /* 131 */	1, NULL,
-    /* 132 */	1, NULL,
-    /* 133 */	1, NULL,
-    /* 134 */	1, NULL,
-    /* 135 */	1, NULL,
-    /* 136 */	1, NULL,
-    /* 137 */	1, NULL,
-    /* 140 */	1, NULL,
-    /* 141 */	1, NULL,
-    /* 142 */	1, NULL,
-    /* 143 */	1, NULL,
-    /* 144 */	1, NULL,
-    /* 145 */	1, NULL,
-    /* 146 */	1, NULL,
-    /* 147 */	1, NULL,
-    /* 150 */	1, NULL,
-    /* 151 */	1, NULL,
-    /* 152 */	1, NULL,
-    /* 153 */	1, NULL,
-    /* 154 */	1, NULL,
-    /* 155 */	1, NULL,
-    /* 156 */	1, NULL,
-    /* 157 */	1, NULL,
-    /* 160 */	1, NULL,
-    /* 161 */	1, NULL,
-    /* 162 */	1, NULL,
-    /* 163 */	1, NULL,
-    /* 164 */	1, NULL,
-    /* 165 */	1, NULL,
-    /* 166 */	1, NULL,
-    /* 167 */	1, NULL,
-    /* 170 */	1, NULL,
-    /* 171 */	1, NULL,
-    /* 172 */	1, NULL,
-    /* 173 */	1, NULL,
-    /* 174 */	1, NULL,
-    /* 175 */	1, NULL,
-    /* 176 */	1, NULL,
-    /* 177 */	5, "[DEL]",
-};
+	chars[i].ch_size = sz;
+	chars[i].ch_str = str;
+}
 
+void init_chars(void)
+{
+	int i;
+
+	/* Initialize all printable chars (32-126) to size 1, NULL string */
+	i = 32;
+	while (i < 127)
+	{
+		init_char(i, 1, (char *)0);
+		i = i + 1;
+	}
+
+	/* NUL character */
+	init_char(0, 1, (char *)0);
+
+	/* Control characters 1-31 */
+	init_char(1, 2, "^A");
+	init_char(2, 2, "^B");
+	init_char(3, 2, "^C");
+	init_char(4, 2, "^D");
+	init_char(5, 2, "^E");
+	init_char(6, 2, "^F");
+	init_char(7, 2, "^G");
+	init_char(8, 2, "^H");
+	init_char(9, 2, "^I");
+	init_char(10, 7, "[ERROR]");	/* newline shouldn't occur */
+	init_char(11, 2, "^K");
+	init_char(12, 2, "^L");
+	init_char(13, 2, "^M");
+	init_char(14, 2, "^N");
+	init_char(15, 2, "^O");
+	init_char(16, 2, "^P");
+	init_char(17, 2, "^Q");
+	init_char(18, 2, "^R");
+	init_char(19, 2, "^S");
+	init_char(20, 2, "^T");
+	init_char(21, 2, "^U");
+	init_char(22, 2, "^V");
+	init_char(23, 2, "^W");
+	init_char(24, 2, "^X");
+	init_char(25, 2, "^Y");
+	init_char(26, 2, "^Z");
+	init_char(27, 2, "^[");
+	init_char(28, 3, "^BS");	/* backslash - MiniC can't do \\ */
+	init_char(29, 2, "^]");
+	init_char(30, 2, "^^");
+	init_char(31, 2, "^_");
+
+	/* DEL character */
+	init_char(127, 5, "[DEL]");
+}
