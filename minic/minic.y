@@ -23,10 +23,10 @@ enum { /* minic types */
 	UNION_T,   /* union */
 };
 
-#define SHORT     (1 << 7)  /* Short flag for types */
-#define UNSIGNED  (1 << 6)  /* Unsigned flag for types */
-#define FLOAT     (1 << 5)  /* Float flag for types (float=INT|FLOAT, double=LNG|FLOAT) */
-#define FAR       (1 << 24) /* Far pointer flag (32-bit segment:offset) - bit 24 to avoid conflict with IDIR encoding */
+#define SHORT     (1 << 16)  /* Short flag for types */
+#define UNSIGNED  (1 << 17)  /* Unsigned flag for types */
+#define FLOAT     (1 << 18)  /* Float flag for types (float=INT|FLOAT, double=LNG|FLOAT) */
+#define FAR       (1 << 24)  /* Far pointer flag (32-bit segment:offset) */
 #define IDIR(x) (((x) << 3) + PTR)
 #define IDIR_FAR(x) ((((x) << 3) + PTR) | FAR)  /* Far pointer to type */
 #define FUNC(x) (((x) << 3) + FUN)
@@ -55,6 +55,7 @@ struct Symb {
 		Tmp,
 		Var,
 		Glo,
+		Ext,  /* External symbol - referenced by name */
 	} t;
 	union {
 		int n;
@@ -110,6 +111,7 @@ struct {
 	int glo;
 	int enumconst; /* -2 means it's an enum constant, glo stores the value */
 	int isarray; /* 1 if this is an array, 0 if it's a regular variable or pointer */
+	int isextern; /* 1 if this is an extern declaration */
 } varh[NVar];
 
 /* Typedef table */
@@ -202,6 +204,31 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 			varh[h].ctyp = ctyp;
 			varh[h].enumconst = (glo == -2) ? 1 : 0;
 			varh[h].isarray = isarray;
+			varh[h].isextern = 0;
+			return;
+		}
+		if (strcmp(varh[h].v, v) == 0)
+			die("double definition");
+		h = (h+1) % NVar;
+	} while(h != h0);
+	die("too many variables");
+}
+
+void
+varaddextern(char *v, unsigned ctyp, int isarray)
+{
+	unsigned h0, h;
+
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (varh[h].v[0] == 0) {
+			strcpy(varh[h].v, v);
+			varh[h].glo = 1;  /* Mark as global */
+			varh[h].ctyp = ctyp;
+			varh[h].enumconst = 0;
+			varh[h].isarray = isarray;
+			varh[h].isextern = 1;  /* Mark as extern */
 			return;
 		}
 		if (strcmp(varh[h].v, v) == 0)
@@ -454,6 +481,10 @@ varget(char *v)
 				/* Enum constant - return as integer constant */
 				s.t = Con;
 				s.u.n = varh[h].glo;
+			} else if (varh[h].isextern) {
+				/* External symbol - reference by name */
+				s.t = Ext;
+				strcpy(s.u.v, v);
 			} else if (!varh[h].glo) {
 				s.t = Var;
 				strcpy(s.u.v, v);
@@ -526,6 +557,9 @@ psymb(Symb s)
 		break;
 	case Glo:
 		fprintf(of, "$glo%d", s.u.n);
+		break;
+	case Ext:
+		fprintf(of, "$%s", s.u.v);
 		break;
 	case Con:
 		fprintf(of, "%d", s.u.n);
@@ -1359,6 +1393,37 @@ expr(Node *n)
 		fprintf(of, " =w ceq%c ", irtyp(s0.ctyp));
 		psymb(s0);
 		fprintf(of, ", 0\n");
+		break;
+
+	case 'K':
+		/* Cast expression: n->u.n is target type, n->l is expression */
+		s0 = expr(n->l);
+		sr.ctyp = n->u.n;
+		/* For most casts, just copy the value with new type */
+		if (ISFLOAT(s0.ctyp) && !ISFLOAT(sr.ctyp)) {
+			/* Float to int conversion */
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =%c %s ", irtyp(sr.ctyp),
+				KIND(s0.ctyp) == LNG ? "dtosi" : "stosi");
+			psymb(s0);
+			fprintf(of, "\n");
+		} else if (!ISFLOAT(s0.ctyp) && ISFLOAT(sr.ctyp)) {
+			/* Int to float conversion */
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =%c %s ", irtyp(sr.ctyp),
+				KIND(sr.ctyp) == LNG ? "sltof" : "swtof");
+			psymb(s0);
+			fprintf(of, "\n");
+		} else {
+			/* Integer/pointer casts - just copy (bitwise) */
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =%c copy ", irtyp(sr.ctyp));
+			psymb(s0);
+			fprintf(of, "\n");
+		}
 		break;
 
 	case '=':
@@ -2197,7 +2262,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %%
 
-prog: kfunc prog | typed_decl prog | edcl prog | tdcl prog | sdcl prog | static_assert_dcl prog | ;
+prog: kfunc prog | typed_decl prog | edcl prog | tdcl prog | sdcl prog | static_assert_dcl prog | externdcl prog | ;
 
 edcl: enumstart enums '}' ';'
     ;
@@ -2224,6 +2289,62 @@ enum: IDENT
 	enumval++;
 }
     ;
+
+externdcl: EXTERN type IDENT ';'
+{
+	/* Extern variable - just register in symbol table, no allocation */
+	if ($2 == NIL)
+		die("invalid void extern declaration");
+	varaddextern($3->u.v, $2, 0);
+}
+         | EXTERN type IDENT '[' ']' ';'
+{
+	/* Extern array without size - register as pointer */
+	if ($2 == NIL)
+		die("invalid void extern array");
+	varaddextern($3->u.v, IDIR($2), 1);
+}
+         | EXTERN type IDENT '[' NUM ']' ';'
+{
+	/* Extern array with size - register as pointer */
+	if ($2 == NIL)
+		die("invalid void extern array");
+	varaddextern($3->u.v, IDIR($2), 1);
+}
+         | EXTERN STRUCT IDENT IDENT ';'
+{
+	/* Extern struct variable: extern struct foo bar; */
+	int idx = structfind($3->u.v);
+	if (idx < 0)
+		die("unknown struct type");
+	unsigned styp = (idx << 3) + STRUCT_T;
+	varaddextern($4->u.v, styp, 0);
+}
+         | EXTERN STRUCT IDENT IDENT '[' ']' ';'
+{
+	/* Extern struct array without size: extern struct foo bar[]; */
+	int idx = structfind($3->u.v);
+	if (idx < 0)
+		die("unknown struct type");
+	unsigned styp = (idx << 3) + STRUCT_T;
+	varaddextern($4->u.v, IDIR(styp), 1);
+}
+         | EXTERN STRUCT IDENT '*' IDENT ';'
+{
+	/* Extern struct pointer: extern struct foo *bar; */
+	int idx = structfind($3->u.v);
+	if (idx < 0)
+		die("unknown struct type");
+	unsigned styp = (idx << 3) + STRUCT_T;
+	varaddextern($5->u.v, IDIR(styp), 0);
+}
+         | EXTERN type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
+{
+	/* Extern function pointer: extern int (*callback)(int, int); */
+	unsigned fptr_type = IDIR(FUNC($2));
+	varaddextern($5->u.v, fptr_type, 0);
+}
+         ;
 
 tdcl: TYPEDEF type IDENT ';'
 {
@@ -2411,7 +2532,7 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 }
                | '(' ')' ';'
 {
-	/* Forward declaration */
+	/* Forward declaration - no parameters */
 	varadd(parsed_ident, 1, FUNC(parsed_type), 0);
 }
                | ';'
@@ -2548,7 +2669,6 @@ fptpar0: fptpar1
 fptpar1: type ',' fptpar1 { $$ = 0; }
        | type             { $$ = 0; }
        ;
-
 
 dcls:
     | dcls type IDENT ';'
@@ -2935,6 +3055,7 @@ pref: post
     | '!' pref          { $$ = mknode('!', $2, 0); }
     | PP pref           { $$ = mknode('p', $2, 0); }
     | MM pref           { $$ = mknode('m', $2, 0); }
+    | '(' type ')' pref { $$ = mknode('K', $4, 0); $$->u.n = $2; }
     ;
 
 post: NUM
