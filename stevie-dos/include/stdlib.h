@@ -6,16 +6,6 @@
 #define NULL 0
 #endif
 
-/* Functions returning pointers declared as int - cast at call site */
-int malloc();
-int calloc();
-int realloc();
-int free();
-int exit();
-int atoi();
-long atol();
-int getenv();
-int abs();
-long labs();
+/* MiniC allows undeclared function calls */
 
 #endif

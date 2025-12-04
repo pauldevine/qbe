@@ -3,129 +3,152 @@
  *
  * Extensive modifications by:  Tony Andrews       onecom!wldrdg!tony
  *
- * Savaged to compile under modern gcc and improved (haha) by: George Nakos  ggn@atari.org
- *
+ * DOS port for MiniC/QBE 8086 compiler
  */
 
 #include "stevie.h"
 
-void
-filemess(s)
-char *s;
+void filemess(char *s)
 {
-	smsg("\"%s\" %s", (Filename == NULL) ? "" : Filename, s);
+	char *fname;
+	if (Filename == NULL)
+		fname = "";
+	else
+		fname = Filename;
+	smsg("\"%s\" %s", fname, s);
 }
 
-void
-renum()
+void renum(void)
 {
-	LPTR	*p;
-	unsigned int l = 0;
+	LPTR *p;
+	int l;
 
-	for (p = Filemem; p != NULL ;p = nextline(p), l += LINEINC)
+	l = 0;
+	p = Filemem;
+	while (p != NULL)
+	{
 		p->linep->num = l;
+		p = (LPTR *)nextline(p);
+		l = l + LINEINC;
+	}
 
-	Fileend->linep->num = 0xffff;
+	Fileend->linep->num = 65535;
 }
 
-bool_t
-readfile(fname, fromp, nochangename)
-char	*fname;
-LPTR	*fromp;
-bool_t	nochangename;	/* if TRUE, don't change the Filename */
+bool_t readfile(char *fname, LPTR *fromp, bool_t nochangename)
 {
-    FILE	*f, *fopen();
-    LINE	*curr;
-    char	buff[1024];
-    char	*p;
-    int	i, c;
-    long	nchars;
-    int	unprint = 0;
-    int	linecnt = 0;
-    bool_t	wasempty = bufempty();
+	FILE *f;
+	LINE *curr;
+	LINE *lp;
+	LINE *dummy;
+	char *buff;
+	char *p;
+	int i;
+	int c;
+	int len;
+	long nchars;
+	int unprint;
+	int linecnt;
+	bool_t wasempty;
 
-    curr = fromp->linep;
+	buff = (char *)alloc(1024);
+	unprint = 0;
+	linecnt = 0;
+	wasempty = bufempty();
 
-    if ( ! nochangename )
-        Filename = strsave(fname);
+	curr = fromp->linep;
 
-    if ( (f = fopen(fname, "r")) == NULL )
-        return TRUE;
+	if (!nochangename)
+		Filename = (char *)strsave(fname);
 
-    filemess("");
+	f = (FILE *)fopen(fname, "r");
+	if (f == NULL)
+	{
+		free(buff);
+		return TRUE;
+	}
 
-    for (i = nchars = 0; (c = getc(f)) != EOF ; nchars++)
-    {
-        if (c >= 0x80)
-        {
-            c -= 0x80;
-            unprint++;
-        }
+	filemess("");
 
-        /*
-         * Nulls are special, so they can't show up in the file.
-         * We should count nulls seperate from other nasties, but
-         * this is okay for now.
-         */
-        if (c == NUL)
-        {
-            unprint++;
-            continue;
-        }
+	i = 0;
+	nchars = 0;
+	c = getc(f);
+	while (c != EOF)
+	{
+		nchars = nchars + 1;
 
-        if (c == '\n')  	/* process the completed line */
-        {
-            int	len;
-            LINE	*lp;
+		if (c >= 128)
+		{
+			c = c - 128;
+			unprint = unprint + 1;
+		}
 
-            buff[i] = '\0';
-            len = strlen(buff) + 1;
-            if ((lp = newline(len)) == NULL)
-                exit(1);
+		/*
+		 * Nulls are special, so they can't show up in the file.
+		 */
+		if (c == NUL)
+		{
+			unprint = unprint + 1;
+			c = getc(f);
+			continue;
+		}
 
-            strcpy(lp->s, buff);
+		if (c == 10)	/* newline - process the completed line */
+		{
+			*(buff + i) = 0;
+			len = strlen(buff) + 1;
+			lp = (LINE *)newline(len);
+			if (lp == NULL)
+				exit(1);
 
-            curr->next->prev = lp;	/* new line to next one */
-            lp->next = curr->next;
+			strcpy(lp->s, buff);
 
-            curr->next = lp;	/* new line to prior one */
-            lp->prev = curr;
+			curr->next->prev = lp;	/* new line to next one */
+			lp->next = curr->next;
 
-            curr = lp;		/* new line becomes current */
-            i = 0;
-            linecnt++;
-        }
-        else
-            buff[i++] = c;
-    }
-    fclose(f);
+			curr->next = lp;	/* new line to prior one */
+			lp->prev = curr;
 
-    /*
-     * If the buffer was empty when we started, we have to go back
-     * and remove the "dummy" line at Filemem and patch up the ptrs.
-     */
-    if (wasempty)
-    {
-        LINE	*dummy = Filemem->linep;	/* dummy line ptr */
+			curr = lp;		/* new line becomes current */
+			i = 0;
+			linecnt = linecnt + 1;
+		}
+		else
+		{
+			*(buff + i) = (char)c;
+			i = i + 1;
+		}
+		c = getc(f);
+	}
+	fclose(f);
 
-        free(dummy->s);				/* free string space */
-        Filemem->linep = Filemem->linep->next;
-        free(dummy);				/* free LINE struct */
-        Filemem->linep->prev = NULL;
+	/*
+	 * If the buffer was empty when we started, we have to go back
+	 * and remove the "dummy" line at Filemem and patch up the ptrs.
+	 */
+	if (wasempty)
+	{
+		dummy = Filemem->linep;	/* dummy line ptr */
 
-        Curschar->linep = Filemem->linep;
-        Topchar->linep  = Filemem->linep;
-    }
+		free(dummy->s);			/* free string space */
+		Filemem->linep = Filemem->linep->next;
+		free(dummy);			/* free LINE struct */
+		Filemem->linep->prev = (LINE *)0;
 
-    if ( unprint > 0 )
-        p = "\"%s\" %d lines, %ld characters (%d un-printable))";
-    else
-        p = "\"%s\" %d lines, %ld characters";
+		Curschar->linep = Filemem->linep;
+		Topchar->linep = Filemem->linep;
+	}
 
-    sprintf(buff, p, fname, linecnt, nchars, unprint);
-    msg(buff);
-    renum();
-    return FALSE;
+	if (unprint > 0)
+		p = "\"%s\" %d lines, %ld characters (%d un-printable))";
+	else
+		p = "\"%s\" %d lines, %ld characters";
+
+	sprintf(buff, p, fname, linecnt, nchars, unprint);
+	msg(buff);
+	renum();
+	free(buff);
+	return FALSE;
 }
 
 
@@ -135,88 +158,95 @@ bool_t	nochangename;	/* if TRUE, don't change the Filename */
  * If either 'start' or 'end' contain null line pointers, the default
  * is to use the start or end of the file respectively.
  */
-bool_t
-writeit(fname, start, end)
-char	*fname;
-LPTR	*start, *end;
+bool_t writeit(char *fname, LPTR *start, LPTR *end)
 {
-    FILE	*f, *fopen();
-    FILE	*fopenb();		/* open in binary mode, where needed */
-    char	buff[80];
-    char	backup[16], *s;
-    long	nchars;
-    int	lines;
-    LPTR	*p;
+	FILE *f;
+	char *buff;
+	char *backup;
+	char *s;
+	long nchars;
+	int lines;
+	LPTR *p;
 
-    sprintf(buff, "\"%s\"", fname);
-    msg(buff);
+	buff = (char *)alloc(80);
+	backup = (char *)alloc(16);
 
-    /*
-     * Form the backup file name - change foo.* to foo.bak
-     */
-    strcpy(backup, fname);
-    for (s = backup; *s && *s != '.' ; s++)
-        ;
-    *s = NUL;
-    strcat(backup, ".bak");
+	sprintf(buff, "\"%s\"", fname);
+	msg(buff);
 
-    /*
-     * Delete any existing backup and move the current version
-     * to the backup. For safety, we don't remove the backup
-     * until the write has finished successfully. And if the
-     * 'backup' option is set, leave it around.
-     */
-    rename(fname, backup);
+	/*
+	 * Form the backup file name - change foo.* to foo.bak
+	 */
+	strcpy(backup, fname);
+	s = backup;
+	while (*s && *s != '.')
+		s = s + 1;
+	*s = NUL;
+	strcat(backup, ".bak");
 
+	/*
+	 * Delete any existing backup and move the current version
+	 * to the backup.
+	 */
+	rename(fname, backup);
 
-    f = P(P_CR) ? fopen(fname, "w") : fopenb(fname, "w");
+	if (P(P_CR))
+		f = (FILE *)fopen(fname, "w");
+	else
+		f = (FILE *)fopenb(fname, "w");
 
-    if ( f == NULL )
-    {
-        emsg("Can't open file for writing!");
-        return FALSE;
-    }
+	if (f == NULL)
+	{
+		emsg("Can't open file for writing!");
+		free(buff);
+		free(backup);
+		return FALSE;
+	}
 
-    /*
-     * If we were given a bound, start there. Otherwise just
-     * start at the beginning of the file.
-     */
-    if (start == NULL || start->linep == NULL)
-        p = Filemem;
-    else
-        p = start;
+	/*
+	 * If we were given a bound, start there. Otherwise just
+	 * start at the beginning of the file.
+	 */
+	if (start == NULL || start->linep == NULL)
+		p = Filemem;
+	else
+		p = start;
 
-    lines = nchars = 0;
-    do
-    {
-        fprintf(f, "%s\n", p->linep->s);
-        nchars += strlen(p->linep->s) + 1;
-        lines++;
+	lines = 0;
+	nchars = 0;
+	while (1)
+	{
+		fprintf(f, "%s\n", p->linep->s);
+		nchars = nchars + strlen(p->linep->s) + 1;
+		lines = lines + 1;
 
-        /*
-         * If we were given an upper bound, and we just did that
-         * line, then bag it now.
-         */
-        if (end != NULL && end->linep != NULL)
-        {
-            if (end->linep == p->linep)
-                break;
-        }
+		/*
+		 * If we were given an upper bound, and we just did that
+		 * line, then bag it now.
+		 */
+		if (end != NULL && end->linep != NULL)
+		{
+			if (end->linep == p->linep)
+				break;
+		}
 
-    }
-    while ((p = nextline(p)) != NULL);
+		p = (LPTR *)nextline(p);
+		if (p == NULL)
+			break;
+	}
 
-    fclose(f);
-    sprintf(buff, "\"%s\" %d lines, %ld characters", fname, lines, nchars);
-    msg(buff);
-    UNCHANGED;
+	fclose(f);
+	sprintf(buff, "\"%s\" %d lines, %ld characters", fname, lines, nchars);
+	msg(buff);
+	UNCHANGED;
 
-    /*
-     * Remove the backup unless they want it left around
-     */
-    if (!P(P_BK))
-        remove(backup);
+	/*
+	 * Remove the backup unless they want it left around
+	 */
+	if (!P(P_BK))
+		remove(backup);
 
-    return TRUE;
+	free(buff);
+	free(backup);
+	return TRUE;
 }
-
