@@ -37,9 +37,21 @@
 #include "ascii.h"
 #include "term.h"
 #include "keymap.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+
+/*
+ * Minimal C runtime declarations for DOS/MiniC target
+ * These replace <stdio.h>, <stdlib.h>, <string.h>
+ * Actual implementations linked from runtime library
+ */
+typedef int FILE;
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
+
+/* stdio functions - these are runtime library calls */
+/* fprintf, sprintf, fopen, fclose, fread, fwrite are implicitly declared */
+
+/* Note: MiniC uses implicit declaration for library functions */
 
 typedef int bool_t;
 typedef unsigned short UWORD;
