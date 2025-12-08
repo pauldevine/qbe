@@ -3229,7 +3229,6 @@ yylex()
 			line++;
 	} while (isspace(c));
 
-
 	if (c == EOF)
 		return 0;
 
