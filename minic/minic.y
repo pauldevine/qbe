@@ -511,6 +511,97 @@ varget(char *v)
 	return 0;
 }
 
+/* Evaluate a constant expression - returns the integer value */
+/* Used for case labels which require compile-time constants */
+int
+const_eval(Node *n)
+{
+	int l, r;
+	Symb *sv;
+
+	if (!n) die("null expression in const_eval");
+
+	switch (n->op) {
+	case 'N':
+		/* Numeric constant (lexer creates 'N' nodes for numbers with u.n) */
+		return n->u.n;
+
+	case 'V':
+		/* Identifier - could be an enum constant */
+		sv = varget(n->u.v);
+		if (sv && sv->t == Con)
+			return sv->u.n;
+		die("non-constant in case label");
+		return 0;
+
+	case '+':
+		l = const_eval(n->l);
+		r = const_eval(n->r);
+		return l + r;
+
+	case '-':
+		if (n->r == 0) {
+			/* Unary minus */
+			return -const_eval(n->l);
+		}
+		l = const_eval(n->l);
+		r = const_eval(n->r);
+		return l - r;
+
+	case '*':
+		l = const_eval(n->l);
+		r = const_eval(n->r);
+		return l * r;
+
+	case '/':
+		l = const_eval(n->l);
+		r = const_eval(n->r);
+		if (r == 0) die("division by zero in constant expression");
+		return l / r;
+
+	case '%':
+		l = const_eval(n->l);
+		r = const_eval(n->r);
+		if (r == 0) die("modulo by zero in constant expression");
+		return l % r;
+
+	case '&':
+		l = const_eval(n->l);
+		r = const_eval(n->r);
+		return l & r;
+
+	case '|':
+		l = const_eval(n->l);
+		r = const_eval(n->r);
+		return l | r;
+
+	case '^':
+		l = const_eval(n->l);
+		r = const_eval(n->r);
+		return l ^ r;
+
+	case '~':
+		/* Unary bitwise NOT */
+		return ~const_eval(n->l);
+
+	case 'L':
+		/* Left shift */
+		l = const_eval(n->l);
+		r = const_eval(n->r);
+		return l << r;
+
+	case 'R':
+		/* Right shift */
+		l = const_eval(n->l);
+		r = const_eval(n->r);
+		return l >> r;
+
+	default:
+		die("unsupported operation in constant expression");
+		return 0;
+	}
+}
+
 char
 irtyp(unsigned ctyp)
 {
@@ -3013,7 +3104,7 @@ stmt: ';'                            { $$ = 0; }
         $$ = mkfor(init_expr, $8, $10, $12);
     }
     | SWITCH '(' expr ')' stmt       { $$ = mkstmt(Switch, $3, $5, 0); }
-    | CASE NUM ':' stmt              { Stmt *s = mkstmt(Case, 0, $4, 0); s->val = $2->u.n; $$ = s; }
+    | CASE pref ':' stmt             { Stmt *s = mkstmt(Case, 0, $4, 0); s->val = const_eval($2); $$ = s; }
     | DEFAULT ':' stmt               { $$ = mkstmt(Default, 0, $3, 0); }
     ;
 

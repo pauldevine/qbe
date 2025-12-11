@@ -14,11 +14,7 @@
 
 #include "stevie.h"
 
-static	void	doshift(), dodelete(), doput(), dochange();
-static	void	tabinout(), startinsert();
-static	bool_t	dojoin(), doyank();
-void resetundo();
-char *mkstr(char c);
+/* Forward declarations removed for MiniC compatibility */
 
 /*
  * Macro evaluates true if char 'c' is a valid identifier character
@@ -34,7 +30,7 @@ char *mkstr(char c);
  * cannot be undone. If the undo code for an edit works, 'can_undo'
  * should be set, AFTER the CHANGED macro is invoked.
  */
-bool_t	can_undo = FALSE;
+int	can_undo;
 
 /*
  * Operators
@@ -48,7 +44,7 @@ bool_t	can_undo = FALSE;
 
 #define	CLEAROP	(operator = NOP)	/* clear any pending operator */
 
-static	int	operator = NOP;		/* current pending operator */
+int	operator;		/* current pending operator, init to NOP (0) */
 
 /*
  * When a cursor motion command is made, it is marked as being a character
@@ -69,10 +65,10 @@ static	int	operator = NOP;		/* current pending operator */
 #define	MCHAR	0
 #define	MLINE	1
 
-static	int	mtype;			/* type of the current cursor motion */
-static	bool_t	mincl;			/* true if char motion is inclusive */
+int	mtype;			/* type of the current cursor motion */
+int	mincl;			/* true if char motion is inclusive */
 
-static	LPTR	startop;		/* cursor pos. at start of operator */
+struct lptr	startop;		/* cursor pos. at start of operator */
 
 /*
  * Operators can have counts either before the operator, or between the
@@ -84,7 +80,7 @@ static	LPTR	startop;		/* cursor pos. at start of operator */
  * normal() is called with a pending operator, the count in opnum (if
  * present) overrides any count that came later.
  */
-static	int	opnum = 0;
+int	opnum;
 
 
 #define	DEFAULT1(x)	(((x) == 0) ? 1 : (x))
@@ -96,16 +92,29 @@ static	int	opnum = 0;
  */
 
 void
-normal(c)
-int c;
+normal(int c)
 {
-	char *p, *q;
+	char *p;
+	char *q;
 	int n;
-	bool_t flag = FALSE;
-	int type = 0;		/* used in some operations to modify type */
-	int dir = FORWARD;	/* search direction */
-	int nchar = NUL;
-	bool_t finish_op;
+	int flag;
+	int type;		/* used in some operations to modify type */
+	int dir;		/* search direction */
+	int nchar;
+	int finish_op;
+	/* MiniC doesn't support block-scoped variables, so declare them here */
+	struct lptr *pos;
+	struct lptr save;
+	struct lptr *lp;
+	struct lptr mtmp;
+	struct lptr *mark;
+	int l;
+	char ch;
+
+	flag = FALSE;
+	type = 0;
+	dir = FORWARD;
+	nchar = NUL;
 
 	/*
 	 * If there is an operator pending, then the command we take
@@ -232,9 +241,8 @@ int c;
 
 		dozcmd:
 			{
-				register LPTR	*lp = Curschar;
-				register int	l = 0;
-
+				lp = Curschar;
+				l = 0;
 				while ((l < n) && (lp != NULL)) {
 					l += plines(lp);
 					*Topchar = *lp;
@@ -366,34 +374,31 @@ int c;
 	case CTRL(']'):			/* :ta to current identifier */
 		CLEAROP;
 		{
-			char	c;
-			LPTR	save;
-
 			save = *Curschar;
 			/*
 			 * First back up to start of identifier. This
 			 * doesn't match the real vi but I like it a
 			 * little better and it shouldn't bother anyone.
 			 */
-			c = gchar(Curschar);
-			while (IDCHAR(c)) {
+			ch = gchar(Curschar);
+			while (IDCHAR(ch)) {
 				if (!oneleft())
 					break;
-				c = gchar(Curschar);
+				ch = gchar(Curschar);
 			}
-			if (!IDCHAR(c))
+			if (!IDCHAR(ch))
 				oneright();
 
 			stuffin(":ta ");
 			/*
 			 * Now grab the chars in the identifier
 			 */
-			c = gchar(Curschar);
-			while (IDCHAR(c)) {
-				stuffin(mkstr(c));
+			ch = gchar(Curschar);
+			while (IDCHAR(ch)) {
+				stuffin(mkstr(ch));
 				if (!oneright())
 					break;
-				c = gchar(Curschar);
+				ch = gchar(Curschar);
 			}
 			stuffin("\n");
 
@@ -405,8 +410,6 @@ int c;
 		mtype = MCHAR;
 		mincl = TRUE;
 		{
-			LPTR	*pos;
-
 			if ((pos = showmatch()) == NULL)
 				beep();
 			else {
@@ -430,8 +433,6 @@ int c;
 		mincl = FALSE;
 		set_want_col = TRUE;
 		for (n = DEFAULT1(Prenum); n > 0 ;n--) {
-			LPTR	*pos;
-
 			if ((pos = bck_word(Curschar, type)) == NULL) {
 				beep();
 				break;
@@ -458,8 +459,6 @@ int c;
 		mincl = FALSE;
 		set_want_col = TRUE;
 		for (n = DEFAULT1(Prenum); n > 0 ;n--) {
-			LPTR	*pos;
-
 			if ((pos = fwd_word(Curschar, type)) == NULL) {
 				beep();
 				break;
@@ -478,8 +477,6 @@ int c;
 		mincl = TRUE;
 		set_want_col = TRUE;
 		for (n = DEFAULT1(Prenum); n > 0 ;n--) {
-			LPTR	*pos;
-
 			if ((pos = end_word(Curschar, type)) == NULL) {
 				beep();
 				break;
@@ -743,7 +740,7 @@ int c;
 
 	case '`':
 		{
-			LPTR	mtmp, *mark = getmark(vgetc());
+			mark = getmark(vgetc());
 
 			if (mark == NULL)
 				beep();
@@ -886,13 +883,13 @@ int c;
 			 * joins needed.
 			 */
 			while ( Undelchars-- > 0 ) {
-				char	c = gchar(Curschar);
+				ch = gchar(Curschar);
 
-				if (c == NUL) {
+				if (ch == NUL) {
 					*p++ = *q++ = NL;
 					dojoin();
 				} else {
-					*p++ = *q++ = c;
+					*p++ = *q++ = ch;
 					delchar(FALSE);
 				}
 			}
@@ -948,13 +945,10 @@ int c;
 /*
  * doshift - handle a shift operation
  */
-static void
-doshift(op, c1, c2, num)
-int	op;
-char	c1, c2;
-int	num;
+void
+doshift(int op, char c1, char c2, int num)
 {
-	LPTR	top, bot;
+	struct lptr	top, bot;
 	int	nlines;
 	char	opchar;
 
@@ -996,12 +990,10 @@ int	num;
 /*
  * dodelete - handle a delete operation
  */
-static void
-dodelete(c1, c2, num)
-char	c1, c2;
-int	num;
+void
+dodelete(char c1, char c2, int num)
 {
-	LPTR	top, bot;
+	struct lptr	top, bot;
 	int	nlines;
 	int	n;
 
@@ -1078,13 +1070,11 @@ int	num;
 /*
  * dochange - handle a change operation
  */
-static void
-dochange(c1, c2, num)
-char	c1, c2;
-int	num;
+void
+dochange(char c1, char c2, int num)
 {
 	char	sbuf[16];
-	bool_t	doappend;	/* true if we should do append, not insert */
+	int	doappend;	/* true if we should do append, not insert */
 
 	doappend = endofline( (lt(Curschar, &startop)) ? &startop: Curschar);
 
@@ -1108,13 +1098,13 @@ int	num;
 
 #define	YBSIZE	1024
 
-static	char	ybuf[YBSIZE];
-static	int	ybtype = MBAD;
+char	ybuf[YBSIZE];
+int	ybtype;  /* Note: should be initialized to MBAD (-1) at runtime */
 
-static bool_t
-doyank()
+static int
+doyank(void)
 {
-	LPTR	top, bot;
+	struct lptr	top, bot;
 	char	*yptr = ybuf;
 	char	*ybend = &ybuf[YBSIZE-1];
 	int	nlines;
@@ -1171,9 +1161,8 @@ doyank()
 	return TRUE;
 }
 
-static void
-doput(dir)
-int	dir;
+void
+doput(int dir)
 {
 	if (ybtype == MBAD) {
 		beep();
@@ -1195,13 +1184,11 @@ int	dir;
  * If inout==0, add a tab to the begining of the next num lines.
  * If inout==1, delete a tab from the beginning of the next num lines.
  */
-static void
-tabinout(inout, num)
-int	inout;
-int	num;
+void
+tabinout(int inout, int num)
 {
 	int	ntodo = num;
-	LPTR	*p;
+	struct lptr	*p;
 
 	/* construct undo stuff */
 	resetundo();
@@ -1227,12 +1214,11 @@ int	num;
 	can_undo = TRUE;
 }
 
-static void
-startinsert(initstr, startln)
-char *initstr;
-int	startln;	/* if set, insert point really at start of line */
+void
+startinsert(char *initstr, int startln)
 {
-	char *p, c;
+	char *p;
+	char c;
 
 	*Insstart = *Curschar;
 	if (startln)
@@ -1247,15 +1233,15 @@ int	startln;	/* if set, insert point really at start of line */
 }
 
 void
-resetundo()
+resetundo(void)
 {
 	Undelchars = 0;
 	*Undobuff = '\0';
 	Uncurschar->linep = NULL;
 }
 
-static bool_t
-dojoin()
+static int
+dojoin(void)
 {
 	int	scol;		/* save cursor column */
 	int	size;		/* size of the joined line */
@@ -1303,8 +1289,7 @@ return TRUE;
 }
 
 char *
-mkstr(c)
-char	c;
+mkstr(char c)
 {
     static	char	s[2];
 
