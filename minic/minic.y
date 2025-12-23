@@ -2131,9 +2131,9 @@ int genswitchbody(Stmt *s, int brk, Stmt **cases, int *caselbl, int ncase);
 int
 genswitch(Symb val, Stmt *body, int brk)
 {
-	Stmt *cases[64];
+	Stmt *cases[128];
 	int ncase, defidx, i;
-	int caselbl[64];
+	int caselbl[128];
 
 	ncase = 0;
 	defidx = -1;
