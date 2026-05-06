@@ -2577,21 +2577,27 @@ emitins(Ins *i, Fn *fn, FILE *f)
 
 	fmt = omap[o].fmt;
 
-	/* 8086 addressing fixup: if the instruction has a memory operand
-	 * (%M0/%M1) whose base register resolves to AX/CX/DX, those aren't
-	 * legal memory base registers on 8086.  Use BX as a scratch via
-	 * `xchg bx, <reg>` so the register's value is swapped with BX for the
-	 * duration of the instruction (and any other operands referring to BX
-	 * or to the bad reg are remapped consistently).  A second xchg
-	 * restores both registers afterwards.
+	/* Detect the three i8086 fixups that may apply to this instruction:
 	 *
-	 * xchg has the nice property that all corner cases — value reg ==
-	 * address reg, value reg == BX, dst reg overlapping either —
-	 * resolve naturally as long as we swap RBX↔bad consistently in every
-	 * Ref the instruction touches.
+	 *  1. Addressing fixup (outer): if a memory operand (%M0/%M1) uses
+	 *     AX/CX/DX as base, those aren't legal 8086 base regs — wrap with
+	 *     `xchg bx, <reg>` and remap RBX↔bad in every Ref.
+	 *  2. Byte-store fixup: Ostoreb's value (%B0) on SI/DI/BP/SP has no
+	 *     8-bit form — copy through AX with push/pop.
+	 *  3. setCC fixup: cmp dest (%B=) on SI/DI/BP/SP has no 8-bit form —
+	 *     wrap cmp+setcc+movzx in push ax/pop ax.
+	 *
+	 * The addressing fixup must be the OUTERMOST wrap because it relies
+	 * on the swap_bx mutation seeing the original operand registers.
+	 * Byte-store fixup runs INSIDE addressing fixup (after swap_bx) so
+	 * its `mov ax, <src>` doesn't fight with a swapped AX.  setCC fixup
+	 * also runs inside addressing fixup (though Oc*w never have %M
+	 * operands, so addressing fixup is a no-op for them in practice).
 	 */
 	{
 		int bad = 0;
+		int needs_byte_store = 0;
+		int needs_setcc = 0;
 		char *p;
 
 		for (p = fmt; *p; p++)
@@ -2606,16 +2612,43 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			swap_bx(&i->to, bad, fn);
 			swap_bx(&i->arg[0], bad, fn);
 			swap_bx(&i->arg[1], bad, fn);
+		}
+
+		needs_byte_store = (i->op == Ostoreb
+		    && rtype(i->arg[0]) == RTmp
+		    && (i->arg[0].val == RSI || i->arg[0].val == RDI
+		        || i->arg[0].val == RBP || i->arg[0].val == RSP
+		        || i->arg[0].val == RES || i->arg[0].val == RDS));
+
+		needs_setcc = (INRANGE(i->op, Oceqw, Ocultw)
+		    && rtype(i->to) == RTmp
+		    && (i->to.val == RSI || i->to.val == RDI
+		        || i->to.val == RBP || i->to.val == RSP
+		        || i->to.val == RES || i->to.val == RDS));
+
+		if (needs_byte_store) {
+			Ref orig = i->arg[0];
+			fprintf(f, "\tpush ax\n");
+			fprintf(f, "\tmov ax, %s\n", rname[orig.val]);
+			i->arg[0] = TMP(RAX);
 			emitf(fmt, i, fn, f);
+			i->arg[0] = orig;
+			fprintf(f, "\tpop ax\n");
+		} else if (needs_setcc) {
+			fprintf(f, "\tpush ax\n");
+			emitf(fmt, i, fn, f);
+			fprintf(f, "\tpop ax\n");
+		} else {
+			emitf(fmt, i, fn, f);
+		}
+
+		if (bad) {
 			swap_bx(&i->to, bad, fn);
 			swap_bx(&i->arg[0], bad, fn);
 			swap_bx(&i->arg[1], bad, fn);
 			fprintf(f, "\txchg bx, %s\n", rname[bad]);
-			return;
 		}
 	}
-
-	emitf(fmt, i, fn, f);
 }
 
 void
