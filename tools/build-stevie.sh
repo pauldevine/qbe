@@ -169,23 +169,6 @@ for src in "${SOURCES[@]}"; do
 		      -e '/^[[:space:]]*\.data/d' \
 		      -e '/^[[:space:]]*\.bss/d' \
 		      -e '/^[[:space:]]*$/d' \
-		| awk '
-		# Repair 8086 addressing: BX/BP/SI/DI are the only legal memory-base
-		# registers.  When QBE i8086 emits `[ax]`/`[cx]`/`[dx]`, route via BX
-		# (with push/pop) to keep the surrounding regs untouched.
-		{
-			if (match($0, /\[(ax|cx|dx|AX|CX|DX)\]/)) {
-				reg = substr($0, RSTART+1, RLENGTH-2)
-				replaced = substr($0, 1, RSTART-1) "[bx]" substr($0, RSTART+RLENGTH)
-				print "\tpush bx                  ; XXX 8086 addressing fixup: was [" reg "]"
-				print "\tmov bx, " tolower(reg)
-				print replaced
-				print "\tpop bx"
-				next
-			}
-			print
-		}
-		' \
 		| perl -pe '
 			# Byte stores must use 8-bit register names (this fixup runs AFTER
 			# the address-fixup awk because that awk can introduce new

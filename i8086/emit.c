@@ -236,6 +236,53 @@ emitaddr(Con *c, FILE *f)
 		fprintf(f, "+%"PRIi64, c->bits.i);
 }
 
+/* Detect if a Ref-as-memory-operand uses AX/CX/DX as the base register.
+ * 8086 only allows BX/BP/SI/DI as memory base.  Returns the offending
+ * register (RAX/RCX/RDX) or 0 if no fixup is needed.
+ */
+static int
+addr_fixup_reg(Ref r, Fn *fn)
+{
+	Mem *m;
+	int v = -1;
+
+	if (rtype(r) == RTmp)
+		v = r.val;
+	else if (rtype(r) == RMem) {
+		m = &fn->mem[r.val];
+		if (!req(m->base, R) && rtype(m->base) == RTmp)
+			v = m->base.val;
+	}
+	if (v == RAX || v == RCX || v == RDX)
+		return v;
+	return 0;
+}
+
+/* Swap RTmp register references between RBX and `bad` in a Ref.
+ * Used to remap an instruction's operands while BX is xchg'd with
+ * the bad addressing register.  Mutates Ref in place.
+ */
+static void
+swap_bx(Ref *r, int bad, Fn *fn)
+{
+	Mem *m;
+
+	if (rtype(*r) == RTmp) {
+		if (r->val == RBX) r->val = bad;
+		else if (r->val == bad) r->val = RBX;
+	} else if (rtype(*r) == RMem) {
+		m = &fn->mem[r->val];
+		if (rtype(m->base) == RTmp) {
+			if (m->base.val == RBX) m->base.val = bad;
+			else if (m->base.val == bad) m->base.val = RBX;
+		}
+		if (rtype(m->index) == RTmp) {
+			if (m->index.val == RBX) m->index.val = bad;
+			else if (m->index.val == bad) m->index.val = RBX;
+		}
+	}
+}
+
 static void
 emitf(char *s, Ins *i, Fn *fn, FILE *f)
 {
@@ -2529,6 +2576,45 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	}
 
 	fmt = omap[o].fmt;
+
+	/* 8086 addressing fixup: if the instruction has a memory operand
+	 * (%M0/%M1) whose base register resolves to AX/CX/DX, those aren't
+	 * legal memory base registers on 8086.  Use BX as a scratch via
+	 * `xchg bx, <reg>` so the register's value is swapped with BX for the
+	 * duration of the instruction (and any other operands referring to BX
+	 * or to the bad reg are remapped consistently).  A second xchg
+	 * restores both registers afterwards.
+	 *
+	 * xchg has the nice property that all corner cases — value reg ==
+	 * address reg, value reg == BX, dst reg overlapping either —
+	 * resolve naturally as long as we swap RBX↔bad consistently in every
+	 * Ref the instruction touches.
+	 */
+	{
+		int bad = 0;
+		char *p;
+
+		for (p = fmt; *p; p++)
+			if (p[0] == '%' && p[1] == 'M' && (p[2] == '0' || p[2] == '1')) {
+				bad = addr_fixup_reg(p[2] == '0' ? i->arg[0] : i->arg[1], fn);
+				if (bad)
+					break;
+			}
+
+		if (bad) {
+			fprintf(f, "\txchg bx, %s\n", rname[bad]);
+			swap_bx(&i->to, bad, fn);
+			swap_bx(&i->arg[0], bad, fn);
+			swap_bx(&i->arg[1], bad, fn);
+			emitf(fmt, i, fn, f);
+			swap_bx(&i->to, bad, fn);
+			swap_bx(&i->arg[0], bad, fn);
+			swap_bx(&i->arg[1], bad, fn);
+			fprintf(f, "\txchg bx, %s\n", rname[bad]);
+			return;
+		}
+	}
+
 	emitf(fmt, i, fn, f);
 }
 
