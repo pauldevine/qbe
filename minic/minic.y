@@ -154,6 +154,7 @@ struct Member {
 	int offset;      /* Byte offset within struct */
 	int bitwidth;    /* Bit width (0 = not a bitfield) */
 	int bitoffset;   /* Bit offset within the storage unit */
+	int count;       /* Array element count (0 = not an array) */
 };
 
 /* Struct/union definition table */
@@ -362,6 +363,7 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 	m->ctyp = ctyp;
 	m->bitwidth = 0;    /* Not a bitfield */
 	m->bitoffset = 0;
+	m->count = 0;       /* Scalar member */
 
 	if (structh[sidx].isunion) {
 		/* Union: all members at offset 0 */
@@ -375,6 +377,40 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 		structh[sidx].size += SIZE(ctyp);
 	}
 
+	structh[sidx].nmembers++;
+}
+
+/* Add an array member: type ident[count]; */
+void
+structaddarrmember(int sidx, char *name, unsigned ctyp, int count)
+{
+	int i, total;
+	struct Member *m;
+
+	if (structh[sidx].nmembers >= 16)
+		die("too many members in struct/union");
+	for (i = 0; i < structh[sidx].nmembers; i++)
+		if (strcmp(structh[sidx].members[i].name, name) == 0)
+			die("duplicate member name");
+
+	structh[sidx].curbfoffset = 0;
+	structh[sidx].curbfbase = 0;
+
+	m = &structh[sidx].members[structh[sidx].nmembers];
+	strcpy(m->name, name);
+	m->ctyp = ctyp;       /* Element type — accesses through s.arr[i] use this */
+	m->bitwidth = 0;
+	m->bitoffset = 0;
+	m->count = count;
+	total = SIZE(ctyp) * count;
+	if (structh[sidx].isunion) {
+		m->offset = 0;
+		if (total > structh[sidx].size)
+			structh[sidx].size = total;
+	} else {
+		m->offset = structh[sidx].size;
+		structh[sidx].size += total;
+	}
 	structh[sidx].nmembers++;
 }
 
@@ -420,6 +456,7 @@ structaddbitfield(int sidx, char *name, unsigned ctyp, int width)
 	m->offset = structh[sidx].curbfbase;  /* Points to storage unit base */
 	m->bitwidth = width;
 	m->bitoffset = structh[sidx].curbfoffset;
+	m->count = 0;
 
 	/* Advance bit offset for next bitfield */
 	structh[sidx].curbfoffset += width;
@@ -460,6 +497,9 @@ hoistanonymous(int parent_sidx, int anon_sidx)
 		parent_mem = &structh[parent_sidx].members[structh[parent_sidx].nmembers];
 		strcpy(parent_mem->name, anon_mem->name);
 		parent_mem->ctyp = anon_mem->ctyp;
+		parent_mem->bitwidth = anon_mem->bitwidth;
+		parent_mem->bitoffset = anon_mem->bitoffset;
+		parent_mem->count = anon_mem->count;
 
 		if (structh[parent_sidx].isunion) {
 			/* Parent is union - all members at offset 0 */
@@ -1535,6 +1575,13 @@ expr(Node *n)
 				/* Offset 0, just use struct address */
 				addr = s0;
 				addr.ctyp = IDIR(m->ctyp);
+			}
+
+			/* Array members decay to a pointer to their first element —
+			 * don't load through the address, return it as the value. */
+			if (m->count > 0) {
+				sr = addr;
+				break;
 			}
 
 			/* Load value from member address */
@@ -2800,6 +2847,12 @@ smembers:
 {
 	structaddmember(curstruct, $3->u.v, $2);
 }
+        | smembers type IDENT '[' NUM ']' ';'
+{
+	if ($2 == NIL)
+		die("invalid void array member");
+	structaddarrmember(curstruct, $3->u.v, $2, $5->u.n);
+}
         | smembers type IDENT ':' NUM ';'
 {
 	structaddbitfield(curstruct, $3->u.v, $2, $5->u.n);
@@ -2850,6 +2903,12 @@ anonmembers:
         | anonmembers type IDENT ';'
 {
 	structaddmember(curstruct, $3->u.v, $2);
+}
+        | anonmembers type IDENT '[' NUM ']' ';'
+{
+	if ($2 == NIL)
+		die("invalid void array member");
+	structaddarrmember(curstruct, $3->u.v, $2, $5->u.n);
 }
         | anonmembers type IDENT ':' NUM ';'
 {
@@ -2942,6 +3001,25 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	strcpy(ini[nglo], buf);
 	strcpy(gloname[nglo], parsed_ident);
 	varadd(parsed_ident, nglo++, parsed_type, 0);
+}
+               | '[' NUM ']' ';'
+{
+	/* Global array of basic type: emit a zero-filled data block.
+	 * QBE syntax: `data $name = align N { z TOTAL_BYTES }`. */
+	char buf[64];
+	int elemsz, total;
+	if (parsed_type == NIL)
+		die("invalid void array");
+	if (nglo == NGlo)
+		die("too many globals");
+	elemsz = SIZE(parsed_type);
+	total = elemsz * $2->u.n;
+	sprintf(buf, "align %d { z %d }", iralign(parsed_type), total);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], parsed_ident);
+	/* Register as pointer to element type with array flag set. */
+	varadd(parsed_ident, nglo++, IDIR(parsed_type), 1);
 }
                ;
 
@@ -3464,6 +3542,55 @@ stmt: ';'                            { $$ = 0; }
         s = SIZE($1);
         varadd(v, 0, $1, 0);
         fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($1), s);
+        $$ = 0;
+    }
+    | type IDENT '=' expr ';'        {
+        /* Block-scoped variable with initializer.  Mirror the dcls
+         * production: alloc, then evaluate `IDENT = expr` so the
+         * initializer goes through the normal assignment path. */
+        int s;
+        char *v;
+        Node *init_node;
+        if ($1 == NIL)
+            die("invalid void declaration");
+        v = $2->u.v;
+        s = SIZE($1);
+        varadd(v, 0, $1, 0);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($1), s);
+        init_node = mknode('=', $2, $4);
+        expr(init_node);
+        $$ = 0;
+    }
+    | type IDENT '[' NUM ']' ';'     {
+        /* Block-scoped fixed-size array. */
+        int s, n, total;
+        char *v;
+        if ($1 == NIL)
+            die("invalid void array");
+        v = $2->u.v;
+        n = $4->u.n;
+        s = SIZE($1);
+        total = s * n;
+        varadd(v, 0, IDIR($1), 1);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($1), total);
+        $$ = 0;
+    }
+    | type IDENT ',' idlist ';'      {
+        /* Block-scoped multi-variable declaration. */
+        int s;
+        char *v;
+        Node *n;
+        if ($1 == NIL)
+            die("invalid void declaration");
+        s = SIZE($1);
+        v = $2->u.v;
+        varadd(v, 0, $1, 0);
+        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($1), s);
+        for (n = $4; n; n = n->r) {
+            v = n->u.v;
+            varadd(v, 0, $1, 0);
+            fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($1), s);
+        }
         $$ = 0;
     }
     | STATIC type IDENT ';'          {
