@@ -142,9 +142,8 @@ int cntllines(LPTR *pbegin, LPTR *pend)
 	return lnum;
 }
 
-/*
- * plines(p) - return the number of physical screen lines taken by line 'p'
- */
+/* plines() is defined in screen.c. */
+#if 0
 int plines(LPTR *p)
 {
 	int col;
@@ -155,10 +154,6 @@ int plines(LPTR *p)
 	if (*s == NUL)		/* empty line */
 		return 1;
 
-	/*
-	 * If list mode is on, then the '$' at the end of
-	 * the line takes up one extra column.
-	 */
 	if (P(P_LS))
 		col = 1;
 	else
@@ -174,6 +169,7 @@ int plines(LPTR *p)
 	}
 	return ((col + (Columns - 1)) / Columns);
 }
+#endif
 
 void fileinfo(void)
 {

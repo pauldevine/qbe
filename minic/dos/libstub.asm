@@ -264,36 +264,11 @@ _dos_getvidmode:
     mov ax, 0
     ret
 
-; Stubs for stevie globals/functions that live in TUs that don't reach
-; QBE asm (fileio.c, screen.c).  These print/draw nothing; they exist
-; just to satisfy the linker.
+; Stubs for stevie globals that don't have a clear single-file home.
 global _params
 _params: dw 0,0,0,0,0,0,0,0
 global _updatetabstoptable
 _updatetabstoptable:
-    ret
-global _filemess
-_filemess:
-    ret
-global _readfile
-_readfile:
-    mov ax, 0
-    ret
-global _writeit
-_writeit:
-    mov ax, 0
-    ret
-global _renum
-_renum:
-    ret
-global _updatescreen
-_updatescreen:
-    ret
-global _updateline
-_updateline:
-    ret
-global _cursupdate
-_cursupdate:
     ret
 global _gchar
 _gchar:
@@ -303,12 +278,18 @@ global _inc
 _inc:
     mov ax, 0
     ret
-global _s_del
-_s_del:
-    ret
-global _s_ins
-_s_ins:
-    ret
+; NOTE: filemess, readfile, writeit, renum live in fileio.c.
+; updatescreen, updateline, cursupdate, s_ins, s_del live in screen.c.
+; All compile to QBE asm now, so we don't stub them.
+
+; regerror is referenced from search.c which doesn't include regexp.h's
+; declaration in a way that QBE picks up.  Stub it pointing at emsg.
 global _regerror
 _regerror:
+    ret
+
+; remove() is referenced but not in any source file we compile.
+global _remove
+_remove:
+    mov ax, 0
     ret

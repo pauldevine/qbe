@@ -2597,12 +2597,29 @@ i8086_emitfn(Fn *fn, FILE *f)
 			if (b->s1 != b->link)
 				fprintf(f, "\tjmp %s\n", b->s1->name);
 			break;
-		case Jjnz:
-			fprintf(f, "\ttest %s, %s\n", rname[b->jmp.arg.val], rname[b->jmp.arg.val]);
+		case Jjnz: {
+			Ref jr = b->jmp.arg;
+			const char *jreg;
+			if (rtype(jr) == RTmp
+			    && jr.val >= 0
+			    && jr.val < (int)(sizeof rname / sizeof rname[0])
+			    && rname[jr.val] != 0) {
+				jreg = rname[jr.val];
+			} else {
+				/* Defensive: should not happen — register allocator
+				 * left a non-register operand here.  Use AX as a
+				 * placeholder so the assembly is still syntactically
+				 * valid (codegen will be wrong but won't segfault). */
+				jreg = "ax";
+				fprintf(f, "\t; XXX bad jjnz operand: rtype=%d val=%d\n",
+				        rtype(jr), jr.val);
+			}
+			fprintf(f, "\ttest %s, %s\n", jreg, jreg);
 			fprintf(f, "\tjnz %s\n", b->s1->name);
 			if (b->s2 != b->link)
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
+		}
 		/* Conditional jumps based on flags (from comparison) */
 		case Jjfieq:
 			fprintf(f, "\tje %s\n", b->s1->name);

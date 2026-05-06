@@ -93,8 +93,17 @@ for src in "${SOURCES[@]}"; do
 		      -e 's/; TODO: 32-bit op [0-9]*/; XXX 32-bit op stub - codegen incomplete/' \
 		      -e 's/^[[:space:]]*\.ascii "\(.*\)"$/.nasm_str \1/' \
 		| perl -pe '
-			# Swap immediate-then-register comparisons (cmp 48, bx → cmp bx, 48)
+			# Swap immediate-then-register/memory comparisons:
+			#   cmp 48, bx       → cmp bx, 48
+			#   cmp 0, foo       → cmp word [foo], 0
+			# 8086 cmp accepts reg/mem on the left, imm on the right.
+			# Bare symbol used as a comparand should be a memory reference
+			# (the value at that address) — wrap in [] with size hint.
+			# NASM disambiguates `cmp [glo], 0` size by the const, but
+			# adding `word` is safer for stevie globals which are 16-bit.
 			s/^(\s*cmp)\s+(-?\d+)\s*,\s*(ax|bx|cx|dx|si|di|bp|sp)\b/$1 $3, $2/g;
+			s/^(\s*cmp)\s+(-?\d+)\s*,\s*(\[[^\]]+\])/$1 $3, $2/g;
+			s/^(\s*cmp)\s+(-?\d+)\s*,\s*([_A-Za-z][_A-Za-z0-9]*)[ \t]*$/$1 word \[$3\], $2/gm;
 			# Byte stores must use 8-bit register names
 			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*ax\b/$1, al/g;
 			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*bx\b/$1, bl/g;
@@ -192,6 +201,11 @@ for src in "${SOURCES[@]}"; do
 			# from the rname[] segment-register fallback.  Replace with a
 			# noop test that the assembler will accept.
 			s/^(\s*test\s+)(es|ds|cs|ss),\s*\g{2}\b/$1ax, ax ; XXX was test $2,$2/g;
+			# Memory-to-memory mov: illegal on 8086.  Hoist via AX.
+			if (/^(\s*)mov\s+(\[[^\]]+\]|word\s+\[[^\]]+\]|byte\s+\[[^\]]+\]|dword\s+\[[^\]]+\]),\s*(\[[^\]]+\]|word\s+\[[^\]]+\]|byte\s+\[[^\]]+\]|dword\s+\[[^\]]+\])\s*$/) {
+				my ($pad, $dst, $src) = ($1, $2, $3);
+				$_ = "${pad}mov ax, $src\n${pad}mov $dst, ax\n";
+			}
 		' \
 		> "$asm_clean"
 	# Skip stand-alone NASM object assembly — we concatenate all .asm
