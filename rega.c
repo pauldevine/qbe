@@ -161,30 +161,51 @@ ralloc(RMap *m, int t)
 static int
 rfree(RMap *m, int t)
 {
-	int i, r;
+	int i, r, ut;
 
 	assert(t >= Tmp0 || !(BIT(t) & T.rglob));
 	if (!bshas(m->b, t))
 		return -1;
+	/* Lookup convention: m->t[]/m->r[] is keyed by user temp.  When `t`
+	 * is a user temp (t >= Tmp0), find it directly in m->t.  When `t`
+	 * is a physical register (t < Tmp0), there are two cases:
+	 *
+	 *   1. A fixed (t, t) self-mapping was added via radd — search m->t.
+	 *   2. The register is currently allocated to a user temp `ut` —
+	 *      search m->r and free that user temp's mapping.
+	 *
+	 * Case 2 arises whenever rfree is called on a register ID directly,
+	 * which the Ocall caller-save loop (T.rsave) and the def-of-fixed-reg
+	 * paths (`Ocopy TMP(RAX), <ssa-temp>`) both do.  Without this branch
+	 * the user-temp side of the mapping is left dangling: m->t still
+	 * names `ut` but its register bit is cleared, so a later ralloc can
+	 * hand the same physical register out twice. */
 	for (i=0; i < m->n && m->t[i] != t; i++)
 		;
+	if (i >= m->n && t < Tmp0) {
+		for (i=0; i < m->n && m->r[i] != t; i++)
+			;
+	}
 	if (i >= m->n) {
-		/* The bset says `t` is allocated but the parallel m->t[] array
-		 * doesn't list it.  This indicates the two structures fell out
-		 * of sync somewhere upstream.  Recover by treating it as
-		 * unallocated rather than aborting — for the i8086 backend this
-		 * lets compilation proceed where the assertion otherwise kills
-		 * it. */
+		/* Genuinely unmapped — clear the stale bset bit defensively. */
+		if (debug['R']) {
+			int j;
+			fprintf(stderr, "rfree: t=%d in bset, no array entry (n=%d):", t, m->n);
+			for (j = 0; j < m->n; j++)
+				fprintf(stderr, " (t=%d,r=%d)", m->t[j], m->r[j]);
+			fputc('\n', stderr);
+		}
 		bsclr(m->b, t);
 		return -1;
 	}
+	ut = m->t[i];
 	r = m->r[i];
-	bsclr(m->b, t);
+	bsclr(m->b, ut);
 	bsclr(m->b, r);
 	m->n--;
 	memmove(&m->t[i], &m->t[i+1], (m->n-i) * sizeof m->t[0]);
 	memmove(&m->r[i], &m->r[i+1], (m->n-i) * sizeof m->r[0]);
-	assert(t >= Tmp0 || t == r);
+	assert(t >= Tmp0 || t == r || t == ut);
 	return r;
 }
 
