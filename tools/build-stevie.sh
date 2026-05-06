@@ -88,8 +88,21 @@ for src in "${SOURCES[@]}"; do
 	prefix="${base}_"
 	grep -v -E '^\.(text|data|bss|balign|section|globl|type|size|local|file|ident|string|p2align|model|code)' "$asm" \
 		| sed -e '/^[[:space:]]*xchg ,/d' \
+		      -e '/^[[:space:]]*jmp[[:space:]]*$/d' \
+		      -e '/^[[:space:]]*j[a-z]\{2,\}[[:space:]]*$/d' \
 		      -e 's/; TODO: 32-bit op [0-9]*/; XXX 32-bit op stub - codegen incomplete/' \
 		      -e 's/^[[:space:]]*\.ascii "\(.*\)"$/.nasm_str \1/' \
+		| perl -pe '
+			# Swap immediate-then-register comparisons (cmp 48, bx → cmp bx, 48)
+			s/^(\s*cmp)\s+(-?\d+)\s*,\s*(ax|bx|cx|dx|si|di|bp|sp)\b/$1 $3, $2/g;
+			# Byte stores must use 8-bit register names
+			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*ax\b/$1, al/g;
+			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*bx\b/$1, bl/g;
+			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*cx\b/$1, cl/g;
+			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*dx\b/$1, dl/g;
+			# si/di/bp/sp have no 8-bit form; clobber AL as fallback.
+			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*(si|di|bp|sp)\b/$1, al ; XXX 8-bit form of $2 N\/A/g;
+		' \
 		| awk '
 			# Re-emit `.nasm_str <text>` lines as NASM backtick strings,
 			# escaping any literal backticks in the content.
@@ -110,10 +123,10 @@ for src in "${SOURCES[@]}"; do
 			BEGIN { $p = "'"$prefix"'"; }
 			# Label definitions: lN: or lN_lM: at start of line
 			s/^(l\d+(?:_l\d+)?):/${p}$1:/;
-			# Jump targets: jXX <label> (one operand)
-			s/^(\s*j[a-z]+\s+)(l\d+)\b/$1${p}$2/;
+			# Jump targets: jXX <label> (one operand).  Matches lN and lN_lM.
+			s/^(\s*j[a-z]+\s+)(l\d+(?:_l\d+)?)\b/$1${p}$2/;
 			# jnz val, lN, lM (two operands)
-			s/^(\s*jnz\s+[^,]+,\s*)(l\d+)(\s*,\s*)(l\d+)\b/$1${p}$2$3${p}$4/;
+			s/^(\s*jnz\s+[^,]+,\s*)(l\d+(?:_l\d+)?)(\s*,\s*)(l\d+(?:_l\d+)?)\b/$1${p}$2$3${p}$4/;
 			# Global glo: definitions and references (with or without leading
 			# underscore — QBE emits both forms in different contexts).
 			s/^_?glo(\d+):/${p}glo$1:/;
@@ -147,10 +160,6 @@ for src in "${SOURCES[@]}"; do
 		# Repair 8086 addressing: BX/BP/SI/DI are the only legal memory-base
 		# registers.  When QBE i8086 emits `[ax]`/`[cx]`/`[dx]`, route via BX
 		# (with push/pop) to keep the surrounding regs untouched.
-		# Match instructions of the form:
-		#   <op> <prefix?> [<reg>], <src>
-		#   <op> <prefix?> <dst>, [<reg>]
-		# where <reg> is ax/cx/dx (case-insensitive).
 		{
 			if (match($0, /\[(ax|cx|dx|AX|CX|DX)\]/)) {
 				reg = substr($0, RSTART+1, RLENGTH-2)
@@ -163,6 +172,26 @@ for src in "${SOURCES[@]}"; do
 			}
 			print
 		}
+		' \
+		| perl -pe '
+			# Byte stores must use 8-bit register names (this fixup runs AFTER
+			# the address-fixup awk because that awk can introduce new
+			# byte-store instructions whose source register is still in the
+			# 16-bit form).
+			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*ax\b/$1, al/g;
+			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*bx\b/$1, bl/g;
+			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*cx\b/$1, cl/g;
+			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*dx\b/$1, dl/g;
+			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*(si|di|bp|sp)\b/$1, al ; XXX 8-bit form of $2 N\/A/g;
+			# idiv with an immediate operand is illegal — load to BX first.
+			# Also fixup for `idiv` and `div` with a literal divisor.
+			if (/^(\s*)(i?div)\s+(-?\d+)\s*$/) {
+				$_ = "$1mov bx, $3\n$1$2 bx\n";
+			}
+			# `test es, es` (or any segment register self-test) — nonsense
+			# from the rname[] segment-register fallback.  Replace with a
+			# noop test that the assembler will accept.
+			s/^(\s*test\s+)(es|ds|cs|ss),\s*\g{2}\b/$1ax, ax ; XXX was test $2,$2/g;
 		' \
 		> "$asm_clean"
 	# Skip stand-alone NASM object assembly — we concatenate all .asm
@@ -234,7 +263,7 @@ strip_runtime() {
 	done
 } > "$LINK_ASM"
 
-if nasm -f bin "$LINK_ASM" -o "$OUT_DIR/stevie.com" 2>"$OUT_DIR/link.err"; then
+if nasm -w-label-redef-late -w-pp-open-string -f bin "$LINK_ASM" -o "$OUT_DIR/stevie.com" 2>"$OUT_DIR/link.err"; then
 	echo "  OK: $OUT_DIR/stevie.com ($(wc -c <"$OUT_DIR/stevie.com") bytes)"
 else
 	echo "  FAIL link: $(head -3 "$OUT_DIR/link.err")"

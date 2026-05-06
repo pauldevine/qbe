@@ -130,7 +130,9 @@ static struct {
 	{ NOp, 0, 0 }
 };
 
-/* Register names for 16-bit x86 */
+/* Register names for 16-bit x86.  Slots beyond RSP must still have valid
+ * non-NULL strings: the codegen occasionally lands here for segment regs
+ * (RES/RDS).  Use placeholders rather than reading garbage memory. */
 static char *rname[] = {
 	[RAX] = "ax",
 	[RCX] = "cx",
@@ -140,6 +142,8 @@ static char *rname[] = {
 	[RDI] = "di",
 	[RBP] = "bp",
 	[RSP] = "sp",
+	[RES] = "es",
+	[RDS] = "ds",
 };
 
 /* 8-bit register names (low byte) */
@@ -581,8 +585,10 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		return;
 	}
 
-	/* Special handling for 32-bit (Kl) operations on 16-bit hardware */
-	if (i->cls == Kl) {
+	/* Special handling for 32-bit (Kl) operations on 16-bit hardware.
+	 * Also dispatch here for Ostorel which transfers 32-bit data even
+	 * though its result class is Kw (void). */
+	if (i->cls == Kl || i->op == Ostorel) {
 		/*
 		 * 32-bit operations on 16-bit x86 require multi-instruction sequences.
 		 * 32-bit values are stored as two consecutive 16-bit words in memory

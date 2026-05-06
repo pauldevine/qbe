@@ -96,6 +96,59 @@ _sprintf:
     mov ax, 0
     ret
 
+global _fprintf
+_fprintf:
+    mov ax, 0
+    ret
+
+global _printf
+_printf:
+    mov ax, 0
+    ret
+
+global _fputs
+_fputs:
+    mov ax, 0
+    ret
+
+global _fputc
+_fputc:
+    push bp
+    mov bp, sp
+    mov ax, [bp+4]
+    pop bp
+    ret
+
+global _fread
+_fread:
+    mov ax, 0
+    ret
+
+global _fwrite
+_fwrite:
+    mov ax, 0
+    ret
+
+global _fseek
+_fseek:
+    mov ax, 0
+    ret
+
+global _ftell
+_ftell:
+    mov ax, 0
+    ret
+
+global _fflush
+_fflush:
+    ret
+
+global _abort
+_abort:
+    mov ah, 4Ch
+    mov al, 1
+    int 21h
+
 global _fopen
 _fopen:
     mov ax, 0
@@ -165,3 +218,97 @@ _exit:
     mov ax, [bp+4]
     mov ah, 4Ch
     int 21h
+
+global _fgets
+_fgets:
+    mov ax, 0
+    ret
+
+global _isspace
+_isspace:
+    mov ax, 0
+    ret
+
+global _getenv
+_getenv:
+    mov ax, 0
+    ret
+
+global _system
+_system:
+    mov ax, 0
+    ret
+
+; DOS API helpers (stubs — real impl belongs in doslib.asm).
+global _dos_cls
+_dos_cls:
+    ret
+global _dos_gotoxy
+_dos_gotoxy:
+    ret
+global _dos_kbhit
+_dos_kbhit:
+    mov ax, 0
+    ret
+global _dos_putch
+_dos_putch:
+    push bp
+    mov bp, sp
+    mov dx, [bp+4]
+    mov ah, 02h
+    int 21h
+    pop bp
+    ret
+global _dos_getvidmode
+_dos_getvidmode:
+    mov ax, 0
+    ret
+
+; Stubs for stevie globals/functions that live in TUs that don't reach
+; QBE asm (fileio.c, screen.c).  These print/draw nothing; they exist
+; just to satisfy the linker.
+global _params
+_params: dw 0,0,0,0,0,0,0,0
+global _updatetabstoptable
+_updatetabstoptable:
+    ret
+global _filemess
+_filemess:
+    ret
+global _readfile
+_readfile:
+    mov ax, 0
+    ret
+global _writeit
+_writeit:
+    mov ax, 0
+    ret
+global _renum
+_renum:
+    ret
+global _updatescreen
+_updatescreen:
+    ret
+global _updateline
+_updateline:
+    ret
+global _cursupdate
+_cursupdate:
+    ret
+global _gchar
+_gchar:
+    mov ax, 0
+    ret
+global _inc
+_inc:
+    mov ax, 0
+    ret
+global _s_del
+_s_del:
+    ret
+global _s_ins
+_s_ins:
+    ret
+global _regerror
+_regerror:
+    ret
