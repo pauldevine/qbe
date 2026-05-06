@@ -80,6 +80,18 @@ selcmp(Ins i, int k, int cmp, Fn *fn)
 	i0 = curi;
 	fixarg(&i0->arg[0], k, i0, fn);
 	fixarg(&i0->arg[1], k, i0, fn);
+	/* Hint the register allocator to avoid SI/DI/BP/SP/ES/DS for the
+	 * result.  setCC needs an 8-bit-capable register and these have none.
+	 * hint.m is consulted only under register pressure (after exhausting
+	 * the per-temp hint.r preference), so this is a soft preference, not
+	 * a hard constraint.  When rega ignores it the emit phase falls back
+	 * to a setCC al + movzx <dst>, al sequence (correct codegen, but it
+	 * clobbers AL silently). */
+	if (rtype(i0->to) == RTmp && i0->to.val >= Tmp0) {
+		fn->tmp[i0->to.val].hint.m
+		    |= BIT(RSI) | BIT(RDI) | BIT(RBP) | BIT(RSP)
+		    |  BIT(RES) | BIT(RDS);
+	}
 }
 
 static void
