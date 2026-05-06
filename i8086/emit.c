@@ -236,6 +236,71 @@ emitaddr(Con *c, FILE *f)
 		fprintf(f, "+%"PRIi64, c->bits.i);
 }
 
+/* Store the AX-resident result of a Kl operation to its destination.
+ * Slot dests get a single mov (callers that need the high word write it
+ * separately).  Tmp dests just receive the low word — rega doesn't know
+ * about register pairs. */
+static void
+store_ax_to(Ref to, Fn *fn, FILE *f)
+{
+	if (rtype(to) == RTmp)
+		fprintf(f, "\tmov %s, ax\n", rname[to.val]);
+	else if (rtype(to) == RSlot)
+		fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(to, fn));
+}
+
+/* Load a 32-bit operand into DX:AX.  The original 32-bit handlers only
+ * handled RSlot/RCon; this also handles RTmp (treats the temp's register
+ * as the low word and zero-extends DX, matching the convention in the
+ * Oadd/Osub Kl handlers). */
+static void
+load32_dxax(Ref r, Fn *fn, FILE *f)
+{
+	int64_t val;
+	if (rtype(r) == RSlot) {
+		fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r, fn));
+		fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r, fn) + 2);
+	} else if (rtype(r) == RCon) {
+		val = fn->con[r.val].bits.i;
+		fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
+		fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
+	} else if (rtype(r) == RTmp) {
+		fprintf(f, "\tmov ax, %s\n", rname[r.val]);
+		fprintf(f, "\txor dx, dx\n");
+	}
+}
+
+/* Compare DX:AX against a 32-bit operand by emitting two cmp instructions:
+ *   cmp dx, <high(r)>
+ *   cmp ax, <low(r)>
+ * The caller decides what jcc to insert between them.  For RTmp, treats
+ * the high word as 0 (matching load32_dxax's zero-extension). */
+static void
+cmp32_high(Ref r, Fn *fn, FILE *f)
+{
+	int64_t val;
+	if (rtype(r) == RSlot)
+		fprintf(f, "\tcmp dx, word [bp%+ld]\n", (long)slot(r, fn) + 2);
+	else if (rtype(r) == RCon) {
+		val = fn->con[r.val].bits.i;
+		fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
+	} else if (rtype(r) == RTmp)
+		fprintf(f, "\tcmp dx, 0\n");
+}
+
+static void
+cmp32_low(Ref r, Fn *fn, FILE *f)
+{
+	int64_t val;
+	if (rtype(r) == RSlot)
+		fprintf(f, "\tcmp ax, word [bp%+ld]\n", (long)slot(r, fn));
+	else if (rtype(r) == RCon) {
+		val = fn->con[r.val].bits.i;
+		fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
+	} else if (rtype(r) == RTmp)
+		fprintf(f, "\tcmp ax, %s\n", rname[r.val]);
+}
+
 /* Detect if a Ref-as-memory-operand uses AX/CX/DX as the base register.
  * 8086 only allows BX/BP/SI/DI as memory base.  Returns the offending
  * register (RAX/RCX/RDX) or 0 if no fixup is needed.
@@ -598,8 +663,10 @@ emitins(Ins *i, Fn *fn, FILE *f)
 
 	/* Special handling for 32-bit (Kl) operations on 16-bit hardware.
 	 * Ostorel reaches here even though its result class is Kw (void) —
-	 * the data IS 32-bit, so we need the multi-word path. */
-	if (i->cls == Kl || i->op == Ostorel) {
+	 * the data IS 32-bit, so we need the multi-word path.  Same for
+	 * Oc*l comparisons: result is Kw but the args are 32-bit. */
+	if (i->cls == Kl || i->op == Ostorel
+	    || INRANGE(i->op, Oceql, Ocultl)) {
 		/*
 		 * 32-bit operations on 16-bit x86 require multi-instruction sequences.
 		 * 32-bit values are stored as two consecutive 16-bit words in memory
@@ -735,14 +802,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			/*
 			 * 32-bit bitwise AND: dest = src0 & src1
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
 			if (rtype(r1) == RSlot) {
 				fprintf(f, "\tand ax, word [bp%+ld]\n", (long)slot(r1, fn));
@@ -765,14 +825,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			/*
 			 * 32-bit bitwise OR: dest = src0 | src1
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
 			if (rtype(r1) == RSlot) {
 				fprintf(f, "\tor ax, word [bp%+ld]\n", (long)slot(r1, fn));
@@ -795,14 +848,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			/*
 			 * 32-bit bitwise XOR: dest = src0 ^ src1
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
 			if (rtype(r1) == RSlot) {
 				fprintf(f, "\txor ax, word [bp%+ld]\n", (long)slot(r1, fn));
@@ -827,14 +873,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 * For shifts by constant < 16, we can use shld/shl
 			 * For larger shifts, more complex handling needed
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
 			if (rtype(r1) == RCon) {
 				int shift = (int)fn->con[r1.val].bits.i;
@@ -879,14 +918,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			/*
 			 * 32-bit logical right shift (unsigned)
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
 			if (rtype(r1) == RCon) {
 				int shift = (int)fn->con[r1.val].bits.i;
@@ -929,14 +961,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			/*
 			 * 32-bit arithmetic right shift (signed)
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
 			if (rtype(r1) == RCon) {
 				int shift = (int)fn->con[r1.val].bits.i;
@@ -1085,31 +1110,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 * Compare both words, result is 1 if both equal
 			 */
 			/* Load first operand */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
 			/* Compare high word first */
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjne .L_ceql_ne_%p\n", (void*)i);
 
 			/* Compare low word */
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp ax, word [bp%+ld]\n", (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
-			}
+			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjne .L_ceql_ne_%p\n", (void*)i);
 
 			/* Equal */
@@ -1119,41 +1127,21 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\txor ax, ax\n");
 			fprintf(f, ".L_ceql_done_%p:\n", (void*)i);
 
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocnel:
 			/*
 			 * 32-bit inequality comparison
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
 			/* Compare high word */
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjne .L_cnel_ne_%p\n", (void*)i);
 
 			/* Compare low word */
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp ax, word [bp%+ld]\n", (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
-			}
+			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjne .L_cnel_ne_%p\n", (void*)i);
 
 			/* Equal - result is 0 */
@@ -1163,10 +1151,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_cnel_done_%p:\n", (void*)i);
 
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocsltl:
@@ -1174,32 +1159,15 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 * 32-bit signed less than
 			 * Compare high words first (signed), then low words (unsigned) if high equal
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
 			/* Compare high word (signed) */
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjl .L_csltl_true_%p\n", (void*)i);
 			fprintf(f, "\tjg .L_csltl_false_%p\n", (void*)i);
 
 			/* High words equal, compare low (unsigned) */
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp ax, word [bp%+ld]\n", (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
-			}
+			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjb .L_csltl_true_%p\n", (void*)i);
 
 			fprintf(f, ".L_csltl_false_%p:\n", (void*)i);
@@ -1209,40 +1177,20 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_csltl_done_%p:\n", (void*)i);
 
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocslel:
 			/*
 			 * 32-bit signed less than or equal
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjl .L_cslel_true_%p\n", (void*)i);
 			fprintf(f, "\tjg .L_cslel_false_%p\n", (void*)i);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp ax, word [bp%+ld]\n", (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
-			}
+			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjbe .L_cslel_true_%p\n", (void*)i);
 
 			fprintf(f, ".L_cslel_false_%p:\n", (void*)i);
@@ -1252,40 +1200,20 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_cslel_done_%p:\n", (void*)i);
 
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocsgtl:
 			/*
 			 * 32-bit signed greater than
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjg .L_csgtl_true_%p\n", (void*)i);
 			fprintf(f, "\tjl .L_csgtl_false_%p\n", (void*)i);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp ax, word [bp%+ld]\n", (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
-			}
+			cmp32_low(r1, fn, f);
 			fprintf(f, "\tja .L_csgtl_true_%p\n", (void*)i);
 
 			fprintf(f, ".L_csgtl_false_%p:\n", (void*)i);
@@ -1295,40 +1223,20 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_csgtl_done_%p:\n", (void*)i);
 
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocsgel:
 			/*
 			 * 32-bit signed greater than or equal
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjg .L_csgel_true_%p\n", (void*)i);
 			fprintf(f, "\tjl .L_csgel_false_%p\n", (void*)i);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp ax, word [bp%+ld]\n", (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
-			}
+			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjae .L_csgel_true_%p\n", (void*)i);
 
 			fprintf(f, ".L_csgel_false_%p:\n", (void*)i);
@@ -1338,40 +1246,20 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_csgel_done_%p:\n", (void*)i);
 
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocultl:
 			/*
 			 * 32-bit unsigned less than
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjb .L_cultl_true_%p\n", (void*)i);
 			fprintf(f, "\tja .L_cultl_false_%p\n", (void*)i);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp ax, word [bp%+ld]\n", (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
-			}
+			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjb .L_cultl_true_%p\n", (void*)i);
 
 			fprintf(f, ".L_cultl_false_%p:\n", (void*)i);
@@ -1381,40 +1269,20 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_cultl_done_%p:\n", (void*)i);
 
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Oculel:
 			/*
 			 * 32-bit unsigned less than or equal
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjb .L_culel_true_%p\n", (void*)i);
 			fprintf(f, "\tja .L_culel_false_%p\n", (void*)i);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp ax, word [bp%+ld]\n", (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
-			}
+			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjbe .L_culel_true_%p\n", (void*)i);
 
 			fprintf(f, ".L_culel_false_%p:\n", (void*)i);
@@ -1424,40 +1292,20 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_culel_done_%p:\n", (void*)i);
 
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocugtl:
 			/*
 			 * 32-bit unsigned greater than
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			cmp32_high(r1, fn, f);
 			fprintf(f, "\tja .L_cugtl_true_%p\n", (void*)i);
 			fprintf(f, "\tjb .L_cugtl_false_%p\n", (void*)i);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp ax, word [bp%+ld]\n", (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
-			}
+			cmp32_low(r1, fn, f);
 			fprintf(f, "\tja .L_cugtl_true_%p\n", (void*)i);
 
 			fprintf(f, ".L_cugtl_false_%p:\n", (void*)i);
@@ -1467,40 +1315,20 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_cugtl_done_%p:\n", (void*)i);
 
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocugel:
 			/*
 			 * 32-bit unsigned greater than or equal
 			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			load32_dxax(r0, fn, f);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
-			}
+			cmp32_high(r1, fn, f);
 			fprintf(f, "\tja .L_cugel_true_%p\n", (void*)i);
 			fprintf(f, "\tjb .L_cugel_false_%p\n", (void*)i);
 
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tcmp ax, word [bp%+ld]\n", (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
-			}
+			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjae .L_cugel_true_%p\n", (void*)i);
 
 			fprintf(f, ".L_cugel_false_%p:\n", (void*)i);
@@ -1510,10 +1338,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_cugel_done_%p:\n", (void*)i);
 
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Omkfar:
@@ -1797,10 +1622,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".Lceq_done_%p:\n", (void*)i);
 
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocnes:
@@ -1819,10 +1641,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, ".Lcne_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".Lcne_done_%p:\n", (void*)i);
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocgts:
@@ -1842,10 +1661,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, ".Lcgt_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".Lcgt_done_%p:\n", (void*)i);
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocges:
@@ -1864,10 +1680,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, ".Lcge_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".Lcge_done_%p:\n", (void*)i);
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Oclts:
@@ -1886,10 +1699,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, ".Lclt_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".Lclt_done_%p:\n", (void*)i);
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocles:
@@ -1908,10 +1718,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, ".Lcle_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".Lcle_done_%p:\n", (void*)i);
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocos:
@@ -1929,10 +1736,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tjnp .Lcord_done_%p\n", (void*)i);  /* not parity = ordered */
 			fprintf(f, "\txor ax, ax\n");
 			fprintf(f, ".Lcord_done_%p:\n", (void*)i);
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		case Ocuos:
@@ -1952,10 +1756,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, ".Lcuord_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".Lcuord_done_%p:\n", (void*)i);
-			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			store_ax_to(i->to, fn, f);
 			return;
 
 		default:

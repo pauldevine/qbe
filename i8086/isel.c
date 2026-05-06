@@ -55,12 +55,10 @@ selcmp(Ins i, int k, int cmp, Fn *fn)
 	 * fallback (with comment).  TODO: hint or constraint mechanism.
 	 */
 
-	/* TODO(8086): Properly support 32-bit comparisons.  The Oce*l/Ocs*l
-	 * handlers in emit.c only handle RSlot/RCon args, not RTmp — a 32-bit
-	 * temp doesn't fit in a single register and rega doesn't allocate
-	 * register pairs.  Until that's fixed, fall back to 16-bit ops which
-	 * compare only the low word.  This is incorrect for any value > 65535,
-	 * but matches the existing behaviour. */
+	/* 32-bit comparisons use the Oc*l ops; emit.c has multi-step
+	 * handlers (compare high then low, branch on flags) that handle
+	 * RSlot, RCon, and RTmp arg combinations.  16-bit comparisons stay
+	 * with the Oc*w ops and the format-string template. */
 
 	/* 8086 cmp requires reg/mem on the left and immediate on the right;
 	 * `cmp imm, reg` is illegal.  If the operands are flipped, swap them
@@ -94,19 +92,36 @@ selcmp(Ins i, int k, int cmp, Fn *fn)
 		i.arg[0] = hoist_dst;
 	}
 
-	switch (cmp) {
-	case Cieq:  i.op = Oceqw; break;
-	case Cine:  i.op = Ocnew; break;
-	case Cislt: i.op = Ocsltw; break;
-	case Cisgt: i.op = Ocsgtw; break;
-	case Cisle: i.op = Ocslew; break;
-	case Cisge: i.op = Ocsgew; break;
-	case Ciult: i.op = Ocultw; break;
-	case Ciugt: i.op = Ocugtw; break;
-	case Ciule: i.op = Oculew; break;
-	case Ciuge: i.op = Ocugew; break;
-	default:
-		die("unsupported comparison %d", cmp);
+	if (k == Kl) {
+		switch (cmp) {
+		case Cieq:  i.op = Oceql; break;
+		case Cine:  i.op = Ocnel; break;
+		case Cislt: i.op = Ocsltl; break;
+		case Cisgt: i.op = Ocsgtl; break;
+		case Cisle: i.op = Ocslel; break;
+		case Cisge: i.op = Ocsgel; break;
+		case Ciult: i.op = Ocultl; break;
+		case Ciugt: i.op = Ocugtl; break;
+		case Ciule: i.op = Oculel; break;
+		case Ciuge: i.op = Ocugel; break;
+		default:
+			die("unsupported comparison %d", cmp);
+		}
+	} else {
+		switch (cmp) {
+		case Cieq:  i.op = Oceqw; break;
+		case Cine:  i.op = Ocnew; break;
+		case Cislt: i.op = Ocsltw; break;
+		case Cisgt: i.op = Ocsgtw; break;
+		case Cisle: i.op = Ocslew; break;
+		case Cisge: i.op = Ocsgew; break;
+		case Ciult: i.op = Ocultw; break;
+		case Ciugt: i.op = Ocugtw; break;
+		case Ciule: i.op = Oculew; break;
+		case Ciuge: i.op = Ocugew; break;
+		default:
+			die("unsupported comparison %d", cmp);
+		}
 	}
 
 	emiti(i);
