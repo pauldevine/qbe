@@ -206,13 +206,7 @@ void edit(void)
 	}
 }
 
-void getout(void)
-{
-	windgoto(Rows - 1, 0);
-	putchar(13);
-	putchar(10);
-	windexit(0);
-}
+/* getout() is defined in dos.c for the DOS port */
 
 void scrolldown(int nlines)
 {

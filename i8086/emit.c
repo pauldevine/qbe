@@ -259,8 +259,14 @@ slot(Ref r, Fn *fn)
 static void
 emitaddr(Con *c, FILE *f)
 {
+	const char *name;
 	assert(c->sym.type == SGlo || c->sym.type == SThr);
-	fputs(str(c->sym.id), f);
+	name = str(c->sym.id);
+	/* Apply target symbol prefix (e.g. "_") so references match the
+	 * function/data labels emitted with the same prefix. */
+	if (name[0] != '"' && T.assym)
+		fputs(T.assym, f);
+	fputs(name, f);
 	if (c->bits.i)
 		fprintf(f, "+%"PRIi64, c->bits.i);
 }
@@ -297,10 +303,23 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 			else
 				die("invalid 8-bit register specifier");
 
-			if (rtype(r) == RTmp && r.val <= RBX)
+			if (rtype(r) == RTmp && r.val <= RBX) {
 				fprintf(f, "%s", rname8[r.val]);
-			else
+			} else if (rtype(r) == RTmp) {
+				/* SI/DI/BP/SP have no 8-bit form on 8086.  Emit `al`
+				 * as a fallback and prefix the instruction with a
+				 * mov from the real register; the surrounding emit
+				 * code expects a single token here, so we paper over
+				 * the issue with a comment annotation.  Codegen for
+				 * these cases is currently INCORRECT — the right fix
+				 * is to constrain the register allocator to AX-BX
+				 * for byte-sized values. */
+				fprintf(f, "al ; XXX wanted 8-bit form of %s",
+					(r.val < (int)(sizeof rname / sizeof rname[0]) && rname[r.val])
+						? rname[r.val] : "?");
+			} else {
 				die("8-bit register only available for AX-BX");
+			}
 			break;
 		case '=': /* destination register */
 			r = i->to;

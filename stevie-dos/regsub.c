@@ -18,8 +18,8 @@
  *	3. Altered versions must be plainly marked as such, and must not
  *		be misrepresented as being the original software.
  */
-#include <stdio.h>
-#include <regexp.h>
+#include "stevie.h"
+#include "regexp.h"
 #include "regmagic.h"
 
 #ifndef CHARBITS
@@ -28,21 +28,21 @@
 #define	UCHARAT(p)	((int)*(p)&CHARBITS)
 #endif
 
+/* libc */
+char *strncpy(char *dest, char *src, int n);
+
+void regerror(char *s);
+
 /*
  - regsub - perform substitutions after a regexp match
  */
-void
-regsub(prog, source, dest)
-regexp *prog;
-char *source;
-char *dest;
+void regsub(regexp *prog, char *source, char *dest)
 {
-    register char *src;
-    register char *dst;
-    register char c;
-    register int no;
-    register int len;
-    extern char *strncpy();
+    char *src;
+    char *dst;
+    char c;
+    int no;
+    int len;
 
     if (prog == NULL || source == NULL || dest == NULL)
     {

@@ -5,17 +5,17 @@
  * not the System V one.
  */
 #define NSUBEXP  10
+/* MiniC-compatible: arrays-in-struct converted to pointers (allocated by regcomp) */
 typedef struct regexp {
-	char *startp[NSUBEXP];
-	char *endp[NSUBEXP];
+	char **startp;		/* array of NSUBEXP char* */
+	char **endp;		/* array of NSUBEXP char* */
 	char regstart;		/* Internal use only. */
 	char reganch;		/* Internal use only. */
 	char *regmust;		/* Internal use only. */
 	int regmlen;		/* Internal use only. */
-	char program[1];	/* Unwarranted chumminess with compiler. */
+	char *program;		/* dynamically allocated */
 } regexp;
 
-extern regexp *regcomp();
-extern int regexec();
-extern void regsub();
-extern void regerror();
+regexp *regcomp(char *exp);
+int regexec(regexp *prog, char *string);
+void regsub(regexp *prog, char *source, char *dest);

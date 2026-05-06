@@ -277,10 +277,14 @@ _dos_get_version:
 ; Args: exit code
 global _dos_exit
 _dos_exit:
+    push bp
+    mov bp, sp
     mov ah, 4Ch         ; DOS function 4Ch - exit program
-    mov al, [sp+2]      ; Get exit code from stack
+    mov al, [bp+4]      ; Get exit code from stack frame (8086 can't [sp+...])
     int 21h
     ; Never returns
+    pop bp
+    ret
 
 ; ============================================================================
 ; Memory Functions

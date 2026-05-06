@@ -126,6 +126,10 @@ int enumval; /* Current enum value */
 int cur_fn_interrupt; /* 1 if current function has __attribute__((interrupt)) */
 int cur_fn_weak;      /* 1 if current function has __attribute__((weak)) */
 char *ini[NGlo];
+char gloname[NGlo][NString];  /* Real C name for each global slot — used to
+                               * emit `data $foo = ...` instead of $glo1 so
+                               * cross-translation-unit linkage uses the
+                               * source-level identifier. */
 struct {
 	char v[NString];
 	unsigned ctyp;
@@ -235,6 +239,11 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 				varh[h].isextern = 0;  /* Now it's a real definition */
 				return;
 			}
+			/* Allow definition after function prototype with the same type:
+			 * `char *foo(int);` followed later by `char *foo(int x) { ... }`. */
+			if (KIND(varh[h].ctyp) == FUN && KIND(ctyp) == FUN &&
+			    varh[h].ctyp == ctyp)
+				return;
 			die("double definition");
 		}
 		h = (h+1) % NVar;
@@ -493,7 +502,8 @@ typhadd(char *v, unsigned ctyp)
 {
 	unsigned h0, h;
 
-	h0 = hash(v);
+	/* hash() returns hash%NVar but typh has NTyp slots — wrap into NTyp. */
+	h0 = hash(v) % NTyp;
 	h = h0;
 	do {
 		if (typh[h].v[0] == 0) {
@@ -513,7 +523,7 @@ typhget(char *v, unsigned *ctyp)
 {
 	unsigned h0, h;
 
-	h0 = hash(v);
+	h0 = hash(v) % NTyp;
 	h = h0;
 	do {
 		if (strcmp(typh[h].v, v) == 0) {
@@ -713,7 +723,13 @@ psymb(Symb s)
 		fprintf(of, "%%%s", s.u.v);
 		break;
 	case Glo:
-		fprintf(of, "$glo%d", s.u.n);
+		/* Reference globals by their source name when available so the
+		 * generated symbol matches what other translation units expect
+		 * via `extern` declarations. */
+		if (s.u.n > 0 && s.u.n < NGlo && gloname[s.u.n][0] != 0)
+			fprintf(of, "$%s", gloname[s.u.n]);
+		else
+			fprintf(of, "$glo%d", s.u.n);
 		break;
 	case Ext:
 		fprintf(of, "$%s", s.u.v);
@@ -856,6 +872,14 @@ prom(int op, Symb *l, Symb *r)
 		sext(l);
 		/* Return unsigned long if r is unsigned, else signed long */
 		return ISUNSIGNED(r->ctyp) ? (LNG | UNSIGNED) : LNG;
+	}
+
+	/* Pointer subtraction yields ptrdiff_t (long): handle BEFORE the
+	 * same-kind early return so the result type is long, not pointer. */
+	if (op == '-' && KIND(l->ctyp) == PTR && KIND(r->ctyp) == PTR) {
+		if (l->ctyp != r->ctyp)
+			die("non-homogeneous pointers in substraction");
+		return LNG;
 	}
 
 	/* Handle unsigned type promotion */
@@ -1021,7 +1045,7 @@ call(Node *n, Symb *sr)
 				fprintf(of, "(");
 			}
 			for (a=n->r; a; a=a->r) {
-				fprintf(of, "%c ", irtyp(a->u.s.ctyp));
+				fprintf(of, "%c ", irtyp_ret(a->u.s.ctyp));
 				psymb(a->u.s);
 				fprintf(of, ", ");
 			}
@@ -1044,7 +1068,7 @@ call(Node *n, Symb *sr)
 		fprintf(of, " =%c call $%s(", irtyp_ret(sr->ctyp), f);
 	}
 	for (a=n->r; a; a=a->r) {
-		fprintf(of, "%c ", irtyp(a->u.s.ctyp));
+		fprintf(of, "%c ", irtyp_ret(a->u.s.ctyp));
 		psymb(a->u.s);
 		fprintf(of, ", ");
 	}
@@ -1089,25 +1113,37 @@ expr(Node *n)
 		break;
 
 	case '?':
-		/* Ternary operator: cond ? true_expr : false_expr */
+		/* Ternary operator: cond ? true_expr : false_expr.
+		 *
+		 * Each branch may itself emit basic blocks (e.g. nested ternaries
+		 * or short-circuit && / ||).  The phi at the merge therefore can
+		 * NOT use the original branch-entry labels as predecessors — by
+		 * the time control reaches the merge it's via whatever block the
+		 * sub-expression last fell through to.  We emit a dedicated
+		 * "trailer" label after each branch so the predecessor seen by
+		 * the phi is unambiguous: @ltrue → @merge and @lfalse → @merge.
+		 */
 		l = lbl;
-		lbl += 3;
-		/* Evaluate condition */
+		lbl += 5;  /* l = entry-true, l+1 = entry-false, l+2 = trailer-true,
+		            * l+3 = trailer-false, l+4 = merge */
 		s0 = expr(n->l);
 		fprintf(of, "\tjnz ");
 		psymb(s0);
 		fprintf(of, ", @l%d, @l%d\n", l, l+1);
 		/* True branch */
 		fprintf(of, "@l%d\n", l);
-		s0 = expr(n->r->l);  /* true expression */
+		s0 = expr(n->r->l);
 		fprintf(of, "\tjmp @l%d\n", l+2);
+		fprintf(of, "@l%d\n", l+2);
+		fprintf(of, "\tjmp @l%d\n", l+4);
 		/* False branch */
 		fprintf(of, "@l%d\n", l+1);
-		s1 = expr(n->r->r);  /* false expression */
-		fprintf(of, "\tjmp @l%d\n", l+2);
+		s1 = expr(n->r->r);
+		fprintf(of, "\tjmp @l%d\n", l+3);
+		fprintf(of, "@l%d\n", l+3);
+		fprintf(of, "\tjmp @l%d\n", l+4);
 		/* Merge */
-		fprintf(of, "@l%d\n", l+2);
-		/* Type promotion */
+		fprintf(of, "@l%d\n", l+4);
 		if (s0.ctyp != s1.ctyp) {
 			if (s0.ctyp == LNG && s1.ctyp == INT)
 				sr.ctyp = LNG;
@@ -1119,9 +1155,9 @@ expr(Node *n)
 			sr.ctyp = s0.ctyp;
 		fprintf(of, "\t");
 		psymb(sr);
-		fprintf(of, " =%c phi @l%d ", irtyp(sr.ctyp), l);
+		fprintf(of, " =%c phi @l%d ", irtyp_ret(sr.ctyp), l+2);
 		psymb(s0);
-		fprintf(of, ", @l%d ", l+1);
+		fprintf(of, ", @l%d ", l+3);
 		psymb(s1);
 		fprintf(of, "\n");
 		break;
@@ -1199,6 +1235,16 @@ expr(Node *n)
 		break;
 
 	case 'L':
+		/* Op 'L' is overloaded: compound literal AND left shift (SHL).
+		 * Compound literal nodes have r == 0 and u.n holding the type.
+		 * Shift nodes have non-NULL r; route them through the default
+		 * binary-op handler. */
+		if (n->r != 0) {
+			s0 = expr(n->l);
+			s1 = expr(n->r);
+			o = n->op;
+			goto Binop;
+		}
 		/* Compound literal: (type){ initializer }
 		 * Allocate temporary storage, initialize it, return value
 		 */
@@ -1370,7 +1416,7 @@ expr(Node *n)
 			psymb(fptr);
 			fprintf(of, "(");
 			for (a=n->r; a; a=a->r) {
-				fprintf(of, "%c ", irtyp(a->u.s.ctyp));
+				fprintf(of, "%c ", irtyp_ret(a->u.s.ctyp));
 				psymb(a->u.s);
 				fprintf(of, ", ");
 			}
@@ -1556,6 +1602,10 @@ expr(Node *n)
 		/* Cast expression: n->u.n is target type, n->l is expression */
 		s0 = expr(n->l);
 		sr.ctyp = n->u.n;
+		/* (void) cast: evaluate for side effects, discard value */
+		if (sr.ctyp == NIL) {
+			break;
+		}
 		/* For most casts, just copy the value with new type */
 		if (ISFLOAT(s0.ctyp) && !ISFLOAT(sr.ctyp)) {
 			/* Float to int conversion */
@@ -1574,10 +1624,19 @@ expr(Node *n)
 			psymb(s0);
 			fprintf(of, "\n");
 		} else {
-			/* Integer/pointer casts - just copy (bitwise) */
+			/* Integer/pointer casts.  QBE requires source width to match
+			 * destination class.  When narrowing long -> int the value is
+			 * truncated by `=w copy`; when widening int -> long we must
+			 * sign-extend with `extsw`. */
+			char dst = irtyp_ret(sr.ctyp);
+			char src = irtyp_ret(s0.ctyp);
 			fprintf(of, "\t");
 			psymb(sr);
-			fprintf(of, " =%c copy ", irtyp(sr.ctyp));
+			if (dst == 'l' && src == 'w') {
+				fprintf(of, " =l extsw ");
+			} else {
+				fprintf(of, " =%c copy ", dst);
+			}
 			psymb(s0);
 			fprintf(of, "\n");
 		}
@@ -1745,6 +1804,16 @@ expr(Node *n)
 			s0.u.n = tmp++;
 		} else if (KIND(s1.ctyp) == LNG && KIND(s0.ctyp) == INT && !ISFLOAT(s1.ctyp)) {
 			sext(&s0);
+		} else if (KIND(s1.ctyp) != LNG && KIND(s0.ctyp) == LNG && !ISFLOAT(s0.ctyp)) {
+			/* Implicit narrowing from long to int/short/char.
+			 * QBE requires the value width to match the store, so emit a
+			 * truncating copy.  Result type matches the LHS. */
+			fprintf(of, "\t%%t%d =w copy ", tmp);
+			psymb(s0);
+			fprintf(of, "\n");
+			s0.t = Tmp;
+			s0.ctyp = (KIND(s1.ctyp) == CHR) ? CHR : INT;
+			s0.u.n = tmp++;
 		} else if (KIND(s1.ctyp) == CHR && KIND(s0.ctyp) == INT) {
 			/* Truncate int to char - no explicit conversion needed */
 			/* QBE will handle truncation in storeb */
@@ -1759,6 +1828,12 @@ expr(Node *n)
 		}
 		if (s0.ctyp != IDIR(NIL) || KIND(s1.ctyp) != PTR)
 		if (s1.ctyp != IDIR(NIL) || KIND(s0.ctyp) != PTR)
+		/* Null pointer constant: integer constant 0 may be assigned to any pointer
+		 * (C standard §6.3.2.3). NULL typically expands to ((void*)0), but plain 0
+		 * suffices. Detect: RHS is Con with value 0 and LHS is a pointer. */
+		if (KIND(s1.ctyp) == PTR && s0.t == Con && s0.u.n == 0 && !ISFLOAT(s0.ctyp)) {
+			s0.ctyp = s1.ctyp;  /* coerce so the type-equality test below passes */
+		}
 		/* Allow assignment between signed/unsigned variants and float types */
 		if ((s1.ctyp & ~FAR) != (s0.ctyp & ~FAR)
 		    && !(KIND(s1.ctyp) == CHR && KIND(s0.ctyp) == INT)
@@ -2168,6 +2243,17 @@ genswitch(Symb val, Stmt *body, int brk)
 }
 
 int
+contains_case_label(Stmt *s)
+{
+	if (!s) return 0;
+	if (s->t == Case || s->t == Default) return 1;
+	if (s->t == Seq)
+		return contains_case_label((Stmt*)s->p1)
+		    || contains_case_label((Stmt*)s->p2);
+	return 0;
+}
+
+int
 genswitchbody(Stmt *s, int brk, Stmt **cases, int *caselbl, int ncase)
 {
 	int i;
@@ -2177,6 +2263,12 @@ genswitchbody(Stmt *s, int brk, Stmt **cases, int *caselbl, int ncase)
 
 	if (s->t == Seq) {
 		int r1 = genswitchbody((Stmt*)s->p1, brk, cases, caselbl, ncase);
+		/* Mirror stmt(Seq)'s short-circuit: if p1 terminates the basic
+		 * block (ret/break/continue), skip p2 unless p2 contains a case
+		 * label — case labels in a switch body must be reachable even
+		 * if a previous case fell through to a terminator. */
+		if (r1 && !contains_case_label((Stmt*)s->p2))
+			return r1;
 		int r2 = genswitchbody((Stmt*)s->p2, brk, cases, caselbl, ncase);
 		return r1 || r2;
 	} else if (s->t == Case || s->t == Default) {
@@ -2485,7 +2577,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %type <u> type
 %type <s> stmt stmts asmstmt
-%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc
+%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc idlist
 %type <n> asmoutputs asmoutputlist asmoutput asminputs asminputlist asminput asmclobbers asmclobberlist
 %token <u> TNAME
 
@@ -2768,6 +2860,23 @@ anonmembers:
 typed_decl: type_and_ident typed_decl_rest
 {
 	/* type_and_ident saves to globals, typed_decl_rest uses them */
+}
+          | STATIC type_and_ident typed_decl_rest
+{
+	/* `static` storage class: parse-only no-op for now (single-TU compilation).
+	 * Affects linkage in real C; MiniC emits all symbols equivalently. */
+}
+          | INLINE type_and_ident typed_decl_rest
+{
+	/* `inline` is a hint; MiniC emits the function normally. */
+}
+          | STATIC INLINE type_and_ident typed_decl_rest
+{
+	/* `static inline` — same treatment. */
+}
+          | INLINE STATIC type_and_ident typed_decl_rest
+{
+	/* `inline static` — same treatment. */
 };
 
 type_and_ident: type IDENT
@@ -2803,10 +2912,10 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	}
 	fprintf(of, "}\n\n");
 }
-               | '(' ')' ';'
+               | ansi_proto_register ';'
 {
-	/* Forward declaration - no parameters */
-	varadd(parsed_ident, 1, FUNC(parsed_type), 0);
+	/* ANSI function prototype: type name(args);  Registers the type
+	 * without emitting any IR for a stub function. */
 }
                | ';'
 {
@@ -2817,9 +2926,31 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 		die("too many string literals");
 	ini[nglo] = alloc(sizeof "{ x 0 }");
 	sprintf(ini[nglo], "{ %c 0 }", irtyp(parsed_type));
+	strcpy(gloname[nglo], parsed_ident);
+	varadd(parsed_ident, nglo++, parsed_type, 0);
+}
+               | '=' NUM ';'
+{
+	/* Global variable with integer initializer. */
+	char buf[64];
+	if (parsed_type == NIL)
+		die("invalid void declaration");
+	if (nglo == NGlo)
+		die("too many string literals");
+	sprintf(buf, "{ %c %d }", irtyp(parsed_type), $2->u.n);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], parsed_ident);
 	varadd(parsed_ident, nglo++, parsed_type, 0);
 }
                ;
+
+ansi_proto_register: '(' init_ansi par0 ')'
+{
+	/* Prototype-only registration: register function type, no IR emission. */
+	curfntyp = parsed_type;
+	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
+};
 
 ansi_func_proto: '(' init_ansi par0 ')'
 {
@@ -2972,8 +3103,10 @@ par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
 fptpar0: fptpar1
        |                  { $$ = 0; }
        ;
-fptpar1: type ',' fptpar1 { $$ = 0; }
-       | type             { $$ = 0; }
+fptpar1: type ',' fptpar1        { $$ = 0; }
+       | type                    { $$ = 0; }
+       | type IDENT ',' fptpar1  { $$ = 0; }
+       | type IDENT              { $$ = 0; }
        ;
 
 dcls:
@@ -2998,6 +3131,63 @@ dcls:
 			else
 				fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n\tstorew 0, %%_zinit%d\n", tmp, v, i, tmp);
 			tmp++;
+		}
+	}
+}
+    | dcls type IDENT '=' expr ';'
+{
+	/* Local declaration with initializer: int x = expr; */
+	int s;
+	char *v;
+	Node *init_node;
+
+	if ($2 == NIL)
+		die("invalid void declaration");
+	v = $3->u.v;
+	s = SIZE($2);
+	varadd(v, 0, $2, 0);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), s);
+	/* Evaluate initializer as `IDENT = expr` */
+	init_node = mknode('=', $3, $5);
+	expr(init_node);
+}
+    | dcls type IDENT ',' idlist ';'
+{
+	/* Multi-variable declaration: int a, b, c;  All share the same base type.
+	 * Per-declarator pointer/array decoration is not supported here. */
+	int s, i;
+	Node *n;
+	char *v;
+
+	if ($2 == NIL)
+		die("invalid void declaration");
+	s = SIZE($2);
+	/* First identifier */
+	v = $3->u.v;
+	varadd(v, 0, $2, 0);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), s);
+	if (KIND($2) == STRUCT_T || KIND($2) == UNION_T) {
+		for (i = 0; i < s; i += 4) {
+			if (i == 0)
+				fprintf(of, "\tstorew 0, %%%s\n", v);
+			else
+				fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n\tstorew 0, %%_zinit%d\n", tmp, v, i, tmp);
+			tmp++;
+		}
+	}
+	/* Subsequent identifiers chained through idlist */
+	for (n = $5; n; n = n->r) {
+		v = n->u.v;
+		varadd(v, 0, $2, 0);
+		fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), s);
+		if (KIND($2) == STRUCT_T || KIND($2) == UNION_T) {
+			for (i = 0; i < s; i += 4) {
+				if (i == 0)
+					fprintf(of, "\tstorew 0, %%%s\n", v);
+				else
+					fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n\tstorew 0, %%_zinit%d\n", tmp, v, i, tmp);
+				tmp++;
+			}
 		}
 	}
 }
@@ -3063,17 +3253,30 @@ dcls:
 	varadd(v, 0, $3, 0);
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($3), s);
 }
-    | dcls EXTERN type IDENT ';'
+    | dcls STATIC type IDENT '[' NUM ']' ';'
 {
-	int s;
+	/* Static local array — currently treated as a stack alloc.  Real C
+	 * `static` would persist across calls, but for stevie-style use cases
+	 * (single-function helpers) the difference is invisible. */
+	int s, n, total;
 	char *v;
 
 	if ($3 == NIL)
-		die("invalid void declaration");
+		die("invalid void array");
 	v = $4->u.v;
+	n = $6->u.n;
 	s = SIZE($3);
-	varadd(v, 0, $3, 0);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($3), s);
+	total = s * n;
+	varadd(v, 0, IDIR($3), 1);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($3), total);
+}
+    | dcls EXTERN type IDENT ';'
+{
+	/* extern declaration inside a function body: declares an external
+	 * symbol, no local storage allocation. */
+	if ($3 == NIL)
+		die("invalid void declaration");
+	varaddextern($4->u.v, $3, 0);
 }
     | dcls type IDENT '[' NUM ']' ';'
 {
@@ -3176,6 +3379,10 @@ dcls:
 }
     ;
 
+idlist: IDENT                  { $$ = $1; $$->r = 0; }
+      | IDENT ',' idlist       { $$ = $1; $$->r = $3; }
+      ;
+
 inititem: pref                        { $$ = $1; }
         | '.' IDENT '=' pref          { $$ = mknode('D', $4, $2); }
         | '[' NUM ']' '=' pref        { $$ = mknode('d', $5, $2); }
@@ -3271,14 +3478,10 @@ stmt: ';'                            { $$ = 0; }
         $$ = 0;
     }
     | EXTERN type IDENT ';'          {
-        int s;
-        char *v;
+        /* extern in statement scope: register as external symbol, no alloc. */
         if ($2 == NIL)
             die("invalid void declaration");
-        v = $3->u.v;
-        s = SIZE($2);
-        varadd(v, 0, $2, 0);
-        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), s);
+        varaddextern($3->u.v, $2, 0);
         $$ = 0;
     }
     | STATIC_ASSERT '(' NUM ',' STR ')' ';' {
@@ -3311,6 +3514,13 @@ stmt: ';'                            { $$ = 0; }
     }
     | SWITCH '(' expr ')' stmt       { $$ = mkstmt(Switch, $3, $5, 0); }
     | CASE pref ':' stmt             { Stmt *s = mkstmt(Case, 0, $4, 0); s->val = const_eval($2); $$ = s; }
+    | CASE pref '+' pref ':' stmt    { Stmt *s = mkstmt(Case, 0, $6, 0); s->val = const_eval($2) + const_eval($4); $$ = s; }
+    | CASE pref '-' pref ':' stmt    { Stmt *s = mkstmt(Case, 0, $6, 0); s->val = const_eval($2) - const_eval($4); $$ = s; }
+    | CASE pref '*' pref ':' stmt    { Stmt *s = mkstmt(Case, 0, $6, 0); s->val = const_eval($2) * const_eval($4); $$ = s; }
+    | CASE pref '|' pref ':' stmt    { Stmt *s = mkstmt(Case, 0, $6, 0); s->val = const_eval($2) | const_eval($4); $$ = s; }
+    | CASE pref '&' pref ':' stmt    { Stmt *s = mkstmt(Case, 0, $6, 0); s->val = const_eval($2) & const_eval($4); $$ = s; }
+    | CASE pref SHL pref ':' stmt    { Stmt *s = mkstmt(Case, 0, $6, 0); s->val = const_eval($2) << const_eval($4); $$ = s; }
+    | CASE pref SHR pref ':' stmt    { Stmt *s = mkstmt(Case, 0, $6, 0); s->val = const_eval($2) >> const_eval($4); $$ = s; }
     | DEFAULT ':' stmt               { $$ = mkstmt(Default, 0, $3, 0); }
     | asmstmt                        { $$ = $1; }
     ;
@@ -3717,8 +3927,20 @@ post: NUM
         $$->u.n = (int)$2;  /* Store type */
     }
     | '(' expr ')'        { $$ = $2; }
-    | IDENT '(' arg0 ')'  { $$ = mknode('C', $1, $3); }
-    | '(' '*' post ')' '(' arg0 ')'  { $$ = mknode('I', $3, $6); }
+    | post '(' arg0 ')'   {
+        /* Function call. Direct when callee is a bare IDENT (V node);
+         * otherwise indirect (e.g. (*fp)(...), arr[i](...), etc.). */
+        if ($1->op == 'V')
+            $$ = mknode('C', $1, $3);
+        else if ($1->op == '@') {
+            /* Pre-existing convention: indirect-call node 'I' wraps the
+             * function-pointer expression directly (the deref is folded in).
+             * Strip a leading deref so codegen sees the plain pointer. */
+            $$ = mknode('I', $1->l, $3);
+        } else {
+            $$ = mknode('I', $1, $3);
+        }
+    }
     | post '[' expr ']'   { $$ = mkidx($1, $3); }
     | post PP             { $$ = mknode('P', $1, 0); }
     | post MM             { $$ = mknode('M', $1, 0); }
@@ -3956,10 +4178,37 @@ yylex()
 			}
 		}
 
-		/* Check for float/double suffix (f/F for float, l/L for long double - treat as double) */
-		if (c == 'f' || c == 'F' || c == 'l' || c == 'L') {
+		/* Numeric suffix:
+		 * - f / F: float
+		 * - L / l: only marks long double when paired with a float
+		 *   literal (already had a `.` or `e` exponent).  On an integer
+		 *   literal, L means long integer (NOT float).
+		 * - U / u, LL / ll: integer suffixes, accept and discard.
+		 */
+		if (c == 'f' || c == 'F') {
 			isfloat = 1;
-			c = getchar();  /* Consume suffix but don't store it */
+			c = getchar();  /* Consume float suffix */
+		} else if (c == 'l' || c == 'L') {
+			if (isfloat) {
+				/* `1.0L` / `1.0l` is long double — keep as double. */
+				c = getchar();
+			} else {
+				/* Integer long suffix; consume one or two L/l. */
+				c = getchar();
+				if (c == 'l' || c == 'L')
+					c = getchar();
+				/* Optional trailing U/u for `LU` etc. */
+				if (c == 'u' || c == 'U')
+					c = getchar();
+			}
+		} else if (c == 'u' || c == 'U') {
+			c = getchar();
+			/* Optional trailing L/l for `UL` etc. */
+			if (c == 'l' || c == 'L') {
+				c = getchar();
+				if (c == 'l' || c == 'L')
+					c = getchar();
+			}
 		}
 
 		ungetc(c, stdin);
@@ -4087,6 +4336,15 @@ yylex()
 			}
 		}
 
+		/* Skip storage-class keywords that MiniC treats as no-ops:
+		 * - register/auto: deprecated/legacy storage classes
+		 * - restrict: pointer aliasing hint (C99), no semantic change for codegen
+		 * Recurse to skip whitespace and return the next real token. */
+		if (strcmp(v, "register") == 0 || strcmp(v, "auto") == 0 ||
+		    strcmp(v, "restrict") == 0 || strcmp(v, "__restrict") == 0 ||
+		    strcmp(v, "__restrict__") == 0)
+			return yylex();
+
 		for (i=0; kwds[i].s; i++)
 			if (strcmp(v, kwds[i].s) == 0)
 				return kwds[i].t;
@@ -4099,6 +4357,7 @@ yylex()
 	}
 
 	if (c == '"') {
+		int esc = 0;
 		i = 0;
 		n = 32;
 		p = alloc(n);
@@ -4112,8 +4371,15 @@ yylex()
 				n *= 2;
 			}
 			p[i] = c;
-			if (c == '"' && p[i-1]!='\\')
+			if (esc) {
+				/* The previous char was a backslash that started an
+				 * escape sequence; this char is the escaped one. */
+				esc = 0;
+			} else if (c == '\\') {
+				esc = 1;
+			} else if (c == '"') {
 				break;
+			}
 		}
 		strcpy(&p[i], "\", b 0 }");
 		if (nglo == NGlo)
@@ -4181,7 +4447,11 @@ main()
 	nglo = 1;
 	if (yyparse() != 0)
 		die("parse error");
-	for (i=1; i<nglo; i++)
-		fprintf(of, "data $glo%d = %s\n", i, ini[i]);
+	for (i=1; i<nglo; i++) {
+		if (gloname[i][0] != 0)
+			fprintf(of, "data $%s = %s\n", gloname[i], ini[i]);
+		else
+			fprintf(of, "data $glo%d = %s\n", i, ini[i]);
+	}
 	return 0;
 }

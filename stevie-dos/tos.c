@@ -32,8 +32,8 @@ ULONG *phys;
  */
 #define	IBUFSZ	128
 
-static long inbuf[IBUFSZ];	/* buffer for unread input */
-static long *inptr = inbuf;	/* where to put next character */
+long inbuf[IBUFSZ];	/* buffer for unread input */
+long *inptr = inbuf;	/* where to put next character */
 
 /*
  * inchar() - get a character from the keyboard
@@ -50,8 +50,7 @@ static long *inptr = inbuf;	/* where to put next character */
  * loop when any unknown key is seen. Normally, the bell is rung to
  * indicate the error. If the "bug" value is seen, we ignore it completely.
  */
-int
-inchar()
+int inchar()
 {
 	for (;;) {
 		long c, *p;
@@ -111,8 +110,7 @@ inchar()
  *
  * If the buffer overflows, we discard what's left and ring the bell.
  */
-static void
-get_inchars()
+void get_inchars()
 {
 	while (Cconis()) {
 		if (inptr >= &inbuf[IBUFSZ]) {	/* no room in buffer? */
@@ -123,16 +121,14 @@ get_inchars()
 	}
 }
 
-void
-outchar(c)
+void outchar(c)
 char	c;
 {
 	get_inchars();
 	Cconout(c);
 }
 
-void
-outstr(s)
+void outstr(s)
 register char	*s;
 {
 	get_inchars();
@@ -145,8 +141,7 @@ register char	*s;
 /*
  * vbeep() - visual bell
  */
-static void
-vbeep()
+void vbeep()
 {
 	int	text, bgnd;		/* text and background colors */
 	long	l;
@@ -165,8 +160,7 @@ Setcolor(TEXT, text);		/* restore colors */
 Setcolor(BGND, bgnd);
 }
 
-void
-beep()
+void beep()
 {
     if (P(P_VB))
         vbeep();
@@ -174,8 +168,7 @@ beep()
         outchar('\007');
 }
 
-void
-windinit()
+void windinit()
 {
     /*
      * TODO: Yeah, this is ugly and will only work with ST resolutions
@@ -213,8 +206,7 @@ windinit()
     Cursconf((short)1, (short)0);
 }
 
-void
-windexit(r)
+void windexit(r)
 int r;
 {
     /*
@@ -223,8 +215,7 @@ int r;
     exit(r);
 }
 
-void
-windgoto(r, c)
+void windgoto(r, c)
 int	r, c;
 {
     outstr("\033Y");
@@ -236,8 +227,7 @@ int	r, c;
  * System calls or library routines missing in TOS.
  */
 
-void
-sleep(n)
+void sleep(n)
 int n;
 {
     int k;
@@ -247,8 +237,7 @@ int n;
         ;
 }
 
-void
-delay()
+void delay()
 {
     long	n;
 
@@ -256,8 +245,7 @@ delay()
         ;
 }
 
-FILE *
-fopenb(fname, mode)
+FILE * fopenb(fname, mode)
 char	*fname;
 char	*mode;
 {

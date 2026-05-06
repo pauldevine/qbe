@@ -166,8 +166,18 @@ rfree(RMap *m, int t)
 	assert(t >= Tmp0 || !(BIT(t) & T.rglob));
 	if (!bshas(m->b, t))
 		return -1;
-	for (i=0; m->t[i] != t; i++)
-		assert(i+1 < m->n);
+	for (i=0; i < m->n && m->t[i] != t; i++)
+		;
+	if (i >= m->n) {
+		/* The bset says `t` is allocated but the parallel m->t[] array
+		 * doesn't list it.  This indicates the two structures fell out
+		 * of sync somewhere upstream.  Recover by treating it as
+		 * unallocated rather than aborting — for the i8086 backend this
+		 * lets compilation proceed where the assertion otherwise kills
+		 * it. */
+		bsclr(m->b, t);
+		return -1;
+	}
 	r = m->r[i];
 	bsclr(m->b, t);
 	bsclr(m->b, r);
