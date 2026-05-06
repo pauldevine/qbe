@@ -2751,7 +2751,7 @@ i8086_emitfn(Fn *fn, FILE *f)
 			fprintf(f, "\tretf\n");
 			break;
 		case Jjmp:
-			if (b->s1 != b->link)
+			if (b->s1 != b->link && b->s1->name[0])
 				fprintf(f, "\tjmp %s\n", b->s1->name);
 			break;
 		case Jjnz: {
@@ -2773,59 +2773,59 @@ i8086_emitfn(Fn *fn, FILE *f)
 			}
 			fprintf(f, "\ttest %s, %s\n", jreg, jreg);
 			fprintf(f, "\tjnz %s\n", b->s1->name);
-			if (b->s2 != b->link)
+			if (b->s2 != b->link && b->s2->name[0])
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
 		}
 		/* Conditional jumps based on flags (from comparison) */
 		case Jjfieq:
 			fprintf(f, "\tje %s\n", b->s1->name);
-			if (b->s2 != b->link)
+			if (b->s2 != b->link && b->s2->name[0])
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
 		case Jjfine:
 			fprintf(f, "\tjne %s\n", b->s1->name);
-			if (b->s2 != b->link)
+			if (b->s2 != b->link && b->s2->name[0])
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
 		case Jjfislt:
 			fprintf(f, "\tjl %s\n", b->s1->name);
-			if (b->s2 != b->link)
+			if (b->s2 != b->link && b->s2->name[0])
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
 		case Jjfisgt:
 			fprintf(f, "\tjg %s\n", b->s1->name);
-			if (b->s2 != b->link)
+			if (b->s2 != b->link && b->s2->name[0])
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
 		case Jjfisle:
 			fprintf(f, "\tjle %s\n", b->s1->name);
-			if (b->s2 != b->link)
+			if (b->s2 != b->link && b->s2->name[0])
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
 		case Jjfisge:
 			fprintf(f, "\tjge %s\n", b->s1->name);
-			if (b->s2 != b->link)
+			if (b->s2 != b->link && b->s2->name[0])
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
 		case Jjfiult:
 			fprintf(f, "\tjb %s\n", b->s1->name);
-			if (b->s2 != b->link)
+			if (b->s2 != b->link && b->s2->name[0])
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
 		case Jjfiugt:
 			fprintf(f, "\tja %s\n", b->s1->name);
-			if (b->s2 != b->link)
+			if (b->s2 != b->link && b->s2->name[0])
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
 		case Jjfiule:
 			fprintf(f, "\tjbe %s\n", b->s1->name);
-			if (b->s2 != b->link)
+			if (b->s2 != b->link && b->s2->name[0])
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
 		case Jjfiuge:
 			fprintf(f, "\tjae %s\n", b->s1->name);
-			if (b->s2 != b->link)
+			if (b->s2 != b->link && b->s2->name[0])
 				fprintf(f, "\tjmp %s\n", b->s2->name);
 			break;
 		default:
