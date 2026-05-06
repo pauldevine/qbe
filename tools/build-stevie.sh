@@ -193,10 +193,7 @@ strip_runtime() {
 }
 {
 	echo "BITS 16"
-	# QBE i8086 emits 286/386 instructions (sete, movzx, etc.) despite the
-	# backend name; set CPU level to 386 so NASM accepts them.  Real 8086
-	# targeting would require backend changes.
-	echo "CPU 386"
+	echo "CPU 8086"
 	echo "ORG 0x100"
 	echo
 	echo "section .text"

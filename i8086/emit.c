@@ -18,7 +18,8 @@ static struct {
 	/* Arithmetic */
 	{ Oadd,    Ki, "add %=, %1" },
 	{ Osub,    Ki, "sub %=, %1" },
-	{ Omul,    Ki, "imul %=, %1" },
+	/* Omul handled in emitins() — `imul reg, r/m` is 286+.  The 8086
+	 * form is single-operand `imul r/m` with implicit AX*r/m → DX:AX. */
 	{ Odiv,    Ki, "idiv %1" },
 	{ Oudiv,   Ki, "div %1" },
 	{ Orem,    Ki, "idiv %1" },  /* remainder in DX */
@@ -38,10 +39,12 @@ static struct {
 	{ Ostorew, Kw, "mov word %M1, %0" },
 	{ Ostorel, Kw, "mov dword %M1, %0" },
 
-	{ Oloadsb, Ki, "movsx %=, byte %M0" },
-	{ Oloadub, Ki, "movzx %=, byte %M0" },
-	{ Oloadsh, Ki, "movsx %=, word %M0" },
-	{ Oloaduh, Ki, "movzx %=, word %M0" },
+	/* Oloadsb/Oloadub/Oloadsh/Oloaduh handled in emitins() — movzx/movsx
+	 * are 386 instructions.  The 8086 sequence is `xor reg, reg; mov
+	 * reg8, byte [mem]` for zero-extend or `mov al, byte [mem]; cbw`
+	 * for sign-extend.  For half-word loads on 16-bit hardware the
+	 * "extension to 32-bit" is moot — rega doesn't allocate pairs, so
+	 * the high half is lost regardless. */
 	{ Oloadsw, Ki, "mov %=, word %M0" },
 	{ Oloaduw, Ki, "mov %=, word %M0" },
 	{ Oload,   Kw, "mov %=, word %M0" },
@@ -52,17 +55,9 @@ static struct {
 	{ Oswap,   Ki, "xchg %=, %0" },
 	{ Oaddr,   Ki, "lea %=, %M0" },
 
-	/* Comparisons - special handling needed for setCC (8-bit only) */
-	{ Oceqw,   Kw, "cmp %0, %1\n\tsete %B=\n\tmovzx %=, %B=" },
-	{ Ocnew,   Kw, "cmp %0, %1\n\tsetne %B=\n\tmovzx %=, %B=" },
-	{ Ocsltw,  Kw, "cmp %0, %1\n\tsetl %B=\n\tmovzx %=, %B=" },
-	{ Ocsgtw,  Kw, "cmp %0, %1\n\tsetg %B=\n\tmovzx %=, %B=" },
-	{ Ocslew,  Kw, "cmp %0, %1\n\tsetle %B=\n\tmovzx %=, %B=" },
-	{ Ocsgew,  Kw, "cmp %0, %1\n\tsetge %B=\n\tmovzx %=, %B=" },
-	{ Ocultw,  Kw, "cmp %0, %1\n\tsetb %B=\n\tmovzx %=, %B=" },
-	{ Ocugtw,  Kw, "cmp %0, %1\n\tseta %B=\n\tmovzx %=, %B=" },
-	{ Oculew,  Kw, "cmp %0, %1\n\tsetbe %B=\n\tmovzx %=, %B=" },
-	{ Ocugew,  Kw, "cmp %0, %1\n\tsetae %B=\n\tmovzx %=, %B=" },
+	/* 16-bit comparisons are emitted in emitins() with an explicit
+	 * 8086-compatible branchy materialize.  setcc + movzx are 386,
+	 * so we don't use them. */
 
 	/* Control flow */
 	{ Ocall,   Kw, "call %0" },
@@ -234,6 +229,55 @@ emitaddr(Con *c, FILE *f)
 	fputs(name, f);
 	if (c->bits.i)
 		fprintf(f, "+%"PRIi64, c->bits.i);
+}
+
+/* Render just the memory operand text (no leading tab, no instruction
+ * mnemonic) so callers can compose it into custom instruction sequences.
+ * Mirrors the %M handler in emitf. */
+static void
+emit_memref(Ref r, Fn *fn, FILE *f)
+{
+	Con *pc;
+	if (rtype(r) == RTmp)
+		fprintf(f, "[%s]", rname[r.val]);
+	else if (rtype(r) == RSlot)
+		fprintf(f, "[bp%+ld]", (long)slot(r, fn));
+	else if (rtype(r) == RCon) {
+		pc = &fn->con[r.val];
+		if (pc->type == CAddr) {
+			fputc('[', f);
+			emitaddr(pc, f);
+			fputc(']', f);
+		} else
+			fprintf(f, "%"PRIi64, pc->bits.i);
+	} else if (rtype(r) == RMem) {
+		Mem *m = &fn->mem[r.val];
+		int has_offset = (m->offset.type != CUndef);
+		int has_base = !req(m->base, R);
+		int has_index = !req(m->index, R);
+		fputc('[', f);
+		if (has_base) {
+			if (rtype(m->base) == RTmp)
+				fprintf(f, "%s", rname[m->base.val]);
+			else if (rtype(m->base) == RSlot)
+				fprintf(f, "bp%+ld", (long)slot(m->base, fn));
+		}
+		if (has_index) {
+			if (has_base)
+				fprintf(f, " + ");
+			if (rtype(m->index) == RTmp)
+				fprintf(f, "%s", rname[m->index.val]);
+		}
+		if (has_offset) {
+			if (has_base || has_index)
+				fprintf(f, " + ");
+			if (m->offset.type == CAddr)
+				emitaddr(&m->offset, f);
+			else if (m->offset.type == CBits)
+				fprintf(f, "%"PRIi64, m->offset.bits.i);
+		}
+		fputc(']', f);
+	}
 }
 
 /* Store the AX-resident result of a Kl operation to its destination.
@@ -611,33 +655,36 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		return;
 	}
 
-	/* Special handling for shift operations */
+	/* Special handling for shift operations.  8086 supports only
+	 *   shl/shr/sar reg, 1
+	 *   shl/shr/sar reg, cl
+	 * The `reg, imm8` form was added on the 186.  Counts other than 1
+	 * have to come through CL. */
 	if (i->op == Oshl || i->op == Oshr || i->op == Osar) {
-		/* Determine shift operation mnemonic */
+		int64_t imm_cnt = -1;  /* >=0 means "use this immediate" */
 		shiftop = (i->op == Oshl) ? "shl" :
 		          (i->op == Oshr) ? "shr" : "sar";
-
 		r0 = i->arg[0]; /* value to shift */
 		r1 = i->arg[1]; /* shift count */
 
-		/* If shift count is a register (not CX) and not immediate, move to CX */
-		if (rtype(r1) == RTmp && r1.val != RCX) {
+		/* Resolve the count: load into CL when not 1. */
+		if (rtype(r1) == RCon)
+			imm_cnt = fn->con[r1.val].bits.i;
+		else if (rtype(r1) == RTmp && r1.val != RCX)
 			fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
-		} else if (rtype(r1) == RSlot) {
-			/* Load from stack slot into CX */
+		else if (rtype(r1) == RSlot)
 			fprintf(f, "\tmov cx, [bp%+ld]\n", (long)slot(r1, fn));
-		}
+
+		if (imm_cnt > 1)
+			fprintf(f, "\tmov cl, %"PRIi64"\n", imm_cnt);
 
 		/* Move value to destination if needed (before shift) */
-		if (rtype(i->to) == RTmp && i->to.val != r0.val && rtype(r0) == RTmp) {
+		if (rtype(i->to) == RTmp && r0.val != i->to.val && rtype(r0) == RTmp) {
 			fprintf(f, "\tmov %s, %s\n", rname[i->to.val], rname[r0.val]);
-			r0 = i->to; /* Now shift the destination */
+			r0 = i->to;
 		}
 
-		/* Emit the shift operation */
 		fprintf(f, "\t%s ", shiftop);
-
-		/* Emit destination/source */
 		if (rtype(r0) == RTmp)
 			fprintf(f, "%s", rname[r0.val]);
 		else if (rtype(i->to) == RTmp)
@@ -645,19 +692,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		else
 			fprintf(f, "?");
 
-		fprintf(f, ", ");
-
-		/* Emit shift count - use CL for register, immediate for constant */
-		if (rtype(r1) == RCon) {
-			/* Immediate shift count */
-			fprintf(f, "%"PRIi64, fn->con[r1.val].bits.i);
-		} else {
-			/* Shift count in CL (we moved it there if needed) */
-			fprintf(f, "cl");
-		}
-
-		fprintf(f, "\n");
-
+		if (imm_cnt == 1)
+			fprintf(f, ", 1\n");
+		else if (imm_cnt == 0)
+			/* count==0 is a no-op; emit `, cl` which the caller
+			 * shouldn't have generated, but be safe. */
+			fprintf(f, ", 0\n");
+		else
+			fprintf(f, ", cl\n");
 		return;
 	}
 
@@ -2347,6 +2389,205 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	 * which is malformed.  Skip silently. */
 	if (i->op == Oswap && req(i->to, R))
 		return;
+
+	/* Omul (16-bit multiply): 286 added `imul reg, r/m`; 8086 only has
+	 * the single-operand form `imul r/m` with implicit AX*r/m → DX:AX.
+	 * We take the low 16 bits (AX).  Route through AX with save/restore
+	 * when neither input nor output is AX. */
+	if (i->op == Omul && i->cls != Kl && i->cls != Ks && i->cls != Kd) {
+		Ref a0 = i->arg[0], a1 = i->arg[1];
+		int dst_is_ax = (rtype(i->to) == RTmp && i->to.val == RAX);
+		int save_ax = !dst_is_ax;
+		if (save_ax)
+			fprintf(f, "\tpush ax\n");
+		/* Load multiplicand into AX. */
+		fprintf(f, "\tmov ax, ");
+		if (rtype(a0) == RTmp) fprintf(f, "%s\n", rname[a0.val]);
+		else if (rtype(a0) == RCon) fprintf(f, "%"PRIi64"\n", fn->con[a0.val].bits.i);
+		else if (rtype(a0) == RSlot) fprintf(f, "word [bp%+ld]\n", (long)slot(a0, fn));
+		else fprintf(f, "?\n");
+		/* imul takes a register/memory operand, never an immediate.
+		 * Hoist a constant multiplier through BX. */
+		if (rtype(a1) == RCon) {
+			fprintf(f, "\tpush bx\n");
+			fprintf(f, "\tmov bx, %"PRIi64"\n", fn->con[a1.val].bits.i);
+			fprintf(f, "\timul bx\n");
+			fprintf(f, "\tpop bx\n");
+		} else if (rtype(a1) == RTmp) {
+			fprintf(f, "\timul %s\n", rname[a1.val]);
+		} else if (rtype(a1) == RSlot) {
+			fprintf(f, "\timul word [bp%+ld]\n", (long)slot(a1, fn));
+		}
+		/* Result low word is in AX; copy to dst if not AX. */
+		if (!dst_is_ax) {
+			if (rtype(i->to) == RTmp)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			else if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			fprintf(f, "\tpop ax\n");
+		}
+		return;
+	}
+
+	/* Apply the addressing fixup for our custom-emitted handlers below
+	 * (Oloaduh/Oloadsh/Oloadub/Oloadsb).  Their format-string-path
+	 * counterparts would have got it automatically; since these return
+	 * early, do it explicitly. */
+	{
+		int ld_bad = 0;
+		if (i->op == Oloadub || i->op == Oloadsb
+		    || i->op == Oloaduh || i->op == Oloadsh) {
+			ld_bad = addr_fixup_reg(i->arg[0], fn);
+			if (ld_bad) {
+				fprintf(f, "\txchg bx, %s\n", rname[ld_bad]);
+				swap_bx(&i->to, ld_bad, fn);
+				swap_bx(&i->arg[0], ld_bad, fn);
+			}
+		}
+		/* Sub-word loads — 8086 form, no movzx/movsx (386 only).
+	 *
+	 *   Oloadub  zero-extend byte → word: `xor reg, reg; mov reg8, [mem]`
+	 *   Oloadsb  sign-extend byte → word: through AX with `cbw`
+	 *   Oloaduh  zero-extend half → "long": just the 16-bit load (high
+	 *            half lost to rega's lack of register pairs anyway)
+	 *   Oloadsh  sign-extend half → "long": same; pairs aren't allocated
+	 */
+	if (i->op == Oloaduh || i->op == Oloadsh) {
+		fprintf(f, "\tmov ");
+		if (rtype(i->to) == RTmp)
+			fprintf(f, "%s", rname[i->to.val]);
+		else if (rtype(i->to) == RSlot)
+			fprintf(f, "word [bp%+ld]", (long)slot(i->to, fn));
+		fprintf(f, ", word ");
+		emit_memref(i->arg[0], fn, f);
+		fputc('\n', f);
+		goto unwind_load;
+	}
+	if (i->op == Oloadub) {
+		/* If dst has an 8-bit form, clear it first then load the byte. */
+		if (rtype(i->to) == RTmp && i->to.val <= RBX) {
+			fprintf(f, "\txor %s, %s\n", rname[i->to.val], rname[i->to.val]);
+			fprintf(f, "\tmov %s, byte ", rname8[i->to.val]);
+			emit_memref(i->arg[0], fn, f);
+			fputc('\n', f);
+			goto unwind_load;
+		}
+		/* Otherwise route through AL: AH := 0, AL := byte, then mov dst, ax.
+		 * Save/restore AX if dst isn't AX. */
+		if (rtype(i->to) == RTmp && i->to.val == RAX) {
+			fprintf(f, "\txor ax, ax\n");
+			fprintf(f, "\tmov al, byte ");
+			emit_memref(i->arg[0], fn, f);
+			fputc('\n', f);
+			goto unwind_load;
+		}
+		fprintf(f, "\tpush ax\n");
+		fprintf(f, "\txor ax, ax\n");
+		fprintf(f, "\tmov al, byte ");
+		emit_memref(i->arg[0], fn, f);
+		fputc('\n', f);
+		if (rtype(i->to) == RTmp)
+			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+		else if (rtype(i->to) == RSlot)
+			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+		fprintf(f, "\tpop ax\n");
+		goto unwind_load;
+	}
+	if (i->op == Oloadsb) {
+		/* AL := byte; CBW; (mov dst, ax) — must go through AX for CBW. */
+		if (rtype(i->to) == RTmp && i->to.val == RAX) {
+			fprintf(f, "\tmov al, byte ");
+			emit_memref(i->arg[0], fn, f);
+			fputc('\n', f);
+			fprintf(f, "\tcbw\n");
+			goto unwind_load;
+		}
+		fprintf(f, "\tpush ax\n");
+		fprintf(f, "\tmov al, byte ");
+		emit_memref(i->arg[0], fn, f);
+		fputc('\n', f);
+		fprintf(f, "\tcbw\n");
+		if (rtype(i->to) == RTmp)
+			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+		else if (rtype(i->to) == RSlot)
+			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+		fprintf(f, "\tpop ax\n");
+		goto unwind_load;
+	}
+	goto end_load_block;
+unwind_load:
+	if (ld_bad) {
+		swap_bx(&i->to, ld_bad, fn);
+		swap_bx(&i->arg[0], ld_bad, fn);
+		fprintf(f, "\txchg bx, %s\n", rname[ld_bad]);
+	}
+	return;
+end_load_block:
+	(void)0;
+	}
+
+	/* 16-bit comparisons (Oc*w): the 386 sequence is `cmp; setcc; movzx`
+	 * but setcc and movzx are 386-only.  Emit an 8086-compatible
+	 * materialize: cmp, then conditional branch over a `mov dst, 0` so
+	 * dst lands as 0 or 1.  Layout:
+	 *
+	 *   mov dst, 1
+	 *   cmp arg0, arg1
+	 *   j<cc> .Ldone_<id>      ; condition true → keep 1
+	 *   mov dst, 0
+	 * .Ldone_<id>:
+	 */
+	if (INRANGE(i->op, Oceqw, Ocultw)) {
+		const char *jcc;
+		switch (i->op) {
+		case Oceqw:  jcc = "je";  break;
+		case Ocnew:  jcc = "jne"; break;
+		case Ocsltw: jcc = "jl";  break;
+		case Ocsgtw: jcc = "jg";  break;
+		case Ocslew: jcc = "jle"; break;
+		case Ocsgew: jcc = "jge"; break;
+		case Ocultw: jcc = "jb";  break;
+		case Ocugtw: jcc = "ja";  break;
+		case Oculew: jcc = "jbe"; break;
+		case Ocugew: jcc = "jae"; break;
+		default: jcc = "jmp"; break;
+		}
+		/* The dst materializer comes BEFORE cmp so the cmp's flags
+		 * survive into the jcc. */
+		fprintf(f, "\tmov ");
+		if (rtype(i->to) == RTmp)
+			fprintf(f, "%s", rname[i->to.val]);
+		else if (rtype(i->to) == RSlot)
+			fprintf(f, "word [bp%+ld]", (long)slot(i->to, fn));
+		fprintf(f, ", 1\n");
+		/* cmp arg0, arg1 */
+		fprintf(f, "\tcmp ");
+		if (rtype(i->arg[0]) == RTmp)
+			fprintf(f, "%s", rname[i->arg[0].val]);
+		else if (rtype(i->arg[0]) == RSlot)
+			fprintf(f, "word [bp%+ld]", (long)slot(i->arg[0], fn));
+		else if (rtype(i->arg[0]) == RCon)
+			fprintf(f, "%"PRIi64, fn->con[i->arg[0].val].bits.i);
+		fprintf(f, ", ");
+		if (rtype(i->arg[1]) == RTmp)
+			fprintf(f, "%s", rname[i->arg[1].val]);
+		else if (rtype(i->arg[1]) == RSlot)
+			fprintf(f, "word [bp%+ld]", (long)slot(i->arg[1], fn));
+		else if (rtype(i->arg[1]) == RCon)
+			fprintf(f, "%"PRIi64, fn->con[i->arg[1].val].bits.i);
+		fprintf(f, "\n");
+		/* j<cc> .Ldone — if condition true, dst stays 1 */
+		fprintf(f, "\t%s .Lcmp_done_%p\n", jcc, (void*)i);
+		/* Condition false: clear dst to 0 */
+		fprintf(f, "\tmov ");
+		if (rtype(i->to) == RTmp)
+			fprintf(f, "%s", rname[i->to.val]);
+		else if (rtype(i->to) == RSlot)
+			fprintf(f, "word [bp%+ld]", (long)slot(i->to, fn));
+		fprintf(f, ", 0\n");
+		fprintf(f, ".Lcmp_done_%p:\n", (void*)i);
+		return;
+	}
 
 	/* Special handling for Osalloc (stack allocation) */
 	if (i->op == Osalloc) {
