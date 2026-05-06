@@ -87,10 +87,7 @@ for src in "${SOURCES[@]}"; do
 	# kept unprefixed so cross-TU calls still resolve.
 	prefix="${base}_"
 	grep -v -E '^\.(text|data|bss|balign|section|globl|type|size|local|file|ident|string|p2align|model|code)' "$asm" \
-		| sed -e '/^[[:space:]]*xchg ,/d' \
-		      -e '/^[[:space:]]*jmp[[:space:]]*$/d' \
-		      -e '/^[[:space:]]*j[a-z]\{2,\}[[:space:]]*$/d' \
-		      -e 's/; TODO: 32-bit op [0-9]*/; XXX 32-bit op stub - codegen incomplete/' \
+		| sed -e 's/; TODO: 32-bit op [0-9]*/; XXX 32-bit op stub - codegen incomplete/' \
 		      -e 's/^[[:space:]]*\.ascii "\(.*\)"$/.nasm_str \1/' \
 		| awk '
 			# Re-emit `.nasm_str <text>` lines as NASM backtick strings,
