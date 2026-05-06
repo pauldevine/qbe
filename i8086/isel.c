@@ -61,6 +61,39 @@ selcmp(Ins i, int k, int cmp, Fn *fn)
 	 * register pairs.  Until that's fixed, fall back to 16-bit ops which
 	 * compare only the low word.  This is incorrect for any value > 65535,
 	 * but matches the existing behaviour. */
+
+	/* 8086 cmp requires reg/mem on the left and immediate on the right;
+	 * `cmp imm, reg` is illegal.  If the operands are flipped, swap them
+	 * and invert the comparison so the flag-test semantics are preserved.
+	 * (Equality/inequality are swap-symmetric; ordering relations need
+	 * the operator inverted: a < b ↔ b > a, etc.) */
+	if (rtype(i.arg[0]) == RCon && rtype(i.arg[1]) != RCon) {
+		Ref tmp = i.arg[0]; i.arg[0] = i.arg[1]; i.arg[1] = tmp;
+		switch (cmp) {
+		case Cislt: cmp = Cisgt; break;
+		case Cisgt: cmp = Cislt; break;
+		case Cisle: cmp = Cisge; break;
+		case Cisge: cmp = Cisle; break;
+		case Ciult: cmp = Ciugt; break;
+		case Ciugt: cmp = Ciult; break;
+		case Ciule: cmp = Ciuge; break;
+		case Ciuge: cmp = Ciule; break;
+		/* Cieq, Cine: swap-symmetric */
+		}
+	}
+	/* Two-constant cmp (`cmp imm, imm`) is illegal in any register/memory
+	 * combination 8086 supports.  Hoist arg[0] into a fresh temp so the
+	 * generated form becomes `cmp reg, imm`.  The Ocopy must execute
+	 * before the cmp, so emit it AFTER emiti() — QBE's instruction buffer
+	 * fills backwards (last emit() runs first at runtime). */
+	Ref hoist_src = R;
+	Ref hoist_dst = R;
+	if (rtype(i.arg[0]) == RCon && rtype(i.arg[1]) == RCon) {
+		hoist_src = i.arg[0];
+		hoist_dst = newtmp("isel", k, fn);
+		i.arg[0] = hoist_dst;
+	}
+
 	switch (cmp) {
 	case Cieq:  i.op = Oceqw; break;
 	case Cine:  i.op = Ocnew; break;
@@ -77,6 +110,8 @@ selcmp(Ins i, int k, int cmp, Fn *fn)
 	}
 
 	emiti(i);
+	if (!req(hoist_dst, R))
+		emit(Ocopy, k, hoist_dst, hoist_src, R);
 	i0 = curi;
 	fixarg(&i0->arg[0], k, i0, fn);
 	fixarg(&i0->arg[1], k, i0, fn);

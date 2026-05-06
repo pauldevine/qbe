@@ -92,19 +92,6 @@ for src in "${SOURCES[@]}"; do
 		      -e '/^[[:space:]]*j[a-z]\{2,\}[[:space:]]*$/d' \
 		      -e 's/; TODO: 32-bit op [0-9]*/; XXX 32-bit op stub - codegen incomplete/' \
 		      -e 's/^[[:space:]]*\.ascii "\(.*\)"$/.nasm_str \1/' \
-		| perl -pe '
-			# Swap immediate-then-register/memory comparisons:
-			#   cmp 48, bx       → cmp bx, 48
-			#   cmp 0, foo       → cmp word [foo], 0
-			# 8086 cmp accepts reg/mem on the left, imm on the right.
-			# Bare symbol used as a comparand should be a memory reference
-			# (the value at that address) — wrap in [] with size hint.
-			# NASM disambiguates `cmp [glo], 0` size by the const, but
-			# adding `word` is safer for stevie globals which are 16-bit.
-			s/^(\s*cmp)\s+(-?\d+)\s*,\s*(ax|bx|cx|dx|si|di|bp|sp)\b/$1 $3, $2/g;
-			s/^(\s*cmp)\s+(-?\d+)\s*,\s*(\[[^\]]+\])/$1 $3, $2/g;
-			s/^(\s*cmp)\s+(-?\d+)\s*,\s*([_A-Za-z][_A-Za-z0-9]*)[ \t]*$/$1 word \[$3\], $2/gm;
-		' \
 		| awk '
 			# Re-emit `.nasm_str <text>` lines as NASM backtick strings,
 			# escaping any literal backticks in the content.
