@@ -229,7 +229,7 @@ emitaddr(Con *c, FILE *f)
 	name = str(c->sym.id);
 	/* Apply target symbol prefix (e.g. "_") so references match the
 	 * function/data labels emitted with the same prefix. */
-	if (name[0] != '"' && T.assym)
+	if (name[0] != '"' && T.assym[0])
 		fputs(T.assym, f);
 	fputs(name, f);
 	if (c->bits.i)
