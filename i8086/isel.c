@@ -49,11 +49,12 @@ selcmp(Ins i, int k, int cmp, Fn *fn)
 	 * 1. cmp arg0, arg1  (sets flags)
 	 * 2. setCC dest      (sets dest based on flags)
 	 *
-	 * We emit the comparison operation with the QBE cmp opcode,
-	 * and the emit phase will translate it to cmp + setCC
+	 * setCC needs an 8-bit-capable register (AX/BX/CX/DX low/high).
+	 * The register allocator doesn't currently know about this; for
+	 * non-byte-capable destinations the emit phase emits an `al`
+	 * fallback (with comment).  TODO: hint or constraint mechanism.
 	 */
 
-	/* Map QBE comparison to x86 comparison operation */
 	switch (cmp) {
 	case Cieq:  i.op = Oceqw; break;
 	case Cine:  i.op = Ocnew; break;
@@ -66,7 +67,6 @@ selcmp(Ins i, int k, int cmp, Fn *fn)
 	case Ciule: i.op = Oculew; break;
 	case Ciuge: i.op = Ocugew; break;
 	default:
-		/* Unsupported comparison */
 		die("unsupported comparison %d", cmp);
 	}
 

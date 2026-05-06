@@ -109,8 +109,12 @@ for src in "${SOURCES[@]}"; do
 			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*bx\b/$1, bl/g;
 			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*cx\b/$1, cl/g;
 			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*dx\b/$1, dl/g;
-			# si/di/bp/sp have no 8-bit form; clobber AL as fallback.
-			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*(si|di|bp|sp)\b/$1, al ; XXX 8-bit form of $2 N\/A/g;
+			# si/di/bp/sp have no 8-bit form: copy through AX (al exists).
+			# Save/restore AX so the surrounding code is undisturbed.
+			if (/^(\s*)mov\s+(byte\s+\[[^\]]+\]),\s*(si|di|bp|sp)\s*$/) {
+				my ($pad, $dst, $src) = ($1, $2, $3);
+				$_ = "${pad}push ax\n${pad}mov ax, $src\n${pad}mov $dst, al\n${pad}pop ax\n";
+			}
 		' \
 		| awk '
 			# Re-emit `.nasm_str <text>` lines as NASM backtick strings,
@@ -191,7 +195,20 @@ for src in "${SOURCES[@]}"; do
 			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*bx\b/$1, bl/g;
 			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*cx\b/$1, cl/g;
 			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*dx\b/$1, dl/g;
-			s/^(\s*mov\s+byte\s+\[[^\]]*\]),\s*(si|di|bp|sp)\b/$1, al ; XXX 8-bit form of $2 N\/A/g;
+			# si/di/bp/sp have no 8-bit form: hoist through AX with save/restore.
+			if (/^(\s*)mov\s+(byte\s+\[[^\]]+\]),\s*(si|di|bp|sp)\s*$/) {
+				my ($pad, $dst, $src) = ($1, $2, $3);
+				$_ = "${pad}push ax\n${pad}mov ax, $src\n${pad}mov $dst, al\n${pad}pop ax\n";
+			}
+			# QBE i8086 emit fallback emits `mov byte [...], al ; XXX wanted
+			# 8-bit form of <reg>` when the source was actually meant to be
+			# si/di/bp/sp.  AL was silently substituted (wrong codegen).
+			# Rewrite to copy through AX with save/restore so the right
+			# value lands in memory.
+			if (/^(\s*)mov\s+(byte\s+\[[^\]]+\]),\s*al\s*;\s*XXX\s+wanted\s+8-bit\s+form\s+of\s+(si|di|bp|sp)\s*$/) {
+				my ($pad, $dst, $src) = ($1, $2, $3);
+				$_ = "${pad}push ax\n${pad}mov ax, $src\n${pad}mov $dst, al\n${pad}pop ax\n";
+			}
 			# idiv with an immediate operand is illegal — load to BX first.
 			# Also fixup for `idiv` and `div` with a literal divisor.
 			if (/^(\s*)(i?div)\s+(-?\d+)\s*$/) {

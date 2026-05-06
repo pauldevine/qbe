@@ -33,7 +33,7 @@ static struct {
 	{ Osar,    Ki, "sar %=, %1" },
 
 	/* Memory operations */
-	{ Ostoreb, Kw, "mov byte %M1, %0" },
+	{ Ostoreb, Kw, "mov byte %M1, %B0" },
 	{ Ostoreh, Kw, "mov word %M1, %0" },
 	{ Ostorew, Kw, "mov word %M1, %0" },
 	{ Ostorel, Kw, "mov dword %M1, %0" },
@@ -272,16 +272,19 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "%s", rname8[r.val]);
 			} else if (rtype(r) == RTmp) {
 				/* SI/DI/BP/SP have no 8-bit form on 8086.  Emit `al`
-				 * as a fallback and prefix the instruction with a
-				 * mov from the real register; the surrounding emit
-				 * code expects a single token here, so we paper over
-				 * the issue with a comment annotation.  Codegen for
-				 * these cases is currently INCORRECT — the right fix
-				 * is to constrain the register allocator to AX-BX
-				 * for byte-sized values. */
+				 * as a fallback; selstoreb in i8086/isel.c is supposed
+				 * to copy through RAX, but we may end here for ops the
+				 * isel doesn't yet rewrite. */
 				fprintf(f, "al ; XXX wanted 8-bit form of %s",
 					(r.val < (int)(sizeof rname / sizeof rname[0]) && rname[r.val])
 						? rname[r.val] : "?");
+			} else if (rtype(r) == RCon) {
+				/* Immediate operand for a byte op — print the constant. */
+				pc = &fn->con[r.val];
+				if (pc->type == CBits)
+					fprintf(f, "%"PRIi64, pc->bits.i);
+				else
+					emitaddr(pc, f);
 			} else {
 				die("8-bit register only available for AX-BX");
 			}
