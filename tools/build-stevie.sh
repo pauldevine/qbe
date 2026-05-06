@@ -150,11 +150,6 @@ for src in "${SOURCES[@]}"; do
 			# from the rname[] segment-register fallback.  Replace with a
 			# noop test that the assembler will accept.
 			s/^(\s*test\s+)(es|ds|cs|ss),\s*\g{2}\b/$1ax, ax ; XXX was test $2,$2/g;
-			# Memory-to-memory mov: illegal on 8086.  Hoist via AX.
-			if (/^(\s*)mov\s+(\[[^\]]+\]|word\s+\[[^\]]+\]|byte\s+\[[^\]]+\]|dword\s+\[[^\]]+\]),\s*(\[[^\]]+\]|word\s+\[[^\]]+\]|byte\s+\[[^\]]+\]|dword\s+\[[^\]]+\])\s*$/) {
-				my ($pad, $dst, $src) = ($1, $2, $3);
-				$_ = "${pad}mov ax, $src\n${pad}mov $dst, ax\n";
-			}
 		' \
 		> "$asm_clean"
 	# Skip stand-alone NASM object assembly — we concatenate all .asm

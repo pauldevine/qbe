@@ -2632,6 +2632,35 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		        || i->to.val == RBP || i->to.val == RSP
 		        || i->to.val == RES || i->to.val == RDS));
 
+		/* 8086 mem-to-mem fixup: a store/copy whose value is a stack slot
+		 * (rega spilled both ends) produces `mov [dst], [src]` which is
+		 * illegal — 8086 has no memory-to-memory form.  Hoist through AX.
+		 * Applies to Ostore[bhw] (slot source) and to Ocopy when both
+		 * arg[0] and to ended up as slots. */
+		{
+			int is_slot_store = (i->op == Ostoreb || i->op == Ostoreh
+			    || i->op == Ostorew) && rtype(i->arg[0]) == RSlot;
+			int is_slot_copy = (i->op == Ocopy && i->cls == Kw
+			    && rtype(i->arg[0]) == RSlot && rtype(i->to) == RSlot);
+
+			if (is_slot_store || is_slot_copy) {
+				Ref orig = i->arg[0];
+				fprintf(f, "\tpush ax\n");
+				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(orig, fn));
+				i->arg[0] = TMP(RAX);
+				emitf(fmt, i, fn, f);
+				i->arg[0] = orig;
+				fprintf(f, "\tpop ax\n");
+				if (bad) {
+					swap_bx(&i->to, bad, fn);
+					swap_bx(&i->arg[0], bad, fn);
+					swap_bx(&i->arg[1], bad, fn);
+					fprintf(f, "\txchg bx, %s\n", rname[bad]);
+				}
+				return;
+			}
+		}
+
 		if (needs_byte_store) {
 			Ref orig = i->arg[0];
 			fprintf(f, "\tpush ax\n");
