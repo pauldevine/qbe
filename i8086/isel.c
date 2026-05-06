@@ -55,6 +55,12 @@ selcmp(Ins i, int k, int cmp, Fn *fn)
 	 * fallback (with comment).  TODO: hint or constraint mechanism.
 	 */
 
+	/* TODO(8086): Properly support 32-bit comparisons.  The Oce*l/Ocs*l
+	 * handlers in emit.c only handle RSlot/RCon args, not RTmp — a 32-bit
+	 * temp doesn't fit in a single register and rega doesn't allocate
+	 * register pairs.  Until that's fixed, fall back to 16-bit ops which
+	 * compare only the low word.  This is incorrect for any value > 65535,
+	 * but matches the existing behaviour. */
 	switch (cmp) {
 	case Cieq:  i.op = Oceqw; break;
 	case Cine:  i.op = Ocnew; break;

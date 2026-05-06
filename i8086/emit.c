@@ -550,8 +550,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	}
 
 	/* Special handling for 32-bit (Kl) operations on 16-bit hardware.
-	 * Also dispatch here for Ostorel which transfers 32-bit data even
-	 * though its result class is Kw (void). */
+	 * Ostorel reaches here even though its result class is Kw (void) —
+	 * the data IS 32-bit, so we need the multi-word path. */
 	if (i->cls == Kl || i->op == Ostorel) {
 		/*
 		 * 32-bit operations on 16-bit x86 require multi-instruction sequences.
