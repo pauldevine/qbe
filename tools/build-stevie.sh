@@ -146,11 +146,6 @@ for src in "${SOURCES[@]}"; do
 		      -e '/^[[:space:]]*\.bss/d' \
 		      -e '/^[[:space:]]*$/d' \
 		| perl -pe '
-			# idiv with an immediate operand is illegal — load to BX first.
-			# Also fixup for `idiv` and `div` with a literal divisor.
-			if (/^(\s*)(i?div)\s+(-?\d+)\s*$/) {
-				$_ = "$1mov bx, $3\n$1$2 bx\n";
-			}
 			# `test es, es` (or any segment register self-test) — nonsense
 			# from the rname[] segment-register fallback.  Replace with a
 			# noop test that the assembler will accept.

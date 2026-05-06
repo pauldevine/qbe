@@ -2401,14 +2401,17 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		/* Sign-extend AX into DX:AX */
 		fprintf(f, "\tcwd\n");
 
-		/* Perform signed division */
-		fprintf(f, "\tidiv ");
+		/* Perform signed division.  8086 idiv requires a reg/mem operand;
+		 * an immediate is illegal.  Hoist constant divisors through BX. */
 		if (rtype(r1) == RTmp)
-			fprintf(f, "%s\n", rname[r1.val]);
-		else if (rtype(r1) == RCon)
-			fprintf(f, "%"PRIi64"\n", fn->con[r1.val].bits.i);
-		else
-			fprintf(f, "?\n");
+			fprintf(f, "\tidiv %s\n", rname[r1.val]);
+		else if (rtype(r1) == RCon) {
+			fprintf(f, "\tpush bx\n");
+			fprintf(f, "\tmov bx, %"PRIi64"\n", fn->con[r1.val].bits.i);
+			fprintf(f, "\tidiv bx\n");
+			fprintf(f, "\tpop bx\n");
+		} else
+			fprintf(f, "\tidiv ?\n");
 
 		/* Move result to destination */
 		if (i->op == Odiv) {
@@ -2447,14 +2450,17 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		/* Zero-extend into DX:AX */
 		fprintf(f, "\txor dx, dx\n");
 
-		/* Perform unsigned division */
-		fprintf(f, "\tdiv ");
-		if (rtype(r1) == RTmp)
-			fprintf(f, "%s\n", rname[r1.val]);
-		else if (rtype(r1) == RCon)
-			fprintf(f, "%"PRIi64"\n", fn->con[r1.val].bits.i);
-		else
-			fprintf(f, "?\n");
+		/* Perform unsigned division.  Same constant-hoist as idiv above. */
+		if (rtype(r1) == RTmp) {
+			fprintf(f, "\tdiv %s\n", rname[r1.val]);
+		} else if (rtype(r1) == RCon) {
+			fprintf(f, "\tpush bx\n");
+			fprintf(f, "\tmov bx, %"PRIi64"\n", fn->con[r1.val].bits.i);
+			fprintf(f, "\tdiv bx\n");
+			fprintf(f, "\tpop bx\n");
+		} else {
+			fprintf(f, "\tdiv ?\n");
+		}
 
 		/* Move result to destination */
 		if (i->op == Oudiv) {
