@@ -91,9 +91,14 @@ for src in "${SOURCES[@]}"; do
 	# fallback so that `-nostdinc` actually blocks the host system
 	# headers.  Without it, <sys/types.h> would still resolve to the
 	# Xcode SDK.
+	# Stevie's original sources have CRLF line endings and the
+	# DOS-style 0x1a (Ctrl-Z, SUB) end-of-file marker.  cpp passes
+	# both through; minic's lexer treats 0x1a as a stray byte and
+	# silently bails.  Strip both before handing off.
 	if ! cpp -P -nostdinc -isysroot/var/empty -DDOS \
 			"-I$INC_DIR" "-I$SRC_DIR" \
 			"$SRC_DIR/$src" 2>"$err" \
+			| tr -d '\r\032' \
 			| sed "$NORMALIZE_TYPES" > "$pp"; then
 		stage_fail_minic+=("$src (cpp)")
 		[ $KEEP_GOING -eq 0 ] && { echo "FAIL cpp: $src"; cat "$err"; exit 1; }

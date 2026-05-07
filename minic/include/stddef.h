@@ -6,6 +6,9 @@
 typedef unsigned long size_t;
 typedef long ptrdiff_t;
 
-#define NULL ((void *)0)
+/* MiniC's grammar doesn't yet accept `((void *)0)` at file scope as a
+ * pointer initializer; both forms are valid null pointer constants in
+ * standard C, so use the simpler one. */
+#define NULL 0
 
 #endif /* _STDDEF_H */

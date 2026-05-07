@@ -175,6 +175,7 @@ int typedefanoncount = 0;  /* Counter for anonymous typedef structs/unions */
 int clit = 0;  /* Counter for compound literal temporaries */
 unsigned curfntyp = INT;  /* Current function return type (defaults to INT for K&R style) */
 unsigned parsed_type = INT;  /* Stores type parsed in typed_decl for later use */
+unsigned kr_curtype = INT;  /* Stores type from current K&R param-decl group */
 char parsed_ident[NString];  /* Stores identifier parsed in typed_decl */
 
 void
@@ -2563,6 +2564,91 @@ param(char *v, unsigned ctyp, Node *pl)
 	return n;
 }
 
+/* Emit a K&R-style function header.  Called from the prot_knr action
+ * for definitions like `foo(a, b) int a; char *b; { ... }`.  `params`
+ * is a Node chain of bare parameter names built by kr_idlist; each
+ * was registered (via kr_param_dcls' kr_namelist actions) with its
+ * declared type.  Anything not declared defaults to int.  Return type
+ * is implicitly int. */
+void
+emit_knr_func(char *fname, Node *params)
+{
+	Symb *s;
+	Node *n;
+	int t, m;
+
+	for (n = params; n; n = n->r)
+		if (!varget(n->u.v))
+			varadd(n->u.v, 0, INT, 0);
+
+	curfntyp = INT;
+	varadd(fname, 1, FUNC(INT), 0);
+	fprintf(of, "export function w $%s(", fname);
+	n = params;
+	if (n)
+		for (;;) {
+			s = varget(n->u.v);
+			fprintf(of, "%c ", irtyp_ret(s->ctyp));
+			fprintf(of, "%%t%d", tmp++);
+			n = n->r;
+			if (n)
+				fprintf(of, ", ");
+			else
+				break;
+		}
+	fprintf(of, ") {\n");
+	fprintf(of, "@l%d\n", lbl++);
+	for (t = 0, n = params; n; t++, n = n->r) {
+		s = varget(n->u.v);
+		m = SIZE(s->ctyp);
+		fprintf(of, "\t%%%s =l alloc%d %d\n", n->u.v, iralign(s->ctyp), m);
+		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
+		fprintf(of, ", %%%s\n", n->u.v);
+	}
+}
+
+/* Like emit_knr_func but uses parsed_type as the return type instead
+ * of forcing int.  For `char *alloc(size) unsigned size; { ... }` the
+ * caller has set curfntyp = parsed_type before invoking us. */
+void
+emit_knr_func_typed(char *fname, Node *params)
+{
+	Symb *s;
+	Node *n;
+	int t, m;
+
+	for (n = params; n; n = n->r)
+		if (!varget(n->u.v))
+			varadd(n->u.v, 0, INT, 0);
+
+	varadd(fname, 1, FUNC(curfntyp), 0);
+	if (curfntyp == NIL)
+		fprintf(of, "export function $%s(", fname);
+	else
+		fprintf(of, "export function %c $%s(", irtyp_ret(curfntyp), fname);
+	n = params;
+	if (n)
+		for (;;) {
+			s = varget(n->u.v);
+			fprintf(of, "%c ", irtyp_ret(s->ctyp));
+			fprintf(of, "%%t%d", tmp++);
+			n = n->r;
+			if (n)
+				fprintf(of, ", ");
+			else
+				break;
+		}
+	fprintf(of, ") {\n");
+	fprintf(of, "@l%d\n", lbl++);
+	for (t = 0, n = params; n; t++, n = n->r) {
+		s = varget(n->u.v);
+		m = SIZE(s->ctyp);
+		fprintf(of, "\t%%%s =l alloc%d %d\n", n->u.v, iralign(s->ctyp), m);
+		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
+		fprintf(of, ", %%%s\n", n->u.v);
+	}
+}
+
 Stmt *
 mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 {
@@ -2624,7 +2710,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %type <u> type
 %type <s> stmt stmts asmstmt
-%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc idlist
+%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc idlist kr_idlist kr_namelist kr_name sm_more_names ext_decllist ext_decl
 %type <n> asmoutputs asmoutputlist asmoutput asminputs asminputlist asminput asmclobbers asmclobberlist
 %token <u> TNAME
 
@@ -2740,7 +2826,90 @@ externdcl: EXTERN type IDENT ';'
 	unsigned fptr_type = IDIR(FUNC($2));
 	varaddextern($5->u.v, fptr_type, 0);
 }
+         | EXTERN type IDENT '(' ')' ';'
+{
+	/* K&R-style extern function declaration: extern char *strchr();
+	 * Register the function return type; argument types are unknown. */
+	if ($2 == NIL)
+		varadd($3->u.v, 1, FUNC(NIL), 0);
+	else
+		varadd($3->u.v, 1, FUNC($2), 0);
+}
+         | EXTERN type IDENT '(' par1 ')' ';'
+{
+	/* Extern with typed prototype: extern int foo(int, int);
+	 * MiniC just records the return type. */
+	if ($2 == NIL)
+		varadd($3->u.v, 1, FUNC(NIL), 0);
+	else
+		varadd($3->u.v, 1, FUNC($2), 0);
+}
+         | EXTERN type ext_decllist ';'
+{
+	/* Multi-name extern declaration:
+	 *   extern int Cursrow, Curscol, Cursvcol, Curswant;
+	 *   extern char Redobuff[], Insbuff[];
+	 *   extern char *malloc(), *strcpy();
+	 * Each declarator is registered with the same base type ($2),
+	 * adjusted for arrays and functions per `ext_decl_kind`. */
+	Node *n;
+	unsigned t;
+	if ($2 == NIL)
+		die("invalid void extern declaration");
+	for (n = $3; n; n = n->r) {
+		if (n->op == 'F')
+			t = FUNC($2);  /* extern T name(); */
+		else if (n->op == 'A')
+			t = IDIR($2);  /* extern T name[]; */
+		else
+			t = $2;
+		varaddextern(n->u.v, t, n->op == 'A' ? 1 : 0);
+	}
+}
          ;
+
+ext_decllist: ext_decl
+{
+	$$ = $1;
+}
+            | ext_decl ',' ext_decllist
+{
+	$1->r = $3;
+	$$ = $1;
+}
+            ;
+
+ext_decl: IDENT
+{
+	Node *n = mknode(0, 0, 0);
+	strcpy(n->u.v, $1->u.v);
+	$$ = n;
+}
+        | '*' IDENT
+{
+	Node *n = mknode(0, 0, 0);
+	strcpy(n->u.v, $2->u.v);
+	$$ = n;
+}
+        | IDENT '[' ']'
+{
+	Node *n = mknode('A', 0, 0);
+	strcpy(n->u.v, $1->u.v);
+	$$ = n;
+}
+        | '*' IDENT '(' ')'
+{
+	Node *n = mknode('F', 0, 0);
+	strcpy(n->u.v, $2->u.v);
+	$$ = n;
+}
+        | IDENT '(' ')'
+{
+	Node *n = mknode('F', 0, 0);
+	strcpy(n->u.v, $1->u.v);
+	$$ = n;
+}
+        ;
 
 tdcl: TYPEDEF type IDENT ';'
 {
@@ -2857,9 +3026,50 @@ smembers:
 {
 	structaddbitfield(curstruct, $3->u.v, $2, $5->u.n);
 }
+        | smembers type IDENT ',' sm_more_names ';'
+{
+	/* Multi-name member: `struct line *prev, *next;` — all share the
+	 * same base type ($2).  Note: per-declarator pointer levels beyond
+	 * the first declarator are tolerated but not honored (each '*' in
+	 * sm_more_names is consumed for syntactic compatibility but does
+	 * not add another pointer level).  This works for the common K&R
+	 * pattern where every name in the list has matching decoration. */
+	Node *n;
+	structaddmember(curstruct, $3->u.v, $2);
+	for (n = $5; n; n = n->r)
+		structaddmember(curstruct, n->u.v, $2);
+}
         | smembers anonstruct
         | smembers anonunion
         ;
+
+sm_more_names: IDENT
+{
+	Node *n = mknode(0, 0, 0);
+	strcpy(n->u.v, $1->u.v);
+	$$ = n;
+}
+             | '*' IDENT
+{
+	Node *n = mknode(0, 0, 0);
+	strcpy(n->u.v, $2->u.v);
+	$$ = n;
+}
+             | sm_more_names ',' IDENT
+{
+	Node *n = mknode(0, 0, 0);
+	strcpy(n->u.v, $3->u.v);
+	$1->r = n;
+	$$ = $1;
+}
+             | sm_more_names ',' '*' IDENT
+{
+	Node *n = mknode(0, 0, 0);
+	strcpy(n->u.v, $4->u.v);
+	$1->r = n;
+	$$ = $1;
+}
+             ;
 
 anonstruct: anon_s_begin anonmembers anon_s_end
           ;
@@ -3002,6 +3212,20 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	strcpy(gloname[nglo], parsed_ident);
 	varadd(parsed_ident, nglo++, parsed_type, 0);
 }
+               | '=' '(' NUM ')' ';'
+{
+	/* Parenthesized integer initializer: bool_t got_int = (0); */
+	char buf[64];
+	if (parsed_type == NIL)
+		die("invalid void declaration");
+	if (nglo == NGlo)
+		die("too many globals");
+	sprintf(buf, "{ %c %d }", irtyp(parsed_type), $3->u.n);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], parsed_ident);
+	varadd(parsed_ident, nglo++, parsed_type, 0);
+}
                | '[' NUM ']' ';'
 {
 	/* Global array of basic type: emit a zero-filled data block.
@@ -3038,6 +3262,92 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	strcpy(ini[nglo], buf);
 	strcpy(gloname[nglo], parsed_ident);
 	varadd(parsed_ident, nglo++, parsed_type, 0);
+}
+               | ',' ext_decllist ';'
+{
+	/* Multi-name top-level declaration without `extern`:
+	 *   int Cursrow, Curscol, Cursvcol;          (definitions)
+	 *   bool_t bufempty(), buf1line();           (K&R prototypes)
+	 * The first name was captured by type_and_ident as a plain
+	 * variable.  Emit a global for it, then walk ext_decllist for
+	 * the remaining declarators. */
+	Node *n;
+	unsigned t;
+	char buf[64];
+	if (parsed_type == NIL)
+		die("invalid void declaration");
+	/* First name: emit as plain global. */
+	if (nglo == NGlo)
+		die("too many globals");
+	sprintf(buf, "{ %c 0 }", irtyp(parsed_type));
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], parsed_ident);
+	varadd(parsed_ident, nglo++, parsed_type, 0);
+	for (n = $2; n; n = n->r) {
+		if (n->op == 'F') {
+			t = FUNC(parsed_type);
+			varadd(n->u.v, 1, t, 0);
+		} else if (n->op == 'A') {
+			t = IDIR(parsed_type);
+			if (nglo == NGlo)
+				die("too many globals");
+			sprintf(buf, "align %d { z 0 }", iralign(parsed_type));
+			ini[nglo] = alloc(strlen(buf) + 1);
+			strcpy(ini[nglo], buf);
+			strcpy(gloname[nglo], n->u.v);
+			varadd(n->u.v, nglo++, t, 1);
+		} else {
+			if (nglo == NGlo)
+				die("too many globals");
+			sprintf(buf, "{ %c 0 }", irtyp(parsed_type));
+			ini[nglo] = alloc(strlen(buf) + 1);
+			strcpy(ini[nglo], buf);
+			strcpy(gloname[nglo], n->u.v);
+			varadd(n->u.v, nglo++, parsed_type, 0);
+		}
+	}
+}
+               | '(' init_kr kr_idlist ')' kr_param_dcls '{' dcls stmts '}'
+{
+	/* K&R definition with explicit return type:
+	 *   char *alloc(size) unsigned size; { ... }
+	 *   int EnvEval(s, len) char *s; int len; { ... } */
+	curfntyp = parsed_type;
+	emit_knr_func_typed(parsed_ident, $3);
+	if (!stmt($8, -1)) {
+		if (curfntyp == NIL)
+			fprintf(of, "\tret\n");
+		else
+			fprintf(of, "\tret 0\n");
+	}
+	fprintf(of, "}\n\n");
+}
+               | '(' init_ansi par0 ')' ',' ext_decllist ';'
+{
+	/* Multi-name K&R prototype:
+	 *   char *alloc(), *strsave(), *mkstr();
+	 *   void filealloc(), freeall();
+	 * The first name (with its `()`) is registered as a function
+	 * returning parsed_type; ext_decllist handles the rest. */
+	Node *n;
+	unsigned t;
+	if (parsed_type == NIL)
+		varadd(parsed_ident, 1, FUNC(NIL), 0);
+	else
+		varadd(parsed_ident, 1, FUNC(parsed_type), 0);
+	for (n = $6; n; n = n->r) {
+		if (n->op == 'F' || n->op == 0) {
+			/* Function (with or without leading *). */
+			t = (parsed_type == NIL) ? FUNC(NIL) : FUNC(parsed_type);
+			varadd(n->u.v, 1, t, 0);
+		} else if (n->op == 'A') {
+			t = IDIR(parsed_type);
+			varadd(n->u.v, 0, t, 1);
+		} else {
+			varadd(n->u.v, 1, FUNC(parsed_type), 0);
+		}
+	}
 }
                ;
 
@@ -3088,6 +3398,17 @@ init_ansi:
 	varclr();
 	tmp = 0;
 	clit = 0;
+};
+
+init_kr:
+{
+	/* Reset symbol table for a K&R function body.  parsed_type and
+	 * parsed_ident were set by type_and_ident before this fires. */
+	varclr();
+	tmp = 0;
+	clit = 0;
+	cur_fn_interrupt = 0;
+	cur_fn_weak = 0;
 };
 
 init:
@@ -3176,7 +3497,71 @@ prot_knr: IDENT '(' par0 ')'
 		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
 		fprintf(of, ", %%%s\n", n->u.v);
 	}
+}
+        | IDENT '(' kr_idlist ')' kr_param_dcls
+{
+	emit_knr_func($1->u.v, $3);
 };
+
+kr_idlist: IDENT
+{
+	Node *n = mknode(0, 0, 0);
+	strcpy(n->u.v, $1->u.v);
+	$$ = n;
+}
+         | IDENT ',' kr_idlist
+{
+	Node *n = mknode(0, 0, $3);
+	strcpy(n->u.v, $1->u.v);
+	$$ = n;
+}
+         ;
+
+kr_param_dcls: { }
+             | kr_param_dcls type kr_namelist ';'
+{
+	/* Apply the type to every name collected in kr_namelist.
+	 * kr_namelist nodes encode array-ness in the `op` field:
+	 * 'A' = `name[]` so the type decays to a pointer; 0 = scalar. */
+	Node *n;
+	unsigned t;
+	for (n = $3; n; n = n->r) {
+		t = (n->op == 'A') ? IDIR($2) : $2;
+		varadd(n->u.v, 0, t, 0);
+	}
+}
+             ;
+
+kr_namelist: kr_name
+{
+	$$ = $1;
+}
+           | kr_name ',' kr_namelist
+{
+	$1->r = $3;
+	$$ = $1;
+}
+           ;
+
+kr_name: IDENT
+{
+	Node *n = mknode(0, 0, 0);
+	strcpy(n->u.v, $1->u.v);
+	$$ = n;
+}
+       | IDENT '[' ']'
+{
+	Node *n = mknode('A', 0, 0);
+	strcpy(n->u.v, $1->u.v);
+	$$ = n;
+}
+       | IDENT '[' NUM ']'
+{
+	Node *n = mknode('A', 0, 0);
+	strcpy(n->u.v, $1->u.v);
+	$$ = n;
+}
+       ;
 
 par0: par1
     | TVOID               { $$ = 0; }
