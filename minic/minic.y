@@ -215,6 +215,35 @@ varclr()
 	for (h=0; h<NVar; h++)
 		if (!varh[h].glo && !varh[h].enumconst)
 			varh[h].v[0] = 0;
+
+	/* Linear-probe chain repair: a freshly emptied slot can sit between
+	 * a hash bucket and entries that probed past it.  Lookup by name
+	 * stops at the empty slot and falsely reports "undefined", which
+	 * showed up after a function with many locals when a later global
+	 * collided with one of those locals.  Walk the table from each
+	 * empty slot, sliding live entries back into earlier positions if
+	 * their hash bucket lies on or before the gap. */
+	for (h = 0; h < NVar; h++) {
+		if (varh[h].v[0] == 0) {
+			unsigned i = (h + 1) % NVar;
+			while (varh[i].v[0] != 0) {
+				unsigned hi = hash(varh[i].v);
+				int between;
+				if (h < i)
+					between = (hi <= h || hi > i);
+				else
+					between = (hi <= h && hi > i);
+				if (between) {
+					varh[h] = varh[i];
+					varh[i].v[0] = 0;
+					h = i;
+				}
+				i = (i + 1) % NVar;
+				if (i == h)
+					break;
+			}
+		}
+	}
 }
 
 void
@@ -246,6 +275,17 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 			if (KIND(varh[h].ctyp) == FUN && KIND(ctyp) == FUN &&
 			    varh[h].ctyp == ctyp)
 				return;
+			/* Permit re-declaration of a same-typed local in a nested
+			 * block.  Stevie does this in distinct for-bodies:
+			 *   for (...) { LPTR *pos; ... }
+			 *   for (...) { LPTR *pos; ... }
+			 * QBE accepts the duplicate alloc (it isn't strict-SSA on
+			 * input); the second decl effectively rebinds %name. */
+			if (glo == 0 && varh[h].glo == 0 && !varh[h].isextern &&
+			    !varh[h].enumconst && varh[h].ctyp == ctyp) {
+				varh[h].isarray = isarray;
+				return;
+			}
 			die("double definition");
 		}
 		h = (h+1) % NVar;
@@ -2629,6 +2669,120 @@ emit_global_int_init(int value)
 	varadd(parsed_ident, nglo++, parsed_type, 0);
 }
 
+/* `struct TAG { ... } NAME[N];` — emit a zero-filled global array of
+ * the just-defined struct (curstruct).  Both the static and non-static
+ * forms reduce to this. */
+void
+emit_struct_global_array(char *name, int count)
+{
+	int idx = curstruct;
+	int total;
+	char buf[64];
+	unsigned styp;
+
+	if (idx < 0)
+		die("missing struct context");
+	styp = (idx << 3) + STRUCT_T;
+	curstruct = -1;
+	total = SIZE(styp) * count;
+	if (nglo == NGlo)
+		die("too many globals");
+	sprintf(buf, "align %d { z %d }", iralign(styp), total);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], name);
+	varadd(name, nglo++, IDIR(styp), 1);
+}
+
+/* Struct-array initializer collection.
+ *
+ *   struct TAG NAME[] = { 1, "a", 2, "b", ... };
+ *   struct TAG NAME[] = { { 1, "a" }, { 2, "b" }, ... };
+ *
+ * Items arrive in source order; we cycle through the struct's members
+ * to assign per-item QBE types when emitting the data block. */
+#define NSAI 4096
+int  nsai = 0;
+char sai_kind[NSAI];   /* 'N' = literal number, 'S' = string global idx */
+long sai_val[NSAI];
+
+void
+sai_clear(void)
+{
+	nsai = 0;
+}
+
+void
+sai_add_num(long v)
+{
+	if (nsai >= NSAI)
+		die("too many struct-array init items");
+	sai_kind[nsai] = 'N';
+	sai_val[nsai++] = v;
+}
+
+void
+sai_add_str(int idx)
+{
+	if (nsai >= NSAI)
+		die("too many struct-array init items");
+	sai_kind[nsai] = 'S';
+	sai_val[nsai++] = idx;
+}
+
+/* Emit `data $NAME = align A { ... }` for a struct-array initializer.
+ * Items in sai_* are walked round-robin against the struct's members,
+ * each emitted with the QBE type that matches the member it fills. */
+void
+emit_struct_array_data(int sidx, char *name)
+{
+	static char buf[65536];
+	int buflen = 0;
+	int i, memidx, nmem;
+	unsigned mctyp;
+	char ir;
+
+	nmem = structh[sidx].nmembers;
+	if (nmem == 0)
+		die("struct-array init: empty struct");
+	if (nsai % nmem != 0)
+		die("struct-array init: item count not a multiple of members");
+
+	buflen += sprintf(buf + buflen, "align 8 {");
+	memidx = 0;
+	for (i = 0; i < nsai; i++) {
+		mctyp = structh[sidx].members[memidx].ctyp;
+		ir = irtyp(mctyp);
+		if (i)
+			buflen += sprintf(buf + buflen, ",");
+		if (sai_kind[i] == 'S') {
+			/* String literal - emit as pointer */
+			if (sai_val[i] == 0)
+				buflen += sprintf(buf + buflen, " %c 0", ir);
+			else
+				buflen += sprintf(buf + buflen, " %c $glo%ld",
+				                  ir, sai_val[i]);
+		} else {
+			buflen += sprintf(buf + buflen, " %c %ld", ir, sai_val[i]);
+		}
+		memidx++;
+		if (memidx == nmem)
+			memidx = 0;
+	}
+	buflen += sprintf(buf + buflen, " }");
+
+	if (nglo == NGlo)
+		die("too many globals");
+	ini[nglo] = alloc(buflen + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], name);
+	{
+		unsigned styp = (sidx << 3) + STRUCT_T;
+		varadd(name, nglo++, IDIR(styp), 1);
+	}
+	sai_clear();
+}
+
 /* Apply the K&R parameter base type to every name in kr_namelist.
  * node->op encodes the declarator shape:
  *   0   plain IDENT
@@ -2732,7 +2886,10 @@ emit_local_multi_decl_full(unsigned base, Node *list)
 			continue;
 		}
 		if (n->op == 'G') {
-			varadd(v, 1, FUNC(IDIR(base)), 0);
+			/* `*ident()` — uniform-* peeling: when the first declarator
+			 * absorbed `*` into base, subsequent items already match it.
+			 * Treat as `FUNC(base)` like a plain 'F'. */
+			varadd(v, 1, FUNC(base), 0);
 			continue;
 		}
 		if (n->op == 'B') {
@@ -2819,9 +2976,17 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 			t = IDIR(ebase);
 			varadd(v, 0, t, 0);
 			fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(t), SIZE(t));
+			if (n->l) {
+				Node *id = mknode('V', 0, 0);
+				strcpy(id->u.v, v);
+				expr(mknode('=', id, n->l));
+			}
 			continue;
 		}
-		t = (n->op == 'A') ? IDIR(base) : base;
+		/* Plain or [N] declarator: peel one * off the absorbed base
+		 * so `char *p, c;` makes c a `char` (standard C semantics).
+		 * `[N]` similarly lands at element-of-base. */
+		t = (n->op == 'A') ? IDIR(ebase) : ebase;
 		varadd(v, 0, t, n->op == 'A' ? 1 : 0);
 		fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(t), SIZE(t));
 		if (KIND(t) == STRUCT_T || KIND(t) == UNION_T) {
@@ -2835,6 +3000,11 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 				}
 				tmp++;
 			}
+		}
+		if (n->op == 0 && n->l) {
+			Node *id = mknode('V', 0, 0);
+			strcpy(id->u.v, v);
+			expr(mknode('=', id, n->l));
 		}
 	}
 }
@@ -3035,14 +3205,32 @@ enums: enum
 enum: IDENT
 {
 	varadd($1->u.v, enumval, INT, 0);
-	varh[hash($1->u.v)].enumconst = 1;
+	{
+		unsigned eh0 = hash($1->u.v), eh = eh0;
+		do {
+			if (strcmp(varh[eh].v, $1->u.v) == 0) {
+				varh[eh].enumconst = 1;
+				break;
+			}
+			eh = (eh + 1) % NVar;
+		} while (eh != eh0);
+	}
 	enumval++;
 }
     | IDENT '=' NUM
 {
 	enumval = $3->u.n;
 	varadd($1->u.v, enumval, INT, 0);
-	varh[hash($1->u.v)].enumconst = 1;
+	{
+		unsigned eh0 = hash($1->u.v), eh = eh0;
+		do {
+			if (strcmp(varh[eh].v, $1->u.v) == 0) {
+				varh[eh].enumconst = 1;
+				break;
+			}
+			eh = (eh + 1) % NVar;
+		} while (eh != eh0);
+	}
 	enumval++;
 }
     ;
@@ -3169,6 +3357,8 @@ ext_decl: IDENT                 { $$ = kr_name_node($1->u.v, 0); }
         | IDENT '[' NUM ']'     { $$ = kr_array_node($1->u.v, $3->u.n); }
         | '*' IDENT '(' ')'     { $$ = kr_name_node($2->u.v, 'G'); }
         | IDENT '(' ')'         { $$ = kr_name_node($1->u.v, 'F'); }
+        | IDENT '=' expr        { $$ = kr_name_node($1->u.v, 0); $$->l = $3; }
+        | '*' IDENT '=' expr    { $$ = kr_name_node($2->u.v, 'P'); $$->l = $4; }
         ;
 
 tdcl: TYPEDEF type IDENT ';'
@@ -3266,6 +3456,14 @@ static_assert_dcl: STATIC_ASSERT '(' NUM ',' STR ')' ';'
 sdcl: structstart smembers '}' ';'
 {
 	curstruct = -1;  /* Done defining this struct */
+}
+    | structstart smembers '}' IDENT '[' NUM ']' ';'
+{
+	emit_struct_global_array($4->u.v, $6->u.n);
+}
+    | STATIC structstart smembers '}' IDENT '[' NUM ']' ';'
+{
+	emit_struct_global_array($5->u.v, $7->u.n);
 }
     ;
 
@@ -3600,7 +3798,31 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 		}
 	}
 }
+               | '[' ']' '=' '{' sai_init_clear sai_list opt_trailing_comma '}' ';'
+{
+	/* struct TAG NAME[] = { ... };  Both flat and brace-per-row forms
+	 * share one walker; nested braces act only as row delimiters. */
+	if (KIND(parsed_type) != STRUCT_T)
+		die("array initializer requires struct type");
+	emit_struct_array_data(DREF(parsed_type), parsed_ident);
+}
                ;
+
+sai_init_clear: { sai_clear(); };
+
+opt_trailing_comma: | ',';
+
+sai_list: sai_item
+        | sai_list ',' sai_item
+        ;
+
+sai_item: NUM                  { sai_add_num($1->u.n); }
+        | '-' NUM              { sai_add_num(-$2->u.n); }
+        | '(' NUM ')'          { sai_add_num($2->u.n); }
+        | '(' '-' NUM ')'      { sai_add_num(-$3->u.n); }
+        | STR                  { sai_add_str($1->u.n); }
+        | '{' sai_list opt_trailing_comma '}' { }
+        ;
 
 ansi_proto_register: '(' init_ansi par0 ')'
 {

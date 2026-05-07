@@ -265,18 +265,23 @@ _dos_getvidmode:
     ret
 
 ; Stubs for stevie globals that don't have a clear single-file home.
-global _params
-_params: dw 0,0,0,0,0,0,0,0
+; _params now lives in param.c (compiles via struct-array initializers).
+; _gchar and _inc live in ptrfunc.c.
 global _updatetabstoptable
 _updatetabstoptable:
     ret
-global _gchar
-_gchar:
-    mov ax, 0
+; Turbo C delay()/disable()/enable() stubs — stevie compiles with
+; __TURBOC__ defined so it expects these.
+global _delay
+_delay:
     ret
-global _inc
-_inc:
-    mov ax, 0
+global _disable
+_disable:
+    cli
+    ret
+global _enable
+_enable:
+    sti
     ret
 ; NOTE: filemess, readfile, writeit, renum live in fileio.c.
 ; updatescreen, updateline, cursupdate, s_ins, s_del live in screen.c.

@@ -95,7 +95,7 @@ for src in "${SOURCES[@]}"; do
 	# DOS-style 0x1a (Ctrl-Z, SUB) end-of-file marker.  cpp passes
 	# both through; minic's lexer treats 0x1a as a stray byte and
 	# silently bails.  Strip both before handing off.
-	if ! cpp -P -nostdinc -isysroot/var/empty -DDOS \
+	if ! cpp -P -nostdinc -isysroot/var/empty -DDOS -D__TURBOC__ \
 			"-I$INC_DIR" "-I$SRC_DIR" \
 			"$SRC_DIR/$src" 2>"$err" \
 			| tr -d '\r\032' \
@@ -186,6 +186,10 @@ for src in "${SOURCES[@]}"; do
 		      -e 's/^[[:space:]]*\.word \(.*\)$/dw \1/' \
 		      -e 's/^[[:space:]]*\.quad \(.*\)$/dq \1/' \
 		      -e 's/^[[:space:]]*\.zero \(.*\)$/times \1 db 0/' \
+		      -e 's/^[[:space:]]*\.fill \([0-9]*\),1,0$/times \1 db 0/' \
+		      -e 's/^[[:space:]]*\.fill \([0-9]*\),2,0$/times \1 dw 0/' \
+		      -e 's/^[[:space:]]*\.fill \([0-9]*\),4,0$/times \1 dd 0/' \
+		      -e 's/^[[:space:]]*\.fill \([0-9]*\)$/times \1 db 0/' \
 		      -e '/^[[:space:]]*\.section/d' \
 		      -e '/^[[:space:]]*\.balign/d' \
 		      -e '/^[[:space:]]*\.local/d' \
