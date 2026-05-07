@@ -1641,7 +1641,13 @@ expr(Node *n)
 		sr.ctyp = INT;
 		fprintf(of, "\t");
 		psymb(sr);
-		fprintf(of, " =w ceq%c ", irtyp(s0.ctyp));
+		{
+			/* QBE compare instructions only exist in w/l/s/d
+			 * forms — widen byte/halfword to word. */
+			char ct = irtyp(s0.ctyp);
+			if (ct == 'b' || ct == 'h') ct = 'w';
+			fprintf(of, " =w ceq%c ", ct);
+		}
 		psymb(s0);
 		fprintf(of, ", 0\n");
 		break;
@@ -1985,7 +1991,11 @@ expr(Node *n)
 		}
 
 		if (strchr("ne<l", n->op)) {
-			sprintf(ty, "%c", irtyp(sr.ctyp));
+			char ct = irtyp(sr.ctyp);
+			/* QBE compare ops are only typed w/l/s/d.  Widen
+			 * byte/halfword operand types to word. */
+			if (ct == 'b' || ct == 'h') ct = 'w';
+			sprintf(ty, "%c", ct);
 			sr.ctyp = INT;
 		} else
 			strcpy(ty, "");
@@ -2371,8 +2381,15 @@ stmt(Stmt *s, int b)
 	case Expr:
 		expr(s->p1);
 		return 0;
-	case Seq:
-		return stmt(s->p1, b) || stmt(s->p2, b);
+	case Seq: {
+		/* Always evaluate both sub-statements — if the first
+		 * terminated control flow, we still need to emit any
+		 * labels (and following code) from the second so that
+		 * `goto` jumps from earlier blocks land somewhere. */
+		int r1 = stmt(s->p1, b);
+		int r2 = stmt(s->p2, b);
+		return r1 || r2;
+	}
 	case If:
 		l = lbl;
 		lbl += 3;
