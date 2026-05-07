@@ -287,10 +287,102 @@ _enable:
 ; updatescreen, updateline, cursupdate, s_ins, s_del live in screen.c.
 ; All compile to QBE asm now, so we don't stub them.
 
-; regerror is referenced from search.c which doesn't include regexp.h's
-; declaration in a way that QBE picks up.  Stub it pointing at emsg.
-global _regerror
-_regerror:
+; regerror is now in search.c which compiles.
+
+; Standard C / MS-DOS / curses functions stevie expects.  All return 0
+; so the binary at least links and runs; real behavior would be added
+; in a follow-up DOS runtime.
+global _getch
+_getch:
+    mov ax, 0
+    ret
+global _int86
+_int86:
+    mov ax, 0
+    ret
+global _intdos
+_intdos:
+    mov ax, 0
+    ret
+global _signal
+_signal:
+    mov ax, 0
+    ret
+global _sleep
+_sleep:
+    ret
+global _stat
+_stat:
+    mov ax, -1
+    ret
+global _chmod
+_chmod:
+    mov ax, 0
+    ret
+global _mktemp
+_mktemp:
+    ; mktemp(template) — return template unchanged
+    push bp
+    mov bp, sp
+    mov ax, [bp+4]
+    pop bp
+    ret
+global _islower
+_islower:
+    push bp
+    mov bp, sp
+    mov ax, [bp+4]
+    cmp al, 'a'
+    jb .no
+    cmp al, 'z'
+    ja .no
+    mov ax, 1
+    pop bp
+    ret
+.no:
+    xor ax, ax
+    pop bp
+    ret
+global _isupper
+_isupper:
+    push bp
+    mov bp, sp
+    mov ax, [bp+4]
+    cmp al, 'A'
+    jb .no
+    cmp al, 'Z'
+    ja .no
+    mov ax, 1
+    pop bp
+    ret
+.no:
+    xor ax, ax
+    pop bp
+    ret
+global _strrchr
+_strrchr:
+    ; strrchr(s, c) — find last c in s; trivial loop
+    push bp
+    mov bp, sp
+    push si
+    push bx
+    mov si, [bp+4]   ; s
+    mov bl, [bp+6]   ; c
+    xor ax, ax       ; result = NULL
+.loop:
+    mov dl, [si]
+    cmp dl, 0
+    je .done
+    cmp dl, bl
+    jne .skip
+    mov ax, si
+.skip:
+    inc si
+    jmp .loop
+.done:
+    pop bx
+    pop si
+    pop bp
     ret
 
 ; remove() is referenced but not in any source file we compile.

@@ -2730,6 +2730,48 @@ sai_add_str(int idx)
 	sai_val[nsai++] = idx;
 }
 
+/* Emit a global data block holding an array of string-literal /
+ * integer pointer values from sai_*.  Used for both file-scope and
+ * block-scope-static `T *ARR[] = { "s1", "s2", ... };`. */
+void
+emit_pointer_array_data(unsigned elemtyp, char *name)
+{
+	static char buf[16384];
+	int buflen = 0;
+	int i;
+	char ir = irtyp(elemtyp);  /* 'l' for any pointer */
+
+	buflen += sprintf(buf + buflen, "align 8 {");
+	for (i = 0; i < nsai; i++) {
+		if (i)
+			buflen += sprintf(buf + buflen, ",");
+		if (sai_kind[i] == 'S' && sai_val[i] != 0)
+			buflen += sprintf(buf + buflen, " %c $glo%ld",
+			                  ir, sai_val[i]);
+		else
+			buflen += sprintf(buf + buflen, " %c %ld",
+			                  ir, sai_val[i]);
+	}
+	buflen += sprintf(buf + buflen, " }");
+
+	if (nglo == NGlo)
+		die("too many globals");
+	ini[nglo] = alloc(buflen + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], name);
+	varadd(name, nglo++, elemtyp, 1);
+	sai_clear();
+}
+
+/* Wrapper used by the dcls rule for `static T *NAME[] = {...};`. */
+void
+emit_static_pointer_array(unsigned ptr_type, char *name)
+{
+	if (KIND(ptr_type) != PTR)
+		die("static array-of-pointer init requires pointer type");
+	emit_pointer_array_data(ptr_type, name);
+}
+
 /* Emit `data $NAME = align A { ... }` for a struct-array initializer.
  * Items in sai_* are walked round-robin against the struct's members,
  * each emitted with the QBE type that matches the member it fills. */
@@ -3800,11 +3842,17 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 }
                | '[' ']' '=' '{' sai_init_clear sai_list opt_trailing_comma '}' ';'
 {
-	/* struct TAG NAME[] = { ... };  Both flat and brace-per-row forms
-	 * share one walker; nested braces act only as row delimiters. */
-	if (KIND(parsed_type) != STRUCT_T)
-		die("array initializer requires struct type");
-	emit_struct_array_data(DREF(parsed_type), parsed_ident);
+	/* TYP NAME[] = { ... };  For struct types, walk the struct
+	 * members.  For pointer types, emit one `l $gloN`/`l 0` per
+	 * item.  Used for `struct charinfo chars[] = {...}` and for
+	 * `static char *msgs[] = {"a","b","c"}` (handled by the static
+	 * block-scope rule below). */
+	if (KIND(parsed_type) == STRUCT_T)
+		emit_struct_array_data(DREF(parsed_type), parsed_ident);
+	else if (KIND(parsed_type) == PTR)
+		emit_pointer_array_data(parsed_type, parsed_ident);
+	else
+		die("array initializer requires struct or pointer type");
 }
                ;
 
@@ -4188,6 +4236,10 @@ dcls:
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($3), s);
 }
     | dcls STATIC type IDENT '=' expr ';' { emit_local_init($3, $4, $6); }
+    | dcls STATIC type IDENT '[' ']' '=' '{' sai_init_clear sai_list opt_trailing_comma '}' ';'
+{
+	emit_static_pointer_array($3, $4->u.v);
+}
     | dcls STATIC type IDENT '[' NUM ']' ';'
 {
 	/* Static local array — currently treated as a stack alloc.  Real C
@@ -4326,6 +4378,25 @@ dcls:
 	fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
 	varadd(v, 0, fptr_type, 0);  /* Not an array */
 	fprintf(of, "\t%%%s =l alloc8 8\n", v);  /* Pointers are 8 bytes */
+}
+    | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' ',' ext_decllist ';'
+{
+	/* Function pointer + K&R protos in one decl:
+	 *   int (*move)(), inc(), dec();
+	 * The first item is a fnptr local; subsequent ext_decllist items
+	 * are walked with the same uniform-* peeling as plain multi-decls. */
+	char *v;
+	unsigned fptr_type;
+	Node *first;
+
+	if ($2 == NIL)
+		die("invalid void function pointer");
+	v = $5->u.v;
+	fptr_type = IDIR(FUNC($2));
+	varadd(v, 0, fptr_type, 0);
+	fprintf(of, "\t%%%s =l alloc8 8\n", v);
+	(void)first;
+	emit_local_multi_decl_full($2, $11);
 }
     | dcls STATIC_ASSERT '(' NUM ',' STR ')' ';'
 {
@@ -4925,6 +4996,13 @@ post: NUM
     | STR
     | IDENT
     | SIZEOF '(' type ')' { $$ = mknode('N', 0, 0); $$->u.n = SIZE($3); }
+    | SIZEOF '(' IDENT ')' {
+        Symb *vs = varget($3->u.v);
+        $$ = mknode('N', 0, 0);
+        if (!vs)
+            die("sizeof on undeclared identifier");
+        $$->u.n = SIZE(vs->ctyp);
+    }
     | ALIGNOF '(' type ')' {
         /* _Alignof returns alignment requirement for type */
         int align;

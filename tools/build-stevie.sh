@@ -172,7 +172,10 @@ for src in "${SOURCES[@]}"; do
 			s/^_?glo(\d+):/${p}glo$1:/;
 			s/\b_?glo(\d+)\b/${p}glo$1/g;
 		' \
-		| sed -e 's/word ptr \[/word [/g' \
+		| sed -e 's/word ptr \([a-z][a-z]:\)\[/word \1[/g' \
+		      -e 's/byte ptr \([a-z][a-z]:\)\[/byte \1[/g' \
+		      -e 's/dword ptr \([a-z][a-z]:\)\[/dword \1[/g' \
+		      -e 's/word ptr \[/word [/g' \
 		      -e 's/byte ptr \[/byte [/g' \
 		      -e 's/dword ptr \[/dword [/g' \
 		      -e 's|/\* \(.*\) \*/|; \1|' \
