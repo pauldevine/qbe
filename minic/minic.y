@@ -2625,8 +2625,25 @@ emit_local_init(unsigned ctyp, Node *ident, Node *initexpr)
 	s = SIZE(ctyp);
 	varadd(v, 0, ctyp, 0);
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(ctyp), s);
-	init_node = mknode('=', ident, initexpr);
-	expr(init_node);
+	if (initexpr) {
+		init_node = mknode('=', ident, initexpr);
+		expr(init_node);
+	}
+}
+
+/* Walk a chain of init_decl Nodes (op='I', u.v=name, l=initexpr or 0)
+ * and emit a local alloc + optional store for each. */
+void
+emit_local_init_list(unsigned ctyp, Node *list)
+{
+	Node *n;
+	Node id;
+	for (n = list; n; n = n->r) {
+		id.op = 'V';
+		id.l = id.r = 0;
+		strcpy(id.u.v, n->u.v);
+		emit_local_init(ctyp, &id, n->l);
+	}
 }
 
 /* Build an IDENT node with the given declarator-kind tag in op:
@@ -2639,6 +2656,18 @@ Node *
 kr_name_node(char *name, char op)
 {
 	Node *n = mknode(op, 0, 0);
+	strcpy(n->u.v, name);
+	return n;
+}
+
+/* Node tag 'B' = sized array declarator IDENT[NUM].  The size is
+ * stashed as a NUM child on n->l so n->u.v can keep the name. */
+Node *
+kr_array_node(char *name, int size)
+{
+	Node *sz = mknode('N', 0, 0);
+	sz->u.n = size;
+	Node *n = mknode('B', sz, 0);
 	strcpy(n->u.v, name);
 	return n;
 }
@@ -2679,6 +2708,20 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 		}
 		if (n->op == 'G') {
 			varadd(v, 1, FUNC(IDIR(base)), 0);
+			continue;
+		}
+		if (n->op == 'B') {
+			/* IDENT[NUM] — sized array.  When the multi-decl's
+			 * leading declarator was `*X` and the base type
+			 * greedily absorbed the *, peel it back here so the
+			 * array's element type is the un-pointered base.
+			 * (Stevie uses uniform `char *lp, buf[128]` patterns
+			 * where the * belongs to lp, not buf.) */
+			int count = n->l->u.n;
+			unsigned elem = (KIND(base) == PTR) ? DREF(base) : base;
+			int total = count * SIZE(elem);
+			varadd(v, 0, IDIR(elem), 1);
+			fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(elem), total);
 			continue;
 		}
 		t = (n->op == 'P' || n->op == 'A') ? IDIR(base) : base;
@@ -2845,7 +2888,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %type <u> type
 %type <s> stmt stmts asmstmt
-%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc idlist kr_idlist kr_namelist kr_name sm_more_names ext_decllist ext_decl
+%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc idlist kr_idlist kr_namelist kr_name sm_more_names ext_decllist ext_decl comma_expr comma_exp0 init_decllist init_decl
 %type <n> asmoutputs asmoutputlist asmoutput asminputs asminputlist asminput asmclobbers asmclobberlist
 %token <u> TNAME
 
@@ -3023,11 +3066,12 @@ ext_decllist: ext_decl
 }
             ;
 
-ext_decl: IDENT             { $$ = kr_name_node($1->u.v, 0); }
-        | '*' IDENT         { $$ = kr_name_node($2->u.v, 'P'); }
-        | IDENT '[' ']'     { $$ = kr_name_node($1->u.v, 'A'); }
-        | '*' IDENT '(' ')' { $$ = kr_name_node($2->u.v, 'G'); }
-        | IDENT '(' ')'     { $$ = kr_name_node($1->u.v, 'F'); }
+ext_decl: IDENT                 { $$ = kr_name_node($1->u.v, 0); }
+        | '*' IDENT             { $$ = kr_name_node($2->u.v, 'P'); }
+        | IDENT '[' ']'         { $$ = kr_name_node($1->u.v, 'A'); }
+        | IDENT '[' NUM ']'     { $$ = kr_array_node($1->u.v, $3->u.n); }
+        | '*' IDENT '(' ')'     { $$ = kr_name_node($2->u.v, 'G'); }
+        | IDENT '(' ')'         { $$ = kr_name_node($1->u.v, 'F'); }
         ;
 
 tdcl: TYPEDEF type IDENT ';'
@@ -3650,10 +3694,12 @@ kr_namelist: kr_name
 }
            ;
 
-kr_name: IDENT             { $$ = kr_name_node($1->u.v, 0); }
-       | '*' IDENT         { $$ = kr_name_node($2->u.v, 'P'); }
-       | IDENT '[' ']'     { $$ = kr_name_node($1->u.v, 'A'); }
-       | IDENT '[' NUM ']' { $$ = kr_name_node($1->u.v, 'A'); }
+kr_name: IDENT                 { $$ = kr_name_node($1->u.v, 0); }
+       | '*' IDENT             { $$ = kr_name_node($2->u.v, 'P'); }
+       | IDENT '[' ']'         { $$ = kr_name_node($1->u.v, 'A'); }
+       | IDENT '[' NUM ']'     { $$ = kr_name_node($1->u.v, 'A'); }
+       | '*' IDENT '[' ']'     { $$ = kr_name_node($2->u.v, 'A'); }
+       | '*' IDENT '[' NUM ']' { $$ = kr_name_node($2->u.v, 'A'); }
        ;
 
 par0: par1
@@ -3726,6 +3772,15 @@ dcls:
 	expr(init_node);
 }
     | dcls type IDENT ',' ext_decllist ';' { emit_local_multi_decl($2, $3->u.v, $5); }
+    | dcls type IDENT '=' expr ',' init_decllist ';'
+{
+	/* Multi-name local declaration with initializers, all sharing
+	 * the same base type:  int row = 0, col = 0;
+	 * Each item in init_decllist is an IDENT with optional `=` expr
+	 * (the init expr is hung off node->l). */
+	emit_local_init($2, $3, $5);
+	emit_local_init_list($2, $7);
+}
     | dcls type IDENT '(' ')' ';'
 {
 	/* Local K&R prototype:  void tabinout();  Register the function
@@ -4066,22 +4121,11 @@ stmt: ';'                            { $$ = 0; }
         fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($1), total);
         $$ = 0;
     }
-    | type IDENT ',' idlist ';'      {
-        /* Block-scoped multi-variable declaration. */
-        int s;
-        char *v;
-        Node *n;
-        if ($1 == NIL)
-            die("invalid void declaration");
-        s = SIZE($1);
-        v = $2->u.v;
-        varadd(v, 0, $1, 0);
-        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($1), s);
-        for (n = $4; n; n = n->r) {
-            v = n->u.v;
-            varadd(v, 0, $1, 0);
-            fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($1), s);
-        }
+    | type IDENT ',' ext_decllist ';' {
+        /* Block-scoped multi-variable decl with full per-declarator
+         * decoration support (`*`, `[]`, `[N]`, `()`).  Reuses the
+         * same helper as the dcls-context multi-decl rule. */
+        emit_local_multi_decl($1, $2->u.v, $4);
         $$ = 0;
     }
     | STATIC type IDENT ';'          {
@@ -4114,7 +4158,7 @@ stmt: ';'                            { $$ = 0; }
     | DO stmt WHILE '(' expr ')' ';' { $$ = mkstmt(DoWhile, $2, $5, 0); }
     | IF '(' expr ')' stmt ELSE stmt { $$ = mkstmt(If, $3, $5, $7); }
     | IF '(' expr ')' stmt           { $$ = mkstmt(If, $3, $5, 0); }
-    | FOR '(' exp0 ';' exp0 ';' exp0 ')' stmt
+    | FOR '(' comma_exp0 ';' comma_exp0 ';' comma_exp0 ')' stmt
                                      { $$ = mkfor($3, $5, $7, $9); }
     | FOR '(' type IDENT '=' expr ';' exp0 ';' exp0 ')' stmt
                                      {
@@ -4504,6 +4548,33 @@ expr: pref
 exp0: expr
     |                   { $$ = 0; }
     ;
+
+comma_expr: expr
+          | comma_expr ',' expr { $$ = mknode(',', $1, $3); }
+          ;
+
+init_decllist: init_decl                       { $$ = $1; }
+             | init_decl ',' init_decllist     { $1->r = $3; $$ = $1; }
+             ;
+
+init_decl: IDENT
+{
+	Node *n = mknode('I', 0, 0);
+	strcpy(n->u.v, $1->u.v);
+	n->l = 0;
+	$$ = n;
+}
+         | IDENT '=' expr
+{
+	Node *n = mknode('I', $3, 0);
+	strcpy(n->u.v, $1->u.v);
+	$$ = n;
+}
+         ;
+
+comma_exp0: comma_expr
+          |                     { $$ = 0; }
+          ;
 
 pref: post
     | '-' pref          { $$ = mkneg($2); }
