@@ -2594,16 +2594,19 @@ emit_global_int_init(int value)
 
 /* Apply the K&R parameter base type to every name in kr_namelist.
  * node->op encodes the declarator shape:
- *   0   plain IDENT  → use base as-is
- *   'P' *IDENT       → IDIR(base) (pointer-to-base)
- *   'A' IDENT[...]    → IDIR(base) (array decays to pointer) */
+ *   0   plain IDENT
+ *   'P' *IDENT       (one extra pointer level)
+ *   'A' IDENT[...]    (array, decays to pointer)
+ *   'X' *IDENT[...]   (two extra pointer levels: char *argv[]) */
 void
 kr_apply_types(unsigned base, Node *names)
 {
 	Node *n;
 	unsigned t;
 	for (n = names; n; n = n->r) {
-		if (n->op == 'A' || n->op == 'P')
+		if (n->op == 'X')
+			t = IDIR(IDIR(base));
+		else if (n->op == 'A' || n->op == 'P')
 			t = IDIR(base);
 		else
 			t = base;
@@ -2751,30 +2754,37 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 			tmp++;
 		}
 	for (n = rest; n; n = n->r) {
+		/* When the leading declarator's `*` was absorbed by greedy
+		 * type matching, the base already carries that pointer
+		 * level.  In Stevie's uniform-* multi-decls (`T *X, *Y` or
+		 * `T *X, Y[N]` etc.) the `*` we see in subsequent ext_decl
+		 * items should match the base's level rather than add one.
+		 * Peel one PTR off the base for consumers that would
+		 * otherwise re-pointer it. */
+		unsigned ebase = (KIND(base) == PTR) ? DREF(base) : base;
 		v = n->u.v;
 		if (n->op == 'F') {
 			varadd(v, 1, FUNC(base), 0);
 			continue;
 		}
 		if (n->op == 'G') {
-			varadd(v, 1, FUNC(IDIR(base)), 0);
+			varadd(v, 1, FUNC(IDIR(ebase)), 0);
 			continue;
 		}
 		if (n->op == 'B') {
-			/* IDENT[NUM] — sized array.  When the multi-decl's
-			 * leading declarator was `*X` and the base type
-			 * greedily absorbed the *, peel it back here so the
-			 * array's element type is the un-pointered base.
-			 * (Stevie uses uniform `char *lp, buf[128]` patterns
-			 * where the * belongs to lp, not buf.) */
 			int count = n->l->u.n;
-			unsigned elem = (KIND(base) == PTR) ? DREF(base) : base;
-			int total = count * SIZE(elem);
-			varadd(v, 0, IDIR(elem), 1);
-			fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(elem), total);
+			int total = count * SIZE(ebase);
+			varadd(v, 0, IDIR(ebase), 1);
+			fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(ebase), total);
 			continue;
 		}
-		t = (n->op == 'P' || n->op == 'A') ? IDIR(base) : base;
+		if (n->op == 'P') {
+			t = IDIR(ebase);
+			varadd(v, 0, t, 0);
+			fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(t), SIZE(t));
+			continue;
+		}
+		t = (n->op == 'A') ? IDIR(base) : base;
 		varadd(v, 0, t, n->op == 'A' ? 1 : 0);
 		fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(t), SIZE(t));
 		if (KIND(t) == STRUCT_T || KIND(t) == UNION_T) {
@@ -3748,8 +3758,8 @@ kr_name: IDENT                 { $$ = kr_name_node($1->u.v, 0); }
        | '*' IDENT             { $$ = kr_name_node($2->u.v, 'P'); }
        | IDENT '[' ']'         { $$ = kr_name_node($1->u.v, 'A'); }
        | IDENT '[' NUM ']'     { $$ = kr_name_node($1->u.v, 'A'); }
-       | '*' IDENT '[' ']'     { $$ = kr_name_node($2->u.v, 'A'); }
-       | '*' IDENT '[' NUM ']' { $$ = kr_name_node($2->u.v, 'A'); }
+       | '*' IDENT '[' ']'     { $$ = kr_name_node($2->u.v, 'X'); }
+       | '*' IDENT '[' NUM ']' { $$ = kr_name_node($2->u.v, 'X'); }
        ;
 
 par0: par1
