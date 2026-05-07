@@ -578,6 +578,26 @@ typhget(char *v, unsigned *ctyp)
 	return 0;
 }
 
+/* Probe the symbol table for the array flag of a variable.  varh[]
+ * uses linear probing, so the entry for `v` may be at hash(v)+k for
+ * some k > 0; looking only at hash(v) misses collisions.  Return 0
+ * if not found. */
+int
+var_isarray(char *v)
+{
+	unsigned h0, h;
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (varh[h].v[0] == 0)
+			return 0;
+		if (strcmp(varh[h].v, v) == 0)
+			return varh[h].isarray;
+		h = (h+1) % NVar;
+	} while (h != h0);
+	return 0;
+}
+
 Symb *
 varget(char *v)
 {
@@ -1234,7 +1254,7 @@ expr(Node *n)
 			fprintf(of, "\t");
 			psymb(sr);
 			fprintf(of, " =l copy $%s\n", n->u.v);
-		} else if (varh[hash(n->u.v)].isarray) {
+		} else if (var_isarray(n->u.v)) {
 			/* Arrays - don't load, the lvalue IS the pointer */
 			sr = s0;
 		} else {
