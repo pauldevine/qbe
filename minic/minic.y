@@ -2672,6 +2672,56 @@ kr_array_node(char *name, int size)
 	return n;
 }
 
+/* Same as emit_local_multi_decl but every declarator (including the
+ * first) is in `list`.  Used when the first declarator is decorated
+ * (`[N]`, `*`, `()`, etc.). */
+void
+emit_local_multi_decl_full(unsigned base, Node *list)
+{
+	Node *n, *next;
+	int i;
+	unsigned t;
+	char *v;
+
+	if (base == NIL)
+		die("invalid void declaration");
+	for (n = list; n; n = n->r) {
+		v = n->u.v;
+		if (n->op == 'F') {
+			varadd(v, 1, FUNC(base), 0);
+			continue;
+		}
+		if (n->op == 'G') {
+			varadd(v, 1, FUNC(IDIR(base)), 0);
+			continue;
+		}
+		if (n->op == 'B') {
+			int count = n->l->u.n;
+			unsigned elem = (KIND(base) == PTR) ? DREF(base) : base;
+			int total = count * SIZE(elem);
+			varadd(v, 0, IDIR(elem), 1);
+			fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(elem), total);
+			continue;
+		}
+		t = (n->op == 'P' || n->op == 'A') ? IDIR(base) : base;
+		varadd(v, 0, t, n->op == 'A' ? 1 : 0);
+		fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(t), SIZE(t));
+		if (KIND(t) == STRUCT_T || KIND(t) == UNION_T) {
+			int sz = SIZE(t);
+			for (i = 0; i < sz; i += 4) {
+				if (i == 0)
+					fprintf(of, "\tstorew 0, %%%s\n", v);
+				else {
+					fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n", tmp, v, i);
+					fprintf(of, "\tstorew 0, %%_zinit%d\n", tmp);
+				}
+				tmp++;
+			}
+		}
+		(void)next;
+	}
+}
+
 /* Emit a multi-name local declaration: `type IDENT, ext_decllist;`.
  * Each declarator carries its own decoration in `op`.  Used for the
  * many K&R patterns such as `char *s1, *s2;` and the mixed
@@ -3772,6 +3822,20 @@ dcls:
 	expr(init_node);
 }
     | dcls type IDENT ',' ext_decllist ';' { emit_local_multi_decl($2, $3->u.v, $5); }
+    | dcls type IDENT '[' NUM ']' ',' ext_decllist ';'
+{
+	Node *first = kr_array_node($3->u.v, $5->u.n);
+	first->r = $8;
+	emit_local_multi_decl_full($2, first);
+}
+    | dcls type IDENT '(' ')' ',' ext_decllist ';'
+{
+	/* `T name1(), name2, ...;` — first declarator is K&R proto.
+	 * Build a 'F' node and chain. */
+	Node *first = kr_name_node($3->u.v, 'F');
+	first->r = $7;
+	emit_local_multi_decl_full($2, first);
+}
     | dcls type IDENT '=' expr ',' init_decllist ';'
 {
 	/* Multi-name local declaration with initializers, all sharing
