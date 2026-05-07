@@ -17,20 +17,40 @@ KEEP_GOING=0
 [ "${1-}" = "--keep-going" ] && KEEP_GOING=1
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SRC_DIR="$QBE_DIR/stevie-dos"
-OUT_DIR="$QBE_DIR/build/stevie-dos"
-MINIC_CPP="$QBE_DIR/minic/minic_cpp_v2"
+SRC_DIR="$QBE_DIR/stevie-orig"
+OUT_DIR="$QBE_DIR/build/stevie-orig"
+MINIC="$QBE_DIR/minic/minic"
+INC_DIR="$QBE_DIR/minic/include"
 QBE="$QBE_DIR/qbe"
 DOS_DIR="$QBE_DIR/minic/dos"
 
+# Type/decl normalization sed scripts shared with minic_cpp_v2.
+NORMALIZE_TYPES='
+s/\bunsigned short int\b/unsigned short/g
+s/\bunsigned long int\b/unsigned long/g
+s/\bsigned short int\b/short/g
+s/\bsigned long int\b/long/g
+s/\blong long int\b/long long/g
+s/\blong int\b/long/g
+s/\bshort int\b/short/g
+s/\bsigned char\b/char/g
+s/\bsigned short\b/short/g
+s/\bsigned long long\b/long long/g
+s/\bsigned long\b/long/g
+s/\bsigned int\b/int/g
+s/\bsigned\b//g
+'
+
 mkdir -p "$OUT_DIR"
 
-# Files compiled in order. tos.c is Atari-only; skip.
+# Files compiled in order. From original DOS_MSC.MK; tos/os2/minix/unix
+# are platform alternates and are skipped.
 SOURCES=(
 	alloc.c
 	cmdline.c
 	dos.c
 	edit.c
+	enveval.c
 	fileio.c
 	help.c
 	hexchars.c
@@ -39,12 +59,17 @@ SOURCES=(
 	mark.c
 	misccmds.c
 	normal.c
+	ops.c
 	param.c
 	ptrfunc.c
 	regexp.c
 	regsub.c
 	screen.c
 	search.c
+	sentence.c
+	tagcmd.c
+	undo.c
+	version.c
 )
 
 stage_pass=()
@@ -58,10 +83,34 @@ for src in "${SOURCES[@]}"; do
 	obj="$OUT_DIR/$base.obj"
 	err="$OUT_DIR/$base.err"
 
-	# Stage 1: C → SSA
-	if ! "$MINIC_CPP" "$SRC_DIR/$src" "$ssa" 2>"$err"; then
+	# Stage 1: C → SSA.  Use cpp with -nostdinc -I minic/include so that
+	# we use our stub system headers rather than the host's macOS SDK.
+	# Define DOS so env.h selects the right platform branch.
+	pp="$OUT_DIR/$base.pp.c"
+	# `-isysroot /var/empty` defeats macOS clang's automatic SDK
+	# fallback so that `-nostdinc` actually blocks the host system
+	# headers.  Without it, <sys/types.h> would still resolve to the
+	# Xcode SDK.
+	if ! cpp -P -nostdinc -isysroot/var/empty -DDOS \
+			"-I$INC_DIR" "-I$SRC_DIR" \
+			"$SRC_DIR/$src" 2>"$err" \
+			| sed "$NORMALIZE_TYPES" > "$pp"; then
+		stage_fail_minic+=("$src (cpp)")
+		[ $KEEP_GOING -eq 0 ] && { echo "FAIL cpp: $src"; cat "$err"; exit 1; }
+		continue
+	fi
+	if ! "$MINIC" < "$pp" > "$ssa" 2>"$err"; then
 		stage_fail_minic+=("$src")
 		[ $KEEP_GOING -eq 0 ] && { echo "FAIL minic: $src"; cat "$err"; exit 1; }
+		continue
+	fi
+	# Empty SSA means minic accepted the input but produced no code.
+	# That happens today on K&R definitions and other unsupported
+	# top-level constructs — minic silently bails.  Treat as failure.
+	if [ ! -s "$ssa" ]; then
+		echo "(no output from minic — likely unsupported top-level syntax)" >>"$err"
+		stage_fail_minic+=("$src (empty)")
+		[ $KEEP_GOING -eq 0 ] && { echo "FAIL minic-empty: $src"; cat "$err"; exit 1; }
 		continue
 	fi
 

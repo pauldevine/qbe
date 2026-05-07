@@ -5,7 +5,7 @@
 #ifndef _STDLIB_H
 #define _STDLIB_H
 
-typedef unsigned long size_t;
+#include <stddef.h>
 
 /* Memory allocation - must be provided by runtime */
 void *malloc(size_t size);

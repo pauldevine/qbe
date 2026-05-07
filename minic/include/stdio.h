@@ -5,7 +5,7 @@
 #ifndef _STDIO_H
 #define _STDIO_H
 
-typedef unsigned long size_t;
+#include <stddef.h>
 
 /* Function declarations - implementations in runtime library */
 /* Note: MiniC doesn't support const or variadic functions (...) */

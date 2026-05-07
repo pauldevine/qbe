@@ -3021,6 +3021,24 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	/* Register as pointer to element type with array flag set. */
 	varadd(parsed_ident, nglo++, IDIR(parsed_type), 1);
 }
+               | '=' STR ';'
+{
+	/* Global pointer initialized with a string literal:
+	 *   char *Version = "STEVIE - Version 3.69b";
+	 * The lexer already reserved a global slot for the string itself
+	 * (in `ini[$2->u.n]`).  Allocate a separate slot for the pointer
+	 * variable that points at it. */
+	char buf[64];
+	if (parsed_type == NIL)
+		die("invalid void declaration");
+	if (nglo == NGlo)
+		die("too many globals");
+	sprintf(buf, "{ l $glo%d }", $2->u.n);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], parsed_ident);
+	varadd(parsed_ident, nglo++, parsed_type, 0);
+}
                ;
 
 ansi_proto_register: '(' init_ansi par0 ')'
