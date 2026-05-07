@@ -2564,6 +2564,71 @@ param(char *v, unsigned ctyp, Node *pl)
 	return n;
 }
 
+/* `typedef struct tag alias;` — register the alias as a typedef of
+ * the existing struct tag (looked up by name). */
+void
+typedef_struct_tag(char *tag, char *alias)
+{
+	int idx = structfind(tag);
+	if (idx < 0)
+		die("typedef of unknown struct tag");
+	typhadd(alias, (idx << 3) + STRUCT_T);
+}
+
+/* Emit a file-scope integer initializer using parsed_type and
+ * parsed_ident set by type_and_ident. */
+void
+emit_global_int_init(int value)
+{
+	char buf[64];
+	if (parsed_type == NIL)
+		die("invalid void declaration");
+	if (nglo == NGlo)
+		die("too many globals");
+	sprintf(buf, "{ %c %d }", irtyp(parsed_type), value);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], parsed_ident);
+	varadd(parsed_ident, nglo++, parsed_type, 0);
+}
+
+/* Apply the K&R parameter base type to every name in kr_namelist.
+ * node->op encodes the declarator shape:
+ *   0   plain IDENT  → use base as-is
+ *   'P' *IDENT       → IDIR(base) (pointer-to-base)
+ *   'A' IDENT[...]    → IDIR(base) (array decays to pointer) */
+void
+kr_apply_types(unsigned base, Node *names)
+{
+	Node *n;
+	unsigned t;
+	for (n = names; n; n = n->r) {
+		if (n->op == 'A' || n->op == 'P')
+			t = IDIR(base);
+		else
+			t = base;
+		varadd(n->u.v, 0, t, 0);
+	}
+}
+
+/* Emit a local declaration with initializer (used by static-with-init). */
+void
+emit_local_init(unsigned ctyp, Node *ident, Node *initexpr)
+{
+	int s;
+	char *v;
+	Node *init_node;
+
+	if (ctyp == NIL)
+		die("invalid void declaration");
+	v = ident->u.v;
+	s = SIZE(ctyp);
+	varadd(v, 0, ctyp, 0);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(ctyp), s);
+	init_node = mknode('=', ident, initexpr);
+	expr(init_node);
+}
+
 /* Build an IDENT node with the given declarator-kind tag in op:
  *   0   = plain IDENT (uses base type)
  *   'P' = *IDENT       (one extra pointer level)
@@ -2969,6 +3034,8 @@ tdcl: TYPEDEF type IDENT ';'
 {
 	typhadd($3->u.v, $2);
 }
+    | TYPEDEF ENUM IDENT IDENT ';' { typhadd($4->u.v, INT); }
+    | TYPEDEF STRUCT IDENT IDENT ';' { typedef_struct_tag($3->u.v, $4->u.v); }
     | TYPEDEF typedefenum    {}
     | TYPEDEF typedefstruct  {}
     | TYPEDEF typedefunion   {}
@@ -3266,20 +3333,9 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	strcpy(gloname[nglo], parsed_ident);
 	varadd(parsed_ident, nglo++, parsed_type, 0);
 }
-               | '=' '(' NUM ')' ';'
-{
-	/* Parenthesized integer initializer: bool_t got_int = (0); */
-	char buf[64];
-	if (parsed_type == NIL)
-		die("invalid void declaration");
-	if (nglo == NGlo)
-		die("too many globals");
-	sprintf(buf, "{ %c %d }", irtyp(parsed_type), $3->u.n);
-	ini[nglo] = alloc(strlen(buf) + 1);
-	strcpy(ini[nglo], buf);
-	strcpy(gloname[nglo], parsed_ident);
-	varadd(parsed_ident, nglo++, parsed_type, 0);
-}
+               | '=' '(' NUM ')' ';'             { emit_global_int_init($3->u.n); }
+               | '=' '-' NUM ';'                 { emit_global_int_init(-$3->u.n); }
+               | '=' '(' '-' NUM ')' ';'         { emit_global_int_init(-$4->u.n); }
                | '[' NUM ']' ';'
 {
 	/* Global array of basic type: emit a zero-filled data block.
@@ -3580,18 +3636,7 @@ kr_idlist: IDENT
          ;
 
 kr_param_dcls: { }
-             | kr_param_dcls type kr_namelist ';'
-{
-	/* Apply the type to every name collected in kr_namelist.
-	 * kr_namelist nodes encode array-ness in the `op` field:
-	 * 'A' = `name[]` so the type decays to a pointer; 0 = scalar. */
-	Node *n;
-	unsigned t;
-	for (n = $3; n; n = n->r) {
-		t = (n->op == 'A') ? IDIR($2) : $2;
-		varadd(n->u.v, 0, t, 0);
-	}
-}
+             | kr_param_dcls type kr_namelist ';' { kr_apply_types($2, $3); }
              ;
 
 kr_namelist: kr_name
@@ -3605,24 +3650,10 @@ kr_namelist: kr_name
 }
            ;
 
-kr_name: IDENT
-{
-	Node *n = mknode(0, 0, 0);
-	strcpy(n->u.v, $1->u.v);
-	$$ = n;
-}
-       | IDENT '[' ']'
-{
-	Node *n = mknode('A', 0, 0);
-	strcpy(n->u.v, $1->u.v);
-	$$ = n;
-}
-       | IDENT '[' NUM ']'
-{
-	Node *n = mknode('A', 0, 0);
-	strcpy(n->u.v, $1->u.v);
-	$$ = n;
-}
+kr_name: IDENT             { $$ = kr_name_node($1->u.v, 0); }
+       | '*' IDENT         { $$ = kr_name_node($2->u.v, 'P'); }
+       | IDENT '[' ']'     { $$ = kr_name_node($1->u.v, 'A'); }
+       | IDENT '[' NUM ']' { $$ = kr_name_node($1->u.v, 'A'); }
        ;
 
 par0: par1
@@ -3695,6 +3726,17 @@ dcls:
 	expr(init_node);
 }
     | dcls type IDENT ',' ext_decllist ';' { emit_local_multi_decl($2, $3->u.v, $5); }
+    | dcls type IDENT '(' ')' ';'
+{
+	/* Local K&R prototype:  void tabinout();  Register the function
+	 * type without allocating any storage. */
+	varadd($3->u.v, 1, FUNC($2), 0);
+}
+    | dcls type IDENT '(' par1 ')' ';'
+{
+	/* Local ANSI prototype with typed args. */
+	varadd($3->u.v, 1, FUNC($2), 0);
+}
     | dcls ALIGNAS '(' NUM ')' type IDENT ';'
 {
 	/* _Alignas(constant) type var; */
@@ -3757,6 +3799,7 @@ dcls:
 	varadd(v, 0, $3, 0);
 	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($3), s);
 }
+    | dcls STATIC type IDENT '=' expr ';' { emit_local_init($3, $4, $6); }
     | dcls STATIC type IDENT '[' NUM ']' ';'
 {
 	/* Static local array — currently treated as a stack alloc.  Real C
@@ -3781,6 +3824,28 @@ dcls:
 	if ($3 == NIL)
 		die("invalid void declaration");
 	varaddextern($4->u.v, $3, 0);
+}
+    | dcls EXTERN type IDENT '(' ')' ';'
+{
+	/* Local K&R-style extern function decl:  extern char *strncpy(); */
+	varadd($4->u.v, 1, FUNC($3), 0);
+}
+    | dcls EXTERN type ext_decllist ';'
+{
+	/* Multi-name local extern decl. */
+	Node *n;
+	unsigned t;
+	for (n = $4; n; n = n->r) {
+		if (n->op == 'F')
+			t = FUNC($3);
+		else if (n->op == 'G')
+			t = FUNC(IDIR($3));
+		else if (n->op == 'A' || n->op == 'P')
+			t = IDIR($3);
+		else
+			t = $3;
+		varaddextern(n->u.v, t, n->op == 'A' ? 1 : 0);
+	}
 }
     | dcls type IDENT '[' NUM ']' ';'
 {
