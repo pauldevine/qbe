@@ -2564,6 +2564,76 @@ param(char *v, unsigned ctyp, Node *pl)
 	return n;
 }
 
+/* Build an IDENT node with the given declarator-kind tag in op:
+ *   0   = plain IDENT (uses base type)
+ *   'P' = *IDENT       (one extra pointer level)
+ *   'A' = IDENT[]       (array; decays to pointer)
+ *   'F' = IDENT()       (function returning base)
+ *   'G' = *IDENT()      (function returning pointer to base) */
+Node *
+kr_name_node(char *name, char op)
+{
+	Node *n = mknode(op, 0, 0);
+	strcpy(n->u.v, name);
+	return n;
+}
+
+/* Emit a multi-name local declaration: `type IDENT, ext_decllist;`.
+ * Each declarator carries its own decoration in `op`.  Used for the
+ * many K&R patterns such as `char *s1, *s2;` and the mixed
+ * `char *initstr, *getenv();` (proto + var). */
+void
+emit_local_multi_decl(unsigned base, char *first, Node *rest)
+{
+	int s, i;
+	Node *n;
+	unsigned t;
+	char *v;
+
+	if (base == NIL)
+		die("invalid void declaration");
+	s = SIZE(base);
+	v = first;
+	varadd(v, 0, base, 0);
+	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(base), s);
+	if (KIND(base) == STRUCT_T || KIND(base) == UNION_T)
+		for (i = 0; i < s; i += 4) {
+			if (i == 0)
+				fprintf(of, "\tstorew 0, %%%s\n", v);
+			else {
+				fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n", tmp, v, i);
+				fprintf(of, "\tstorew 0, %%_zinit%d\n", tmp);
+			}
+			tmp++;
+		}
+	for (n = rest; n; n = n->r) {
+		v = n->u.v;
+		if (n->op == 'F') {
+			varadd(v, 1, FUNC(base), 0);
+			continue;
+		}
+		if (n->op == 'G') {
+			varadd(v, 1, FUNC(IDIR(base)), 0);
+			continue;
+		}
+		t = (n->op == 'P' || n->op == 'A') ? IDIR(base) : base;
+		varadd(v, 0, t, n->op == 'A' ? 1 : 0);
+		fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(t), SIZE(t));
+		if (KIND(t) == STRUCT_T || KIND(t) == UNION_T) {
+			int sz = SIZE(t);
+			for (i = 0; i < sz; i += 4) {
+				if (i == 0)
+					fprintf(of, "\tstorew 0, %%%s\n", v);
+				else {
+					fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n", tmp, v, i);
+					fprintf(of, "\tstorew 0, %%_zinit%d\n", tmp);
+				}
+				tmp++;
+			}
+		}
+	}
+}
+
 /* Emit a K&R-style function header.  Called from the prot_knr action
  * for definitions like `foo(a, b) int a; char *b; { ... }`.  `params`
  * is a Node chain of bare parameter names built by kr_idlist; each
@@ -2854,15 +2924,24 @@ externdcl: EXTERN type IDENT ';'
 	 * adjusted for arrays and functions per `ext_decl_kind`. */
 	Node *n;
 	unsigned t;
-	if ($2 == NIL)
-		die("invalid void extern declaration");
 	for (n = $3; n; n = n->r) {
-		if (n->op == 'F')
-			t = FUNC($2);  /* extern T name(); */
-		else if (n->op == 'A')
-			t = IDIR($2);  /* extern T name[]; */
-		else
+		if (n->op == 'F') {
+			t = FUNC($2);
+		} else if (n->op == 'G') {
+			t = FUNC(IDIR($2));
+		} else if (n->op == 'A') {
+			if ($2 == NIL)
+				die("invalid void extern array");
+			t = IDIR($2);
+		} else if (n->op == 'P') {
+			if ($2 == NIL)
+				die("invalid void extern pointer");
+			t = IDIR($2);
+		} else {
+			if ($2 == NIL)
+				die("invalid void extern declaration");
 			t = $2;
+		}
 		varaddextern(n->u.v, t, n->op == 'A' ? 1 : 0);
 	}
 }
@@ -2879,36 +2958,11 @@ ext_decllist: ext_decl
 }
             ;
 
-ext_decl: IDENT
-{
-	Node *n = mknode(0, 0, 0);
-	strcpy(n->u.v, $1->u.v);
-	$$ = n;
-}
-        | '*' IDENT
-{
-	Node *n = mknode(0, 0, 0);
-	strcpy(n->u.v, $2->u.v);
-	$$ = n;
-}
-        | IDENT '[' ']'
-{
-	Node *n = mknode('A', 0, 0);
-	strcpy(n->u.v, $1->u.v);
-	$$ = n;
-}
-        | '*' IDENT '(' ')'
-{
-	Node *n = mknode('F', 0, 0);
-	strcpy(n->u.v, $2->u.v);
-	$$ = n;
-}
-        | IDENT '(' ')'
-{
-	Node *n = mknode('F', 0, 0);
-	strcpy(n->u.v, $1->u.v);
-	$$ = n;
-}
+ext_decl: IDENT             { $$ = kr_name_node($1->u.v, 0); }
+        | '*' IDENT         { $$ = kr_name_node($2->u.v, 'P'); }
+        | IDENT '[' ']'     { $$ = kr_name_node($1->u.v, 'A'); }
+        | '*' IDENT '(' ')' { $$ = kr_name_node($2->u.v, 'G'); }
+        | IDENT '(' ')'     { $$ = kr_name_node($1->u.v, 'F'); }
         ;
 
 tdcl: TYPEDEF type IDENT ';'
@@ -3308,14 +3362,14 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 		}
 	}
 }
-               | '(' init_kr kr_idlist ')' kr_param_dcls '{' dcls stmts '}'
+               | knr_func_proto '{' dcls stmts '}'
 {
 	/* K&R definition with explicit return type:
 	 *   char *alloc(size) unsigned size; { ... }
-	 *   int EnvEval(s, len) char *s; int len; { ... } */
-	curfntyp = parsed_type;
-	emit_knr_func_typed(parsed_ident, $3);
-	if (!stmt($8, -1)) {
+	 *   int EnvEval(s, len) char *s; int len; { ... }
+	 * The function header was already emitted when knr_func_proto
+	 * reduced (so it precedes any local-decl emit from dcls). */
+	if (!stmt($4, -1)) {
 		if (curfntyp == NIL)
 			fprintf(of, "\tret\n");
 		else
@@ -3356,6 +3410,14 @@ ansi_proto_register: '(' init_ansi par0 ')'
 	/* Prototype-only registration: register function type, no IR emission. */
 	curfntyp = parsed_type;
 	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
+};
+
+knr_func_proto: '(' init_kr kr_idlist ')' kr_param_dcls
+{
+	/* Reduces between the K&R parameter list and the body, so the
+	 * function header is emitted before dcls/stmts emit anything. */
+	curfntyp = parsed_type;
+	emit_knr_func_typed(parsed_ident, $3);
 };
 
 ansi_func_proto: '(' init_ansi par0 ')'
@@ -3632,46 +3694,7 @@ dcls:
 	init_node = mknode('=', $3, $5);
 	expr(init_node);
 }
-    | dcls type IDENT ',' idlist ';'
-{
-	/* Multi-variable declaration: int a, b, c;  All share the same base type.
-	 * Per-declarator pointer/array decoration is not supported here. */
-	int s, i;
-	Node *n;
-	char *v;
-
-	if ($2 == NIL)
-		die("invalid void declaration");
-	s = SIZE($2);
-	/* First identifier */
-	v = $3->u.v;
-	varadd(v, 0, $2, 0);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), s);
-	if (KIND($2) == STRUCT_T || KIND($2) == UNION_T) {
-		for (i = 0; i < s; i += 4) {
-			if (i == 0)
-				fprintf(of, "\tstorew 0, %%%s\n", v);
-			else
-				fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n\tstorew 0, %%_zinit%d\n", tmp, v, i, tmp);
-			tmp++;
-		}
-	}
-	/* Subsequent identifiers chained through idlist */
-	for (n = $5; n; n = n->r) {
-		v = n->u.v;
-		varadd(v, 0, $2, 0);
-		fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), s);
-		if (KIND($2) == STRUCT_T || KIND($2) == UNION_T) {
-			for (i = 0; i < s; i += 4) {
-				if (i == 0)
-					fprintf(of, "\tstorew 0, %%%s\n", v);
-				else
-					fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n\tstorew 0, %%_zinit%d\n", tmp, v, i, tmp);
-				tmp++;
-			}
-		}
-	}
-}
+    | dcls type IDENT ',' ext_decllist ';' { emit_local_multi_decl($2, $3->u.v, $5); }
     | dcls ALIGNAS '(' NUM ')' type IDENT ';'
 {
 	/* _Alignas(constant) type var; */
@@ -4764,7 +4787,6 @@ yylex()
 			case 'n': n = '\n'; break;
 			case 't': n = '\t'; break;
 			case 'r': n = '\r'; break;
-			case '0': n = '\0'; break;
 			case 'a': n = '\a'; break;  /* Bell/alert */
 			case 'b': n = '\b'; break;  /* Backspace */
 			case 'f': n = '\f'; break;  /* Form feed */
