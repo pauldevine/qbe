@@ -283,13 +283,15 @@ emit_memref(Ref r, Fn *fn, FILE *f)
 /* Store the AX-resident result of a Kl operation to its destination.
  * Slot dests get a single mov (callers that need the high word write it
  * separately).  Tmp dests just receive the low word — rega doesn't know
- * about register pairs. */
+ * about register pairs.  Suppresses self-moves when the destination is
+ * already AX. */
 static void
 store_ax_to(Ref to, Fn *fn, FILE *f)
 {
-	if (rtype(to) == RTmp)
-		fprintf(f, "\tmov %s, ax\n", rname[to.val]);
-	else if (rtype(to) == RSlot)
+	if (rtype(to) == RTmp) {
+		if (strcmp(rname[to.val], "ax") != 0)
+			fprintf(f, "\tmov %s, ax\n", rname[to.val]);
+	} else if (rtype(to) == RSlot)
 		fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(to, fn));
 }
 
@@ -751,7 +753,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
 			} else if (rtype(r0) == RTmp) {
 				/* Register - assume it's actually a slot reference */
-				fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+				{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
 				fprintf(f, "\txor dx, dx\n");  /* Extend to 32-bit */
 			}
 
@@ -774,7 +776,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
 				/* For register destination, we can only store low word */
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			}
 			return;
 
@@ -792,7 +794,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
 				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
 			} else if (rtype(r0) == RTmp) {
-				fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+				{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
 				fprintf(f, "\txor dx, dx\n");
 			}
 
@@ -814,7 +816,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			}
 			return;
 
@@ -831,7 +833,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				int64_t val = fn->con[r0.val].bits.i;
 				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
 			} else if (rtype(r0) == RTmp) {
-				fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+				{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
 			}
 
 			/* Multiply by src1 low word (result in DX:AX) */
@@ -850,7 +852,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			}
 			return;
 
@@ -873,7 +875,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			}
 			return;
 
@@ -896,7 +898,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			}
 			return;
 
@@ -919,7 +921,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			}
 			return;
 
@@ -966,7 +968,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			}
 			return;
 
@@ -1009,7 +1011,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			}
 			return;
 
@@ -1052,7 +1054,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			}
 			return;
 
@@ -1069,7 +1071,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
 			} else if (rtype(r0) == RTmp) {
 				/* Register to register - just copy low word, extend high */
-				fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+				{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
 				fprintf(f, "\tcwd\n");  /* Sign-extend AX to DX:AX */
 			}
 
@@ -1077,7 +1079,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			}
 			return;
 
@@ -1114,7 +1116,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			}
 			return;
 
@@ -1132,7 +1134,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
 				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
 			} else if (rtype(r0) == RTmp) {
-				fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+				{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
 				fprintf(f, "\tcwd\n");
 			}
 
@@ -1479,7 +1481,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 					fprintf(f, "\tmov word [bp%+ld], 0\n", (long)slot(i->to, fn) + 2);
 				} else if (rtype(i->to) == RTmp && i->to.val != RAX) {
-					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+					{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 				}
 			}
 			return;
@@ -1497,7 +1499,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
 			} else if (rtype(r0) == RTmp) {
 				if (i->to.val != r0.val || rtype(i->to) != RTmp)
-					fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+					{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
 			}
 			if (i->op == Oextsw)
 				fprintf(f, "\tcwd\n");
@@ -1507,7 +1509,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp && i->to.val != RAX) {
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			}
 			return;
 
@@ -2109,7 +2111,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				if (rtype(i->to) == RSlot)
 					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				else if (rtype(i->to) == RTmp)
-					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+					{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
 				if (rtype(i->to) == RSlot)
 					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn) + 2);
@@ -2170,7 +2172,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		fprintf(f, "\txor ah, ah\n");  /* zero-extend to word */
 		/* Store result */
 		if (rtype(i->to) == RTmp)
-			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		else if (rtype(i->to) == RSlot)
 			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 		return;
@@ -2201,7 +2203,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		fprintf(f, "\tmov ax, word ptr es:[bx]\n");
 		/* Store result */
 		if (rtype(i->to) == RTmp)
-			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		else if (rtype(i->to) == RSlot)
 			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 		return;
@@ -2292,7 +2294,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		/* Store result */
 		if (rtype(i->to) == RTmp)
-			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		else if (rtype(i->to) == RSlot)
 			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 		return;
@@ -2315,7 +2317,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		/* Store result */
 		if (rtype(i->to) == RTmp)
-			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		else if (rtype(i->to) == RSlot)
 			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 		return;
@@ -2365,7 +2367,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		if (i->op == Odiv) {
 			/* Quotient is in AX */
 			if (rtype(i->to) == RTmp && i->to.val != RAX)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		} else {
 			/* Remainder is in DX */
 			if (rtype(i->to) == RTmp)
@@ -2414,7 +2416,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		if (i->op == Oudiv) {
 			/* Quotient is in AX */
 			if (rtype(i->to) == RTmp && i->to.val != RAX)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		} else {
 			/* Remainder is in DX */
 			if (rtype(i->to) == RTmp)
@@ -2501,12 +2503,16 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		int save_ax = !dst_is_ax;
 		if (save_ax)
 			fprintf(f, "\tpush ax\n");
-		/* Load multiplicand into AX. */
-		fprintf(f, "\tmov ax, ");
-		if (rtype(a0) == RTmp) fprintf(f, "%s\n", rname[a0.val]);
-		else if (rtype(a0) == RCon) fprintf(f, "%"PRIi64"\n", fn->con[a0.val].bits.i);
-		else if (rtype(a0) == RSlot) fprintf(f, "word [bp%+ld]\n", (long)slot(a0, fn));
-		else fprintf(f, "?\n");
+		/* Load multiplicand into AX (skip if it's already there). */
+		if (rtype(a0) == RTmp && strcmp(rname[a0.val], "ax") == 0) {
+			/* nop — AX already holds a0 */
+		} else {
+			fprintf(f, "\tmov ax, ");
+			if (rtype(a0) == RTmp) fprintf(f, "%s\n", rname[a0.val]);
+			else if (rtype(a0) == RCon) fprintf(f, "%"PRIi64"\n", fn->con[a0.val].bits.i);
+			else if (rtype(a0) == RSlot) fprintf(f, "word [bp%+ld]\n", (long)slot(a0, fn));
+			else fprintf(f, "?\n");
+		}
 		/* imul takes a register/memory operand, never an immediate.
 		 * Hoist a constant multiplier through BX. */
 		if (rtype(a1) == RCon) {
@@ -2522,7 +2528,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		/* Result low word is in AX; copy to dst if not AX. */
 		if (!dst_is_ax) {
 			if (rtype(i->to) == RTmp)
-				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 			else if (rtype(i->to) == RSlot)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 			fprintf(f, "\tpop ax\n");
@@ -2588,7 +2594,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		emit_memref(i->arg[0], fn, f);
 		fputc('\n', f);
 		if (rtype(i->to) == RTmp)
-			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		else if (rtype(i->to) == RSlot)
 			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 		fprintf(f, "\tpop ax\n");
@@ -2609,7 +2615,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		fputc('\n', f);
 		fprintf(f, "\tcbw\n");
 		if (rtype(i->to) == RTmp)
-			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		else if (rtype(i->to) == RSlot)
 			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 		fprintf(f, "\tpop ax\n");
