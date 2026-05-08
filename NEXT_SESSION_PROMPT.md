@@ -6,18 +6,38 @@ Modern C toolchain (MiniC frontend → QBE → NASM) targeting the 1978
 Intel 8086 in DOS real mode.  Premise: **Stevie 3.69b (a 1986 vi
 clone) is the workload.  Its needs drive what features get added.**
 
-Build target: `stevie-orig/`.  Pipeline: `tools/build-stevie.sh
---keep-going`.
+Build target: `stevie-orig/`.  Pipeline today: `tools/build-stevie.sh
+--keep-going` (tiny model, .COM output via `nasm -f bin`).
+
+## Strategic shift — full DOS memory-model matrix
+
+Direction set by user: **stop trying to squeeze stevie into a .COM.**
+Instead, support the full DOS memory-model matrix end-to-end so that
+stevie (and any other workload) picks the model that fits its needs.
+
+```
+  Memory   Code      Data      Default     Default
+  Model    Model     Model     Code Ptr    Data Ptr
+  -----    -----     -----     --------    --------
+  tiny     small     small     near        near       (.COM)
+  small    small     small     near        near       (.EXE, 1 CS / 1 DS)
+  medium   big       small     far         near       (.EXE, multi-CS)
+  compact  small     big       near        far        (.EXE, multi-DS)
+  large    big       big       far         far        (.EXE)
+  huge     big       huge      far         huge       (.EXE, items > 64KB)
+```
+
+For stevie specifically the immediate destination is **medium**: code
+crosses 64KB (already at 80KB), data fits in 64KB, libstub doesn't
+need to grow (`union REGS *` stays a 2-byte near pointer).
 
 ## Where we are right now
 
-**24/24 sources still compile and link.**  Path A (near-pointer
-narrowing) landed in commit 5125e70 and dropped stevie.com from
-97982 → 80802 bytes (~17.5%, after a follow-up self-move elision in
-commit e5c013d).  **Binary still exceeds the .COM 64KB ceiling**, so
-DOSBox truncates and we crash before reaching anything useful.
-Either further bloat reduction or a real .EXE (Path B) is required to
-actually run end-to-end.
+**24/24 sources still compile and link** to a tiny-model `.COM` of
+80802 bytes (commit e5c013d).  Path A (near-pointer narrowing) +
+self-move elision landed this session.  Binary still over the 64KB
+.COM ceiling, but that ceiling stops mattering once we hit the .EXE
+pipeline below.
 
 ```
 === Build summary ===
@@ -26,108 +46,144 @@ actually run end-to-end.
   OK: build/stevie-orig/stevie.com (80802 bytes)
 ```
 
-### What THIS session changed (Path A — pointer narrowing)
+### What qbe already supports (foundation already in place)
 
-- **`minic.y` `irtyp`/`irtyp_ret`** now return `'w'` for non-far PTR
-  and FUN.  Far pointers stay `'l'` (4 bytes: segment:offset).
-- **All hard-coded `=l alloc/copy/add/mul/div` sites** in minic.y that
-  produce or consume near-pointer addresses are now `=w`.
-  Function-pointer locals went from `alloc8 8` to `alloc4 2`.
-- **ptrdiff_t** for near-pointer subtraction is `INT` (16-bit), only
-  `LNG` for far-pointer subtraction.
-- **`ops.h`**: `alloc4`/`alloc8`/`alloc16` accept Kw results as well
-  as Kl (`T(w,l,e,e, x,x,e,e)`).  On i8086 the alloc'd address is
-  16-bit.
-- **`parse.c` `usecheck`**: Kw tmp can be used where Km (=Kl) is
-  expected, gated on `T.name == "i8086"` so amd64/arm64 typechecking
-  is unchanged.
-- **`i8086/emit.c`**: Kw constant operands are sign-truncated to 16
-  bits before emission.  Without this, a folded Kw `sub 0, 1` becomes
-  `mov ax, 4294967295` (NASM word-bound warning) instead of `mov ax,
-  -1`.
-- **`stddef.h`**: `size_t` and `ptrdiff_t` are now `unsigned int` /
-  `int` (16-bit), not `long`.  Was forcing 32-bit-pair codegen for
-  every `strlen()+1` expression.
-- **`libstub.asm`**: pointer-arg stack offsets reverted to 2-byte
-  slots (`_intdos` outregs `[bp+6]`, `_int86` outregs `[bp+8]`,
-  `_strrchr` c `[bp+6]`, `_strcpy` src `[bp+6]`).  `_stdin`/`_stdout`/
-  `_stderr` globals added (small non-zero sentinels) so `fprintf()`
-  references resolve.
+- `enum MemModel` covers all 6 models — `all.h:70`.
+- `qbe -m {tiny,small,medium,compact,large,huge}` flag — `main.c:49`.
+- ABI picks RET vs RETF, near-call vs far-call return-slot size based
+  on `uses_far_code()` — `i8086/abi.c:33`.
+- `selpar()` already lays parameters out at `[bp+4]` for near calls
+  vs `[bp+6]` for far calls.
+- Emit prologue knows about all six models and emits the appropriate
+  segment directives — `i8086/emit.c:177`.
+- Verified working: `./qbe -t i8086 -m medium <ssa>` emits `proc far
+  / retf / call far` correctly.
 
-### Why the savings were 17% and not "halve"
+### What's still missing for the full matrix
 
-The original estimate was that pointer narrowing would roughly halve
-the binary.  Actual savings were limited by:
+1. **No `uses_far_data()`** — qbe's data-pointer width is whatever
+   the IL says.  compact/large/huge need data pointers to be `l`
+   (far) by default, but minic emits `w` after Path A.
 
-- **Stevie genuinely uses `long`** for file positions (`fseek`/`ftell`
-  argument types) and BIOS data (`Realsecs`-style timer ticks).  We
-  can't narrow these.  Search/fileio/undo all retain real 32-bit
-  arithmetic.
-- **2488 `xchg bx, ax`-style fixups** in the binary, ~1 byte each.
-  These come from `i8086/emit.c`'s BX-address-mode rewrite — the i8086
-  only allows BX/SI/DI as base registers in `[reg]` addressing, but
-  rega doesn't hint addresses into BX, so a swap is emitted before
-  every store/load through a register-resident pointer.  ~2.5KB of
-  pure overhead.
-- **9072 `mov` instructions** (every reg-mem and mem-reg op).
-  Includes 69 `mov ax, ax` self-moves and 226 `mov bp, sp` /
-  187 `mov sp, bp` prologue/epilogue pairs.
+2. **minic has no `-m` flag** — Path A hard-codes near pointers as
+   `w` regardless of model.  Needs to be model-driven:
+
+   | model    | code ptr (FUN) | data ptr (PTR) |
+   |----------|----------------|----------------|
+   | tiny     | w              | w              |
+   | small    | w              | w              |
+   | medium   | **l**          | w              |
+   | compact  | w              | **l**          |
+   | large    | **l**          | **l**          |
+   | huge     | **l**          | **l** (huge)   |
+
+3. **No .EXE pipeline** — `tools/build-stevie.sh` only knows
+   `nasm -f bin` → flat .COM.  Medium+ requires `nasm -f obj`
+   (OMF) → DOS linker → MZ .EXE.
+
+4. **No DOS linker on macOS** — wlink (Open Watcom) builds from
+   source; alternative is a custom OMF linker (~500-800 LOC).
+
+5. **crt0 has no MZ variant** — current `crt0.asm` is .COM-only.
+   .EXE entry needs to set DS to DGROUP and handle a separate stack
+   segment.
+
+6. **libstub stack offsets depend on model** — for compact/large/
+   huge, pointer args are 4-byte (segment:offset) again, so
+   `_intdos`/`_strcpy`/`_strrchr`/`_int86` need model-aware variants
+   or per-model rebuilds.
 
 ## What's next — in dependency order
 
-### Priority 1 — get .COM under 64KB (blocking)
+### Step 1 — minic learns memory-model awareness
 
-Without this, DOSBox truncates the binary at 0xFFFE and execution
-crashes the moment it jumps into the upper half.
+**Goal:** `minic -m <model>` produces IR with the right pointer
+widths per the table above.  small/tiny still works exactly like
+today (regression check).
 
-#### 1a — Cheaper paths first (incremental codegen wins)
+Concrete work:
+- Add `-m <model>` arg parsing to `minic/minic.y` `main()`.
+  Default = small (matches Path A behaviour).
+- Replace the hard-coded `KIND(ctyp) == PTR && !ISFAR(ctyp)` →
+  `'w'` rule in `irtyp()` / `irtyp_ret()` with a model lookup:
+  ```
+  near_data = (model in {tiny, small, medium});
+  near_code = (model in {tiny, small, compact});
+  if (KIND == FUN)        return near_code ? 'w' : 'l';
+  if (KIND == PTR && ISFAR(t))   return 'l';
+  if (KIND == PTR)        return near_data ? 'w' : 'l';
+  ```
+- Audit the 28+ hard-coded `=w alloc/copy/add/mul/div` sites we
+  changed in commit 5125e70 — those are *near pointer* operations.
+  In compact/large/huge, the alloc result is still a near pointer
+  (you can't far-alloc a stack slot), but the data-pointer arithmetic
+  on top changes.  Sites to revisit:
+  - `=w copy $name` (function/global address) — code addresses are
+    `'w'` if near_code, else `'l'`.
+  - `=w add %_clit` (struct/array member offset) — uses the IL type
+    of the address being added to (the clit is always near, so
+    stays `'w'`).
+  - `=w add %ptr, off` (member access on a runtime pointer) —
+    matches `irtyp(ptr_ctyp)`, which is now model-aware automatically.
+- Update `minic_cpp_v2` (the cpp wrapper) to pass `-m` through.
+- Update `tools/build-stevie.sh` to plumb `--model=<m>` through to
+  both minic and qbe.
 
-- **Eliminate `mov ax, ax` self-moves** (69 occurrences, 138 bytes).
-  Track them down to the emit site and gate on src!=dst.
-- **Hint pointer values into BX/SI/DI** during register allocation so
-  loads/stores don't need the xchg dance.  Each removed xchg pair is
-  2 bytes; ~2KB potential.
-- **Coalesce prologue/epilogue** when no locals are allocated (some
-  functions have `push bp / mov bp, sp / pop bp / ret` with no body).
+Validation: rebuild stevie with `--model=small`, expect identical
+behaviour to today.  Then `--model=medium`, expect bigger but
+working asm with `proc far` / `call far` everywhere.
 
-Estimated combined savings: 5-10KB.  **Probably won't get us under
-64KB on its own** but might get within striking distance.
+### Step 2 — stand up the .EXE pipeline (medium model)
 
-#### 1b — Path B (multi-segment .EXE) — bigger lift, no ceiling
+**Goal:** `tools/build-stevie.sh --model=medium --exe` produces a
+runnable `stevie.exe`.
 
-Per the original analysis, NASM `-f bin` doesn't support segment-base
-references.  Need:
+Concrete work:
+- Switch per-TU assembly from `nasm -f bin` to `nasm -f obj` (OMF).
+  Verify NASM emits sane segment directives for medium model.
+- Pick a DOS linker:
+  - **Easiest:** install Open Watcom (homebrew has `open-watcom-v2`
+    on macOS via `brew tap open-watcom/open-watcom-v2-binaries` —
+    confirm), use `wlink`.
+  - **Fallback:** write a minimal OMF→MZ linker in Python.  Spec
+    in Open Watcom docs (`/openwatcom/docs/pdf/lr.pdf`) — only
+    need to handle the records NASM emits (THEADR, SEGDEF,
+    GRPDEF, EXTDEF, PUBDEF, LEDATA, FIXUPP, MODEND).
+- Write an `crt0_exe.asm` variant that:
+  - Sets DS to DGROUP at entry.
+  - Initializes SS:SP to the stack segment (separate from DGROUP).
+  - Calls `_main` via far call.
+  - Exits with INT 21h AH=4Ch using AL from `_main`.
+- Update `build-stevie.sh` to drive the new pipeline behind
+  `--exe`/`--model=medium`.
+- Update `_malloc` heap layout — without a fixed image-end, the
+  heap starts after BSS (linker-defined `_end`) and grows up to
+  the bottom of the stack segment.
 
-1. Compile each TU with `qbe -t i8086 -m medium`.
-2. Assemble each TU with `nasm -f obj` (NASM emits OMF).
-3. Link with a real DOS linker.  Options:
-   - **wlink (Open Watcom)** — best, build from source on macOS.
-   - **Custom Python linker** against NASM's OMF output — ~500-800
-     lines.  OMF reference at Open Watcom docs.
-4. `tools/build-stevie.sh` learns a `--exe` mode.
-5. crt0 needs an MZ-EXE-style entry that sets DS to DGROUP.
+Validation: `dosbox build/stevie-orig/stevie.exe` reaches `_main`
+without truncation, runs `windinit`, calls `_int86` cleanly.
 
-Path B unlocks much more than .COM (>64KB code, separate code/data
-segments, multiple data segments).  But it's a 1-2 session lift on its
-own and there are no existing tests for medium-model emission against
-stevie.
+### Step 3 — exercise medium model under DOSBox
 
-### Priority 2 — actually run it end-to-end
+**Goal:** stevie actually loads a file and renders the screen.
 
-Once Priority 1 lands:
+Likely-failure stack (already partially mapped from prior runs):
+1. crt0 — DS/SS setup, stack init.
+2. `windinit` — first INT 10h / INT 21h calls.  `_int86`/`_intdos`
+   are now real.
+3. `malloc` — real bump allocator; verify it works in .EXE layout.
+4. Far pointer arithmetic — `0xF400800D` TI Pro detection should
+   fail strncmp and fall back to IBM PC.
+5. Screen drawing — VGA mode 3 text-mode I/O via INT 10h.
 
-```sh
-dosbox build/stevie-orig/stevie.com   # or stevie.exe
-```
+### Step 4 — fill in compact / large / huge
 
-Likely-failure stack:
-1. crt0 — segment setup, stack init.  Mostly battle-tested.
-2. `windinit` — first DOS interaction.  `_int86`/`_intdos` are real
-   now, so this should mostly work.
-3. malloc — real bump allocator now.  May exhaust if we ask for too
-   much (heap top is `SP - 1024`).
-4. Far pointer arithmetic — `0xF400800D` access for TI Pro detection;
-   should fail strncmp and fall back to IBM PC.
+Defer until after medium is running.  Each one needs:
+- minic data-pointer rules (already covered by step 1's table).
+- libstub variant with 4-byte data-pointer args.
+- Possibly per-model `crt0` adjustments.
+- huge specifically needs segment-arithmetic helpers for
+  `array[i]` where `i * sizeof > 64KB`.
 
 ## Hard-won lessons (all in memory)
 
@@ -136,10 +192,11 @@ See `~/.claude/projects/-Users-pauldevine-projects-qbe/memory/`:
   uniform-* peeling, CRLF/0x1A, macOS sysroot trap.
 - `reference_qbe_upstream.md` — `upstream` remote points at
   c9x.me/qbe.git.
-- `project_minic_pointer_bloat.md` — Path A landed; details what was
-  changed and why the savings stopped at 17%.
+- `project_minic_pointer_bloat.md` — Path A landed; details what
+  was changed and why the savings stopped at 17%.
 - `feedback_libstub_ptr_abi.md` — near-pointer args = 2 stack bytes
-  after Path A; far-pointer args = 4 bytes.
+  after Path A; far-pointer args = 4 bytes.  This goes back in
+  flux for compact/large/huge.
 
 ## Useful one-liners
 
@@ -147,7 +204,7 @@ See `~/.claude/projects/-Users-pauldevine-projects-qbe/memory/`:
 # Rebuild
 make qbe && cd minic && make && cd ..
 
-# Build stevie
+# Build stevie (current — tiny / .COM)
 rm -rf build/stevie-orig && tools/build-stevie.sh --keep-going
 
 # Pass/fail summary
@@ -164,25 +221,15 @@ echo "self-moves: $(grep -cE '^\s+mov ([a-z][a-z]), \1$' build/stevie-orig/stevi
 echo "xchg: $(grep -c '^\s*xchg' build/stevie-orig/stevie.full.asm)"
 echo "32-bit adc: $(grep -c '^\s*adc ' build/stevie-orig/stevie.full.asm)"
 
-# Verify -m medium emits far code
+# Verify qbe -m medium emits far code (already works)
 ./qbe -t i8086 -m medium build/stevie-orig/alloc.ssa | grep -E "proc far|retf|call far" | head
-
-# Run in DOSBox.  Will still truncate at 0xFFFE.
-cat > /tmp/dosrun.conf <<'EOF'
-[autoexec]
-mount c /Users/pauldevine/projects/qbe/build/stevie-orig
-c:
-stevie.com
-exit
-EOF
-dosbox -conf /tmp/dosrun.conf
 
 # Cherry-pick from upstream qbe
 git fetch upstream
 git log upstream/master --oneline -- spill.c rega.c isel.c
 
 # Inspect the pipeline for one file
-cat build/stevie-orig/<base>.pp.c    # cpp output (post tr/sed)
+cat build/stevie-orig/<base>.pp.c    # cpp output
 cat build/stevie-orig/<base>.ssa     # minic's IR
 cat build/stevie-orig/<base>.asm     # qbe i8086 emit
 cat build/stevie-orig/<base>.nasm.asm
