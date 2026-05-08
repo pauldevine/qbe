@@ -706,8 +706,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	/* Special handling for 32-bit (Kl) operations on 16-bit hardware.
 	 * Ostorel reaches here even though its result class is Kw (void) —
 	 * the data IS 32-bit, so we need the multi-word path.  Same for
-	 * Oc*l comparisons: result is Kw but the args are 32-bit. */
-	if (i->cls == Kl || i->op == Ostorel
+	 * Oc*l comparisons: result is Kw but the args are 32-bit.
+	 *
+	 * Oaddr is excluded: the address-of (lea) of a fast-local slot is
+	 * a 16-bit offset (high half is implicitly 0 for DS-relative
+	 * pointers in small/medium model).  Let it fall through to the
+	 * format-string `lea %=, %M0` template — rega allocates a single
+	 * register and the omap entry is `Ki` (matches both Kw and Kl). */
+	if ((i->cls == Kl && i->op != Oaddr) || i->op == Ostorel
 	    || INRANGE(i->op, Oceql, Ocultl)) {
 		/*
 		 * 32-bit operations on 16-bit x86 require multi-instruction sequences.
@@ -1407,6 +1413,93 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			if (rtype(i->to) == RSlot) {
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
+			}
+			return;
+
+		case Oswap:
+			/* rega emits Oswap to resolve parallel moves at block
+			 * boundaries.  rega doesn't allocate pairs for Kl, so
+			 * the temp lives in a single register (low half).  Swap
+			 * just that register; the implicit high half (0 for
+			 * pointers, sign-extended for longs) follows the value
+			 * via the Oadd/Osub Kl handlers' xor/cwd. */
+			if (rtype(i->arg[0]) == RTmp && rtype(i->arg[1]) == RTmp)
+				fprintf(f, "\txchg %s, %s\n",
+				    rname[i->arg[0].val], rname[i->arg[1].val]);
+			return;
+
+		case Odiv:
+		case Oudiv:
+		case Orem:
+		case Ourem:
+			/* 32-bit division on 16-bit hardware would need a long
+			 * division library routine.  Not implemented yet —
+			 * emit the 16-bit form via load32_dxax + idiv/div as a
+			 * best-effort, marked TODO so callers using `long`
+			 * division still get something traceable. */
+			fprintf(f, "\t; TODO: 32-bit %s — using 16-bit truncated form\n",
+			    i->op == Odiv ? "idiv" :
+			    i->op == Oudiv ? "div" :
+			    i->op == Orem ? "irem" : "urem");
+			load32_dxax(r0, fn, f);
+			if (rtype(r1) == RSlot)
+				fprintf(f, "\t%s word [bp%+ld]\n",
+				    (i->op == Odiv || i->op == Orem) ? "idiv" : "div",
+				    (long)slot(r1, fn));
+			else if (rtype(r1) == RTmp)
+				fprintf(f, "\t%s %s\n",
+				    (i->op == Odiv || i->op == Orem) ? "idiv" : "div",
+				    rname[r1.val]);
+			else if (rtype(r1) == RCon) {
+				fprintf(f, "\tpush bx\n");
+				fprintf(f, "\tmov bx, %d\n",
+				    (int)(fn->con[r1.val].bits.i & 0xFFFF));
+				fprintf(f, "\t%s bx\n",
+				    (i->op == Odiv || i->op == Orem) ? "idiv" : "div");
+				fprintf(f, "\tpop bx\n");
+			}
+			/* Result: AX (quotient) or DX (remainder) */
+			if (i->op == Orem || i->op == Ourem) {
+				if (rtype(i->to) == RSlot) {
+					fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn));
+					fprintf(f, "\tmov word [bp%+ld], 0\n", (long)slot(i->to, fn) + 2);
+				} else if (rtype(i->to) == RTmp) {
+					fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
+				}
+			} else {
+				if (rtype(i->to) == RSlot) {
+					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+					fprintf(f, "\tmov word [bp%+ld], 0\n", (long)slot(i->to, fn) + 2);
+				} else if (rtype(i->to) == RTmp && i->to.val != RAX) {
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				}
+			}
+			return;
+
+		case Oextsw:
+		case Oextuw:
+			/* Extend 16-bit (Kw) value to 32-bit (Kl) result.
+			 * Oextsw: sign-extend (cwd: AX → DX:AX with sign bit).
+			 * Oextuw: zero-extend (xor dx, dx).
+			 * Load arg into AX first; result in DX:AX, then store. */
+			if (rtype(r0) == RSlot) {
+				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
+			} else if (rtype(r0) == RCon) {
+				int64_t val = fn->con[r0.val].bits.i;
+				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
+			} else if (rtype(r0) == RTmp) {
+				if (i->to.val != r0.val || rtype(i->to) != RTmp)
+					fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+			}
+			if (i->op == Oextsw)
+				fprintf(f, "\tcwd\n");
+			else
+				fprintf(f, "\txor dx, dx\n");
+			if (rtype(i->to) == RSlot) {
+				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
+			} else if (rtype(i->to) == RTmp && i->to.val != RAX) {
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
 			}
 			return;
 
