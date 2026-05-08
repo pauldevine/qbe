@@ -123,9 +123,9 @@ O(ultof,   T(e,e,l,l, e,e,x,x), F(1,0,0,0,0,0,0,0,0,0)) X(0,0,1) V(0)
 O(cast,    T(s,d,w,l, x,x,x,x), F(1,0,0,0,0,0,0,0,0,0)) X(0,0,1) V(0)
 
 /* Stack Allocation */
-O(alloc4,  T(e,l,e,e, e,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
-O(alloc8,  T(e,l,e,e, e,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
-O(alloc16, T(e,l,e,e, e,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
+O(alloc4,  T(w,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
+O(alloc8,  T(w,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
+O(alloc16, T(w,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
 
 /* Variadic Function Helpers */
 O(vaarg,   T(m,m,m,m, x,x,x,x), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)

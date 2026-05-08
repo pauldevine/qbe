@@ -467,9 +467,17 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 			case RCon:
 				pc = &fn->con[r.val];
 				switch (pc->type) {
-				case CBits:
-					fprintf(f, "%"PRIi64, pc->bits.i);
+				case CBits: {
+					int64_t v = pc->bits.i;
+					/* Truncate to the instruction's size class so that, e.g.,
+					 * a Kw `sub 0, 1` folded to int32 -1 (= 0xFFFFFFFF =
+					 * 4294967295) emits as -1 / 0xFFFF rather than blowing
+					 * past NASM's word bound. */
+					if (i->cls == Kw)
+						v = (int64_t)(int16_t)v;
+					fprintf(f, "%"PRIi64, v);
 					break;
+				}
 				case CAddr:
 					emitaddr(pc, f);
 					break;

@@ -767,13 +767,13 @@ irtyp(unsigned ctyp)
 {
 	int k = KIND(ctyp);
 
-	/* Check pointer/function types first - they are always 'l' (64-bit for QBE) */
-	/* This must come before ISFLOAT check because type composition can */
-	/* accidentally set the FLOAT bit */
-	/* Note: Far pointers are 32-bit (segment:offset) but we use 'l' in QBE IL */
-	/* The i8086 backend handles the actual size difference */
-	if (k == PTR || k == FUN)
+	/* Pointer/function types: far pointers are 32-bit (segment:offset),
+	 * encoded as 'l'; near pointers in i8086 small/medium model are
+	 * 16-bit, encoded as 'w'. */
+	if (k == PTR && ISFAR(ctyp))
 		return 'l';
+	if (k == PTR || k == FUN)
+		return 'w';
 	if (ISFLOAT(ctyp)) {
 		if (k == LNG) return 'd';  /* double */
 		return 's';  /* float */
@@ -782,8 +782,8 @@ irtyp(unsigned ctyp)
 	if (k == CHR) return 'b';
 	/* Short ints are halfwords - check KIND to avoid false positives from shifted types */
 	if ((ctyp & SHORT) && k == INT) return 'h';
-	/* Pointers, longs, function pointers are 8 bytes */
-	if (k == PTR || k == LNG || SIZE(ctyp) == 8) return 'l';
+	/* Longs and 8-byte types */
+	if (k == LNG || SIZE(ctyp) == 8) return 'l';
 	/* Regular ints are words */
 	return 'w';
 }
@@ -792,8 +792,10 @@ irtyp(unsigned ctyp)
 char
 irtyp_ret(unsigned ctyp)
 {
-	if (KIND(ctyp) == PTR || KIND(ctyp) == FUN)
+	if (KIND(ctyp) == PTR && ISFAR(ctyp))
 		return 'l';
+	if (KIND(ctyp) == PTR || KIND(ctyp) == FUN)
+		return 'w';
 	if (ISFLOAT(ctyp)) {
 		if (KIND(ctyp) == LNG) return 'd';  /* double */
 		return 's';  /* float */
@@ -1010,7 +1012,8 @@ prom(int op, Symb *l, Symb *r)
 			goto Scale;
 		if (l->ctyp != r->ctyp)
 			die("non-homogeneous pointers in substraction");
-		return LNG;
+		/* ptrdiff_t: 16-bit for near pointers, 32-bit for far. */
+		return ISFAR(l->ctyp) ? LNG : INT;
 	}
 
 Scale:
@@ -1018,12 +1021,14 @@ Scale:
 	if (r->t == Con)
 		r->u.n *= sz;
 	else {
-		if (irtyp(r->ctyp) != 'l')
+		char pt = irtyp(l->ctyp);  /* 'w' near, 'l' far */
+		if (pt == 'l' && irtyp(r->ctyp) != 'l')
 			sext(r);
-		fprintf(of, "\t%%t%d =l mul %d, ", tmp, sz);
+		fprintf(of, "\t%%t%d =%c mul %d, ", tmp, pt, sz);
 		psymb(*r);
 		fprintf(of, "\n");
 		r->u.n = tmp++;
+		r->ctyp = (pt == 'l') ? LNG : INT;
 	}
 	return l->ctyp;
 }
@@ -1293,7 +1298,7 @@ expr(Node *n)
 			/* Copy function address to temporary */
 			fprintf(of, "\t");
 			psymb(sr);
-			fprintf(of, " =l copy $%s\n", n->u.v);
+			fprintf(of, " =w copy $%s\n", n->u.v);
 		} else if (var_isarray(n->u.v)) {
 			/* Arrays - don't load, the lvalue IS the pointer */
 			sr = s0;
@@ -1357,7 +1362,7 @@ expr(Node *n)
 			int i;
 
 			/* Allocate temporary storage */
-			fprintf(of, "\t%%_clit%d =l alloc%d %d\n", clitnum, iralign(ctyp), s);
+			fprintf(of, "\t%%_clit%d =w alloc%d %d\n", clitnum, iralign(ctyp), s);
 
 			if (KIND(ctyp) == STRUCT_T || KIND(ctyp) == UNION_T) {
 				/* Struct/union initialization */
@@ -1370,7 +1375,7 @@ expr(Node *n)
 					if (j == 0)
 						fprintf(of, "\tstorew 0, %%_clit%d\n", clitnum);
 					else {
-						fprintf(of, "\t%%t%d =l add %%_clit%d, %d\n", tmp, clitnum, j);
+						fprintf(of, "\t%%t%d =w add %%_clit%d, %d\n", tmp, clitnum, j);
 						fprintf(of, "\tstorew 0, %%t%d\n", tmp);
 						tmp++;
 					}
@@ -1402,7 +1407,7 @@ expr(Node *n)
 
 					/* Compute member address and store */
 					if (m->offset > 0) {
-						fprintf(of, "\t%%t%d =l add %%_clit%d, %d\n", tmp, clitnum, m->offset);
+						fprintf(of, "\t%%t%d =w add %%_clit%d, %d\n", tmp, clitnum, m->offset);
 						fprintf(of, "\tstore%c ", irtyp(m->ctyp));
 						psymb(val);
 						fprintf(of, ", %%t%d\n", tmp);
@@ -1437,7 +1442,7 @@ expr(Node *n)
 						psymb(val);
 						fprintf(of, ", %%_clit%d\n", clitnum);
 					} else {
-						fprintf(of, "\t%%t%d =l add %%_clit%d, %d\n", tmp, clitnum, i * elems);
+						fprintf(of, "\t%%t%d =w add %%_clit%d, %d\n", tmp, clitnum, i * elems);
 						fprintf(of, "\tstore%c ", irtyp(elemtyp));
 						psymb(val);
 						fprintf(of, ", %%t%d\n", tmp);
@@ -1453,7 +1458,7 @@ expr(Node *n)
 				sr.ctyp = ctyp;
 				fprintf(of, "\t");
 				psymb(sr);
-				fprintf(of, " =l copy %%_clit%d\n", clitnum);
+				fprintf(of, " =w copy %%_clit%d\n", clitnum);
 			} else {
 				/* Scalar compound literal - store and load value */
 				char t = irtyp(ctyp);
@@ -1629,7 +1634,7 @@ expr(Node *n)
 				addr.ctyp = IDIR(m->ctyp);
 				fprintf(of, "\t");
 				psymb(addr);
-				fprintf(of, " =l add ");
+				fprintf(of, " =w add ");
 				psymb(s0);
 				fprintf(of, ", %d\n", m->offset);
 			} else {
@@ -1787,7 +1792,7 @@ expr(Node *n)
 						addr.ctyp = IDIR(m->ctyp);
 						fprintf(of, "\t");
 						psymb(addr);
-						fprintf(of, " =l add ");
+						fprintf(of, " =w add ");
 						psymb(s_struct);
 						fprintf(of, ", %d\n", m->offset);
 					} else {
@@ -2093,7 +2098,7 @@ expr(Node *n)
 	if (n->op == '-'
 	&&  KIND(s0.ctyp) == PTR
 	&&  KIND(s1.ctyp) == PTR) {
-		fprintf(of, "\t%%t%d =l div ", tmp);
+		fprintf(of, "\t%%t%d =%c div ", tmp, irtyp(sr.ctyp));
 		psymb(sr);
 		fprintf(of, ", %d\n", SIZE(DREF(s0.ctyp)));
 		sr.u.n = tmp++;
@@ -2143,7 +2148,7 @@ lval(Node *n)
 			int i;
 
 			/* Allocate temporary storage */
-			fprintf(of, "\t%%_clit%d =l alloc%d %d\n", clitnum, iralign(ctyp), s);
+			fprintf(of, "\t%%_clit%d =w alloc%d %d\n", clitnum, iralign(ctyp), s);
 
 			if (KIND(ctyp) == STRUCT_T || KIND(ctyp) == UNION_T) {
 				/* Struct/union initialization */
@@ -2156,7 +2161,7 @@ lval(Node *n)
 					if (j == 0)
 						fprintf(of, "\tstorew 0, %%_clit%d\n", clitnum);
 					else {
-						fprintf(of, "\t%%t%d =l add %%_clit%d, %d\n", tmp, clitnum, j);
+						fprintf(of, "\t%%t%d =w add %%_clit%d, %d\n", tmp, clitnum, j);
 						fprintf(of, "\tstorew 0, %%t%d\n", tmp);
 						tmp++;
 					}
@@ -2187,7 +2192,7 @@ lval(Node *n)
 					}
 
 					if (m->offset > 0) {
-						fprintf(of, "\t%%t%d =l add %%_clit%d, %d\n", tmp, clitnum, m->offset);
+						fprintf(of, "\t%%t%d =w add %%_clit%d, %d\n", tmp, clitnum, m->offset);
 						fprintf(of, "\tstore%c ", irtyp(m->ctyp));
 						psymb(val);
 						fprintf(of, ", %%t%d\n", tmp);
@@ -2217,7 +2222,7 @@ lval(Node *n)
 			sr.ctyp = ctyp;
 			fprintf(of, "\t");
 			psymb(sr);
-			fprintf(of, " =l copy %%_clit%d\n", clitnum);
+			fprintf(of, " =w copy %%_clit%d\n", clitnum);
 		}
 		break;
 	case '@':
@@ -2260,7 +2265,7 @@ lval(Node *n)
 				sr.ctyp = m->ctyp;  /* lval returns the type, not IDIR */
 				fprintf(of, "\t");
 				psymb(sr);
-				fprintf(of, " =l add ");
+				fprintf(of, " =w add ");
 				psymb(s0);
 				fprintf(of, ", %d\n", m->offset);
 			} else {
@@ -2860,7 +2865,7 @@ emit_local_init(unsigned ctyp, Node *ident, Node *initexpr)
 	v = ident->u.v;
 	s = SIZE(ctyp);
 	varadd(v, 0, ctyp, 0);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(ctyp), s);
+	fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign(ctyp), s);
 	if (initexpr) {
 		init_node = mknode('=', ident, initexpr);
 		expr(init_node);
@@ -2939,19 +2944,19 @@ emit_local_multi_decl_full(unsigned base, Node *list)
 			unsigned elem = (KIND(base) == PTR) ? DREF(base) : base;
 			int total = count * SIZE(elem);
 			varadd(v, 0, IDIR(elem), 1);
-			fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(elem), total);
+			fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign(elem), total);
 			continue;
 		}
 		t = (n->op == 'P' || n->op == 'A') ? IDIR(base) : base;
 		varadd(v, 0, t, n->op == 'A' ? 1 : 0);
-		fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(t), SIZE(t));
+		fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign(t), SIZE(t));
 		if (KIND(t) == STRUCT_T || KIND(t) == UNION_T) {
 			int sz = SIZE(t);
 			for (i = 0; i < sz; i += 4) {
 				if (i == 0)
 					fprintf(of, "\tstorew 0, %%%s\n", v);
 				else {
-					fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n", tmp, v, i);
+					fprintf(of, "\t%%_zinit%d =w add %%%s, %d\n", tmp, v, i);
 					fprintf(of, "\tstorew 0, %%_zinit%d\n", tmp);
 				}
 				tmp++;
@@ -2978,13 +2983,13 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 	s = SIZE(base);
 	v = first;
 	varadd(v, 0, base, 0);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(base), s);
+	fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign(base), s);
 	if (KIND(base) == STRUCT_T || KIND(base) == UNION_T)
 		for (i = 0; i < s; i += 4) {
 			if (i == 0)
 				fprintf(of, "\tstorew 0, %%%s\n", v);
 			else {
-				fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n", tmp, v, i);
+				fprintf(of, "\t%%_zinit%d =w add %%%s, %d\n", tmp, v, i);
 				fprintf(of, "\tstorew 0, %%_zinit%d\n", tmp);
 			}
 			tmp++;
@@ -3011,13 +3016,13 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 			int count = n->l->u.n;
 			int total = count * SIZE(ebase);
 			varadd(v, 0, IDIR(ebase), 1);
-			fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(ebase), total);
+			fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign(ebase), total);
 			continue;
 		}
 		if (n->op == 'P') {
 			t = IDIR(ebase);
 			varadd(v, 0, t, 0);
-			fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(t), SIZE(t));
+			fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign(t), SIZE(t));
 			if (n->l) {
 				Node *id = mknode('V', 0, 0);
 				strcpy(id->u.v, v);
@@ -3030,14 +3035,14 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 		 * `[N]` similarly lands at element-of-base. */
 		t = (n->op == 'A') ? IDIR(ebase) : ebase;
 		varadd(v, 0, t, n->op == 'A' ? 1 : 0);
-		fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign(t), SIZE(t));
+		fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign(t), SIZE(t));
 		if (KIND(t) == STRUCT_T || KIND(t) == UNION_T) {
 			int sz = SIZE(t);
 			for (i = 0; i < sz; i += 4) {
 				if (i == 0)
 					fprintf(of, "\tstorew 0, %%%s\n", v);
 				else {
-					fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n", tmp, v, i);
+					fprintf(of, "\t%%_zinit%d =w add %%%s, %d\n", tmp, v, i);
 					fprintf(of, "\tstorew 0, %%_zinit%d\n", tmp);
 				}
 				tmp++;
@@ -3088,7 +3093,7 @@ emit_knr_func(char *fname, Node *params)
 	for (t = 0, n = params; n; t++, n = n->r) {
 		s = varget(n->u.v);
 		m = SIZE(s->ctyp);
-		fprintf(of, "\t%%%s =l alloc%d %d\n", n->u.v, iralign(s->ctyp), m);
+		fprintf(of, "\t%%%s =w alloc%d %d\n", n->u.v, iralign(s->ctyp), m);
 		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
 		fprintf(of, ", %%%s\n", n->u.v);
 	}
@@ -3130,7 +3135,7 @@ emit_knr_func_typed(char *fname, Node *params)
 	for (t = 0, n = params; n; t++, n = n->r) {
 		s = varget(n->u.v);
 		m = SIZE(s->ctyp);
-		fprintf(of, "\t%%%s =l alloc%d %d\n", n->u.v, iralign(s->ctyp), m);
+		fprintf(of, "\t%%%s =w alloc%d %d\n", n->u.v, iralign(s->ctyp), m);
 		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
 		fprintf(of, ", %%%s\n", n->u.v);
 	}
@@ -3916,7 +3921,7 @@ ansi_func_proto: '(' init_ansi par0 ')'
 	for (t=0, n=$3; n; t++, n=n->r) {
 		s = varget(n->u.v);
 		m = SIZE(s->ctyp);
-		fprintf(of, "\t%%%s =l alloc%d %d\n", n->u.v, iralign(s->ctyp), m);
+		fprintf(of, "\t%%%s =w alloc%d %d\n", n->u.v, iralign(s->ctyp), m);
 		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
 		fprintf(of, ", %%%s\n", n->u.v);
 	}
@@ -4022,7 +4027,7 @@ prot_knr: IDENT '(' par0 ')'
 	for (t=0, n=$3; n; t++, n=n->r) {
 		s = varget(n->u.v);
 		m = SIZE(s->ctyp);
-		fprintf(of, "\t%%%s =l alloc%d %d\n", n->u.v, iralign(s->ctyp), m);
+		fprintf(of, "\t%%%s =w alloc%d %d\n", n->u.v, iralign(s->ctyp), m);
 		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
 		fprintf(of, ", %%%s\n", n->u.v);
 	}
@@ -4107,7 +4112,7 @@ dcls:
 	v = $3->u.v;
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), s);
+	fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($2), s);
 
 	/* Zero-initialize struct/union for bitfield support */
 	if (KIND($2) == STRUCT_T || KIND($2) == UNION_T) {
@@ -4116,7 +4121,7 @@ dcls:
 			if (i == 0)
 				fprintf(of, "\tstorew 0, %%%s\n", v);
 			else
-				fprintf(of, "\t%%_zinit%d =l add %%%s, %d\n\tstorew 0, %%_zinit%d\n", tmp, v, i, tmp);
+				fprintf(of, "\t%%_zinit%d =w add %%%s, %d\n\tstorew 0, %%_zinit%d\n", tmp, v, i, tmp);
 			tmp++;
 		}
 	}
@@ -4133,7 +4138,7 @@ dcls:
 	v = $3->u.v;
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), s);
+	fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($2), s);
 	/* Evaluate initializer as `IDENT = expr` */
 	init_node = mknode('=', $3, $5);
 	expr(init_node);
@@ -4193,7 +4198,7 @@ dcls:
 	varadd(v, 0, $6, 0);
 	/* Emit comment about alignment requirement */
 	fprintf(of, "\t# _Alignas(%d) for %%%s\n", align, v);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, align, s);
+	fprintf(of, "\t%%%s =w alloc%d %d\n", v, align, s);
 }
     | dcls ALIGNAS '(' type ')' type IDENT ';'
 {
@@ -4221,7 +4226,7 @@ dcls:
 		KIND($4) == CHR ? "char" :
 		KIND($4) == LNG ? "long" : "int",
 		align, v);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, align, s);
+	fprintf(of, "\t%%%s =w alloc%d %d\n", v, align, s);
 }
     | dcls STATIC type IDENT ';'
 {
@@ -4233,7 +4238,7 @@ dcls:
 	v = $4->u.v;
 	s = SIZE($3);
 	varadd(v, 0, $3, 0);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($3), s);
+	fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($3), s);
 }
     | dcls STATIC type IDENT '=' expr ';' { emit_local_init($3, $4, $6); }
     | dcls STATIC type IDENT '[' ']' '=' '{' sai_init_clear sai_list opt_trailing_comma '}' ';'
@@ -4255,7 +4260,7 @@ dcls:
 	s = SIZE($3);
 	total = s * n;
 	varadd(v, 0, IDIR($3), 1);
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($3), total);
+	fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($3), total);
 }
     | dcls EXTERN type IDENT ';'
 {
@@ -4300,7 +4305,7 @@ dcls:
 	s = SIZE($2);  /* element size */
 	total = s * n;
 	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), total);
+	fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($2), total);
 }
     | dcls type IDENT '[' NUM ']' '=' '{' initlist '}' ';'
 {
@@ -4315,13 +4320,13 @@ dcls:
 	s = SIZE($2);  /* element size */
 	total = s * n;
 	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
-	fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), total);
+	fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($2), total);
 
 	/* Zero-initialize the array first */
 	{
 		int j;
 		for (j = 0; j < n; j++) {
-			fprintf(of, "\t%%t%d =l add ", tmp);
+			fprintf(of, "\t%%t%d =w add ", tmp);
 			fprintf(of, "%%%s, %d\n", v, j * s);
 			fprintf(of, "\tstore%c 0, %%t%d\n", irtyp($2), tmp);
 			tmp++;
@@ -4352,7 +4357,7 @@ dcls:
 				i++;  /* Only increment for non-designated */
 			}
 
-			fprintf(of, "\t%%t%d =l add ", tmp);
+			fprintf(of, "\t%%t%d =w add ", tmp);
 			fprintf(of, "%%%s, %d\n", v, idx * s);
 			fprintf(of, "\tstore%c ", irtyp($2));
 			psymb(val);
@@ -4377,7 +4382,7 @@ dcls:
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
 	varadd(v, 0, fptr_type, 0);  /* Not an array */
-	fprintf(of, "\t%%%s =l alloc8 8\n", v);  /* Pointers are 8 bytes */
+	fprintf(of, "\t%%%s =w alloc4 2\n", v);  /* Near pointer: 2 bytes */
 }
     | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' ',' ext_decllist ';'
 {
@@ -4394,7 +4399,7 @@ dcls:
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));
 	varadd(v, 0, fptr_type, 0);
-	fprintf(of, "\t%%%s =l alloc8 8\n", v);
+	fprintf(of, "\t%%%s =w alloc4 2\n", v);  /* Near pointer: 2 bytes */
 	(void)first;
 	emit_local_multi_decl_full($2, $11);
 }
@@ -4491,7 +4496,7 @@ stmt: ';'                            { $$ = 0; }
         v = $2->u.v;
         s = SIZE($1);
         varadd(v, 0, $1, 0);
-        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($1), s);
+        fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($1), s);
         $$ = 0;
     }
     | type IDENT '=' expr ';'        {
@@ -4506,7 +4511,7 @@ stmt: ';'                            { $$ = 0; }
         v = $2->u.v;
         s = SIZE($1);
         varadd(v, 0, $1, 0);
-        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($1), s);
+        fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($1), s);
         init_node = mknode('=', $2, $4);
         expr(init_node);
         $$ = 0;
@@ -4522,7 +4527,7 @@ stmt: ';'                            { $$ = 0; }
         s = SIZE($1);
         total = s * n;
         varadd(v, 0, IDIR($1), 1);
-        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($1), total);
+        fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($1), total);
         $$ = 0;
     }
     | type IDENT ',' ext_decllist ';' {
@@ -4540,7 +4545,7 @@ stmt: ';'                            { $$ = 0; }
         v = $3->u.v;
         s = SIZE($2);
         varadd(v, 0, $2, 0);
-        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($2), s);
+        fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($2), s);
         $$ = 0;
     }
     | EXTERN type IDENT ';'          {
@@ -4574,7 +4579,7 @@ stmt: ';'                            { $$ = 0; }
         v = $4->u.v;
         s = SIZE($3);
         varadd(v, 0, $3, 0);
-        fprintf(of, "\t%%%s =l alloc%d %d\n", v, iralign($3), s);
+        fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($3), s);
         init_expr = mknode('=', $4, $6);
         $$ = mkfor(init_expr, $8, $10, $12);
     }

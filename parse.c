@@ -832,8 +832,16 @@ parseline(PState ps)
 static int
 usecheck(Ref r, int k, Fn *fn)
 {
-	return rtype(r) != RTmp || fn->tmp[r.val].cls == k
-		|| (fn->tmp[r.val].cls == Kl && k == Kw);
+	if (rtype(r) != RTmp || fn->tmp[r.val].cls == k)
+		return 1;
+	if (fn->tmp[r.val].cls == Kl && k == Kw)
+		return 1;
+	/* On i8086, near pointers are 16-bit (Kw) but Km == Kl in the IL —
+	 * allow Kw tmps to be used where Km is expected. */
+	if (strcmp(T.name, "i8086") == 0
+	    && fn->tmp[r.val].cls == Kw && k == Kl)
+		return 1;
+	return 0;
 }
 
 static void

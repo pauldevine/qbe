@@ -79,15 +79,15 @@ _strlen:
     pop bp
     ret
 
-; char *strcpy(char *dest, char *src) — pointers are l (32-bit), 4 bytes each.
+; char *strcpy(char *dest, char *src) — near pointers, 2 bytes each.
 global _strcpy
 _strcpy:
     push bp
     mov bp, sp
     push si
     push di
-    mov di, [bp+4]      ; dest offset
-    mov si, [bp+8]      ; src offset (skip 4-byte dest)
+    mov di, [bp+4]      ; dest
+    mov si, [bp+6]      ; src
 .l:
     lodsb
     stosb
@@ -316,6 +316,14 @@ _dos_getvidmode:
 ; Stubs for stevie globals that don't have a clear single-file home.
 ; _params now lives in param.c (compiles via struct-array initializers).
 ; _gchar and _inc live in ptrfunc.c.
+
+; FILE* stdio handles.  Near pointers (2 bytes) — values are non-zero
+; sentinels (DOS handle numbers) so NULL checks pass.
+global _stdin, _stdout, _stderr
+_stdin:  dw 1   ; sentinel (DOS handle 0 = stdin)
+_stdout: dw 2   ; sentinel (DOS handle 1 = stdout)
+_stderr: dw 3   ; sentinel (DOS handle 2 = stderr)
+
 global _updatetabstoptable
 _updatetabstoptable:
     ret
@@ -368,16 +376,13 @@ _getch:
 ; int int86(int intno, union REGS *in, union REGS *out)
 ; REGS layout: ax(0), bx(2), cx(4), dx(6), si(8), di(10), cflag(12), flags(14).
 ;
-; minic emits pointers as 32-bit (`l`) so each REGS* arg occupies 4 bytes
-; on the stack: low 16 = offset, high 16 = segment.  In small model the
-; segment is always DGROUP/DS so we just use the offset.
+; minic emits near pointers as 16-bit (`w`), so each REGS* arg occupies
+; 2 bytes on the stack.
 ;
 ; Stack layout (after push bp / mov bp, sp, near-call return addr):
 ;   [bp+4]  intno (int = 16-bit)
 ;   [bp+6]  inregs offset
-;   [bp+8]  inregs segment (ignored, small model)
-;   [bp+10] outregs offset
-;   [bp+12] outregs segment (ignored)
+;   [bp+8]  outregs offset
 ;
 ; Dispatches the requested INT via self-modifying code.
 global _int86
@@ -398,7 +403,7 @@ _int86:
 .int_op:
     int 21h
     push bx
-    mov bx, [bp+10]
+    mov bx, [bp+8]
     mov [bx+0], ax
     pop ax
     mov [bx+2], ax
@@ -418,7 +423,7 @@ _int86:
     ret
 
 ; int intdos(union REGS *in, union REGS *out) — int86(0x21, in, out).
-; Stack: [bp+4] inregs offset, [bp+6] segment, [bp+8] outregs offset, [bp+10] segment.
+; Stack (near pointers, 2 bytes each): [bp+4] inregs, [bp+6] outregs.
 global _intdos
 _intdos:
     push bp
@@ -434,7 +439,7 @@ _intdos:
     mov bx, [bx+2]
     int 21h
     push bx
-    mov bx, [bp+8]
+    mov bx, [bp+6]
     mov [bx+0], ax
     pop ax
     mov [bx+2], ax
@@ -507,15 +512,15 @@ _isupper:
     xor ax, ax
     pop bp
     ret
-; char *strrchr(char *s, int c) — pointer is l (4 bytes), c is w (2 bytes).
+; char *strrchr(char *s, int c) — near pointer (2 bytes), c is w (2 bytes).
 global _strrchr
 _strrchr:
     push bp
     mov bp, sp
     push si
     push bx
-    mov si, [bp+4]   ; s offset
-    mov bl, [bp+8]   ; c (low byte of int, after 4-byte ptr)
+    mov si, [bp+4]   ; s
+    mov bl, [bp+6]   ; c (low byte)
     xor ax, ax
 .loop:
     mov dl, [si]
