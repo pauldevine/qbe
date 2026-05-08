@@ -14,7 +14,14 @@
 
 set -u
 KEEP_GOING=0
-[ "${1-}" = "--keep-going" ] && KEEP_GOING=1
+MODEL="small"
+for arg in "$@"; do
+	case "$arg" in
+		--keep-going) KEEP_GOING=1 ;;
+		--model=*) MODEL="${arg#--model=}" ;;
+		*) echo "unknown arg '$arg'" >&2; exit 1 ;;
+	esac
+done
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_DIR="$QBE_DIR/stevie-orig"
@@ -104,7 +111,7 @@ for src in "${SOURCES[@]}"; do
 		[ $KEEP_GOING -eq 0 ] && { echo "FAIL cpp: $src"; cat "$err"; exit 1; }
 		continue
 	fi
-	if ! "$MINIC" < "$pp" > "$ssa" 2>"$err"; then
+	if ! "$MINIC" -m "$MODEL" < "$pp" > "$ssa" 2>"$err"; then
 		stage_fail_minic+=("$src")
 		[ $KEEP_GOING -eq 0 ] && { echo "FAIL minic: $src"; cat "$err"; exit 1; }
 		continue
@@ -120,7 +127,7 @@ for src in "${SOURCES[@]}"; do
 	fi
 
 	# Stage 2: SSA → ASM
-	if ! "$QBE" -t i8086 "$ssa" >"$asm" 2>"$err"; then
+	if ! "$QBE" -t i8086 -m "$MODEL" "$ssa" >"$asm" 2>"$err"; then
 		stage_fail_qbe+=("$src: $(head -1 "$err")")
 		[ $KEEP_GOING -eq 0 ] && { echo "FAIL qbe: $src"; cat "$err"; exit 1; }
 		continue
@@ -180,6 +187,7 @@ for src in "${SOURCES[@]}"; do
 		      -e 's/dword ptr \[/dword [/g' \
 		      -e 's|/\* \(.*\) \*/|; \1|' \
 		      -e 's/^\([A-Za-z_][A-Za-z0-9_]*\) proc near$/\1:/' \
+		      -e 's/^\([A-Za-z_][A-Za-z0-9_]*\) proc far$/\1:/' \
 		      -e 's/^\([A-Za-z_][A-Za-z0-9_]*\) endp$/; \1 endp/' \
 		      -e '/^:$/d' \
 		      -e 's/^[[:space:]]*\.byte \(.*\)$/db \1/' \

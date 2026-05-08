@@ -23,6 +23,24 @@ enum { /* minic types */
 	UNION_T,   /* union */
 };
 
+/* DOS memory model — mirrors qbe's enum MemModel.  Selected via -m on
+ * the command line.  Default = small (matches Path A behaviour). */
+enum {
+	MTiny,
+	MSmall,
+	MMedium,
+	MCompact,
+	MLarge,
+	MHuge,
+};
+int memmodel = MSmall;
+#define NEAR_CODE() (memmodel == MTiny || memmodel == MSmall || memmodel == MCompact)
+#define NEAR_DATA() (memmodel == MTiny || memmodel == MSmall || memmodel == MMedium)
+#define CODEPTR_T() (NEAR_CODE() ? 'w' : 'l')
+#define DATAPTR_T() (NEAR_DATA() ? 'w' : 'l')
+#define CODEPTR_SZ() (NEAR_CODE() ? 2 : 4)
+#define DATAPTR_SZ() (NEAR_DATA() ? 2 : 4)
+
 #define SHORT     (1 << 16)  /* Short flag for types */
 #define UNSIGNED  (1 << 17)  /* Unsigned flag for types */
 #define FLOAT     (1 << 18)  /* Float flag for types (float=INT|FLOAT, double=LNG|FLOAT) */
@@ -768,12 +786,17 @@ irtyp(unsigned ctyp)
 	int k = KIND(ctyp);
 
 	/* Pointer/function types: far pointers are 32-bit (segment:offset),
-	 * encoded as 'l'; near pointers in i8086 small/medium model are
-	 * 16-bit, encoded as 'w'. */
-	if (k == PTR && ISFAR(ctyp))
-		return 'l';
-	if (k == PTR || k == FUN)
-		return 'w';
+	 * encoded as 'l'.  Otherwise, the IL width is selected by memory
+	 * model: code pointers honour NEAR_CODE, data pointers NEAR_DATA. */
+	if (k == FUN)
+		return CODEPTR_T();
+	if (k == PTR) {
+		if (ISFAR(ctyp))
+			return 'l';
+		if (KIND(DREF(ctyp)) == FUN)
+			return CODEPTR_T();
+		return DATAPTR_T();
+	}
 	if (ISFLOAT(ctyp)) {
 		if (k == LNG) return 'd';  /* double */
 		return 's';  /* float */
@@ -792,10 +815,15 @@ irtyp(unsigned ctyp)
 char
 irtyp_ret(unsigned ctyp)
 {
-	if (KIND(ctyp) == PTR && ISFAR(ctyp))
-		return 'l';
-	if (KIND(ctyp) == PTR || KIND(ctyp) == FUN)
-		return 'w';
+	if (KIND(ctyp) == FUN)
+		return CODEPTR_T();
+	if (KIND(ctyp) == PTR) {
+		if (ISFAR(ctyp))
+			return 'l';
+		if (KIND(DREF(ctyp)) == FUN)
+			return CODEPTR_T();
+		return DATAPTR_T();
+	}
 	if (ISFLOAT(ctyp)) {
 		if (KIND(ctyp) == LNG) return 'd';  /* double */
 		return 's';  /* float */
@@ -1298,7 +1326,7 @@ expr(Node *n)
 			/* Copy function address to temporary */
 			fprintf(of, "\t");
 			psymb(sr);
-			fprintf(of, " =w copy $%s\n", n->u.v);
+			fprintf(of, " =%c copy $%s\n", CODEPTR_T(), n->u.v);
 		} else if (var_isarray(n->u.v)) {
 			/* Arrays - don't load, the lvalue IS the pointer */
 			sr = s0;
@@ -4382,7 +4410,7 @@ dcls:
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
 	varadd(v, 0, fptr_type, 0);  /* Not an array */
-	fprintf(of, "\t%%%s =w alloc4 2\n", v);  /* Near pointer: 2 bytes */
+	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
 }
     | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' ',' ext_decllist ';'
 {
@@ -4399,7 +4427,7 @@ dcls:
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));
 	varadd(v, 0, fptr_type, 0);
-	fprintf(of, "\t%%%s =w alloc4 2\n", v);  /* Near pointer: 2 bytes */
+	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
 	(void)first;
 	emit_local_multi_decl_full($2, $11);
 }
@@ -5543,9 +5571,52 @@ yyerror(char *err)
 }
 
 int
-main()
+main(int argc, char **argv)
 {
 	int i;
+	static struct { const char *name; int model; } mmodels[] = {
+		{ "tiny",    MTiny },
+		{ "small",   MSmall },
+		{ "medium",  MMedium },
+		{ "compact", MCompact },
+		{ "large",   MLarge },
+		{ "huge",    MHuge },
+		{ 0, 0 }
+	};
+
+	for (i = 1; i < argc; i++) {
+		const char *a = argv[i];
+		const char *m = 0;
+		if (strcmp(a, "-m") == 0 && i + 1 < argc)
+			m = argv[++i];
+		else if (strncmp(a, "-m", 2) == 0)
+			m = a + 2;
+		else if (strncmp(a, "--model=", 8) == 0)
+			m = a + 8;
+		else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
+			fprintf(stderr,
+			    "usage: %s [-m <model>] < input.c > output.ssa\n"
+			    "  -m <model>   memory model: tiny, small (default),\n"
+			    "               medium, compact, large, huge\n",
+			    argv[0]);
+			return 0;
+		} else {
+			fprintf(stderr, "%s: unknown argument '%s'\n", argv[0], a);
+			return 1;
+		}
+		if (m) {
+			int k;
+			for (k = 0; mmodels[k].name; k++)
+				if (strcmp(mmodels[k].name, m) == 0) {
+					memmodel = mmodels[k].model;
+					break;
+				}
+			if (!mmodels[k].name) {
+				fprintf(stderr, "%s: unknown memory model '%s'\n", argv[0], m);
+				return 1;
+			}
+		}
+	}
 
 	of = stdout;
 	nglo = 1;

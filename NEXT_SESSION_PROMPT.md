@@ -33,18 +33,42 @@ need to grow (`union REGS *` stays a 2-byte near pointer).
 
 ## Where we are right now
 
-**24/24 sources still compile and link** to a tiny-model `.COM` of
-80802 bytes (commit e5c013d).  Path A (near-pointer narrowing) +
-self-move elision landed this session.  Binary still over the 64KB
-.COM ceiling, but that ceiling stops mattering once we hit the .EXE
-pipeline below.
+**Step 1 (minic memory-model awareness) is done this session.**
+
+- `minic -m {tiny,small,medium,compact,large,huge}` parses argv,
+  defaults to `small`.
+- `irtyp` / `irtyp_ret` are model-aware: code pointers honour
+  `NEAR_CODE`, data pointers honour `NEAR_DATA`, far stays `'l'`.
+- Function-address sites that were hard-coded to `=w` (the
+  `=w copy $name` for function-pointer fetch and the two function-
+  pointer alloc sites) are now driven by `CODEPTR_T()` / `CODEPTR_SZ()`.
+- `minic_cpp_v2` and `tools/build-stevie.sh` accept `--model=<m>`
+  and forward it to both minic and qbe.
+
+**24/24 sources compile + assemble for both small and medium model**:
 
 ```
-=== Build summary ===
-  PASS: 24/24
-=== Linking ===
-  OK: build/stevie-orig/stevie.com (80802 bytes)
+# small (default) — bit-identical to pre-session baseline
+tools/build-stevie.sh --keep-going
+=> build/stevie-orig/stevie.com (80802 bytes)
+
+# medium — minic+qbe both happy; nasm -f bin can't link `call far`
+tools/build-stevie.sh --keep-going --model=medium
+=> 24/24 PASS at the per-TU stage; link fails with
+   "binary output format does not support segment base references"
+   on every `call far _malloc` / `call far _emsg` site.
 ```
+
+The medium-model link failure is the expected, intentional next
+problem: medium requires `nasm -f obj` (OMF) plus a DOS linker, which
+is exactly Step 2 below.
+
+The data-pointer hard-coded `=w` sites from commit 5125e70 (alloc,
+`%_clit*`, `%_zinit*`, struct-member adds) are correct as-is for
+medium — they describe near-data arithmetic and medium still has
+near data.  They will need another pass when compact/large/huge land
+(Step 4): in those models alloc still returns a 16-bit offset but
+data-pointer arithmetic on top should be `'l'` with an `extuw` lift.
 
 ### What qbe already supports (foundation already in place)
 
@@ -63,105 +87,116 @@ pipeline below.
 
 1. **No `uses_far_data()`** — qbe's data-pointer width is whatever
    the IL says.  compact/large/huge need data pointers to be `l`
-   (far) by default, but minic emits `w` after Path A.
+   (far) by default; minic now emits `'l'` for those models, but
+   alloca'd stack offsets are still 16-bit, so an `extuw`/segment-
+   construct lift is missing.  Not on the medium critical path.
 
-2. **minic has no `-m` flag** — Path A hard-codes near pointers as
-   `w` regardless of model.  Needs to be model-driven:
-
-   | model    | code ptr (FUN) | data ptr (PTR) |
-   |----------|----------------|----------------|
-   | tiny     | w              | w              |
-   | small    | w              | w              |
-   | medium   | **l**          | w              |
-   | compact  | w              | **l**          |
-   | large    | **l**          | **l**          |
-   | huge     | **l**          | **l** (huge)   |
-
-3. **No .EXE pipeline** — `tools/build-stevie.sh` only knows
+2. **No .EXE pipeline** — `tools/build-stevie.sh` only knows
    `nasm -f bin` → flat .COM.  Medium+ requires `nasm -f obj`
-   (OMF) → DOS linker → MZ .EXE.
+   (OMF) → DOS linker → MZ .EXE.  *This is the immediate blocker.*
 
-4. **No DOS linker on macOS** — wlink (Open Watcom) builds from
+3. **No DOS linker on macOS** — wlink (Open Watcom) builds from
    source; alternative is a custom OMF linker (~500-800 LOC).
 
-5. **crt0 has no MZ variant** — current `crt0.asm` is .COM-only.
+4. **crt0 has no MZ variant** — current `crt0.asm` is .COM-only.
    .EXE entry needs to set DS to DGROUP and handle a separate stack
    segment.
+
+5. **qbe's i8086 emit still mixes GNU-as / MASM directives** — the
+   build script's `sed` pass papers over it for `nasm -f bin`, but
+   `nasm -f obj` will need a cleaner upstream emit (or a more
+   careful rewrite pass).
 
 6. **libstub stack offsets depend on model** — for compact/large/
    huge, pointer args are 4-byte (segment:offset) again, so
    `_intdos`/`_strcpy`/`_strrchr`/`_int86` need model-aware variants
    or per-model rebuilds.
 
+7. **The minic `=w` data-pointer table** — for compact/large/huge,
+   alloc still returns a 16-bit offset; data-pointer arithmetic on
+   top must be `'l'` with an `extuw` or DS-based segment-pair lift.
+   Mapped out but deferred to Step 4.
+
 ## What's next — in dependency order
 
-### Step 1 — minic learns memory-model awareness
+### Step 1 — minic learns memory-model awareness  ✅ DONE
 
-**Goal:** `minic -m <model>` produces IR with the right pointer
-widths per the table above.  small/tiny still works exactly like
-today (regression check).
+(Landed this session.  See "Where we are right now" above.)
 
-Concrete work:
-- Add `-m <model>` arg parsing to `minic/minic.y` `main()`.
-  Default = small (matches Path A behaviour).
-- Replace the hard-coded `KIND(ctyp) == PTR && !ISFAR(ctyp)` →
-  `'w'` rule in `irtyp()` / `irtyp_ret()` with a model lookup:
-  ```
-  near_data = (model in {tiny, small, medium});
-  near_code = (model in {tiny, small, compact});
-  if (KIND == FUN)        return near_code ? 'w' : 'l';
-  if (KIND == PTR && ISFAR(t))   return 'l';
-  if (KIND == PTR)        return near_data ? 'w' : 'l';
-  ```
-- Audit the 28+ hard-coded `=w alloc/copy/add/mul/div` sites we
-  changed in commit 5125e70 — those are *near pointer* operations.
-  In compact/large/huge, the alloc result is still a near pointer
-  (you can't far-alloc a stack slot), but the data-pointer arithmetic
-  on top changes.  Sites to revisit:
-  - `=w copy $name` (function/global address) — code addresses are
-    `'w'` if near_code, else `'l'`.
-  - `=w add %_clit` (struct/array member offset) — uses the IL type
-    of the address being added to (the clit is always near, so
-    stays `'w'`).
-  - `=w add %ptr, off` (member access on a runtime pointer) —
-    matches `irtyp(ptr_ctyp)`, which is now model-aware automatically.
-- Update `minic_cpp_v2` (the cpp wrapper) to pass `-m` through.
-- Update `tools/build-stevie.sh` to plumb `--model=<m>` through to
-  both minic and qbe.
-
-Validation: rebuild stevie with `--model=small`, expect identical
-behaviour to today.  Then `--model=medium`, expect bigger but
-working asm with `proc far` / `call far` everywhere.
-
-### Step 2 — stand up the .EXE pipeline (medium model)
+### Step 2 — stand up the .EXE pipeline (medium model)  ⬅ NEXT
 
 **Goal:** `tools/build-stevie.sh --model=medium --exe` produces a
 runnable `stevie.exe`.
 
-Concrete work:
-- Switch per-TU assembly from `nasm -f bin` to `nasm -f obj` (OMF).
-  Verify NASM emits sane segment directives for medium model.
-- Pick a DOS linker:
-  - **Easiest:** install Open Watcom (homebrew has `open-watcom-v2`
-    on macOS via `brew tap open-watcom/open-watcom-v2-binaries` —
-    confirm), use `wlink`.
-  - **Fallback:** write a minimal OMF→MZ linker in Python.  Spec
-    in Open Watcom docs (`/openwatcom/docs/pdf/lr.pdf`) — only
-    need to handle the records NASM emits (THEADR, SEGDEF,
-    GRPDEF, EXTDEF, PUBDEF, LEDATA, FIXUPP, MODEND).
-- Write an `crt0_exe.asm` variant that:
-  - Sets DS to DGROUP at entry.
-  - Initializes SS:SP to the stack segment (separate from DGROUP).
-  - Calls `_main` via far call.
-  - Exits with INT 21h AH=4Ch using AL from `_main`.
-- Update `build-stevie.sh` to drive the new pipeline behind
-  `--exe`/`--model=medium`.
-- Update `_malloc` heap layout — without a fixed image-end, the
-  heap starts after BSS (linker-defined `_end`) and grows up to
-  the bottom of the stack segment.
+Right now `--model=medium` already gets us 24/24 PASS at minic+qbe.
+The build-stevie.sh "link" step then concatenates everything into
+`stevie.full.asm` and runs `nasm -f bin` with `ORG 0x100`, which
+fails on every `call far _malloc` etc.  That is the wall to break.
 
-Validation: `dosbox build/stevie-orig/stevie.exe` reaches `_main`
-without truncation, runs `windinit`, calls `_int86` cleanly.
+Suggested order of attack:
+
+**(2a) Single-TU OMF round-trip.**  Pick the simplest source
+(`alloc.c` or `version.c`), generate `.nasm.asm` exactly like today,
+prepend an OMF-friendly preamble (no `BITS 16 / ORG 0x100`; instead
+proper `segment _TEXT class=CODE` / `segment _DATA class=DATA` /
+`group DGROUP _DATA _BSS`), and assemble with `nasm -f obj`.
+Iterate on what the per-TU rewrite needs to emit until NASM is happy.
+*Don't* try to link yet — just confirm clean OMF object files.
+
+   The qbe i8086 emit currently produces things like
+   `name proc far`, `call far _malloc`, `; XXX 32-bit op stub`, plus
+   GNU-as `.text` / `.balign` mixed in.  The `sed` pass strips the
+   GNU-as bits.  For OMF we additionally need:
+   - `name proc far` → `name:` plus a separate `..start` / `global`
+     declaration in the right segment.
+   - `call far _malloc` becomes a far reference to an external symbol
+     in another module's `_TEXT` segment (NASM does this for free in
+     `-f obj` if the symbol is declared with `extern` *and* the call
+     site uses `call far func` — the OMF FIXUPP record will carry it).
+   - String literals `_glo1: db ...` need to live in `_DATA`, not
+     interleaved with `_TEXT`.  Currently they're inline.  Either
+     re-section per literal, or buffer them to emit at end of TU.
+
+**(2b) Pick a DOS linker.**
+
+   - **Easiest path:** install Open Watcom.  On macOS, the binary
+     bundle from `https://github.com/open-watcom/open-watcom-v2/releases`
+     gives you a working `wlink`.  (Homebrew tap `open-watcom/v2`
+     existed at some point; verify before relying on it.)  Then:
+     ```
+     wlink system dos format dos exe \
+           file alloc.obj file version.obj ... \
+           file crt0_exe.obj file libstub.obj file doslib.obj \
+           name stevie.exe
+     ```
+   - **Fallback (more fun, more work):** write an OMF→MZ linker in
+     Python.  Need to handle THEADR, SEGDEF, GRPDEF, EXTDEF, PUBDEF,
+     LEDATA, LIDATA, FIXUPP, MODEND, plus segment ordering and
+     fixup resolution into MZ relocation table.  Spec lives in the
+     Open Watcom Linker Reference (`/openwatcom/docs/pdf/lr.pdf`)
+     and the OMF reference (search "Tomb of the Unknown OMF").
+     Estimate ~500-800 LOC of Python for medium-only support.
+
+**(2c) Write `crt0_exe.asm`.**  Diff from `crt0.asm` (.COM):
+   - On entry, DS=ES=PSP, SS:SP set up by DOS to the stack segment
+     declared in the MZ header.  Set DS to `DGROUP` (`mov ax, dgroup
+     / mov ds, ax`).
+   - Call `_main` with a *far* call (medium = far code).
+   - On return, `mov ah, 4Ch / mov al, return_code / int 21h`.
+   - Don't `ORG 0x100` — let the linker place us.
+
+**(2d) Update `_malloc`.**  Today `_malloc` bumps from
+`_heap_end_of_image` (a label injected at link concat).  In .EXE
+the linker provides `_end` (or whatever symbol marks BSS end);
+`_malloc` should bump from there up to bottom of stack segment.
+
+**(2e) Drive it from `build-stevie.sh`.**  Add `--exe` (or imply
+from `--model in {medium,large,...}`).  When set, run `nasm -f obj`
+per TU, hand objs to `wlink`, write `stevie.exe`.
+
+**Validation.**  `dosbox-x build/stevie-orig/stevie.exe` reaches
+`_main` without truncation, runs `windinit`, hits `_int86` cleanly.
+The likely failure stack is in Step 3 below.
 
 ### Step 3 — exercise medium model under DOSBox
 
@@ -204,8 +239,15 @@ See `~/.claude/projects/-Users-pauldevine-projects-qbe/memory/`:
 # Rebuild
 make qbe && cd minic && make && cd ..
 
-# Build stevie (current — tiny / .COM)
+# Build stevie (default = small, .COM)
 rm -rf build/stevie-orig && tools/build-stevie.sh --keep-going
+
+# Build stevie medium model (24/24 compiles + assembles; link fails
+# until step 2 is done)
+rm -rf build/stevie-orig && tools/build-stevie.sh --keep-going --model=medium
+
+# Drive minic alone with a model selector
+./minic/minic -m medium < build/stevie-orig/search.pp.c | head
 
 # Pass/fail summary
 for src in alloc cmdline dos edit enveval fileio help hexchars linefunc \
