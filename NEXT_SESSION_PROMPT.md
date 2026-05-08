@@ -13,16 +13,17 @@ Build target: `stevie-orig/`.  Pipeline: `tools/build-stevie.sh
 
 **24/24 sources still compile and link.**  Path A (near-pointer
 narrowing) landed in commit 5125e70 and dropped stevie.com from
-97982 → 80922 bytes (~17%).  **Binary still exceeds the .COM 64KB
-ceiling**, so DOSBox truncates and we crash before reaching anything
-useful.  Either further bloat reduction or a real .EXE (Path B) is
-required to actually run end-to-end.
+97982 → 80802 bytes (~17.5%, after a follow-up self-move elision in
+commit e5c013d).  **Binary still exceeds the .COM 64KB ceiling**, so
+DOSBox truncates and we crash before reaching anything useful.
+Either further bloat reduction or a real .EXE (Path B) is required to
+actually run end-to-end.
 
 ```
 === Build summary ===
   PASS: 24/24
 === Linking ===
-  OK: build/stevie-orig/stevie.com (80922 bytes)
+  OK: build/stevie-orig/stevie.com (80802 bytes)
 ```
 
 ### What THIS session changed (Path A — pointer narrowing)
