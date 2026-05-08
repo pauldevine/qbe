@@ -274,6 +274,8 @@ strip_runtime() {
 		cat "$OUT_DIR/$base.nasm.asm"
 		echo
 	done
+	echo "; ===== heap marker ====="
+	echo "_heap_end_of_image:"
 } > "$LINK_ASM"
 
 if nasm -w-label-redef-late -w-pp-open-string -f bin "$LINK_ASM" -o "$OUT_DIR/stevie.com" 2>"$OUT_DIR/link.err"; then
