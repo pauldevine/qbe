@@ -50,6 +50,14 @@ static struct {
 	{ Oload,   Kw, "mov %=, word %M0" },
 	{ Oload,   Kl, "mov %=, dword %M0" },
 
+	/* Extensions to word.  On 16-bit 8086 a halfword (16-bit) is already a
+	 * word, so Oextsh/Oextuh Kw are just register/memory moves.  Oextub Kw
+	 * masks the high byte; Oextsb Kw needs CBW and is handled in emitins()
+	 * (CBW only operates on AL → AX). */
+	{ Oextsh,  Kw, "mov %=, %0" },
+	{ Oextuh,  Kw, "mov %=, %0" },
+	{ Oextub,  Kw, "mov %=, %0\n\tand %=, 255" },
+
 	/* Data movement */
 	{ Ocopy,   Ki, "mov %=, %0" },
 	{ Oswap,   Ki, "xchg %=, %0" },
@@ -2464,11 +2472,34 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		Ref target = i->arg[0];
 
 		if (rtype(target) == RTmp) {
-			/* Indirect far call through 32-bit pointer in memory or register pair
-			 * For now, we assume the far pointer is in a register pair or memory location
-			 * Format: call far [address] or call far seg:offset
-			 */
-			fprintf(f, "\tcall far word [%s]\n", rname[target.val]);
+			/* Indirect far call: target is a 32-bit (Kl) far pointer
+			 * with offset in AX (low half) and segment in DX (high half).
+			 * 8086 has no `call far reg:reg` form, so synthesize one
+			 * with a retf trick — push a return frame plus the target,
+			 * then retf jumps to dx:ax leaving cs:ret_label as the
+			 * callee's saved return address:
+			 *
+			 *   mov cx, .Lfarcall_<n>      ; (8086: push imm16 is 186+,
+			 *                              ;  so route through a reg)
+			 *   push cs                    ; saved CS for callee's retf
+			 *   push cx                    ; saved IP for callee's retf
+			 *   push dx                    ; target segment
+			 *   push ax                    ; target offset
+			 *   retf                       ; jumps dx:ax
+			 *  .Lfarcall_<n>:              ; resume here
+			 *
+			 * CX is caller-save in cdecl, so any live value the rega
+			 * placed there is already dead at this call site. */
+			fprintf(f, "\tmov cx, .Lfarcall_%p\n", (void*)i);
+			fprintf(f, "\tpush cs\n");
+			fprintf(f, "\tpush cx\n");
+			fprintf(f, "\tpush dx\n");
+			fprintf(f, "\tpush ax\n");
+			fprintf(f, "\tretf\n");
+			fprintf(f, ".Lfarcall_%p:\n", (void*)i);
+		} else if (rtype(target) == RSlot) {
+			/* Kl spilled to a stack slot — call far through it directly. */
+			fprintf(f, "\tcall far dword [bp%+ld]\n", (long)slot(target, fn));
 		} else if (rtype(target) == RCon) {
 			/* Direct far call to function */
 			Con *c = &fn->con[target.val];
@@ -2492,6 +2523,51 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	 * which is malformed.  Skip silently. */
 	if (i->op == Oswap && req(i->to, R))
 		return;
+
+	/* Oextsb Kw: sign-extend the low byte of arg[0] to a 16-bit word.
+	 * 8086 has no `movsx` (that's a 386 instruction), so route through
+	 * AL/AX with CBW.  CBW operates on AL → AX, so when dst is not AX we
+	 * push/pop AX to preserve any live caller-save value the rega placed
+	 * there.  Source can be a register, slot, or constant. */
+	if (i->op == Oextsb && i->cls == Kw) {
+		Ref a0 = i->arg[0];
+		int dst_is_ax = (rtype(i->to) == RTmp && i->to.val == RAX);
+		if (!dst_is_ax)
+			fprintf(f, "\tpush ax\n");
+		/* Load the low byte of arg into AL.  When the source is in
+		 * AX/CX/DX/BX (registers with byte forms), use the 8-bit
+		 * register name.  For SI/DI/BP/SP and slots, take the byte
+		 * directly from memory; for constants, mask to 8 bits. */
+		if (rtype(a0) == RTmp) {
+			if (a0.val == RAX) {
+				/* AL already has the low byte. */
+			} else if (a0.val <= RBX) {
+				fprintf(f, "\tmov al, %s\n", rname8[a0.val]);
+			} else {
+				/* SI/DI/BP/SP — no 8-bit subregister.  Move the
+				 * full word into AX and let CBW look at AL. */
+				fprintf(f, "\tmov ax, %s\n", rname[a0.val]);
+			}
+		} else if (rtype(a0) == RSlot) {
+			fprintf(f, "\tmov al, byte [bp%+ld]\n", (long)slot(a0, fn));
+		} else if (rtype(a0) == RCon) {
+			int64_t val = fn->con[a0.val].bits.i;
+			fprintf(f, "\tmov al, %d\n", (int)(val & 0xFF));
+		} else {
+			die("Oextsb: invalid source ref type");
+		}
+		fprintf(f, "\tcbw\n");
+		/* Move AX to dest (slot or non-AX register). */
+		if (rtype(i->to) == RSlot) {
+			fprintf(f, "\tmov word [bp%+ld], ax\n",
+				(long)slot(i->to, fn));
+		} else if (rtype(i->to) == RTmp && i->to.val != RAX) {
+			fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+		}
+		if (!dst_is_ax)
+			fprintf(f, "\tpop ax\n");
+		return;
+	}
 
 	/* Omul (16-bit multiply): 286 added `imul reg, r/m`; 8086 only has
 	 * the single-operand form `imul r/m` with implicit AX*r/m → DX:AX.

@@ -2349,6 +2349,10 @@ collectcases(Stmt *s, Stmt **cases, int *ncase, int *defidx)
 		if (s->t == Default)
 			*defidx = *ncase;
 		cases[(*ncase)++] = s;
+		/* Fallthrough labels parse as nested Case nodes, e.g.
+		 *   case A: case B: stmt;  →  Case(A, p2=Case(B, p2=stmt))
+		 * Recurse into p2 so the inner label is also collected. */
+		collectcases((Stmt*)s->p2, cases, ncase, defidx);
 	}
 }
 
@@ -2421,6 +2425,15 @@ genswitchbody(Stmt *s, int brk, Stmt **cases, int *caselbl, int ncase)
 		if (r1 && !contains_case_label((Stmt*)s->p2))
 			return r1;
 		int r2 = genswitchbody((Stmt*)s->p2, brk, cases, caselbl, ncase);
+		/* When p2 contains a case label it provides a fresh re-entry
+		 * point: even if p1 terminated the prior basic block, control
+		 * can resume at the case label and fall through past p2.  The
+		 * combined termination state of this Seq is therefore r2 alone
+		 * — propagating r1 would let an earlier case body's `break`
+		 * poison enclosing Seqs and suppress sibling stmts that
+		 * legitimately follow the case label. */
+		if (contains_case_label((Stmt*)s->p2))
+			return r2;
 		return r1 || r2;
 	} else if (s->t == Case || s->t == Default) {
 		/* Find this case in the cases array and emit its label */

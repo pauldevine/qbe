@@ -47,5 +47,6 @@ extern void segread();
 
 #define FP_SEG(fp) ((unsigned short)(((unsigned long)(fp)) >> 16))
 #define FP_OFF(fp) ((unsigned short)((unsigned long)(fp)))
+#define MK_FP(seg, ofs) ((void far *)(((unsigned long)(seg) << 16) | (unsigned short)(ofs)))
 
 #endif /* _DOS_H */

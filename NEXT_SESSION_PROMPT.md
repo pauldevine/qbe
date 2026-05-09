@@ -34,15 +34,57 @@ crosses 64KB (already at 80KB), data fits in 64KB.
 
 ## Where we are right now
 
-**Step 4 in progress — stevie.exe accepts vi commands and renders
-typed text under DOSBox.**  Press `i`, type chars, watch them appear
-on screen (after a buffering delay because `flushbuf` only fires when
-outbuf fills or is explicitly drained).  Cursor advances per keystroke.
+**Step 4 ongoing — stevie.exe edit loop + minic switch fixed.**  Press
+`i`, type chars; expect backspace, CR/NL, fallthrough cases to now do
+the right thing in the SSA (untested under DOSBox this session).
+stevie.exe = 130,704 bytes (was 121,104 — extra code from previously-
+truncated case bodies that finally emit).  All 24/24 modules compile
+clean; 0 silently-dropped opcodes.
 
-**Latest commit: `2154af9` — "stevie: editor takes typed input,
-displays text via teletype".**
+**Latest commit:** `2154af9` (pending — this session's fixes uncommitted).
 
-### Bugs fixed this session
+### Bugs fixed this session (carry forward into commit)
+
+A. **minic.y switch case-label/body truncation.**  `collectcases`
+   didn't recurse into Case `p2`, so nested fallthrough labels (`case
+   A: case B:`) lost the inner case from the dispatch table.
+   `genswitchbody`'s Seq early-stop propagated `r1=1` (terminated by an
+   earlier case body's `break`) past case-label re-entry points, so
+   sibling stmts after the first stmt of each case body were silently
+   skipped.  Combined effect on stevie's `edit()`: BS=8 and NL=10
+   labels missing from dispatch; BS body truncated to its first guard;
+   CR body truncated to its `if (State==REPLACE)` line.  Fix in
+   `minic/minic.y` `collectcases` (recurse into p2) and `genswitchbody`
+   Seq (return r2 when `contains_case_label(p2)`).  See
+   `~/.claude/projects/-Users-pauldevine-projects-qbe/memory/feedback_minic_switch_fallthrough_bugs.md`.
+
+B. **i8086 indirect far call codegen.**  `Ocallfar` with an RTmp target
+   emitted `call far word [reg]` — invalid 8086 EA, wrong size.  8086
+   has no `call far reg:reg`.  Fix in `i8086/emit.c`: synthesize via
+   push-cs/cx (return frame) + push-dx/ax (target) + `retf`.  CX is
+   caller-save so the rega-allocated value there is already dead at
+   the call site.  Pre-fix qbe was constant-propagating function
+   pointers in `showmatch()` because the minic bug truncated case
+   bodies, leaving only one assignment to %move; fix A unmasked this.
+   See `feedback_i8086_indirect_far_call.md`.
+
+C. **i8086 missing emit entries for Oextsh/Oextuh/Oextub/Oextsb.**
+   78 silently-dropped `; TODO: op N cls 0` comments across stevie
+   modules.  Added Kw omap entries (sh/uh = `mov %=, %0`; ub adds
+   `and %=, 255`) and a custom Oextsb handler routing through AL with
+   CBW.  Pre-fix, anything depending on Oextsh of `loadsh` from a
+   recently-stored value (load-elimination rewrite in `load.c`) ran
+   `test ax, ax` against stale AX — hence the BS first-guard's
+   `if (fixpos)` test was reading the post-loop counter.
+
+D. **MK_FP undefined in `minic/include/dos.h`.**  dos.c's hTIPRO
+   bodies use `dst = MK_FP(0xDE00, ...)`; without the macro, minic saw
+   an implicit-int call return assigned to a `char far *` and bailed
+   with "invalid assignment".  Pre-fix-A those bodies were inside
+   truncated case bodies and never type-checked.  Added the standard
+   Turbo C definition.
+
+### Bugs fixed previous session (kept for reference)
 
 1. **minic: nested decl-init was hoisted to function entry.**
    `int v = *p++;` inside `if (cond) { ... }` evaluated the
@@ -102,13 +144,12 @@ made it safe.
 
 ## What still needs follow-up
 
-- **Backspace blanks the screen and editor doesn't recover.**  In
-  insert mode, deleting the most recent char triggers a screen-blank
-  with no repaint after.  Likely another bad-codegen path in the
-  delete/redraw code (probably `s_del`, `updateline`, or the `BS`
-  handling in `edit.c`).  Repro: launch, press `i`, type chars,
-  press backspace.  Add a probe in `s_del` and the delete-char
-  branch of insert mode to find where it freezes.
+- **Re-test under DOSBox.**  This session's fixes (A–D above) are
+  unverified at runtime — only verified that the SSA + asm now contain
+  the previously-missing instructions and 0 TODOs.  Backspace was the
+  stated symptom; expect it to behave correctly now since the BS
+  handler's full body finally emits.  Worth a smoke test of: typing,
+  backspace, CR/NL (open new line), `:` cmdline, `:q` quit.
 
 - **AH=09 BIOS path doesn't render.**  When flushbuf calls INT 10h
   AH=09 with cx=1, no character appears at the cursor.  AH=0E
