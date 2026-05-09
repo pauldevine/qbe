@@ -34,163 +34,110 @@ crosses 64KB (already at 80KB), data fits in 64KB.
 
 ## Where we are right now
 
-**Step 3 in progress — stevie.exe boots and reaches its main edit
-loop under DOSBox.**  The screen clears and a blinking cursor appears.
-Vi commands typed at the keyboard are not picked up — the editor
-loop runs but `vgetc`/`getch` aren't reaching the dispatcher.
+**Step 4 in progress — stevie.exe accepts vi commands and renders
+typed text under DOSBox.**  Press `i`, type chars, watch them appear
+on screen (after a buffering delay because `flushbuf` only fires when
+outbuf fills or is explicitly drained).  Cursor advances per keystroke.
 
-### Trace last observed (medium-model stevie.exe)
-
-```
-XM 1 2 3 a b c d e f g h i A B C  [screen clears, blinking cursor, no input]
-```
-
-Decoded against the probes still in source:
-- `X` — `_start` reached (crt0_exe.asm)
-- `M` — DGROUP set; about to `call far _main`
-- `1` — entered `main()`
-- `2` / `3` — before / after `windinit()`
-- `a..g` — each LPTR malloc returned
-- `h` — `screenalloc()` succeeded
-- `i` — `filealloc()` returned
-- `A` — entered `screenclear()`
-- `B` — past CLS (CLS is currently *skipped* — see workaround below)
-- `C` — buffers blanked; about to return from screenclear
-- (`D` was lost to a screen-clear race; happens elsewhere)
+**Latest commit: `2154af9` — "stevie: editor takes typed input,
+displays text via teletype".**
 
 ### Bugs fixed this session
 
-1. **libstub `_int86` / `_intdos` clobbered BX**.  Same class as last
-   session's `_malloc` BX clobber (BX is callee-save in cdecl/8086).
-   Both stubs used BX to walk the REGS struct without `push bx /
-   pop bx`.  Fixed in `minic/dos/libstub.asm` so caller's BX
-   survives any `int86()` / `intdos()` call.
+1. **minic: nested decl-init was hoisted to function entry.**
+   `int v = *p++;` inside `if (cond) { ... }` evaluated the
+   initializer unconditionally at the prologue.  The grammar rule
+   `stmt: type IDENT '=' expr ';'` called `expr(init_node)` directly
+   at parse time and returned `Stmt = 0`.  Fix in `minic/minic.y`:
+   wrap the assignment as `mkstmt(Expr, init_node, 0, 0)` so it gets
+   emitted in lexical order via `stmt()`.  Symptom: `vgetc()`'s
+   `*getcnext++` ran when `getcnext` was NULL, so the editor read NUL
+   chars from random DGROUP memory and never asked for keyboard input.
 
-2. **libstub `_strcmp` / `_strncmp` were `mov ax, 0; ret` stubs**.
-   Now real byte-by-byte 8086 implementations.  This was the headline
-   bug.  Stevie's `windinit()` does:
+2. **qbe spill.c: caller-save avoid mask not applied to void calls.**
+   `dopm()` only fired for calls followed by `Ocopy` (return-value
+   handoff).  Void callees got no `hint.m`, so live-across temps
+   landed in AX/CX/DX and were clobbered.  Fix in `spill.c`: in the
+   per-instruction loop tail, OR the caller-save mask into `r` for
+   `iscall(i->op)` before calling `sethint(v, r)`.  Repro:
+
    ```c
-   host_type = strncmp(ti_sig, ti_sig_addr, ti_sig_len) ? hIBMPC : hTIPRO;
+   extern void other(); extern int gA, gB;
+   void test() {
+     int r[4]; r[0]=r[1]=r[2]=r[3]=0;
+     other(r); r[2] = gA * gB; other(r);
+   }
    ```
-   Stub returned 0 → `host_type = hTIPRO` → `crt_int = 0x49` → every
-   `int86(crt_int, …)` hit **INT 49h** (undefined on a PC).  DOSBox
-   handled INT 49h as a benign no-op, which is why earlier sessions
-   thought "msg() hangs" — actually screen output went nowhere because
-   no INT 10h ever fired.
+   Pre-fix: `mov cx, &r[2]` set up before call, reused as `mov [bx],
+   ax` after via `xchg bx, cx` — wild write since CX got clobbered.
+   Post-fix: `&r[2]` lands in BX (callee-save), preserved across the
+   call.  See
+   `~/.claude/projects/-Users-pauldevine-projects-qbe/memory/feedback_qbe_void_call_no_caller_save_hint.md`.
 
-### Workarounds in place (real fixes deferred)
+3. **qbe i8086/emit.c: Oloadub fast path clobbered base when dst
+   aliased it.**  After `addr_fixup_reg` + `swap_bx` had routed the
+   address through BX and rega put dst in BX too, the fast path
+   emitted `xor bx, bx; mov bl, byte [bx]` — destroying the address.
+   Fix: detect when the memref's base/index register equals dst and
+   fall through to the AX-routed safe path that pushes/pops AX.
+   Symptom in `windinit`: `bgn_mode`, `Columns`, `bgn_color` all read
+   junk from DGROUP:0 instead of the BIOS-returned values.
 
-3. **Skip the strncmp(ti_sig, ti_sig_addr, …) call entirely**
-   (`stevie-orig/dos.c`).  Force `host_type = hIBMPC` directly.
-   minic's far-pointer codegen for that line is broken — emits
-   `mov es, dx` with uninitialised DX, plus a `cwd` chain that
-   sign-extends a near offset where a segment word should go.  Not
-   the hill to die on; sidestep until the rest of the path is green.
+4. **stevie workaround: flushbuf bypasses INT 10h AH=09.**  The
+   write-char-with-attribute call doesn't render anything under
+   DOSBox even with hardcoded attribute = 0x07.  Stripped the AH=09
+   block and rely on the AH=0E (teletype) loop alone.  Root cause
+   TBD.  Same edit hardcodes `bgn_color = 0x07; P(P_CO) = 0x07` to
+   skip the second BIOS read while debugging.
 
-4. **Skip `CLS` in `screenclear`** (`stevie-orig/screen.c`).  See
-   below — this is the qbe rega caller-save bug.  `updatescreen()`
-   will repaint the buffers anyway.
+### Workarounds carried forward (real fixes deferred)
 
-### The big remaining codegen bug — qbe rega + caller-save
+- `host_type = hIBMPC` forced in `windinit` (far-pointer codegen bug
+  for the `strncmp(ti_sig, ti_sig_addr, ti_sig_len)` call site).
+- `flushbuf` skips AH=09 (see above).
+- `bgn_color`/`P(P_CO)` hardcoded to 0x07.
 
-Documented in
-`~/.claude/projects/-Users-pauldevine-projects-qbe/memory/feedback_qbe_caller_save_bug.md`.
+CLS in `screenclear()` is now **restored** — the rega caller-save fix
+made it safe.
 
-qbe's i8086 register allocator places SSA temps in **CX (or AX/DX
-— all caller-save)** and keeps them live across `call far`.  Minimal
-repro:
+## What still needs follow-up
 
-```c
-// /tmp/repro.c
-extern void other();
-extern int gA, gB;
-void test() {
-    int r[4];
-    r[0]=0; r[1]=0; r[2]=0; r[3]=0;
-    other(r);
-    r[2] = gA * gB;
-    other(r);
-}
-```
+- **Backspace blanks the screen and editor doesn't recover.**  In
+  insert mode, deleting the most recent char triggers a screen-blank
+  with no repaint after.  Likely another bad-codegen path in the
+  delete/redraw code (probably `s_del`, `updateline`, or the `BS`
+  handling in `edit.c`).  Repro: launch, press `i`, type chars,
+  press backspace.  Add a probe in `s_del` and the delete-char
+  branch of insert mode to find where it freezes.
 
-Compile with `./minic/minic -m medium < /tmp/repro.c | ./qbe -t i8086
--m medium`.  Output shows `mov cx, &r[2]` set up before the first
-call and reused as the destination address after the call:
+- **AH=09 BIOS path doesn't render.**  When flushbuf calls INT 10h
+  AH=09 with cx=1, no character appears at the cursor.  AH=0E
+  (teletype) on the same struct works fine.  Possibilities: (a) DOSBox-
+  specific quirk with cx=1; (b) one of the byte fields in REGS is
+  still wrong; (c) the int86 libstub mishandles something specific
+  to AH=09.  Try a hand-written asm test that calls INT 10h AH=09
+  directly to isolate.
 
-```asm
-    lea ax, [bp-16]
-    mov cx, ax
-    add cx, 8           ; cx = &r[2]
-    xchg bx, cx
-    mov word [bx], 0
-    xchg bx, cx         ; cx still = &r[2]
-    ...
-    call far _other     ; CX clobbered here per cdecl
-    mov ax, [_gA]
-    mov dx, [_gB]
-    imul dx
-    xchg bx, cx         ; bx = whatever the callee left in cx (garbage)
-    mov word [bx], ax   ; WILD WRITE
-```
+- **Buffering delay.**  Typed chars only appear after outbuf fills.
+  Real stevie would flush more aggressively — probably tied to
+  cursor/line updates.  Once backspace is fixed, audit the
+  updateline/cursupdate paths.
 
-Why GVN/qbe ends up here: minic's REGS-zinit pattern emits multiple
-`add %ptr, K` temps with the same operands (e.g. `&r[2]`).  qbe's
-GVN merges them into one temp.  The merged temp is now live across
-the call.  spill.c's `iscall` block calls `limit2(v, NGPS, NFPS, 0)`
-to limit to callee-save count, but then `sethint(v, r)` hints toward
-`r = T.rsave` (caller-save mask) — biasing rega the wrong way.
-Suspicion: `sethint` should hint toward callee-save for live-across-
-call temps, or the call needs an explicit clobber list.  Untested.
-
-In stevie this hits every BIOS wrapper in `dos.c` that uses `union
-REGS` + multiple `int86` calls: `bios_t_ed`, `bios_t_el`, `windgoto`,
-`bios_t_il`, `bios_t_dl`.  Symptom is "wild write into DGROUP
-somewhere", which sometimes lands harmlessly and sometimes (e.g. the
-CLS path observed this session) garbles the BIOS arguments and turns
-INT 10h AH=09 into a runaway screen-fill loop.
-
-Also relevant: `_putchar` in libstub is a hand-rolled INT 10h call
-that *does* preserve BX, so the diagnostic probes work.  It's the
-qbe-emitted code that triggers the bug.
-
-### What still needs follow-up
-
-- **Why typed input doesn't reach the editor**.  After our changes
-  stevie reaches the main `edit()` loop, but keystrokes don't take
-  effect.  Likely candidates:
-  - `_getch` / `_inchar` codegen (same rega-CX issue?)
-  - `_int86` BX-save side-effect we missed
-  - `vgetc()`'s buffer interactions
-  Add a `putchar('K')` probe at the top of `edit()` and inside
-  `vgetc()` to see if anything fires on keypress.
-
-- **Fix the rega CX-across-call bug for real**.  The blunt fix is in
-  `spill.c` near the `iscall` block.  Try changing `sethint(v, r)`
-  so live-across-call temps get hinted toward callee-save (BX/SI/DI),
-  not caller-save.  Verify with `/tmp/repro.c` — the post-call store
-  must NOT use the same register that was set up pre-call.  Also
-  check upstream qbe for related fixes.
-
-- **The far-pointer codegen bug in minic**.  The `strncmp(ti_sig,
-  ti_sig_addr, …)` call site emits broken code (uninitialised ES, etc).
-  Currently sidestepped.  Worth its own debug session — check how
-  minic lowers `char far *` arg passing.
-
-- **Diagnostic probes are still in source**.  Remove before any
-  release-quality run:
-  - `minic/dos/crt0_exe.asm` — XMR probes
-  - `stevie-orig/main.c` — `1`, `2`, `3`, `a`-`j`
-  - `stevie-orig/screen.c` — `A`, `B`, `C`, `D`
-
-- **Audit remaining libstub for BX clobbers**.  We've now patched
+- **Audit remaining libstub for BX clobbers.**  We've patched
   `_malloc` (in libstub_to_exe.py), `_int86`, `_intdos`.  `_putchar`,
-  `_strrchr` already save BX correctly.  Most other functions don't
-  touch BX.  But `_atoi`, `_strchr`, `_strcat` are still stubs that
-  return 0/-1 — they'll surface the moment stevie's parser uses them.
+  `_strrchr` already save BX correctly.  But `_atoi`, `_strchr`,
+  `_strcat` are still `mov ax, 0; ret` stubs — they'll surface the
+  moment stevie's parser uses them.
 
-- **fprintf/file I/O stubs**.  Currently no-ops returning 0/-1.
+- **fprintf/file I/O stubs.**  Currently no-ops returning 0/-1.
   Once stevie tries to load a file the readfile path needs real
   fopen/fread.
+
+- **The far-pointer codegen bug in minic.**  The `strncmp(ti_sig,
+  ti_sig_addr, …)` call site emits broken code (uninitialised ES,
+  etc.).  Currently sidestepped via `host_type = hIBMPC` hardcode.
+  Worth its own debug session — check how minic lowers `char far *`
+  arg passing.
 
 ## Build / run
 
@@ -233,6 +180,8 @@ you can read the trace.
 See `~/.claude/projects/-Users-pauldevine-projects-qbe/memory/`:
 - `feedback_minic_yacc_quirks.md` — miniyacc, varclr probe chains,
   uniform-* peeling, CRLF/0x1A, macOS sysroot trap.
+- `feedback_minic_decl_init_hoisting.md` — **this session.**  Block-
+  scoped `int v = expr;` was hoisted to function entry.  Fixed.
 - `reference_qbe_upstream.md` — `upstream` remote points at
   c9x.me/qbe.git.
 - `project_minic_pointer_bloat.md` — Path A landed; details what
@@ -241,11 +190,15 @@ See `~/.claude/projects/-Users-pauldevine-projects-qbe/memory/`:
   after Path A; far-pointer args = 4 bytes.
 - `feedback_omf_pipeline_gotchas.md` — nasm -f obj strictness,
   segment naming, MZ header layout.
-- `feedback_i8086_codegen_bugs.md` — five cascading codegen bugs;
-  this session added #5 (libstub functional stubs that "succeed"
-  silently → wrong branches).
+- `feedback_i8086_codegen_bugs.md` — five cascading codegen bugs.
+- `feedback_i8086_loadub_dst_aliases_addr.md` — **this session.**
+  Oloadub fast path clobbered address when dst register aliased
+  the memref base.  Fixed.
 - `feedback_qbe_caller_save_bug.md` — the rega CX-across-call bug
-  (this session's headliner).
+  (the original headline).
+- `feedback_qbe_void_call_no_caller_save_hint.md` — **this session.**
+  spill.c missed the avoid-mask hint for void calls; fix lifted the
+  rega bug for stevie's BIOS wrappers.
 
 ## Useful one-liners
 
@@ -267,11 +220,18 @@ hdr = struct.unpack_from("<H", d, 8)[0]
 open("/tmp/crt0.bin","wb").write(d[hdr*16:hdr*16+44])
 ' && ndisasm -b 16 -o 0 /tmp/crt0.bin
 
-# Verify rega bug repro still triggers
+# Verify rega caller-save fix still holds (should NOT show xchg bx, cx
+# reusing CX after a `call far`)
 echo 'extern void other();
 extern int gA, gB;
 void test(){int r[4];r[0]=0;r[1]=0;r[2]=0;r[3]=0;other(r);r[2]=gA*gB;other(r);}' \
-    | ./minic/minic -m medium | ./qbe -t i8086 -m medium | grep -A2 'call far' | head
+    | ./minic/minic -m medium | ./qbe -t i8086 -m medium | grep -A8 'call far'
+
+# Verify the minic decl-init fix (the deref+post-inc must be inside
+# @l1, not in @l0 entry block)
+echo 'extern int *p;
+test(){if(p){int v=*p++;return v;}return 0;}' \
+    | ./minic/minic -m medium
 
 # Drive minic alone with a model selector
 ./minic/minic -m medium < build/stevie-orig/search.pp.c | head
