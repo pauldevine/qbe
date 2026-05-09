@@ -15,13 +15,21 @@
 set -u
 KEEP_GOING=0
 MODEL="small"
+EXE=0  # 1 → produce a .EXE via OMF objs + omf_link.py.  Implied by medium+.
 for arg in "$@"; do
 	case "$arg" in
 		--keep-going) KEEP_GOING=1 ;;
 		--model=*) MODEL="${arg#--model=}" ;;
+		--exe) EXE=1 ;;
+		--com) EXE=0 ;;
 		*) echo "unknown arg '$arg'" >&2; exit 1 ;;
 	esac
 done
+
+# Medium and above can't be flat-loaded as .COM; force .EXE pipeline.
+case "$MODEL" in
+	medium|compact|large|huge) EXE=1 ;;
+esac
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_DIR="$QBE_DIR/stevie-orig"
@@ -248,47 +256,93 @@ if [ ${#stage_pass[@]} -ne ${#SOURCES[@]} ]; then
 	echo "Linking with stubs for the missing ones."
 fi
 
-# Stage 4: Link via NASM concatenation (no real linker on macOS toolchain).
-# crt0.asm provides _start; doslib.asm provides DOS API helpers.
-# Concatenate into one file and assemble as a flat .COM (ORG 0x100).
-#
-# crt0.asm uses NASM "section" directives and BITS/CPU.  We strip those
-# and rely on the wrapper-supplied prologue.  Same for doslib.asm.
 echo
-echo "=== Linking ==="
-LINK_ASM="$OUT_DIR/stevie.full.asm"
-strip_runtime() {
-	grep -v -E '^(BITS|CPU|section|global|extern)\b' "$1"
-}
-{
-	echo "BITS 16"
-	echo "CPU 8086"
-	echo "ORG 0x100"
-	echo
-	echo "section .text"
-	echo "; ===== crt0 ====="
-	strip_runtime "$DOS_DIR/crt0.asm"
-	echo
-	echo "; ===== doslib ====="
-	strip_runtime "$DOS_DIR/doslib.asm"
-	echo
-	echo "; ===== libstub (placeholder libc) ====="
-	strip_runtime "$DOS_DIR/libstub.asm"
-	echo
-	for src in "${SOURCES[@]}"; do
+if [ $EXE -eq 1 ]; then
+	# .EXE pipeline (medium model and up):
+	#   per-TU asm  → asm_to_omf.py → nasm -f obj → libobj
+	#   crt0_exe.asm + libstub_exe.asm  → nasm -f obj → libobj
+	#   omf_link.py → MZ EXE.
+	echo "=== Linking (medium .EXE) ==="
+	# 1. Per-TU OMF objects (regenerate even if we already have .obj from
+	#    the C build path — flags or qbe behaviour may have changed).
+	for src in "${stage_pass[@]}"; do
 		base="${src%.c}"
-		[ -f "$OUT_DIR/$base.nasm.asm" ] || continue
-		echo "; ===== $src ====="
-		cat "$OUT_DIR/$base.nasm.asm"
-		echo
+		"$QBE_DIR/tools/asm_to_omf.py" "$base" \
+			"$OUT_DIR/$base.asm" "$OUT_DIR/$base.omf.asm" 2>>"$OUT_DIR/link.err" || {
+			echo "  FAIL omf-wrap: $base"; exit 1; }
+		nasm -f obj "$OUT_DIR/$base.omf.asm" \
+			-o "$OUT_DIR/$base.obj" 2>>"$OUT_DIR/link.err" || {
+			echo "  FAIL nasm-obj: $base"; cat "$OUT_DIR/link.err"; exit 1; }
 	done
-	echo "; ===== heap marker ====="
-	echo "_heap_end_of_image:"
-} > "$LINK_ASM"
+	# 2. crt0_exe.obj
+	nasm -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" \
+		2>>"$OUT_DIR/link.err" || {
+		echo "  FAIL nasm-obj: crt0_exe"; cat "$OUT_DIR/link.err"; exit 1; }
+	# 3. libstub_exe.obj (auto-converted from libstub.asm).
+	"$QBE_DIR/tools/libstub_to_exe.py" "$DOS_DIR/libstub.asm" \
+		"$OUT_DIR/libstub_exe.asm" 2>>"$OUT_DIR/link.err" || {
+		echo "  FAIL libstub-conv"; exit 1; }
+	nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" \
+		2>>"$OUT_DIR/link.err" || {
+		echo "  FAIL nasm-obj: libstub_exe"; cat "$OUT_DIR/link.err"; exit 1; }
 
-if nasm -w-label-redef-late -w-pp-open-string -f bin "$LINK_ASM" -o "$OUT_DIR/stevie.com" 2>"$OUT_DIR/link.err"; then
-	echo "  OK: $OUT_DIR/stevie.com ($(wc -c <"$OUT_DIR/stevie.com") bytes)"
+	# 4. Link.  crt0 must come first so its _TEXT ends up at CS:IP=0:0
+	#    (the linker places code segments in input order).
+	OBJS=("$OUT_DIR/crt0_exe.obj")
+	for src in "${stage_pass[@]}"; do
+		OBJS+=("$OUT_DIR/${src%.c}.obj")
+	done
+	OBJS+=("$OUT_DIR/libstub_exe.obj")
+
+	if "$QBE_DIR/tools/omf_link.py" \
+		-o "$OUT_DIR/stevie.exe" \
+		--map "$OUT_DIR/stevie.map" \
+		--entry _start \
+		--stack-size 4096 \
+		"${OBJS[@]}" 2>>"$OUT_DIR/link.err"; then
+		echo "  OK: $OUT_DIR/stevie.exe ($(wc -c <"$OUT_DIR/stevie.exe") bytes)"
+	else
+		echo "  FAIL link: $(tail -3 "$OUT_DIR/link.err")"
+		exit 1
+	fi
 else
-	echo "  FAIL link: $(head -3 "$OUT_DIR/link.err")"
-	exit 1
+	# .COM pipeline (tiny/small): NASM-concat into a flat binary.
+	echo "=== Linking (.COM) ==="
+	LINK_ASM="$OUT_DIR/stevie.full.asm"
+	strip_runtime() {
+		grep -v -E '^(BITS|CPU|section|global|extern)\b' "$1"
+	}
+	{
+		echo "BITS 16"
+		echo "CPU 8086"
+		echo "ORG 0x100"
+		echo
+		echo "section .text"
+		echo "; ===== crt0 ====="
+		strip_runtime "$DOS_DIR/crt0.asm"
+		echo
+		echo "; ===== doslib ====="
+		strip_runtime "$DOS_DIR/doslib.asm"
+		echo
+		echo "; ===== libstub (placeholder libc) ====="
+		strip_runtime "$DOS_DIR/libstub.asm"
+		echo
+		for src in "${SOURCES[@]}"; do
+			base="${src%.c}"
+			[ -f "$OUT_DIR/$base.nasm.asm" ] || continue
+			echo "; ===== $src ====="
+			cat "$OUT_DIR/$base.nasm.asm"
+			echo
+		done
+		echo "; ===== heap marker ====="
+		echo "_heap_end_of_image:"
+	} > "$LINK_ASM"
+
+	if nasm -w-label-redef-late -w-pp-open-string -f bin "$LINK_ASM" \
+			-o "$OUT_DIR/stevie.com" 2>"$OUT_DIR/link.err"; then
+		echo "  OK: $OUT_DIR/stevie.com ($(wc -c <"$OUT_DIR/stevie.com") bytes)"
+	else
+		echo "  FAIL link: $(head -3 "$OUT_DIR/link.err")"
+		exit 1
+	fi
 fi
