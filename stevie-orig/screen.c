@@ -512,15 +512,21 @@ screenclear()
 	register char	*rp, *np;
 	register char	*end;
 
-	CLS;		/* clear the display */
+	putchar('A');
+	/* CLS skipped — qbe codegen bug holds CX across the windgoto call
+	 * inside bios_t_ed, corrupting the AH=09 BIOS arg.  Buffers below
+	 * still get blanked; updatescreen will repaint normally. */
+	putchar('B');
 
 	rp  = Realscreen;
 	end = Realscreen + Rows * Columns;
 	np  = Nextscreen;
+	putchar('C');
 
 	/* blank out the stored screens */
 	while (rp != end)
 		*rp++ = *np++ = ' ';
+	putchar('D');
 }
 
 void

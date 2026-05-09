@@ -470,7 +470,10 @@ windinit()
 	/* Identify the host type.  Look for signature in TI Pro ROM.  If */
 	/* found, set host type to TI Pro, else assume host is an IBM PC. */
 
-	host_type = strncmp(ti_sig, ti_sig_addr, ti_sig_len) ? hIBMPC : hTIPRO;
+	/* Force IBM PC host type — far-pointer codegen bug in minic produces
+	 * bogus code for the strncmp(ti_sig, ti_sig_addr, ...) call.  Skip
+	 * the runtime detection; assume IBMPC since that's our DOSBox target. */
+	host_type = hIBMPC;
 
 	/* Next, perform host-dependent initialization. */
 

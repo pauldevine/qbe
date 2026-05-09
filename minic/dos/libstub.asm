@@ -99,14 +99,76 @@ _strcpy:
     pop bp
     ret
 
+; int strcmp(const char *s1, const char *s2)
 global _strcmp
 _strcmp:
-    mov ax, 0
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    mov si, [bp+4]
+    mov di, [bp+6]
+    xor ax, ax
+.loop:
+    mov bl, [si]
+    mov bh, [di]
+    cmp bl, bh
+    jne .diff
+    cmp bl, 0
+    je .done
+    inc si
+    inc di
+    jmp .loop
+.diff:
+    xor ax, ax
+    xor dx, dx
+    mov al, bl
+    mov dl, bh
+    sub ax, dx
+.done:
+    pop bx
+    pop di
+    pop si
+    pop bp
     ret
 
+; int strncmp(const char *s1, const char *s2, size_t n)
 global _strncmp
 _strncmp:
-    mov ax, 0
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    mov si, [bp+4]
+    mov di, [bp+6]
+    mov cx, [bp+8]
+    xor ax, ax
+    jcxz .done
+.loop:
+    mov bl, [si]
+    mov bh, [di]
+    cmp bl, bh
+    jne .diff
+    cmp bl, 0
+    je .done
+    inc si
+    inc di
+    dec cx
+    jnz .loop
+    jmp .done
+.diff:
+    xor ax, ax
+    xor dx, dx
+    mov al, bl
+    mov dl, bh
+    sub ax, dx
+.done:
+    pop bx
+    pop di
+    pop si
+    pop bp
     ret
 
 global _strchr
@@ -397,6 +459,7 @@ _int86:
     mov bp, sp
     push si
     push di
+    push bx                     ; BX is callee-save (cdecl/8086)
     mov ax, [bp+4]
     mov [cs:.int_op+1], al
     mov bx, [bp+6]
@@ -423,6 +486,7 @@ _int86:
     and ax, 1
     mov [bx+12], ax
     mov ax, [bx+0]
+    pop bx
     pop di
     pop si
     pop bp
@@ -436,6 +500,7 @@ _intdos:
     mov bp, sp
     push si
     push di
+    push bx                     ; BX is callee-save (cdecl/8086)
     mov bx, [bp+4]
     mov ax, [bx+0]
     mov cx, [bx+4]
@@ -459,6 +524,7 @@ _intdos:
     and ax, 1
     mov [bx+12], ax
     mov ax, [bx+0]
+    pop bx
     pop di
     pop si
     pop bp
