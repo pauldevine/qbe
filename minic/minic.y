@@ -4528,9 +4528,12 @@ stmt: ';'                            { $$ = 0; }
         $$ = 0;
     }
     | type IDENT '=' expr ';'        {
-        /* Block-scoped variable with initializer.  Mirror the dcls
-         * production: alloc, then evaluate `IDENT = expr` so the
-         * initializer goes through the normal assignment path. */
+        /* Block-scoped variable with initializer.  alloc happens at
+         * parse time (function entry, like all locals), but the
+         * initializer assignment must run only when control flow
+         * reaches the declaration — not unconditionally at the start
+         * of the function.  Wrap the assignment as an Expr Stmt so
+         * stmt() emits it in lexical order. */
         int s;
         char *v;
         Node *init_node;
@@ -4541,8 +4544,7 @@ stmt: ';'                            { $$ = 0; }
         varadd(v, 0, $1, 0);
         fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($1), s);
         init_node = mknode('=', $2, $4);
-        expr(init_node);
-        $$ = 0;
+        $$ = mkstmt(Expr, init_node, 0, 0);
     }
     | type IDENT '[' NUM ']' ';'     {
         /* Block-scoped fixed-size array. */

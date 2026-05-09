@@ -216,10 +216,21 @@ limit2(BSet *b1, int k1, int k2, BSet *f)
 static void
 sethint(BSet *u, bits r)
 {
-	int t;
+	int t, hr;
+	Tmp *p;
 
-	for (t=Tmp0; bsiter(u, &t); t++)
-		tmp[phicls(t, tmp)].hint.m |= r;
+	for (t=Tmp0; bsiter(u, &t); t++) {
+		p = &tmp[phicls(t, tmp)];
+		p->hint.m |= r;
+		/* If a previous pass set hint.r (preferred single register)
+		 * to a register now in the avoid mask, clear it.  Otherwise
+		 * rega's `r = *hint(t)` path uses the preferred register
+		 * directly and bypasses hint.m, causing live-across-call
+		 * temps to land in caller-save regs and get clobbered. */
+		hr = p->hint.r;
+		if (hr != -1 && (r & BIT(hr)))
+			p->hint.r = -1;
+	}
 }
 
 /* reloads temporaries in u that are
@@ -492,6 +503,19 @@ spill(Fn *fn)
 			}
 			emiti(*i);
 			r = v->t[0]; /* Tmp0 is NBit */
+			/* For Call instructions not handled via dopm (e.g.,
+			 * void-returning calls with no following Ocopy), tell
+			 * the live-across-call temps to AVOID caller-save
+			 * registers — those will be clobbered by the call.
+			 * Without this, rega may pick AX/CX/DX for a temp
+			 * needed after the call, producing wild writes when
+			 * the post-call code reads garbage from the clobbered
+			 * register. */
+			if (iscall(i->op)) {
+				int rs;
+				for (rs=0; T.rsave[rs]>=0; rs++)
+					r |= BIT(T.rsave[rs]);
+			}
 			if (r)
 				sethint(v, r);
 		}

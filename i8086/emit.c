@@ -2571,13 +2571,32 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		goto unwind_load;
 	}
 	if (i->op == Oloadub) {
-		/* If dst has an 8-bit form, clear it first then load the byte. */
+		/* If dst has an 8-bit form, clear it first then load the byte.
+		 * Skip this fast path when the address operand uses the same
+		 * register as the destination — the `xor dst, dst` would
+		 * destroy the address before we read from it.  This happens
+		 * after addr_fixup_reg / swap_bx have already routed the
+		 * address through BX and rega happened to allocate the dst
+		 * to BX as well. */
 		if (rtype(i->to) == RTmp && i->to.val <= RBX) {
-			fprintf(f, "\txor %s, %s\n", rname[i->to.val], rname[i->to.val]);
-			fprintf(f, "\tmov %s, byte ", rname8[i->to.val]);
-			emit_memref(i->arg[0], fn, f);
-			fputc('\n', f);
-			goto unwind_load;
+			int dst = i->to.val;
+			int addr_clash = 0;
+			if (rtype(i->arg[0]) == RTmp && i->arg[0].val == dst)
+				addr_clash = 1;
+			else if (rtype(i->arg[0]) == RMem) {
+				Mem *m = &fn->mem[i->arg[0].val];
+				if (rtype(m->base) == RTmp && m->base.val == dst)
+					addr_clash = 1;
+				if (rtype(m->index) == RTmp && m->index.val == dst)
+					addr_clash = 1;
+			}
+			if (!addr_clash) {
+				fprintf(f, "\txor %s, %s\n", rname[dst], rname[dst]);
+				fprintf(f, "\tmov %s, byte ", rname8[dst]);
+				emit_memref(i->arg[0], fn, f);
+				fputc('\n', f);
+				goto unwind_load;
+			}
 		}
 		/* Otherwise route through AL: AH := 0, AL := byte, then mov dst, ax.
 		 * Save/restore AX if dst isn't AX. */

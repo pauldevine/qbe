@@ -92,7 +92,6 @@ char	*argv[];
 	char	*pat = NULL;			/* pattern from command line */
 	int	line = -1;					/* line number from command line */
 
-	putchar('1');
 	/*
 	 * Process the command line arguments.
 	 */
@@ -147,39 +146,26 @@ char	*argv[];
  	if (numfiles > 1)
  		fprintf(stderr, "%d files to edit\n", numfiles);
 
-	putchar('2');
 	windinit();
-	putchar('3');
 
 	/*
 	 * Allocate LPTR structures for all the various position pointers
 	 */
  	Filemem = (LPTR *) malloc(sizeof(LPTR));
-	putchar('a');
 	Filetop = (LPTR *) malloc(sizeof(LPTR));
-	putchar('b');
 	Fileend = (LPTR *) malloc(sizeof(LPTR));
-	putchar('c');
 	Topchar = (LPTR *) malloc(sizeof(LPTR));
-	putchar('d');
 	Botchar = (LPTR *) malloc(sizeof(LPTR));
-	putchar('e');
 	Curschar = (LPTR *) malloc(sizeof(LPTR));
-	putchar('f');
 	Insstart = (LPTR *) malloc(sizeof(LPTR));
-	putchar('g');
 	if (screenalloc() == -1) {
-		putchar('!');
 		fprintf(stderr, "Can't allocate data structures\n");
 		windexit(0);
 	}
-	putchar('h');
 
 	filealloc();		/* Initialize Filemem, Filetop, and Fileend */
-	putchar('i');
 
 	screenclear();
-	putchar('j');
 
 	if ((initstr = getenv("EXINIT")) != NULL) {
 		char *lp, buf[128];

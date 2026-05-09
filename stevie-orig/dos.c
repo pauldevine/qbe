@@ -223,13 +223,12 @@ flushbuf()				/* Flush buffered output to display */
 
 		switch (host_type) {
 		case hIBMPC:
-			inregs.h.ah = 0x09;
-			inregs.h.al = *bptr;
-			inregs.h.bh = bgn_page;
-			inregs.h.bl = P(P_CO);
-			inregs.x.cx = 1;
-			int86(crt_int, &inregs, &outregs);
+			/* Skip the AH=09 (write-with-attribute) call entirely;
+			 * just teletype the buffer.  The AH=09 path was
+			 * displaying nothing — narrow down whether it's bad
+			 * codegen on the AH=09 setup or some other issue. */
 			inregs.h.ah = 0x0E;
+			inregs.h.bh = 0;
 			while (bpos-- > 0) {
 				inregs.h.al = *bptr++;
 				int86(crt_int, &inregs, &outregs);
@@ -486,12 +485,11 @@ windinit()
 		bgn_page = regs.h.bh;
 		bgn_mode = regs.h.al;
 		Columns = regs.h.ah;
-		/*  Find the starting color, and save to restore later */
-		regs.h.ah = 8;		/* Read char/attr BIOS fn */
-		regs.h.bh = bgn_page;
-		int86(crt_int, &regs, &regs);
-		bgn_color = (int) regs.h.ah;
-		P(P_CO) = bgn_color;
+		/* HARDCODE: skip the second BIOS call & set attribute to 0x07
+		 * (light gray on black) directly, to test whether the display
+		 * issue is just bgn_color being read wrong. */
+		bgn_color = 0x07;
+		P(P_CO) = 0x07;
 		break;
 	case hTIPRO:
 		Columns = 80;

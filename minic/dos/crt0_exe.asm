@@ -25,30 +25,15 @@ global _start
 segment _TEXT class=CODE align=2 use16
 
 _start:
-    ; PROBE: print 'X' to confirm crt0 reached.
-    mov ax, 0x0E58       ; AH=0Eh teletype, AL='X'
-    xor bx, bx
-    int 0x10
-
     ; DS = DGROUP so near-data accesses ([_var]) resolve.
     mov ax, DGROUP
     mov ds, ax
-
-    ; PROBE: print 'M' just before far-call to _main.
-    mov ax, 0x0E4D       ; 'M'
-    xor bx, bx
-    int 0x10
 
     xor ax, ax
     push ax              ; argv = NULL
     push ax              ; argc = 0
     call far _main
     add sp, 4
-
-    ; PROBE: print 'R' if _main returned (should not be reached usually).
-    mov ax, 0x0E52       ; 'R'
-    xor bx, bx
-    int 0x10
 
     ; Exit to DOS with AL = main's return code.
     mov ah, 0x4C
