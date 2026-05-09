@@ -196,16 +196,14 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 	cty = 0;
 
 	/* emit() builds in reverse, so emit in reverse order of execution:
-	 * Execution order: allocate -> store args -> call -> get result -> cleanup
-	 * Emit order: cleanup -> get result -> call -> store args -> allocate
+	 * Execution order: store args -> call -> get result
+	 * Emit order: get result -> call -> store args
+	 *
+	 * NOTE: arg slots are pre-reserved at the bottom of the locals frame
+	 * (see i8086_abi).  The prologue's `sub sp, 2*fn->slot` already accounts
+	 * for them, so we don't emit any per-call sub/add of SP.  Args are
+	 * written directly into the reserved slots via SLOT() refs.
 	 */
-
-	/* 5. Caller cleanup (last emitted, last executed)
-	 * Use Osalloc with negative value to deallocate (add to SP)
-	 */
-	if (stk > 0) {
-		emit(Osalloc, Kw, R, getcon(-stk, fn), R);
-	}
 
 	/* 4. Handle return value (get result from AX after call) */
 	if (!req(icall->to, R)) {
@@ -224,75 +222,48 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 	else
 		emit(Ocall, 0, R, icall->arg[0], CALL(cty));
 
-	/* 2. Pass arguments on stack (right-to-left for cdecl)
+	/* 2. Pass arguments via pre-reserved slots at the bottom of the
+	 * locals frame.  Slot indices 0..arg_words-1 always lie at the
+	 * deepest part of the frame (just above SP after prologue), so
+	 * they hand off to a far/near call's return-address push naturally.
 	 *
-	 * FINAL SIMPLIFIED APPROACH for 8086:
-	 * The problem: mov [ax], value is invalid (AX can't be base register)
-	 * The solution: Use BP-relative addressing instead!
+	 * Layout (after prologue, just before this call's stores):
+	 *   SP = BP - 2*fn->slot   (set by `sub sp, 2*fn->slot` in prologue)
+	 *   slot 0   → [BP - 2*fn->slot]      = [SP]      (first arg)
+	 *   slot 1   → [BP - 2*(fn->slot-1)]  = [SP+2]    (second arg)
+	 *   ...
 	 *
-	 * After allocating stack space, we can store arguments using
-	 * [BP-offset] addressing, which is valid on 8086.
-	 *
-	 * Example:
-	 *   sub sp, 4      ; Allocate 4 bytes
-	 *   mov [bp-4], 72  ; Store arg1 (at SP position)
-	 *   mov [bp-2], 105 ; Store arg2 (at SP+2 position)
-	 *   call func
-	 *   add sp, 4      ; Clean up
+	 * Far CALL pushes 4 bytes of return at [SP-4..SP-1]; the callee's
+	 * `[bp+6]` (after push bp; mov bp,sp) reads our slot 0.  ✓
 	 */
 	if (stk > 0) {
-		/* Emit stores FIRST (so they execute AFTER allocation due to reversal)
-		 * Then emit allocation LAST (so it executes FIRST)
-		 *
-		 * Execution order will be:
-		 * 1. sub sp, stk       (allocate space)
-		 * 2. mov [bp-stk], arg1  (store first argument)
-		 * 3. mov [bp-stk+2], arg2 (store second argument)
-		 * 4. call function
-		 */
-
-		/* Calculate offset for each argument and emit stores
-		 * After "sub sp, stk", the arguments are at [bp-stk], [bp-stk+2], etc.
-		 */
-		off = stk;  /* Start from the bottom of allocated space */
+		off = 0;  /* slot index for first arg = bottom of arg region */
 		for (i = i0; i < icall; i++) {
 			if (!isarg(i->op))
 				continue;
 			if (req(i->arg[0], R))
 				continue;
 
-			int arg_size;
-			if (i->cls == Kl) arg_size = 4;
-			else if (i->cls == Ks) arg_size = 4;
-			else if (i->cls == Kd) arg_size = 8;
-			else arg_size = 2;
+			int arg_words;
+			if (i->cls == Kl) arg_words = 2;
+			else if (i->cls == Ks) arg_words = 2;
+			else if (i->cls == Kd) arg_words = 4;
+			else arg_words = 1;
 
-			/* Store this argument at [bp - off]
-			 * Create a memory reference with BP as base and negative offset
-			 */
-			int midx = fn->nmem++;
-			vgrow(&fn->mem, fn->nmem);
-			fn->mem[midx] = (Mem){
-				.base = TMP(RBP),  /* Use BP as base */
-				.index = R,
-				.offset = {.type = CBits, .bits.i = -off},
-				.scale = 0
-			};
-			Ref mem_ref = MEM(midx);
+			Ref slot_ref = SLOT(off);
 
 			/* Emit store based on type */
 			if (i->cls == Ks)
-				emit(Ostores, Ks, R, i->arg[0], mem_ref);
+				emit(Ostores, Ks, R, i->arg[0], slot_ref);
 			else if (i->cls == Kd)
-				emit(Ostored, Kd, R, i->arg[0], mem_ref);
+				emit(Ostored, Kd, R, i->arg[0], slot_ref);
+			else if (i->cls == Kl)
+				emit(Ostorel, Kw, R, i->arg[0], slot_ref);
 			else
-				emit(Ostorew, Kw, R, i->arg[0], mem_ref);
+				emit(Ostorew, Kw, R, i->arg[0], slot_ref);
 
-			off -= arg_size;  /* Move to next argument position */
+			off += arg_words;  /* Next slot index */
 		}
-
-		/* NOW emit allocation (emitted last, executes first) */
-		emit(Osalloc, Kw, R, getcon(stk, fn), R);
 	}
 }
 
@@ -349,6 +320,41 @@ i8086_abi(Fn *fn)
 	Blk *b;
 	Ins *i, *i0;
 	int n0, n1, ioff;
+	int max_arg_words;
+
+	/* Pre-pass: compute the maximum arg-region size across all calls
+	 * in this function and reserve that many slots at the bottom of
+	 * the locals frame.  selcall stores args to slots 0..N-1, which
+	 * the prologue's `sub sp, 2*fn->slot` allocates for free.
+	 *
+	 * Slot index 0 maps to [BP - 2*final_fn_slot] = [SP after prologue],
+	 * so the first arg lands exactly where a CALL needs it.  All call
+	 * sites in this function share these slots since only one call is
+	 * live at a time.
+	 */
+	max_arg_words = 0;
+	for (b = fn->start; b; b = b->link) {
+		int call_words = 0;
+		for (i = b->ins; i < &b->ins[b->nins]; i++) {
+			if (isarg(i->op)) {
+				if (req(i->arg[0], R))
+					continue;
+				if (i->cls == Kl) call_words += 2;
+				else if (i->cls == Ks) call_words += 2;
+				else if (i->cls == Kd) call_words += 4;
+				else call_words += 1;
+			} else if (i->op == Ocall) {
+				if (call_words > max_arg_words)
+					max_arg_words = call_words;
+				call_words = 0;
+			}
+		}
+		/* Also handle the last call in the block (no trailing op
+		 * to flush against). */
+		if (call_words > max_arg_words)
+			max_arg_words = call_words;
+	}
+	fn->slot += max_arg_words;
 
 	/* Lower parameters in the entry block */
 	b = fn->start;

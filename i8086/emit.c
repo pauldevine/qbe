@@ -2659,15 +2659,12 @@ end_load_block:
 		case Ocugew: jcc = "jae"; break;
 		default: jcc = "jmp"; break;
 		}
-		/* The dst materializer comes BEFORE cmp so the cmp's flags
-		 * survive into the jcc. */
-		fprintf(f, "\tmov ");
-		if (rtype(i->to) == RTmp)
-			fprintf(f, "%s", rname[i->to.val]);
-		else if (rtype(i->to) == RSlot)
-			fprintf(f, "word [bp%+ld]", (long)slot(i->to, fn));
-		fprintf(f, ", 1\n");
-		/* cmp arg0, arg1 */
+		/* cmp arg0, arg1 first.  We used to materialize dst=1
+		 * before the cmp, but that's incorrect when dst aliases
+		 * arg0 (e.g. both end up in AX) — the `mov dst, 1` would
+		 * clobber arg0 before the comparison reads it.  `mov`
+		 * doesn't modify flags on 8086, so doing cmp first then
+		 * `mov dst, 1` between cmp and jcc is safe. */
 		fprintf(f, "\tcmp ");
 		if (rtype(i->arg[0]) == RTmp)
 			fprintf(f, "%s", rname[i->arg[0].val]);
@@ -2683,6 +2680,13 @@ end_load_block:
 		else if (rtype(i->arg[1]) == RCon)
 			fprintf(f, "%"PRIi64, fn->con[i->arg[1].val].bits.i);
 		fprintf(f, "\n");
+		/* Materialize dst = 1 (assume condition true).  No flag impact. */
+		fprintf(f, "\tmov ");
+		if (rtype(i->to) == RTmp)
+			fprintf(f, "%s", rname[i->to.val]);
+		else if (rtype(i->to) == RSlot)
+			fprintf(f, "word [bp%+ld]", (long)slot(i->to, fn));
+		fprintf(f, ", 1\n");
 		/* j<cc> .Ldone — if condition true, dst stays 1 */
 		fprintf(f, "\t%s .Lcmp_done_%p\n", jcc, (void*)i);
 		/* Condition false: clear dst to 0 */
@@ -2779,6 +2783,55 @@ end_load_block:
 			swap_bx(&i->arg[1], bad, fn);
 		}
 
+		/* Two-address fixup: format strings of the form `op %=, %1`
+		 * encode the constraint that the destination register must
+		 * already hold arg[0]'s value (since 8086 ops like add/sub/and
+		 * read-modify-write the first operand).  rega's coalescer hints
+		 * but doesn't guarantee this, so when arg[0] and to ended up in
+		 * different physical registers we must materialize the copy.
+		 *
+		 * Detect the pattern by scanning fmt for both "%=" and "%1".
+		 * If matched, and arg[0] is a tmp/slot/const distinct from to,
+		 * emit a `mov to, arg[0]` first.  We also rewrite arg[0] to
+		 * equal to so emitf prints the expected `op to, arg1`.
+		 */
+		{
+			int has_eq = 0, has_1 = 0;
+			for (p = fmt; *p; p++) {
+				if (p[0] == '%' && p[1] == '=') has_eq = 1;
+				if (p[0] == '%' && p[1] == '1') has_1 = 1;
+			}
+			if (has_eq && has_1
+			    && rtype(i->to) == RTmp
+			    && !req(i->arg[0], R)
+			    && !req(i->arg[0], i->to)) {
+				if (rtype(i->arg[0]) == RTmp
+				    && i->arg[0].val != i->to.val) {
+					fprintf(f, "\tmov %s, %s\n",
+						rname[i->to.val], rname[i->arg[0].val]);
+					i->arg[0] = i->to;
+				} else if (rtype(i->arg[0]) == RCon) {
+					Con *cc = &fn->con[i->arg[0].val];
+					if (cc->type == CBits) {
+						int64_t v = cc->bits.i;
+						if (i->cls == Kw) v = (int64_t)(int16_t)v;
+						fprintf(f, "\tmov %s, %"PRIi64"\n",
+							rname[i->to.val], v);
+					} else if (cc->type == CAddr) {
+						fprintf(f, "\tmov %s, ", rname[i->to.val]);
+						emitaddr(cc, f);
+						fprintf(f, "\n");
+					}
+					i->arg[0] = i->to;
+				} else if (rtype(i->arg[0]) == RSlot) {
+					fprintf(f, "\tmov %s, word [bp%+ld]\n",
+						rname[i->to.val],
+						(long)slot(i->arg[0], fn));
+					i->arg[0] = i->to;
+				}
+			}
+		}
+
 		needs_byte_store = (i->op == Ostoreb
 		    && rtype(i->arg[0]) == RTmp
 		    && (i->arg[0].val == RSI || i->arg[0].val == RDI
@@ -2858,20 +2911,11 @@ i8086_emitfn(Fn *fn, FILE *f)
 	fprintf(f, "\n");
 	emitfnlnk(fn->name, &fn->lnk, f);
 
-	/* For MASM compatibility, emit proc directive with near/far attribute */
-	switch (T.memmodel) {
-	case Mmedium:
-	case Mlarge:
-	case Mhuge:
-		/* Far procedure - uses RETF */
-		fprintf(f, "%s proc far\n", fn->name);
-		break;
-	default:
-		/* Near procedure - uses RET */
-		/* MASM-style `name proc near` removed; the bare label above is
-		 * sufficient for NASM and amd64-style assemblers. */
-		break;
-	}
+	/* MASM `proc far/near` directive removed.  emitfnlnk above already
+	 * emitted the prefixed entry label; far calls are signaled by the
+	 * `call far` instruction at the call site, not by a function-level
+	 * directive.  NASM (and OMF linkers) don't need or want it.  RETF
+	 * is emitted explicitly at the epilogue. */
 
 	/* Function prologue */
 	fprintf(f, "\tpush bp\n");
