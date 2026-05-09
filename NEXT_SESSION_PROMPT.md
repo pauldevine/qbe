@@ -6,8 +6,10 @@ Modern C toolchain (MiniC frontend → QBE → NASM) targeting the 1978
 Intel 8086 in DOS real mode.  Premise: **Stevie 3.69b (a 1986 vi
 clone) is the workload.  Its needs drive what features get added.**
 
-Build target: `stevie-orig/`.  Pipeline today: `tools/build-stevie.sh
---keep-going` (tiny model, .COM output via `nasm -f bin`).
+Build target: `stevie-orig/`.  Pipelines:
+- `tools/build-stevie.sh` → small model, .COM via `nasm -f bin`.
+- `tools/build-stevie.sh --model=medium` → medium model, .EXE via
+  per-TU OMF objects + custom Python OMF→MZ linker.
 
 ## Strategic shift — full DOS memory-model matrix
 
@@ -33,187 +35,245 @@ need to grow (`union REGS *` stays a 2-byte near pointer).
 
 ## Where we are right now
 
-**Step 1 (minic memory-model awareness) is done this session.**
+**Steps 1 + 2 are done; Step 3 in progress** — medium-model `stevie.exe`
+builds clean *and now executes through `windinit`, the malloc loop,
+`filealloc`, and `screenclear` under DOSBox*.  Hangs in `msg("Empty
+Buffer")` (gotocmd / outstr / flushbuf).
 
-- `minic -m {tiny,small,medium,compact,large,huge}` parses argv,
-  defaults to `small`.
-- `irtyp` / `irtyp_ret` are model-aware: code pointers honour
-  `NEAR_CODE`, data pointers honour `NEAR_DATA`, far stays `'l'`.
-- Function-address sites that were hard-coded to `=w` (the
-  `=w copy $name` for function-pointer fetch and the two function-
-  pointer alloc sites) are now driven by `CODEPTR_T()` / `CODEPTR_SZ()`.
-- `minic_cpp_v2` and `tools/build-stevie.sh` accept `--model=<m>`
-  and forward it to both minic and qbe.
+### Codegen + runtime bugs fixed this session (the big wins)
 
-**24/24 sources compile + assemble for both small and medium model**:
+The previous build assembled fine but produced wrong code at runtime.
+Stevie hung in `_main` immediately because four interlocking bugs in
+the i8086 backend + libstub corrupted register state across calls:
+
+1. **i8086/abi.c — argument lowering** (most-impactful).  `selcall`
+   used `sub sp, stk; mov [bp-N], val` to push args, but `[bp-N]`
+   addresses inside the function's local frame, not the freshly-
+   allocated arg region (BP is offset from SP by `2*fn->slot`).  Args
+   were silently written into the locals area; `[SP]` was left
+   uninitialized; callees read stack garbage.  Fix: pre-pass all blocks
+   to compute max arg-region size, reserve that many slots at the
+   bottom of the locals frame at function entry (so slot 0 sits exactly
+   at `[SP]` after prologue), use `SLOT(j)` refs for arg stores, drop
+   per-call `sub sp` / `add sp` brackets entirely.  Side-effect: code
+   shrank ~5.5KB from removing the now-unnecessary SP fixups.
+
+2. **i8086/emit.c — two-address constraint fixup**.  The omap entries
+   `add %=, %1`, `sub`, `and`, `or`, `xor` encode the x86 read-modify-
+   write constraint (dest must already hold arg[0]).  rega's coalescer
+   *hints* but doesn't guarantee this.  When dest and arg[0] landed in
+   different registers, the pre-mov got dropped and the asm became
+   `add dx, 16` with DX uninitialized.  Fix: before `emitf`, scan fmt
+   for `%=`+`%1`; if matched and dest != arg[0] reg, emit a `mov dest,
+   arg[0]` first (handling RTmp / RCon / RSlot operand forms).  The
+   shift handling already had this fixup; we generalized.
+
+3. **i8086/emit.c — branchy materialize ordering for cnew/ceqw etc**.
+   The 8086-compatible `cmp/setcc` substitute emitted `mov dst, 1; cmp
+   arg0, arg1; jcc; mov dst, 0`.  When dst aliased arg0 (both → AX),
+   the `mov dst, 1` clobbered arg0 *before* the cmp ever read it, so
+   every comparison evaluated against `1`, not the loaded value.  We
+   saw `if (Filename != NULL)` always take the true branch with argc=0.
+   Fix: do `cmp` first, *then* materialize dst — `mov` doesn't touch
+   flags on 8086, so the jcc still sees the cmp result.
+
+4. **libstub `_malloc` — clobbers callee-save BX**.  cdecl on 8086
+   makes BX/SI/DI callee-save.  qbe-emitted code relies on this (does
+   not save BX itself, so it must trust callees).  Our libstub_exe
+   `_malloc` used `mov bx, [_heap_ptr]` and didn't restore.  Pattern:
+   `newline()` calls `alloc()` which calls `_malloc`; on the 3rd call
+   into newline, `nchars+1` (held in BX) was destroyed and the LINE's
+   `size` field got `_heap_ptr` written into it.  Fix: bracket _malloc
+   body with `push bx` / `pop bx` in `tools/libstub_to_exe.py`.
+
+   *Audit not yet done* on the rest of libstub for similar clobbers.
+   Other functions almost certainly have the same problem (e.g.
+   `_strlen`, `_strcpy`, `_strcmp` use registers freely without
+   saves).  Worth a sweep before dialling in stevie's hot paths.
+
+5. **libstub `_putchar` — actually emits via INT 10h**.  Was a no-op
+   stub returning 0 in AX.  Now writes the arg byte via BIOS teletype
+   (AH=0Eh) so we can use `putchar()` for printf-debugging from any C
+   source.  This is what produced the `S1234abcdefgh56qrsm` trace.
+
+### Current observed run
+
+```
+S 1 2 3 4 a b c d e f g h 5 6 q r s m  [HANG]
+```
+
+Decoded against probes (the probes have since been removed; they were
+in main.c/alloc.c/crt0_exe.asm):
+
+- `S` — crt0 reached the far-call to _main
+- `1` — entered main; argc handled (argc=0 path, Filename=NULL)
+- `2`/`3` — windinit() before/after (INT 10h video-mode probe + signal
+  setup ran clean)
+- `4` — 7 LPTR mallocs + screenalloc (Realscreen + Nextscreen, 2*Rows*
+  Columns = 4000 bytes) succeeded
+- `a..h` — filealloc completed: 3 newlines (each = 2 mallocs), index
+  zeroing, list linking, clrall, u_clear
+- `5`/`6` — main resumed; screenclear()
+- `q`/`r` — getenv("EXINIT") → returned NULL (stub)
+- `s` — Filename check; took the else-branch since Filename==NULL
+- `m` — entered `msg("Empty Buffer")`; **hangs inside msg**
+
+`msg(s)` in `cmdline.c` is `gotocmd(TRUE, 0); outstr(s); flushbuf();`.
+Hang is in one of those three; bisect with `putchar()` probes, or
+trace into outchar/INT 10h (cursor positioning + character output).
+
+- `tools/build-stevie.sh` accepts `--model=medium` (auto-implies
+  `--exe`).  All 24 TUs compile + assemble + link.
+- Output: `build/stevie-orig/stevie.exe` (126 KB MZ EXE, 1247
+  relocations, 26 modules linked).
+- Map file at `build/stevie-orig/stevie.map`.
+- Entry shellcode at CS:IP = 0:0 disassembles cleanly:
+  `mov ax,DGROUP; mov ds,ax; push 0,0; call far MAIN_TEXT:_main`.
 
 ```
 # small (default) — bit-identical to pre-session baseline
 tools/build-stevie.sh --keep-going
 => build/stevie-orig/stevie.com (80802 bytes)
 
-# medium — minic+qbe both happy; nasm -f bin can't link `call far`
+# medium — full pipeline working
 tools/build-stevie.sh --keep-going --model=medium
-=> 24/24 PASS at the per-TU stage; link fails with
-   "binary output format does not support segment base references"
-   on every `call far _malloc` / `call far _emsg` site.
+=> build/stevie-orig/stevie.exe (126336 bytes)
 ```
 
-The medium-model link failure is the expected, intentional next
-problem: medium requires `nasm -f obj` (OMF) plus a DOS linker, which
-is exactly Step 2 below.
+### What this session added
 
-The data-pointer hard-coded `=w` sites from commit 5125e70 (alloc,
-`%_clit*`, `%_zinit*`, struct-member adds) are correct as-is for
-medium — they describe near-data arithmetic and medium still has
-near data.  They will need another pass when compact/large/huge land
-(Step 4): in those models alloc still returns a 16-bit offset but
-data-pointer arithmetic on top should be `'l'` with an `extuw` lift.
+- `tools/asm_to_omf.py` — wraps qbe i8086 `.asm` output as proper OMF
+  NASM source.  Tracks `.text/.data/.bss` sections, generates
+  `extern`/`global` lists, applies the syntax transforms previously
+  done by sed/perl in build-stevie.sh.  Auto-exports every `_xxx:`
+  label (matches C's default external linkage — minic doesn't emit
+  qbe `export` markers for file-scope data).  Uses per-module code
+  segment names (`<MODULE>_TEXT class=CODE`) so the linker keeps
+  each TU's code in its own physical 64KB segment (medium-model
+  multi-CS).
 
-### What qbe already supports (foundation already in place)
+- `tools/omf_link.py` — pure-Python OMF→MZ linker (~720 LOC, stdlib
+  only).  Parses Microsoft OMF records (THEADR, LNAMES, SEGDEF,
+  GRPDEF, EXTDEF, PUBDEF, LEDATA, LIDATA, FIXUPP, MODEND, plus
+  parse-and-discard for COMDEF/COMDAT/LINNUM/etc).  Layouts CODE
+  segments distinct (medium model multi-CS), coalesces DATA + BSS
+  into DGROUP, emits standard 28-byte MZ header with relocation
+  table.  Handles fixup locations 0/1/2/3/5/9/13 + frame methods
+  segment/group/external/preceding-frame/target-frame.  Test rig at
+  `tools/test_omf_link.sh`.
 
-- `enum MemModel` covers all 6 models — `all.h:70`.
-- `qbe -m {tiny,small,medium,compact,large,huge}` flag — `main.c:49`.
-- ABI picks RET vs RETF, near-call vs far-call return-slot size based
-  on `uses_far_code()` — `i8086/abi.c:33`.
-- `selpar()` already lays parameters out at `[bp+4]` for near calls
-  vs `[bp+6]` for far calls.
-- Emit prologue knows about all six models and emits the appropriate
-  segment directives — `i8086/emit.c:177`.
-- Verified working: `./qbe -t i8086 -m medium <ssa>` emits `proc far
-  / retf / call far` correctly.
+- `minic/dos/crt0_exe.asm` — .EXE entry stub.  Sets DS=DGROUP, pushes
+  argc=argv=0, far-calls `_main`, exits via INT 21h AH=4Ch.
 
-### What's still missing for the full matrix
+- `tools/libstub_to_exe.py` — converts `minic/dos/libstub.asm`
+  (small-model, near-call ABI) into `libstub_exe.asm` (medium-model,
+  far-call ABI).  Mechanical transforms: `ret`→`retf`, `[bp+N]`→
+  `[bp+(N+2)]` for positive N (far-call return address occupies an
+  extra 2 bytes between saved bp and first arg).  Replaces the
+  .COM-specific `_malloc`/`_free` (which references the
+  `_heap_end_of_image` post-image label) with .EXE versions that
+  bump from a fixed 32 KB `_heap_buf` in `_BSS`.
 
-1. **No `uses_far_data()`** — qbe's data-pointer width is whatever
-   the IL says.  compact/large/huge need data pointers to be `l`
-   (far) by default; minic now emits `'l'` for those models, but
-   alloca'd stack offsets are still 16-bit, so an `extuw`/segment-
-   construct lift is missing.  Not on the medium critical path.
+- `i8086/emit.c` — removed the redundant `<name> proc far` MASM
+  directive (NASM doesn't need it; was creating a duplicate label
+  with no `_` prefix).  RETF emission unchanged.
 
-2. **No .EXE pipeline** — `tools/build-stevie.sh` only knows
-   `nasm -f bin` → flat .COM.  Medium+ requires `nasm -f obj`
-   (OMF) → DOS linker → MZ .EXE.  *This is the immediate blocker.*
+### What still needs follow-up
 
-3. **No DOS linker on macOS** — wlink (Open Watcom) builds from
-   source; alternative is a custom OMF linker (~500-800 LOC).
+- **minic emits 8-byte data pointers for medium model.**  e.g.
+  `data $Version = { l $glo1 }` — `l` (8 bytes) is wrong for
+  medium-model near data (should be `w`, 2 bytes).  qbe emits `dq`
+  which NASM zero-extends; functionally correct (low 2 bytes are
+  the offset) but wastes 6 bytes per file-scope pointer initializer.
+  Track in feedback memory; non-blocking.
 
-4. **crt0 has no MZ variant** — current `crt0.asm` is .COM-only.
-   .EXE entry needs to set DS to DGROUP and handle a separate stack
-   segment.
+- **qbe's Ocopy with RSlot dest emits `mov [bp+N], <symbol>`** with
+  no size qualifier.  `nasm -f bin` accepts (defaults to word);
+  `nasm -f obj` rejects (relocation size ambiguous).  Worked around
+  in `asm_to_omf.py` by promoting bare slot stores to
+  `mov word [bp+N], ...`.  Real fix is in `i8086/emit.c` Ocopy
+  emission (the format-specifier `%=` should add a size prefix when
+  expanding to a slot operand).
 
-5. **qbe's i8086 emit still mixes GNU-as / MASM directives** — the
-   build script's `sed` pass papers over it for `nasm -f bin`, but
-   `nasm -f obj` will need a cleaner upstream emit (or a more
-   careful rewrite pass).
-
-6. **libstub stack offsets depend on model** — for compact/large/
-   huge, pointer args are 4-byte (segment:offset) again, so
-   `_intdos`/`_strcpy`/`_strrchr`/`_int86` need model-aware variants
-   or per-model rebuilds.
-
-7. **The minic `=w` data-pointer table** — for compact/large/huge,
-   alloc still returns a 16-bit offset; data-pointer arithmetic on
-   top must be `'l'` with an `extuw` or DS-based segment-pair lift.
-   Mapped out but deferred to Step 4.
+- **No DOSBox runtime test.**  `stevie.exe` is byte-correct on
+  inspection but hasn't been launched.  Step 3.
 
 ## What's next — in dependency order
 
-### Step 1 — minic learns memory-model awareness  ✅ DONE
-
-(Landed this session.  See "Where we are right now" above.)
-
-### Step 2 — stand up the .EXE pipeline (medium model)  ⬅ NEXT
-
-**Goal:** `tools/build-stevie.sh --model=medium --exe` produces a
-runnable `stevie.exe`.
-
-Right now `--model=medium` already gets us 24/24 PASS at minic+qbe.
-The build-stevie.sh "link" step then concatenates everything into
-`stevie.full.asm` and runs `nasm -f bin` with `ORG 0x100`, which
-fails on every `call far _malloc` etc.  That is the wall to break.
-
-Suggested order of attack:
-
-**(2a) Single-TU OMF round-trip.**  Pick the simplest source
-(`alloc.c` or `version.c`), generate `.nasm.asm` exactly like today,
-prepend an OMF-friendly preamble (no `BITS 16 / ORG 0x100`; instead
-proper `segment _TEXT class=CODE` / `segment _DATA class=DATA` /
-`group DGROUP _DATA _BSS`), and assemble with `nasm -f obj`.
-Iterate on what the per-TU rewrite needs to emit until NASM is happy.
-*Don't* try to link yet — just confirm clean OMF object files.
-
-   The qbe i8086 emit currently produces things like
-   `name proc far`, `call far _malloc`, `; XXX 32-bit op stub`, plus
-   GNU-as `.text` / `.balign` mixed in.  The `sed` pass strips the
-   GNU-as bits.  For OMF we additionally need:
-   - `name proc far` → `name:` plus a separate `..start` / `global`
-     declaration in the right segment.
-   - `call far _malloc` becomes a far reference to an external symbol
-     in another module's `_TEXT` segment (NASM does this for free in
-     `-f obj` if the symbol is declared with `extern` *and* the call
-     site uses `call far func` — the OMF FIXUPP record will carry it).
-   - String literals `_glo1: db ...` need to live in `_DATA`, not
-     interleaved with `_TEXT`.  Currently they're inline.  Either
-     re-section per literal, or buffer them to emit at end of TU.
-
-**(2b) Pick a DOS linker.**
-
-   - **Easiest path:** install Open Watcom.  On macOS, the binary
-     bundle from `https://github.com/open-watcom/open-watcom-v2/releases`
-     gives you a working `wlink`.  (Homebrew tap `open-watcom/v2`
-     existed at some point; verify before relying on it.)  Then:
-     ```
-     wlink system dos format dos exe \
-           file alloc.obj file version.obj ... \
-           file crt0_exe.obj file libstub.obj file doslib.obj \
-           name stevie.exe
-     ```
-   - **Fallback (more fun, more work):** write an OMF→MZ linker in
-     Python.  Need to handle THEADR, SEGDEF, GRPDEF, EXTDEF, PUBDEF,
-     LEDATA, LIDATA, FIXUPP, MODEND, plus segment ordering and
-     fixup resolution into MZ relocation table.  Spec lives in the
-     Open Watcom Linker Reference (`/openwatcom/docs/pdf/lr.pdf`)
-     and the OMF reference (search "Tomb of the Unknown OMF").
-     Estimate ~500-800 LOC of Python for medium-only support.
-
-**(2c) Write `crt0_exe.asm`.**  Diff from `crt0.asm` (.COM):
-   - On entry, DS=ES=PSP, SS:SP set up by DOS to the stack segment
-     declared in the MZ header.  Set DS to `DGROUP` (`mov ax, dgroup
-     / mov ds, ax`).
-   - Call `_main` with a *far* call (medium = far code).
-   - On return, `mov ah, 4Ch / mov al, return_code / int 21h`.
-   - Don't `ORG 0x100` — let the linker place us.
-
-**(2d) Update `_malloc`.**  Today `_malloc` bumps from
-`_heap_end_of_image` (a label injected at link concat).  In .EXE
-the linker provides `_end` (or whatever symbol marks BSS end);
-`_malloc` should bump from there up to bottom of stack segment.
-
-**(2e) Drive it from `build-stevie.sh`.**  Add `--exe` (or imply
-from `--model in {medium,large,...}`).  When set, run `nasm -f obj`
-per TU, hand objs to `wlink`, write `stevie.exe`.
-
-**Validation.**  `dosbox-x build/stevie-orig/stevie.exe` reaches
-`_main` without truncation, runs `windinit`, hits `_int86` cleanly.
-The likely failure stack is in Step 3 below.
-
-### Step 3 — exercise medium model under DOSBox
+### Step 3 — exercise medium model under DOSBox  ⬅ IN PROGRESS
 
 **Goal:** stevie actually loads a file and renders the screen.
 
-Likely-failure stack (already partially mapped from prior runs):
-1. crt0 — DS/SS setup, stack init.
-2. `windinit` — first INT 10h / INT 21h calls.  `_int86`/`_intdos`
-   are now real.
-3. `malloc` — real bump allocator; verify it works in .EXE layout.
-4. Far pointer arithmetic — `0xF400800D` TI Pro detection should
-   fail strncmp and fall back to IBM PC.
-5. Screen drawing — VGA mode 3 text-mode I/O via INT 10h.
+DOSBox config used for testing (`/tmp/stevie_test.conf`):
+
+```ini
+[sdl]
+output=texture
+fullscreen=false
+[cpu]
+cputype=386
+core=normal
+cycles=fixed 3000
+[dos]
+xms=true
+ems=false
+umb=false
+[autoexec]
+mount c /Users/pauldevine/projects/qbe/build/stevie-orig
+c:
+stevie.exe
+```
+
+Run with `dosbox -conf /tmp/stevie_test.conf`.  At time of writing:
+loads → crt0 → main → past windinit/malloc/filealloc/screenclear →
+hangs in `msg("Empty Buffer")`.
+
+#### Immediate next step: bisect `msg`
+
+`msg(s)` calls `gotocmd(TRUE, 0)` (sets cursor to last row), then
+`outstr(s)` (per-char output), then `flushbuf()`.  Add `putchar('A')`
+probes around each in `stevie-orig/cmdline.c:msg` to identify which.
+Likely candidates:
+
+- `gotocmd` does an `int86()` call (INT 10h cursor position).  Our
+  libstub `_int86` is a real implementation; verify it preserves BX
+  and that the REGS struct round-trip works.
+- `outstr` calls `outchar` per character; `outchar` ultimately wraps
+  INT 10h teletype.  Should work — same path as our `_putchar`
+  diagnostic.
+- `flushbuf` may try to write to a stdio FILE* that isn't real.
+
+#### Probable next-up bugs (order them when you hit them)
+
+- **libstub callee-save audit**.  We patched `_malloc` to save BX.
+  Other libstub functions that touch BX/SI/DI without saving will
+  manifest as "value mysteriously changes after call".  Look at
+  `_strlen`, `_strcpy`, `_strcmp`, `_strncmp`, `_strchr`, `_strcat`,
+  `_strncpy`, `_atoi`, `_int86` (probably the worst offender, since
+  it sets up REGS).
+- **Far-pointer detection at 0xF400:800D** (TI Pro signature).  If
+  stevie ever does `strncmp(ti_sig, ti_sig_addr, ...)` on a real far
+  pointer, our small-model `_strncmp` won't read across segments.
+  Stevie's source treats `ti_sig_addr` as `char far *`, so minic must
+  compile that as a 4-byte pointer with seg:off semantics.
+- **fprintf/file I/O stubs**.  Currently no-ops returning 0/-1.  msg
+  doesn't go through fprintf, but once stevie tries to load a file
+  the readfile path will need real fopen/fread.
+- **screen.c repaint pipeline**.  After msg works, the next thing
+  stevie does is enter `edit()` which calls `screenupdate()` to draw
+  the buffer.  That uses the Realscreen/Nextscreen diff buffers we
+  malloc'd; render via outchar.  Should be reachable once msg unhangs.
+
+Tooling notes:
+- Stock DOSBox 0.74-3 has no built-in debugger — use BIOS teletype
+  probes or set up DOSBox-x for source-level breakpoints.
+- The S/E probes in crt0 + the bisect probes in main.c/alloc.c that
+  produced the `S1234abcdefgh56qrsm` trace have been reverted.  Add
+  them back as needed.
 
 ### Step 4 — fill in compact / large / huge
 
-Defer until after medium is running.  Each one needs:
+Defer until medium runs.  Each one needs:
 - minic data-pointer rules (already covered by step 1's table).
 - libstub variant with 4-byte data-pointer args.
 - Possibly per-model `crt0` adjustments.
@@ -242,9 +302,21 @@ make qbe && cd minic && make && cd ..
 # Build stevie (default = small, .COM)
 rm -rf build/stevie-orig && tools/build-stevie.sh --keep-going
 
-# Build stevie medium model (24/24 compiles + assembles; link fails
-# until step 2 is done)
+# Build stevie medium model (.EXE)
 rm -rf build/stevie-orig && tools/build-stevie.sh --keep-going --model=medium
+
+# Inspect the .EXE map
+less build/stevie-orig/stevie.map
+
+# Decode the MZ header
+python3 -c '
+import struct
+d=open("build/stevie-orig/stevie.exe","rb").read()
+print(struct.unpack_from("<2sHHHHHHHHHHHHH", d, 0))
+'
+
+# Run the OMF linker test rig
+tools/test_omf_link.sh
 
 # Drive minic alone with a model selector
 ./minic/minic -m medium < build/stevie-orig/search.pp.c | head
@@ -257,22 +329,15 @@ for src in alloc cmdline dos edit enveval fileio help hexchars linefunc \
     [ -z "$err" ] && echo "PASS: $src" || echo "FAIL: $src ($err)"
 done
 
-# Bloat profile
-echo "size: $(wc -c < build/stevie-orig/stevie.com) bytes"
-echo "self-moves: $(grep -cE '^\s+mov ([a-z][a-z]), \1$' build/stevie-orig/stevie.full.asm)"
-echo "xchg: $(grep -c '^\s*xchg' build/stevie-orig/stevie.full.asm)"
-echo "32-bit adc: $(grep -c '^\s*adc ' build/stevie-orig/stevie.full.asm)"
+# Verify qbe -m medium emits far code
+./qbe -t i8086 -m medium build/stevie-orig/alloc.ssa | grep -E "retf|call far" | head
 
-# Verify qbe -m medium emits far code (already works)
-./qbe -t i8086 -m medium build/stevie-orig/alloc.ssa | grep -E "proc far|retf|call far" | head
+# Inspect a single-TU OMF wrap
+tools/asm_to_omf.py alloc build/stevie-orig/alloc.asm /tmp/alloc.omf.asm
+nasm -f obj /tmp/alloc.omf.asm -o /tmp/alloc.obj
+file /tmp/alloc.obj
 
 # Cherry-pick from upstream qbe
 git fetch upstream
 git log upstream/master --oneline -- spill.c rega.c isel.c
-
-# Inspect the pipeline for one file
-cat build/stevie-orig/<base>.pp.c    # cpp output
-cat build/stevie-orig/<base>.ssa     # minic's IR
-cat build/stevie-orig/<base>.asm     # qbe i8086 emit
-cat build/stevie-orig/<base>.nasm.asm
 ```
