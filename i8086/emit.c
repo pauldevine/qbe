@@ -708,25 +708,39 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		} else if (imm_cnt == 0) {
 			/* No-op shift — emit syntactically valid output. */
 			fprintf(f, "\t%s %s, 0\n", shiftop, dstname);
-		} else if (imm_cnt > 1) {
-			/* Immediate count > 1.  When the destination is CX,
-			 * loading CL with the count would either clobber the
-			 * value being shifted (the dst-mov already touched CX)
-			 * or be clobbered by it.  Unroll into `shl dst, 1`
-			 * repeats — 8086 always allows the imm=1 form. */
+		} else if (imm_cnt > 1 && imm_cnt <= 8) {
+			/* Small immediate count: unroll into repeated
+			 * `shl dst, 1`.  This avoids touching CX/CL entirely,
+			 * which is critical because the i8086 backend doesn't
+			 * tell rega that shifts clobber CL — without unrolling,
+			 * `mov cl, imm` would corrupt any live Kw value rega
+			 * happened to keep in CX across the shift. */
+			int64_t k;
+			for (k = 0; k < imm_cnt; k++)
+				fprintf(f, "\t%s %s, 1\n", shiftop, dstname);
+		} else if (imm_cnt > 8) {
+			/* Large immediate count: must use CL.  Save CX around
+			 * the shift so any unrelated live value in CX is
+			 * preserved.  When dst is CX itself, the value being
+			 * shifted IS what's pushed/popped, so we need a
+			 * different scratch — route via BX. */
 			if (dst_is_cx) {
-				int64_t k;
-				for (k = 0; k < imm_cnt; k++)
-					fprintf(f, "\t%s %s, 1\n", shiftop, dstname);
+				fprintf(f, "\tpush bx\n");
+				fprintf(f, "\tmov bx, %s\n", dstname);
+				fprintf(f, "\tmov cl, %"PRIi64"\n", imm_cnt);
+				fprintf(f, "\t%s bx, cl\n", shiftop);
+				fprintf(f, "\tmov %s, bx\n", dstname);
+				fprintf(f, "\tpop bx\n");
 			} else {
+				fprintf(f, "\tpush cx\n");
 				fprintf(f, "\tmov cl, %"PRIi64"\n", imm_cnt);
 				fprintf(f, "\t%s %s, cl\n", shiftop, dstname);
+				fprintf(f, "\tpop cx\n");
 			}
 		} else {
-			/* Non-immediate count: must come through CL.  Load it
-			 * AFTER the dst-mov; if dst is CX, we need a scratch.
-			 * Route through BX (push/pop) to avoid clobbering
-			 * caller state. */
+			/* Non-immediate count: must come through CL.  Save CX
+			 * around the shift to preserve any unrelated live value
+			 * (and use BX as scratch when dst==CX). */
 			if (dst_is_cx) {
 				fprintf(f, "\tpush bx\n");
 				fprintf(f, "\tmov bx, %s\n", dstname);
@@ -739,12 +753,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov %s, bx\n", dstname);
 				fprintf(f, "\tpop bx\n");
 			} else {
+				fprintf(f, "\tpush cx\n");
 				if (rtype(r1) == RTmp && r1.val != RCX)
 					fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
 				else if (rtype(r1) == RSlot)
 					fprintf(f, "\tmov cx, [bp%+ld]\n",
 						(long)slot(r1, fn));
 				fprintf(f, "\t%s %s, cl\n", shiftop, dstname);
+				fprintf(f, "\tpop cx\n");
 			}
 		}
 		return;
