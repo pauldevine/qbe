@@ -2889,12 +2889,29 @@ end_load_block:
 		 * If matched, and arg[0] is a tmp/slot/const distinct from to,
 		 * emit a `mov to, arg[0]` first.  We also rewrite arg[0] to
 		 * equal to so emitf prints the expected `op to, arg1`.
+		 *
+		 * When the op is commutative and arg[1] is the same reg as to
+		 * (but arg[0] is not), swapping arg[0] and arg[1] first avoids
+		 * a clobber: the `mov to, arg[0]` would otherwise overwrite
+		 * arg[1]'s live value in to.  After the swap, arg[0] is what
+		 * was already in to (the mov is a no-op or skipped) and arg[1]
+		 * holds the other operand for the read-modify-write.
 		 */
 		{
 			int has_eq = 0, has_1 = 0;
 			for (p = fmt; *p; p++) {
 				if (p[0] == '%' && p[1] == '=') has_eq = 1;
 				if (p[0] == '%' && p[1] == '1') has_1 = 1;
+			}
+			if (has_eq && has_1
+			    && rtype(i->to) == RTmp
+			    && optab[i->op].commutes
+			    && !req(i->arg[1], R)
+			    && req(i->arg[1], i->to)
+			    && !req(i->arg[0], i->to)) {
+				Ref tmp = i->arg[0];
+				i->arg[0] = i->arg[1];
+				i->arg[1] = tmp;
 			}
 			if (has_eq && has_1
 			    && rtype(i->to) == RTmp
