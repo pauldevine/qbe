@@ -685,39 +685,68 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		r0 = i->arg[0]; /* value to shift */
 		r1 = i->arg[1]; /* shift count */
 
-		/* Resolve the count: load into CL when not 1. */
 		if (rtype(r1) == RCon)
 			imm_cnt = fn->con[r1.val].bits.i;
-		else if (rtype(r1) == RTmp && r1.val != RCX)
-			fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
-		else if (rtype(r1) == RSlot)
-			fprintf(f, "\tmov cx, [bp%+ld]\n", (long)slot(r1, fn));
 
-		if (imm_cnt > 1)
-			fprintf(f, "\tmov cl, %"PRIi64"\n", imm_cnt);
-
-		/* Move value to destination if needed (before shift) */
+		/* Move value to destination if needed.  This must happen
+		 * before any CX/CL load, because when dst==CX the dst-mov
+		 * would otherwise clobber the loaded count. */
 		if (rtype(i->to) == RTmp && r0.val != i->to.val && rtype(r0) == RTmp) {
 			fprintf(f, "\tmov %s, %s\n", rname[i->to.val], rname[r0.val]);
 			r0 = i->to;
 		}
 
-		fprintf(f, "\t%s ", shiftop);
-		if (rtype(r0) == RTmp)
-			fprintf(f, "%s", rname[r0.val]);
-		else if (rtype(i->to) == RTmp)
-			fprintf(f, "%s", rname[i->to.val]);
-		else
-			fprintf(f, "?");
+		/* Pick the destination register name we'll print in `shl/shr/sar`. */
+		const char *dstname =
+		    (rtype(r0) == RTmp)        ? rname[r0.val] :
+		    (rtype(i->to) == RTmp)     ? rname[i->to.val] : "?";
+		int dst_is_cx = (rtype(i->to) == RTmp && i->to.val == RCX) ||
+		                (rtype(r0)    == RTmp && r0.val    == RCX);
 
-		if (imm_cnt == 1)
-			fprintf(f, ", 1\n");
-		else if (imm_cnt == 0)
-			/* count==0 is a no-op; emit `, cl` which the caller
-			 * shouldn't have generated, but be safe. */
-			fprintf(f, ", 0\n");
-		else
-			fprintf(f, ", cl\n");
+		if (imm_cnt == 1) {
+			fprintf(f, "\t%s %s, 1\n", shiftop, dstname);
+		} else if (imm_cnt == 0) {
+			/* No-op shift — emit syntactically valid output. */
+			fprintf(f, "\t%s %s, 0\n", shiftop, dstname);
+		} else if (imm_cnt > 1) {
+			/* Immediate count > 1.  When the destination is CX,
+			 * loading CL with the count would either clobber the
+			 * value being shifted (the dst-mov already touched CX)
+			 * or be clobbered by it.  Unroll into `shl dst, 1`
+			 * repeats — 8086 always allows the imm=1 form. */
+			if (dst_is_cx) {
+				int64_t k;
+				for (k = 0; k < imm_cnt; k++)
+					fprintf(f, "\t%s %s, 1\n", shiftop, dstname);
+			} else {
+				fprintf(f, "\tmov cl, %"PRIi64"\n", imm_cnt);
+				fprintf(f, "\t%s %s, cl\n", shiftop, dstname);
+			}
+		} else {
+			/* Non-immediate count: must come through CL.  Load it
+			 * AFTER the dst-mov; if dst is CX, we need a scratch.
+			 * Route through BX (push/pop) to avoid clobbering
+			 * caller state. */
+			if (dst_is_cx) {
+				fprintf(f, "\tpush bx\n");
+				fprintf(f, "\tmov bx, %s\n", dstname);
+				if (rtype(r1) == RTmp && r1.val != RCX)
+					fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
+				else if (rtype(r1) == RSlot)
+					fprintf(f, "\tmov cx, [bp%+ld]\n",
+						(long)slot(r1, fn));
+				fprintf(f, "\t%s bx, cl\n", shiftop);
+				fprintf(f, "\tmov %s, bx\n", dstname);
+				fprintf(f, "\tpop bx\n");
+			} else {
+				if (rtype(r1) == RTmp && r1.val != RCX)
+					fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
+				else if (rtype(r1) == RSlot)
+					fprintf(f, "\tmov cx, [bp%+ld]\n",
+						(long)slot(r1, fn));
+				fprintf(f, "\t%s %s, cl\n", shiftop, dstname);
+			}
+		}
 		return;
 	}
 
