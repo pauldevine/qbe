@@ -3160,22 +3160,45 @@ i8086_emitfn(Fn *fn, FILE *f)
 			break;
 		case Jjnz: {
 			Ref jr = b->jmp.arg;
-			const char *jreg;
 			if (rtype(jr) == RTmp
 			    && jr.val >= 0
 			    && jr.val < (int)(sizeof rname / sizeof rname[0])
 			    && rname[jr.val] != 0) {
-				jreg = rname[jr.val];
+				fprintf(f, "\ttest %s, %s\n",
+					rname[jr.val], rname[jr.val]);
+			} else if (rtype(jr) == RSlot) {
+				/* rega spilled the jjnz condition — `test mem, imm`
+				 * is awkward; route through AX (caller-save at a
+				 * block-end so its value is dead). */
+				fprintf(f, "\tmov ax, word [bp%+ld]\n",
+					(long)slot(jr, fn));
+				fprintf(f, "\ttest ax, ax\n");
+			} else if (rtype(jr) == RCon) {
+				/* Constant jjnz — fold at emit time. */
+				Con *c = &fn->con[jr.val];
+				if (c->type == CBits && c->bits.i == 0) {
+					/* Always-false: only the s2 branch matters. */
+					if (b->s2 != b->link && b->s2->name[0])
+						fprintf(f, "\tjmp %s\n",
+							b->s2->name);
+					break;
+				}
+				if (c->type == CBits) {
+					/* Non-zero constant: always-true. */
+					if (b->s1->name[0])
+						fprintf(f, "\tjmp %s\n",
+							b->s1->name);
+					break;
+				}
+				/* Address constant — non-zero at link time. */
+				if (b->s1->name[0])
+					fprintf(f, "\tjmp %s\n", b->s1->name);
+				break;
 			} else {
-				/* Defensive: should not happen — register allocator
-				 * left a non-register operand here.  Use AX as a
-				 * placeholder so the assembly is still syntactically
-				 * valid (codegen will be wrong but won't segfault). */
-				jreg = "ax";
 				fprintf(f, "\t; XXX bad jjnz operand: rtype=%d val=%d\n",
 				        rtype(jr), jr.val);
+				fprintf(f, "\ttest ax, ax\n");
 			}
-			fprintf(f, "\ttest %s, %s\n", jreg, jreg);
 			if (b->s1->name[0])
 				fprintf(f, "\tjnz %s\n", b->s1->name);
 			if (b->s2 != b->link && b->s2->name[0])
