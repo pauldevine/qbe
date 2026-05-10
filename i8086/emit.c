@@ -2972,6 +2972,21 @@ end_load_block:
 			    && rtype(i->to) == RTmp
 			    && !req(i->arg[0], R)
 			    && !req(i->arg[0], i->to)) {
+				/* For non-commutative ops (sub, sar, shr, shl)
+				 * we couldn't swap operands if arg[1] aliases to;
+				 * the dst-mov below would clobber arg[1]'s live
+				 * value.  Save it via BX with push/pop so the
+				 * op consumes the preserved copy. */
+				int rescue_arg1 = (!optab[i->op].commutes
+				    && !req(i->arg[1], R)
+				    && rtype(i->arg[1]) == RTmp
+				    && req(i->arg[1], i->to));
+				if (rescue_arg1) {
+					fprintf(f, "\tpush bx\n");
+					fprintf(f, "\tmov bx, %s\n",
+						rname[i->arg[1].val]);
+					i->arg[1] = TMP(RBX);
+				}
 				if (rtype(i->arg[0]) == RTmp
 				    && i->arg[0].val != i->to.val) {
 					fprintf(f, "\tmov %s, %s\n",
@@ -2995,6 +3010,25 @@ end_load_block:
 						rname[i->to.val],
 						(long)slot(i->arg[0], fn));
 					i->arg[0] = i->to;
+				}
+				/* If we pushed BX, restore it after emitf prints
+				 * the op.  We mark that here so the deferred
+				 * `pop bx` is emitted at the right point. */
+				if (rescue_arg1) {
+					/* emit the op now and pop bx after.  Easiest:
+					 * call emitf directly here, then pop, then
+					 * `return`.  We replicate the addressing-fixup
+					 * unwind that the normal code path would do. */
+					emitf(fmt, i, fn, f);
+					fprintf(f, "\tpop bx\n");
+					if (bad) {
+						swap_bx(&i->to, bad, fn);
+						swap_bx(&i->arg[0], bad, fn);
+						swap_bx(&i->arg[1], bad, fn);
+						fprintf(f, "\txchg bx, %s\n",
+							rname[bad]);
+					}
+					return;
 				}
 			}
 		}
