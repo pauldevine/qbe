@@ -54,14 +54,23 @@ int memmodel = MSmall;
 #define ISFLOAT(x) ((x) & FLOAT)
 #define ISFAR(x) ((x) & FAR)
 #define BASETYPE(x) (KIND(x) & ~UNSIGNED)
+/* Storage sizes — must match `irtyp`'s storage class so struct member
+ * offsets agree with the layout emit_struct_array_data writes:
+ *   w → 2 bytes, l → 4 bytes on i8086 (the only target minic currently
+ *   targets via the -m memmodel flag).
+ *   Path A narrowed near pointers/int to `w` but left SIZE returning the
+ *   pre-Path-A amd64 sizes (4/8), which made struct param look 24 bytes
+ *   wide to access sites while the initializer wrote 8-byte entries.
+ *   That mismatch had `P(P_MO)` read garbage from past the array.
+ * For far pointers (always `l`) the size stays 4 (seg:off). */
 #define SIZE(x)                                    \
 	(KIND(x) == NIL ? (die("void has no size"), 0) : \
 	 KIND(x) == CHR ? 1 :  \
 	 ((x) & SHORT) ? 2 :  \
-	 KIND(x) == INT ? 4 : \
-	 KIND(x) == LNG ? 8 : \
+	 KIND(x) == INT ? 2 : \
+	 KIND(x) == LNG ? 4 : \
 	 (KIND(x) == STRUCT_T || KIND(x) == UNION_T) ? structh[DREF(x)].size : \
-	 (KIND(x) == PTR && ISFAR(x)) ? 4 : 8)  /* Far pointers are 4 bytes */
+	 (KIND(x) == PTR && ISFAR(x)) ? 4 : DATAPTR_SZ())
 
 typedef struct Node Node;
 typedef struct Symb Symb;
