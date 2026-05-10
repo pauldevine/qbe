@@ -235,6 +235,14 @@ flushbuf()				/* Flush buffered output to display */
 			}
 			break;
 		case hTIPRO:
+			/* Disabled for the qbe i8086 build: the FP_OFF/FP_SEG far-
+			 * pointer arithmetic produces `extsw $outbuf; shr 16` that
+			 * qbe's GCM hoists to the function entry, where the i8086
+			 * Kl handlers commandeer DX:AX without rega coordination
+			 * and clobber the live `if (bpos != 0)` cnew result —
+			 * making flushbuf return early without flushing.  Dead at
+			 * runtime since host_type is always hIBMPC. */
+#if 0
 			curregs.h.ah = 0x03;
 			int86(crt_int, &curregs, &curregs);
 			inregs.h.ah = 0x10;
@@ -246,6 +254,7 @@ flushbuf()				/* Flush buffered output to display */
 			curregs.h.ah = 0x02;
 			curregs.h.dh += bpos;
 			int86(crt_int, &curregs, &outregs);
+#endif
 			break;
 		}
 	}
@@ -996,6 +1005,9 @@ int r, l;
 		int86(crt_int, &inregs, &outregs);
 		break;
 	case hTIPRO:
+		/* See bios_t_dl/flushbuf: MK_FP shr-by-16 triggers a qbe
+		 * GCM-hoist clobber.  Dead at runtime; disabled for build. */
+#if 0
 		inregs.h.ah = 0x17;
 		int86(crt_int, &inregs, &outregs);
 		dst = MK_FP(0xDE00, outregs.x.dx + (r * Columns));
@@ -1003,6 +1015,7 @@ int r, l;
 		end = MK_FP(0xDE00, outregs.x.dx + ((Rows - 1) * Columns));
 		while (src < end) *dst++ = *src++;
 		while (dst < end) *dst++ = ' ';
+#endif
 		break;
 	}
 }
@@ -1070,6 +1083,9 @@ int r, l;
 		int86(crt_int, &inregs, &outregs);
 		break;
 	case hTIPRO:
+		/* See bios_t_dl/flushbuf: MK_FP shr-by-16 triggers a qbe
+		 * GCM-hoist clobber.  Dead at runtime; disabled for build. */
+#if 0
 		inregs.h.ah = 0x17;
 		int86(crt_int, &inregs, &outregs);
 		dst = MK_FP(0xDE00, outregs.x.dx + (Columns * (Rows - 1)) - 1);
@@ -1079,6 +1095,7 @@ int r, l;
 		src = MK_FP(0xDE00, outregs.x.dx + (r * Columns));
 		end = src + (l * Columns);
 		while (src < end) *src++ = ' ';
+#endif
 		break;
 	}
 }
