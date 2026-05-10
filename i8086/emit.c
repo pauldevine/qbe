@@ -1503,8 +1503,18 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			if (rtype(r0) == RSlot) {
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
 			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
+				Con *c = &fn->con[r0.val];
+				if (c->type == CAddr) {
+					/* Address constant — emit symbolic ref so the
+					 * linker resolves the offset.  bits.i is an
+					 * additive offset that emitaddr already handles. */
+					fprintf(f, "\tmov ax, ");
+					emitaddr(c, f);
+					fprintf(f, "\n");
+				} else {
+					int64_t val = c->bits.i;
+					fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
+				}
 			} else if (rtype(r0) == RTmp) {
 				if (i->to.val != r0.val || rtype(i->to) != RTmp)
 					{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
