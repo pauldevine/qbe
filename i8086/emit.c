@@ -217,11 +217,14 @@ slot(Ref r, Fn *fn)
 
 	s = rsval(r);
 	assert(s <= fn->slot);
-	/* Stack grows down, slots are 2 bytes for 16-bit */
+	/* Stack grows down, slots are 2 bytes for 16-bit.  The prologue
+	 * pushes BX, SI, DI (3 callee-save words) AFTER `mov bp, sp`, so
+	 * locals/slots live BELOW that 6-byte block — shift offsets by -6
+	 * so slot 0 lands at [bp - 6 - 2*fn->slot] (still adjacent to SP). */
 	if (s < 0)
 		return 2 * -s;
 	else
-		return -2 * (fn->slot - s);
+		return -6 - 2 * (fn->slot - s);
 }
 
 static void
@@ -3118,9 +3121,20 @@ i8086_emitfn(Fn *fn, FILE *f)
 	 * directive.  NASM (and OMF linkers) don't need or want it.  RETF
 	 * is emitted explicitly at the epilogue. */
 
-	/* Function prologue */
+	/* Function prologue.  Save callee-save registers per cdecl/8086:
+	 * BX, SI, DI must be preserved across calls.  rega treats them as
+	 * non-clobbered (per i8086_rclob in targ.c), so it freely keeps
+	 * live values in them across function calls — which requires that
+	 * EACH function save them at entry and restore at exit.  Without
+	 * this, a callee that touches BX corrupts the caller's live value.
+	 *
+	 * We always emit the saves rather than tracking actual usage; the
+	 * extra 3 push/pop pairs are tiny relative to the call overhead. */
 	fprintf(f, "\tpush bp\n");
 	fprintf(f, "\tmov bp, sp\n");
+	fprintf(f, "\tpush bx\n");
+	fprintf(f, "\tpush si\n");
+	fprintf(f, "\tpush di\n");
 	if (fn->slot > 0)
 		fprintf(f, "\tsub sp, %d\n", 2 * fn->slot);
 
@@ -3140,7 +3154,10 @@ i8086_emitfn(Fn *fn, FILE *f)
 		case Jretw:
 		case Jretl:
 			/* Near return - for tiny/small memory models */
-			fprintf(f, "\tmov sp, bp\n");
+			fprintf(f, "\tlea sp, [bp-6]\n");
+			fprintf(f, "\tpop di\n");
+			fprintf(f, "\tpop si\n");
+			fprintf(f, "\tpop bx\n");
 			fprintf(f, "\tpop bp\n");
 			fprintf(f, "\tret\n");
 			break;
@@ -3150,7 +3167,10 @@ i8086_emitfn(Fn *fn, FILE *f)
 			/* Far return - for medium/large/huge memory models
 			 * RETF pops both IP and CS from stack (4 bytes total)
 			 */
-			fprintf(f, "\tmov sp, bp\n");
+			fprintf(f, "\tlea sp, [bp-6]\n");
+			fprintf(f, "\tpop di\n");
+			fprintf(f, "\tpop si\n");
+			fprintf(f, "\tpop bx\n");
 			fprintf(f, "\tpop bp\n");
 			fprintf(f, "\tretf\n");
 			break;
