@@ -2576,11 +2576,20 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		return;
 	}
 
-	/* Oswap with no destination is a QBE-internal no-op marker.
-	 * The format string `xchg %=, %0` would otherwise emit `xchg , ax`
-	 * which is malformed.  Skip silently. */
-	if (i->op == Oswap && req(i->to, R))
+	/* Oswap: rega's pmgen emits Oswap with `to = R` and both args set to
+	 * the two registers to exchange (resolves cycles in parallel moves at
+	 * block boundaries).  The optab format `xchg %=, %0` would emit
+	 * `xchg , ax` for these, so handle them explicitly here.  Without
+	 * this, the swap is silently dropped and rega's parallel-move
+	 * resolution produces incorrect code (e.g., screenp not migrating
+	 * to its new register at l29→l33 in stevie's filetonext). */
+	if (i->op == Oswap && req(i->to, R)) {
+		if (rtype(i->arg[0]) == RTmp && rtype(i->arg[1]) == RTmp) {
+			fprintf(f, "\txchg %s, %s\n",
+				rname[i->arg[0].val], rname[i->arg[1].val]);
+		}
 		return;
+	}
 
 	/* Oextsb Kw: sign-extend the low byte of arg[0] to a 16-bit word.
 	 * 8086 has no `movsx` (that's a 386 instruction), so route through
@@ -2634,9 +2643,27 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	if (i->op == Omul && i->cls != Kl && i->cls != Ks && i->cls != Kd) {
 		Ref a0 = i->arg[0], a1 = i->arg[1];
 		int dst_is_ax = (rtype(i->to) == RTmp && i->to.val == RAX);
+		int dst_is_dx = (rtype(i->to) == RTmp && i->to.val == RDX);
 		int save_ax = !dst_is_ax;
+		/* `imul r/m` writes DX:AX — DX gets the high word, clobbering
+		 * whatever rega had placed there.  rega does not know about this
+		 * implicit clobber, so we must preserve DX around the imul
+		 * (unless DX is the destination, in which case it's getting
+		 * overwritten with the low word anyway). */
+		int save_dx = !dst_is_dx;
+		/* If a1 is AX but a0 isn't, swap them: `mov ax, a0` would clobber
+		 * a1 before `imul a1` reads it, yielding AX*AX = a0*a0 instead of
+		 * a0*a1.  16-bit mul is commutative for the low-word result. */
+		if (rtype(a1) == RTmp && a1.val == RAX
+		    && !(rtype(a0) == RTmp && a0.val == RAX)) {
+			Ref tmp = a0;
+			a0 = a1;
+			a1 = tmp;
+		}
 		if (save_ax)
 			fprintf(f, "\tpush ax\n");
+		if (save_dx)
+			fprintf(f, "\tpush dx\n");
 		/* Load multiplicand into AX (skip if it's already there). */
 		if (rtype(a0) == RTmp && strcmp(rname[a0.val], "ax") == 0) {
 			/* nop — AX already holds a0 */
@@ -2659,14 +2686,20 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		} else if (rtype(a1) == RSlot) {
 			fprintf(f, "\timul word [bp%+ld]\n", (long)slot(a1, fn));
 		}
-		/* Result low word is in AX; copy to dst if not AX. */
-		if (!dst_is_ax) {
-			if (rtype(i->to) == RTmp)
-				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
-			else if (rtype(i->to) == RSlot)
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
-			fprintf(f, "\tpop ax\n");
+		/* Result low word is in AX; copy to dst (if dst is DX, do this
+		 * before restoring DX from the stack). */
+		if (dst_is_dx) {
+			fprintf(f, "\tmov dx, ax\n");
+		} else if (rtype(i->to) == RTmp) {
+			if (strcmp(rname[i->to.val], "ax") != 0)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+		} else if (rtype(i->to) == RSlot) {
+			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 		}
+		if (save_dx)
+			fprintf(f, "\tpop dx\n");
+		if (save_ax)
+			fprintf(f, "\tpop ax\n");
 		return;
 	}
 
@@ -3187,12 +3220,14 @@ i8086_emitfn(Fn *fn, FILE *f)
 				fprintf(f, "\ttest %s, %s\n",
 					rname[jr.val], rname[jr.val]);
 			} else if (rtype(jr) == RSlot) {
-				/* rega spilled the jjnz condition — `test mem, imm`
-				 * is awkward; route through AX (caller-save at a
-				 * block-end so its value is dead). */
-				fprintf(f, "\tmov ax, word [bp%+ld]\n",
+				/* rega spilled the jjnz condition.  We MUST NOT route
+				 * through any GPR — rega may place a live SSA temp in
+				 * any caller-save reg at block end (the phi-edge moves
+				 * in the successor's edge block expect those values).
+				 * Use `cmp mem, 0` which sets ZF directly without
+				 * touching any register. */
+				fprintf(f, "\tcmp word [bp%+ld], 0\n",
 					(long)slot(jr, fn));
-				fprintf(f, "\ttest ax, ax\n");
 			} else if (rtype(jr) == RCon) {
 				/* Constant jjnz — fold at emit time. */
 				Con *c = &fn->con[jr.val];
