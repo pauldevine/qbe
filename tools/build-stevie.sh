@@ -270,7 +270,7 @@ if [ $EXE -eq 1 ]; then
 		"$QBE_DIR/tools/asm_to_omf.py" "$base" \
 			"$OUT_DIR/$base.asm" "$OUT_DIR/$base.omf.asm" 2>>"$OUT_DIR/link.err" || {
 			echo "  FAIL omf-wrap: $base"; exit 1; }
-		nasm -f obj "$OUT_DIR/$base.omf.asm" \
+		nasm -w-label-redef-late -f obj "$OUT_DIR/$base.omf.asm" \
 			-o "$OUT_DIR/$base.obj" 2>>"$OUT_DIR/link.err" || {
 			echo "  FAIL nasm-obj: $base"; cat "$OUT_DIR/link.err"; exit 1; }
 	done
