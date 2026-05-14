@@ -101,7 +101,158 @@ segment _BSS
 _heap_buf:          resb _heap_size
 """
 
-EPILOGUE = MALLOC_EXE
+# -------- File I/O via DOS INT 21h --------
+#
+# Replaces the always-fail _fopen/_getc/_fclose stubs in libstub.asm
+# with real DOS-backed implementations (read-only for now).  A fixed
+# pool of FILE slots lives in _BSS; each slot is 520 bytes:
+#   +0  handle  (word)
+#   +2  in_use  (byte)
+#   +3  eof     (byte)
+#   +4  buf_pos (word)
+#   +6  buf_len (word)
+#   +8  buf[512]
+FILEIO_EXE = """
+
+; -------- medium-model file I/O --------
+
+%define _FBUF_SZ 512
+%define _FILE_SZ (8 + _FBUF_SZ)
+%define _NUM_FILES 4
+
+segment LIBSTUB_TEXT
+
+global _fopen
+_fopen:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+    push di
+
+    ; Find a free FILE slot.
+    mov si, _file_slots
+    mov di, _NUM_FILES
+.fop_find:
+    cmp byte [si + 2], 0          ; in_use?
+    je .fop_found
+    add si, _FILE_SZ
+    dec di
+    jnz .fop_find
+    xor ax, ax                    ; no free slot -> NULL
+    jmp .fop_done
+
+.fop_found:
+    ; INT 21h AH=3D AL=0 — open for reading.  DS:DX = filename.
+    mov dx, [bp+6]                ; name (near in DGROUP)
+    mov ax, 0x3D00
+    int 0x21
+    jc .fop_fail
+
+    mov [si], ax                  ; handle
+    mov byte [si+2], 1            ; in_use
+    mov byte [si+3], 0            ; eof
+    mov word [si+4], 0            ; buf_pos
+    mov word [si+6], 0            ; buf_len
+
+    mov ax, si                    ; return slot pointer
+    jmp .fop_done
+
+.fop_fail:
+    xor ax, ax
+
+.fop_done:
+    pop di
+    pop si
+    pop bx
+    pop bp
+    retf
+
+
+global _getc
+_getc:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+
+    mov si, [bp+6]                ; FILE slot
+    test si, si
+    jz .gc_eof
+
+.gc_try:
+    mov ax, [si+4]                ; buf_pos
+    cmp ax, [si+6]                ; buf_len
+    jb .gc_byte
+
+    cmp byte [si+3], 0            ; eof already?
+    jne .gc_eof
+
+    ; Refill: INT 21h AH=3F, BX=handle, CX=count, DS:DX=buf
+    mov bx, [si]
+    mov cx, _FBUF_SZ
+    mov dx, si
+    add dx, 8                     ; buf at slot+8
+    mov ah, 0x3F
+    int 0x21
+    jc .gc_set_eof
+    test ax, ax
+    jz .gc_set_eof
+
+    mov [si+6], ax                ; buf_len
+    mov word [si+4], 0            ; buf_pos
+    jmp .gc_try
+
+.gc_byte:
+    mov bx, [si+4]                ; buf_pos
+    mov al, [si + bx + 8]
+    xor ah, ah
+    inc word [si+4]
+    jmp .gc_done
+
+.gc_set_eof:
+    mov byte [si+3], 1
+.gc_eof:
+    mov ax, -1
+
+.gc_done:
+    pop si
+    pop bx
+    pop bp
+    retf
+
+
+global _fclose
+_fclose:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+
+    mov si, [bp+6]                ; FILE slot
+    test si, si
+    jz .fc_done
+
+    mov bx, [si]                  ; handle
+    mov byte [si+2], 0            ; free slot
+
+    ; INT 21h AH=3E, BX=handle
+    mov ah, 0x3E
+    int 0x21
+
+.fc_done:
+    xor ax, ax
+    pop si
+    pop bx
+    pop bp
+    retf
+
+
+segment _BSS
+_file_slots: resb (_NUM_FILES * _FILE_SZ)
+"""
+
+EPILOGUE = MALLOC_EXE + FILEIO_EXE
 
 
 def shift_bp_offset(line):
@@ -199,7 +350,7 @@ def main():
     # The .EXE replacements live in MALLOC_EXE (appended at end of
     # output).  Detect entry into these blocks and skip until the next
     # `global _xxx` for an unrelated symbol.
-    SKIP_GLOBALS = {'_malloc', '_free'}
+    SKIP_GLOBALS = {'_malloc', '_free', '_fopen', '_fclose', '_getc'}
     SKIP_LABELS  = {'_heap_initialized', '_heap_ptr', '_heap_top'}
 
     # Second pass: route lines.  When we encounter a label whose kind is
