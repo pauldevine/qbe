@@ -990,8 +990,28 @@ class Linker:
         bytes_in_last = total_image % 512
         total_pages = (total_image + 511) // 512
 
-        ss_para = self.out_segs[self.stack_seg_idx].para_base
-        sp = self.stack_size & 0xFFFF
+        # We want SS == DS == DGROUP so that "near char *" works
+        # consistently for both stack-local buffers and DGROUP globals.
+        # The C runtime (strcpy's stosb, etc.) treats near pointers as
+        # DS-relative; if SS != DS, a stack pointer passed as `char *`
+        # writes to the wrong segment.  Lay the STACK segment immediately
+        # after DGROUP's BSS so it's reachable as a 16-bit offset from
+        # DGROUP's frame, then set SS=DGROUP and SP=stack-top-within-DGROUP.
+        dgroup = self.out_groups.get('DGROUP')
+        stack_seg = self.out_segs[self.stack_seg_idx]
+        if dgroup and dgroup.member_out_segs:
+            dgroup_para = min(self.out_segs[i].para_base
+                              for i in dgroup.member_out_segs)
+            stack_off_in_dgroup = (stack_seg.para_base - dgroup_para) * 16
+            sp_full = stack_off_in_dgroup + self.stack_size
+            if sp_full > 0xFFFF:
+                die('DGROUP + stack overflows 64KB (sp=%d). '
+                    'Shrink data or stack.' % sp_full)
+            ss_para = dgroup_para
+            sp = sp_full & 0xFFFF
+        else:
+            ss_para = stack_seg.para_base
+            sp = self.stack_size & 0xFFFF
 
         hdr = bytearray(hdr_size_bytes)
         struct.pack_into('<2sHHHHHHHHHHHHH', hdr, 0,
