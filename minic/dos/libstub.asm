@@ -171,29 +171,124 @@ _strncmp:
     pop bp
     ret
 
+; char *strchr(const char *s, int c)
 global _strchr
 _strchr:
-    mov ax, 0
+    push bp
+    mov bp, sp
+    push si
+    mov si, [bp+4]      ; s
+    mov ax, [bp+6]      ; c (low byte significant)
+.lsc:
+    mov ah, [si]
+    cmp ah, al
+    je .fsc             ; found
+    test ah, ah
+    je .nfsc            ; end of string
+    inc si
+    jmp .lsc
+.fsc:
+    mov ax, si
+    pop si
+    pop bp
+    ret
+.nfsc:
+    xor ax, ax
+    pop si
+    pop bp
     ret
 
+; char *strcat(char *dest, const char *src)
 global _strcat
 _strcat:
     push bp
     mov bp, sp
+    push si
+    push di
+    mov di, [bp+4]      ; dest
+.lac:
+    mov al, [di]
+    test al, al
+    je .acdn
+    inc di
+    jmp .lac
+.acdn:
+    mov si, [bp+6]      ; src
+.lacc:
+    lodsb
+    stosb
+    test al, al
+    jne .lacc
     mov ax, [bp+4]
+    pop di
+    pop si
     pop bp
     ret
 
+; size_t strcspn(const char *s, const char *reject)
 global _strcspn
 _strcspn:
-    mov ax, 0
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    mov si, [bp+4]      ; s
+    xor cx, cx          ; count
+.lcsp:
+    mov al, [si]
+    test al, al
+    je .csdn
+    mov di, [bp+6]      ; reject
+.lcsr:
+    mov bl, [di]
+    test bl, bl
+    je .csno            ; not in reject
+    cmp al, bl
+    je .csdn            ; in reject -> stop
+    inc di
+    jmp .lcsr
+.csno:
+    inc si
+    inc cx
+    jmp .lcsp
+.csdn:
+    mov ax, cx
+    pop bx
+    pop di
+    pop si
+    pop bp
     ret
 
+; char *strncpy(char *dest, const char *src, size_t n)
 global _strncpy
 _strncpy:
     push bp
     mov bp, sp
+    push si
+    push di
+    mov di, [bp+4]      ; dest
+    mov si, [bp+6]      ; src
+    mov cx, [bp+8]      ; n
+    jcxz .nclend
+.lnc1:
+    lodsb               ; al = *src++
+    stosb               ; *dest++ = al
+    test al, al
+    je .lnc2            ; src ended; pad rest with NUL
+    loop .lnc1
+    jmp .nclend
+.lnc2:
+    dec cx
+    jcxz .nclend
+.lncp:
+    xor al, al
+    stosb
+    loop .lncp
+.nclend:
     mov ax, [bp+4]
+    pop di
+    pop si
     pop bp
     ret
 
@@ -202,10 +297,132 @@ _atoi:
     mov ax, 0
     ret
 
+; sprintf(char *dest, const char *fmt, ...)
+; Minimal: handles %s (string), %d (signed int), %ld (signed long),
+; %c (char), %% (literal %).  Unknown spec consumes one word arg and
+; emits the spec letter literally so it's visible during dev.
 global _sprintf
 _sprintf:
-    mov ax, 0
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    mov di, [bp+4]              ; dest
+    mov si, [bp+6]              ; fmt
+    lea bx, [bp+8]              ; ptr to first variadic arg
+
+.spr_loop:
+    lodsb
+    test al, al
+    jz .spr_end
+    cmp al, '%'
+    je .spr_pct
+    stosb
+    jmp .spr_loop
+
+.spr_pct:
+    lodsb
+    test al, al
+    jz .spr_end
+    cmp al, '%'
+    je .spr_literal
+    cmp al, 's'
+    je .spr_str
+    cmp al, 'c'
+    je .spr_chr
+    cmp al, 'd'
+    je .spr_decw
+    cmp al, 'l'
+    je .spr_long
+    ; unknown — emit the char so we notice
+.spr_literal:
+    stosb
+    jmp .spr_loop
+
+.spr_chr:
+    mov ax, [bx]
+    add bx, 2
+    stosb
+    jmp .spr_loop
+
+.spr_str:
+    push si
+    mov si, [bx]
+    add bx, 2
+.spr_str_lp:
+    lodsb
+    test al, al
+    jz .spr_str_dn
+    stosb
+    jmp .spr_str_lp
+.spr_str_dn:
+    pop si
+    jmp .spr_loop
+
+.spr_decw:
+    mov ax, [bx]
+    add bx, 2
+    call _spr_emit_w16
+    jmp .spr_loop
+
+.spr_long:
+    ; expect 'd' next: %ld
+    lodsb
+    cmp al, 'd'
+    jne .spr_loop
+    mov ax, [bx]                ; low word
+    mov dx, [bx+2]              ; high word
+    add bx, 4
+    call _spr_emit_l32
+    jmp .spr_loop
+
+.spr_end:
+    mov byte [di], 0
+    xor ax, ax
+    pop bx
+    pop di
+    pop si
+    pop bp
     ret
+
+; Emit signed 16-bit AX as decimal at ES:DI, advance DI.  Clobbers AX/CX/DX.
+_spr_emit_w16:
+    test ax, ax
+    jns .ew_pos
+    mov byte [di], '-'
+    inc di
+    neg ax
+.ew_pos:
+    xor cx, cx
+.ew_div:
+    xor dx, dx
+    mov bx, 10
+    div bx                       ; ax=quot, dx=rem
+    push dx
+    inc cx
+    test ax, ax
+    jnz .ew_div
+.ew_pop:
+    pop dx
+    add dl, '0'
+    mov [di], dl
+    inc di
+    loop .ew_pop
+    ret
+
+; Emit DX:AX as decimal at ES:DI.  If the high word is zero, fall back
+; to the 16-bit emitter for simplicity.  Otherwise emit '?' as a
+; placeholder (TODO: full 32-bit conversion).
+_spr_emit_l32:
+    test dx, dx
+    jnz .el_big
+    jmp _spr_emit_w16
+.el_big:
+    mov byte [di], '?'
+    inc di
+    ret
+
 
 global _fprintf
 _fprintf:
