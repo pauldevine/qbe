@@ -1116,14 +1116,19 @@ emitins(Ins *i, Fn *fn, FILE *f)
 
 		case Ocopy:
 			/*
-			 * 32-bit copy
+			 * 32-bit copy.
 			 *
-			 * Fast path for `Slot = Con` (rega emits this for slot-resident
-			 * Kl phis in parallel-move blocks).  The naive AX/DX scratch
-			 * sequence clobbered AX/DX, which were sometimes live with a
-			 * value just moved by a preceding parallel copy.  `mov word
-			 * [mem], imm16` is a valid 8086 encoding; use it directly so
-			 * we don't touch any register.
+			 * The naive AX/DX scratch sequence (load value into DX:AX,
+			 * then store) clobbers AX and DX, which rega doesn't know
+			 * about because Ocopy's only declared operands are r0 and
+			 * i->to.  In parallel-move blocks rega frequently emits a
+			 * sequence like `R1 =w copy R<x>; ...; S<y> =l copy R3`
+			 * — the second copy's scratch then wipes the first's
+			 * destination, corrupting whatever value rega had placed
+			 * in AX or DX before this op.
+			 *
+			 * Fast path for Con → Slot: `mov word [mem], imm16` doesn't
+			 * need any register at all.
 			 */
 			if (rtype(r0) == RCon && rtype(i->to) == RSlot) {
 				int64_t val = fn->con[r0.val].bits.i;
@@ -1133,6 +1138,19 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					(long)slot(i->to, fn) + 2, (int)((val >> 16) & 0xFFFF));
 				return;
 			}
+
+			/* For every other shape we route through AX:DX.  Preserve
+			 * whichever isn't already participating in the copy. */
+			{
+			int src_in_ax = (rtype(r0) == RTmp && r0.val == RAX);
+			int src_in_dx = (rtype(r0) == RTmp && r0.val == RDX);
+			int dst_in_ax = (rtype(i->to) == RTmp && i->to.val == RAX);
+			int dst_in_dx = (rtype(i->to) == RTmp && i->to.val == RDX);
+			int save_ax = !src_in_ax && !dst_in_ax;
+			int save_dx = !src_in_dx && !dst_in_dx;
+			if (save_ax) fprintf(f, "\tpush ax\n");
+			if (save_dx) fprintf(f, "\tpush dx\n");
+
 			if (rtype(r0) == RSlot) {
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
 				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
@@ -1151,6 +1169,10 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
 				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+			}
+
+			if (save_dx) fprintf(f, "\tpop dx\n");
+			if (save_ax) fprintf(f, "\tpop ax\n");
 			}
 			return;
 
