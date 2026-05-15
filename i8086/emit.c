@@ -1195,7 +1195,23 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			/*
 			 * 32-bit store to memory
 			 * arg[0] = value to store, arg[1] = destination address
+			 *
+			 * 32-bit stores on the 8086 unavoidably go through AX:DX
+			 * (the only word-pair the architecture supports for
+			 * adjacent loads/stores).  rega does not model that AX/DX
+			 * are clobbered by every multi-word op, so we preserve
+			 * them around the sequence — same pattern as the `imul`
+			 * workaround above.  Skip the save if the source already
+			 * lives in AX or DX (it's being read, not corrupted).
 			 */
+			{
+			int src_in_ax = (rtype(r0) == RTmp && r0.val == RAX);
+			int src_in_dx = (rtype(r0) == RTmp && r0.val == RDX);
+			int save_ax = !src_in_ax;
+			int save_dx = !src_in_dx;
+			if (save_ax) fprintf(f, "\tpush ax\n");
+			if (save_dx) fprintf(f, "\tpush dx\n");
+
 			/* Load value to store */
 			if (rtype(r0) == RSlot) {
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
@@ -1229,6 +1245,10 @@ emitins(Ins *i, Fn *fn, FILE *f)
 						fprintf(f, "\tmov word [bx+2], dx\n");
 					}
 				}
+			}
+
+			if (save_dx) fprintf(f, "\tpop dx\n");
+			if (save_ax) fprintf(f, "\tpop ax\n");
 			}
 			return;
 
