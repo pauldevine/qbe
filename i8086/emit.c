@@ -798,7 +798,19 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			/*
 			 * 32-bit addition: dest = src0 + src1
 			 * add low words, then adc high words
+			 *
+			 * AX/DX are used as scratch unconditionally.  rega doesn't
+			 * model the implicit DX:AX clobber, so preserve whichever
+			 * isn't the destination — same pattern as Ostorel/Ocopy Kl.
 			 */
+			{
+			int dst_in_ax = (rtype(i->to) == RTmp && i->to.val == RAX);
+			int dst_in_dx = (rtype(i->to) == RTmp && i->to.val == RDX);
+			int save_ax = !dst_in_ax;
+			int save_dx = !dst_in_dx;
+			if (save_ax) fprintf(f, "\tpush ax\n");
+			if (save_dx) fprintf(f, "\tpush dx\n");
+
 			/* Load src0 low word to AX */
 			if (rtype(r0) == RSlot) {
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
@@ -831,8 +843,18 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				/* For register destination, we can only store low word */
-				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+				/* For register destination, we can only store low word.
+				 * If dst is DX, copy AX (the low word) into DX before
+				 * the pop dx restores DX's prior value. */
+				if (dst_in_dx) {
+					fprintf(f, "\tmov dx, ax\n");
+				} else if (strcmp(rname[i->to.val], "ax") != 0) {
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				}
+			}
+
+			if (save_dx) fprintf(f, "\tpop dx\n");
+			if (save_ax) fprintf(f, "\tpop ax\n");
 			}
 			return;
 
