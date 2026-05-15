@@ -32,9 +32,81 @@ static	char	*mkline();	/* calculate line string for "number" mode */
  * stuff from Filemem to Nextscreen, and update Botchar.
  */
 
+/*
+ * DEBUG PROBE (render-loop bug): dump Topchar state and the first three
+ * LINE-list entries into Nextscreen rows 0-3, then short-circuit the
+ * normal filetonext logic.  Status line is still drawn elsewhere via
+ * msg(buff) so we keep that signal.  Remove this block once the bug
+ * is understood.
+ */
+#define FTN_DEBUG_PROBE 1
+#if FTN_DEBUG_PROBE
+static void ftn_putrow(int row, char *s)
+{
+	register int col = 0;
+	while (col < Columns && s[col] != '\0') {
+		Nextscreen[row * Columns + col] = s[col];
+		col++;
+	}
+	while (col < Columns) {
+		Nextscreen[row * Columns + col] = ' ';
+		col++;
+	}
+}
+#endif
+
 static void
 filetonext()
 {
+#if FTN_DEBUG_PROBE
+	{
+		char buf[80];
+		LINE *lp0 = Topchar->linep;
+		LINE *lp1 = lp0 ? lp0->next : (LINE *)0;
+		LINE *lp2 = lp1 ? lp1->next : (LINE *)0;
+		register int row;
+
+		/* blank the body area */
+		for (row = 0; row < Rows - 1; row++)
+			ftn_putrow(row, "");
+
+		sprintf(buf, "PROBE TC.linep=%d TC.idx=%d nu=%d Rows=%d Cols=%d",
+		        (int)lp0, Topchar->index, P(P_NU), Rows, Columns);
+		ftn_putrow(0, buf);
+
+		sprintf(buf, "lp0=%d lp0->prev=%d lp0->next=%d lp0->s=%d",
+		        (int)lp0,
+		        lp0 ? (int)lp0->prev : 0,
+		        lp0 ? (int)lp0->next : 0,
+		        lp0 ? (int)lp0->s : 0);
+		ftn_putrow(1, buf);
+
+		if (lp0 && lp0->s)
+			ftn_putrow(2, lp0->s);
+		else
+			ftn_putrow(2, "lp0->s is NULL");
+
+		sprintf(buf, "lp1=%d lp1->s=%d  lp2=%d", (int)lp1,
+		        lp1 ? (int)lp1->s : 0, (int)lp2);
+		ftn_putrow(3, buf);
+
+		if (lp1 && lp1->s)
+			ftn_putrow(4, lp1->s);
+		else
+			ftn_putrow(4, "lp1->s is NULL");
+
+		if (lp2 && lp2->s)
+			ftn_putrow(5, lp2->s);
+		else
+			ftn_putrow(5, "lp2->s is NULL");
+
+		/* satisfy the rest of stevie: Botchar must be valid */
+		*Botchar = *Topchar;
+		return;
+	}
+#endif
+#if 0  /* original filetonext body disabled while probe is active */
+	{
 	register int	row, col;
 	register char	*screenp = Nextscreen;
 	LPTR	memp;
@@ -183,6 +255,8 @@ filetonext()
 		*Botchar = *Fileend;
 	else
 		*Botchar = memp;	/* FIX - prev? */
+	} /* end of body block (debug-probe wrap) */
+#endif /* end of original filetonext body */
 }
 
 /*

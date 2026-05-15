@@ -1,161 +1,143 @@
-# Resume prompt — Stevie/QBE: readfile works, render loop is the bug
+# Resume prompt — Stevie/QBE: filetonext PROBE staged, awaiting DOSBox readout
 
-## Status (smoke-tested 2026-05-15)
+## What this session did
 
-Current `master` (HEAD `6f0c182`) **renders HELLO.txt's "2 line" status
-bar correctly** but the screen body fills with a repeating `1`/`l`
-pattern instead of the file contents.  Keyboard input is ignored
-during the loop.
+Added a **debug probe** at the top of `filetonext()` in
+`stevie-orig/screen.c`.  The probe short-circuits the normal
+render logic and dumps the actual state of `Topchar` and the
+first three `LINE` nodes into screen rows 0–5.  Status line
+(row 23) continues to render normally via `msg(buff)`.
 
-This is the same render-loop symptom from the previous session — my
-session-2 commit `228eb27` (extending AX/DX preservation to every
-remaining `Kl` handler) preserved the prior readfile-completes state
-without introducing new regressions.  We're now firmly in the
-"readfile works, screen rendering is broken" regime.
+The probe is gated by `#define FTN_DEBUG_PROBE 1` (top of the
+filetonext block) and the original body is gated by `#if 0`
+just below it — both flips revert in seconds when the probe is
+no longer needed.
 
-(Side note observed during debug: I rebuilt at commit `00c3667` and
-its binary showed *only* the "HELLO.txt" prompt without "2 line".
-The previous prompt had recorded "2 line, ? character + render loop"
-for that state.  Difference is probably from non-emit.c QBE changes
-since 00c3667 was committed — not relevant to the current bug, just
-noting that the pre-state ≠ the originally recorded pre-state.)
-
-## What landed this session
+### Files touched
 
 ```
-228eb27 i8086 emit: preserve AX/DX across remaining Kl handlers
-6f0c182 NEXT_SESSION_PROMPT.md: Kl AX/DX preservation extended; DOSBox test pending
+stevie-orig/screen.c    +73 lines  (probe + #if 0 around original body)
 ```
 
-The session-2 commit added `kl_save_axdx` / `kl_restore_axdx` helpers
-in `i8086/emit.c` and wrapped every `Kl` op that uses AX:DX as scratch
-(Osub, Omul, Oload, Odiv/Orem/Oudiv/Ourem, Oextsw/Oextuw, all ten
-`Oc*l` 32-bit comparisons).  See the commit message for details.
+No changes to qbe/i8086/emit.c this session.
 
-The 32-bit comparison wrap is particularly important — `Ocultl` /
-`Oculel` are used by `screen.c`'s topchar/botchar checks.  Before
-this commit they silently clobbered any rega-allocated live tmp in
-AX or DX.  This was on the candidate-cause list for the render loop
-but did NOT turn out to be the (sole) root cause.
+### MiniC bug observed while landing the probe
 
-## How to reproduce
+MiniC's codegen emits a `ret` followed by more instructions in
+the same basic block when a `return;` is followed by additional
+statements inside the function — QBE then rejects the SSA
+with `label or } expected` (see screen.ssa:280 from the failed
+build).  Workaround: use `#if 0` to delete the unreachable code
+entirely.  Worth a memory entry if it recurs.
+
+## How to run the probe
 
 ```sh
-make qbe
+make qbe  # already up to date
 rm -rf build/stevie-orig && tools/build-stevie.sh --keep-going --model=medium
 cat > build/stevie-orig/HELLO.TXT << 'EOF'
 Hello from a non-empty file!
 This is line 2.
 EOF
 dosbox -c "mount c $PWD/build/stevie-orig" -c "c:" -c "cls" \
-       -c "stevie.exe HELLO.txt"
+       -c "stevie.exe HELLO.TXT"
 ```
 
-Expected today: `"HELLO.txt" 2 line, ? character` status, screen
-body fills with `1`/`l` characters in rows.  Keyboard input ignored.
+(The above is already done as of HEAD; `build/stevie-orig/stevie.exe`
+exists with the probe linked in.)
 
-## What's still broken — the render loop
+## What you should see in DOSBox
 
-`updatescreen()` → `filetonext()` → `nexttoscreen()` is producing the
-garbage screen.  `filetonext` walks the LINE list starting from
-`*Topchar`, calling `gchar(&memp)` (`screen.pp.c:490`) for each char
-and `inc(&memp)` (`screen.pp.c:491`) to advance.
+Six debug rows at the top of the screen:
 
-### Suspect 1 — the LINE list itself
+```
+row 0:  PROBE TC.linep=<n> TC.idx=<n> nu=<n> Rows=<n> Cols=<n>
+row 1:  lp0=<n> lp0->prev=<n> lp0->next=<n> lp0->s=<n>
+row 2:  <Topchar->linep->s content, or "lp0->s is NULL">
+row 3:  lp1=<n> lp1->s=<n>  lp2=<n>
+row 4:  <Topchar->linep->next->s content, or "lp1->s is NULL">
+row 5:  <Topchar->linep->next->next->s content, or "lp2->s is NULL">
+row 23: "HELLO.TXT" 2 line, ?? character        (status)
+```
 
-`lp->linep` (a near pointer) and `lp->linep->s` (a `char *` near
-pointer to the line's text buffer).  `readfile` builds the doubly
-linked list at `fileio.pp.c:548–554`:
+### Interpretation cheatsheet
+
+- `lp0->s` text should match HELLO.TXT line 1 (`Hello from a non-empty file!`)
+  IF it's the sentinel head; otherwise it could match line 2 or be NULL.
+- `lp1->s` and `lp2->s` should walk forward through the LINE list.
+- If `lp0->next == lp0` (or `lp1 == lp0`, etc.) we have a **cycle**.
+- If `lp0` itself is `0` (= NULL near pointer), `Topchar->linep` was
+  never assigned — probably an `edit()` / `*Filemem` init bug.
+- If `lp0` is sane but `lp0->s` is `0`, the `lp->s = malloc(...)`
+  inside `newline()` either failed or rega lost the malloc-return value.
+- If the printable strings show garbage that includes "1"/"l", the LINE
+  list itself is corrupt — narrows the search to `readfile`'s
+  `fileio.pp.c:548–554`.
+- `nu=` reports `params[P_NU].value`.  Should be 0; if non-zero, we
+  have a separate "params got corrupted" bug.
+
+## Suspects (carried from previous prompt)
+
+1. **LINE list cycle / corruption**: `readfile` builds the doubly
+   linked list at `stevie-orig/fileio.c:117–123`.  Tactical audit
+   of `build/stevie-orig/fileio.asm` lines 367–410 against
+   `fileio.ssa` lines 184–219 is still pending — the asm has a
+   suspicious lack of `mov [bp-42], cx` (the `curr = lp` store)
+   that I couldn't locate when I scanned this session.  May be a
+   missing storew or may be the slot is actually `[bp-60]`
+   (the prologue is dense; readfile has 506 bytes of stack).
+2. **`params[14]` corruption**: handled by the probe (row 0
+   shows `nu=`).
+3. **`inc(&memp)` returning -1 prematurely**: less likely
+   (would produce `~`/`@`, not "1"/"l").
+4. **`Topchar` / `Filemem` mis-init**: also covered by row 1
+   (`lp0=`, `lp0->prev=`, etc.).
+
+## Reverting the probe
 
 ```c
-strcpy(lp->s, buff);
-curr->next->prev = lp;
-lp->next = curr->next;
-curr->next = lp;
-lp->prev = curr;
-curr = lp;
+/* in stevie-orig/screen.c near line 42 */
+#define FTN_DEBUG_PROBE 0   /* was 1 */
 ```
 
-If any of these stores go to the wrong place (e.g., `lp->s` ends up
-pointing to a static string `"1"`, or `lp->next` cycles back to lp),
-filetonext would loop or read garbage.
-
-**Concrete probe**: insert `fprintf(stderr, "line %d: %s\n", linecnt,
-lp->s);` after line 548 and run with `stevie.exe HELLO.txt > log
-2>&1`.  Compare log against the file content.
-
-### Suspect 2 — line numbers spuriously enabled
-
-`params[14]` is the "nu" / number option, default `(0)` per
-`param.pp.c:441`.  If it's reading non-zero (e.g., BSS not zeroed,
-or `params[]` storage corrupted), `filetonext` would prepend `mkline(lno)`
-to every line.  `mkline` writes a sparse string with the digits of
-`n` reversed into a buffer; if `n` is corrupted to something like
-65535 you'd get "5", "5", "3", "5", "6" reversed, which read at
-`extra[--nextra]` produces "65535" — not "1"s, but a similar visual
-flood.
-
-**Concrete probe**: add `fprintf(stderr, "params[14]=%d lno=%d\n",
-params[14].value, lno);` at the top of `filetonext`.
-
-### Suspect 3 — `inc(&memp)` returning -1 prematurely
-
-If `inc` returns -1 (end-of-file marker) on the first char,
-`done = 1` is set immediately, the while loop exits, and the
-fallback code fills rows with `~` (vim empty marker) or `@`
-(line-too-long).  `~` is 0x7E, `@` is 0x40 — neither matches the
-visible "1"/"l" pattern, so this is less likely.
-
-### Suspect 4 — `Topchar` / `Curschar` / `Filemem` mis-init
-
-`edit()` (`edit.pp.c:438–440`) does:
-
-```c
-*Topchar = *Filemem;
-*Curschar = *Filemem;
-Cursrow = Curscol = 0;
-```
-
-If `Filemem`'s `linep` points to the sentinel start (not the first
-real line) — that's expected and `filetonext` should skip via `inc`
-to the first real line.  But if any of the LPTR struct stores went
-wrong, `Topchar` could point somewhere bogus.
+…and flip the `#if 0` below it back to `#if 1` (or remove it).
 
 ## Next steps
 
-1. **Add a printf probe to `filetonext` (Suspect 2 + Suspect 1).**
-   Insert at the top:
-   ```c
-   fprintf(stderr, "filetonext: params[14]=%d Topchar.linep=%p .s=%p [%.20s]\n",
-       params[14].value, Topchar->linep,
-       Topchar->linep ? Topchar->linep->s : 0,
-       (Topchar->linep && Topchar->linep->s) ? Topchar->linep->s : "");
-   ```
-   Need `stderr` redirected — DOSBox can do `c:\stevie.exe HELLO.txt
-   2> err.log`.  Or write to a debug file via `fopen("c:\\dbg.txt","w")`.
+1. **Run the probe in DOSBox**, read the six rows, paste the
+   contents back into the next session.
+2. Based on the readout, jump to the appropriate suspect:
+   - Garbage `lp0->s` content → audit `readfile` line-build
+     asm at `fileio.asm:367–410` for a missing/swapped store.
+   - Cycle (`lp0->next == lp0` etc.) → also in `readfile`.
+   - `nu=1` → audit `param.c` initialization + BSS-zero crt0.
+   - `lp0 == 0` → audit `edit()` at `edit.pp.c:438–440` and
+     `Filemem` init.
+3. After the bug is understood, flip the probe off (see above)
+   and land the real fix.
 
-2. **Audit `readfile`'s LINE-list construction** at
-   `fileio.pp.c:548–554`.  The four stores happen in tight
-   succession and at least one of them goes through a stack-slot
-   reload — a prime candidate for rega clobber.  Diff
-   `build/stevie-orig/fileio.asm` around `_readfile`'s line-build
-   block against the post-Bug-A SSA at `fileio.ssa` for those lines.
+## Outstanding non-probe TODOs
 
-3. **Strategic Kl AX/DX fix in isel.c** (still outstanding from the
-   previous prompt).  Push/pop is tactical; modelling RAX/RDX as
-   clobbers in `i8086/isel.c` would eliminate the per-handler
-   wrapper and fix the "src in AX/DX" edge case.
+These are unchanged from the prior prompt:
 
-4. **Audit Kl-in-single-reg lossiness.**  Not blocking HELLO.txt
-   but matters for files >64KB and `%ld` printf.
+- **Strategic Kl AX/DX fix in `i8086/isel.c`** — replace the
+  tactical per-handler push/pop landed in commit 228eb27 with
+  proper RAX/RDX clobber-modelling so rega avoids the conflict
+  natively.
+- **Kl-in-single-reg lossiness audit** — not blocking
+  HELLO.TXT but matters for files >64KB and `%ld` printf.
 
 ## Memory entries that may need updates
 
 - `feedback_minic_readfile_register_clobber.md` — scope is now
-  broader than Bug B; the AX/DX implicit-clobber family applies to
-  every emit.c handler that uses AX:DX as scratch.
-- `feedback_minic_long_vararg_truncated.md` — Bug A is permanent;
-  no change.
+  broader than Bug B; the AX/DX implicit-clobber family applies
+  to every emit.c handler that uses AX:DX as scratch.
+- `feedback_minic_long_vararg_truncated.md` — Bug A is
+  permanent; no change.
+- **NEW candidate**: `feedback_minic_ret_then_code.md` — minic
+  emits `ret` followed by SSA without a label when a `return;`
+  is followed by more code in the same function.  Workaround:
+  `#if 0` the unreachable code.
 
 ## Heisenbug lessons (carried forward)
 
@@ -163,9 +145,15 @@ wrong, `Topchar` could point somewhere bogus.
   avoid mask must NOT propagate via `visit`.
 - **Multi-word ops on a single-word ISA need wrapping.** Tactical
   push/pop landed in 228eb27; strategic isel-side fix still TODO.
-- **Comparisons can clobber.** Even though `Oc*l` results are Kw,
-  the body uses AX:DX — easy to miss.
+- **Comparisons can clobber.** Even though `Oc*l` results are
+  Kw, the body uses AX:DX — easy to miss.
 - **Side-by-side binary tests catch state-of-mind drift.** Stage
-  both pre and post binaries in `build/stevie-orig/` with distinct
-  names so DOSBox's 8.3 mangling shows them as `STEVIE~1.EXE` and
-  `STEVIE~2.EXE`; lets the user compare without rebuilding.
+  both pre and post binaries in `build/stevie-orig/` with
+  distinct names so DOSBox's 8.3 mangling shows them as
+  `STEVIE~1.EXE` and `STEVIE~2.EXE`; lets the user compare
+  without rebuilding.
+- **Probe-into-screen beats stderr in DOS.** `libstub_to_exe.py`
+  only stubs read-only `fopen`/`getc`/`fclose` for the medium-
+  model `.EXE` build; `fopen` for write, `fprintf`, `fputs`,
+  `fwrite` all return 0 immediately.  Writing diagnostics into
+  the `Nextscreen` buffer is the path of least resistance.
