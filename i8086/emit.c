@@ -306,6 +306,38 @@ store_ax_to(Ref to, Fn *fn, FILE *f)
 		fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(to, fn));
 }
 
+/* Preserve AX/DX across a Kl op that uses them as scratch.  rega doesn't
+ * model the implicit clobber, so we save/restore the caller's AX/DX
+ * unless the op's destination is one of them (in which case the op writes
+ * it and restoring would overwrite the result).  Push/pop is cheaper than
+ * the alternative — letting rega spill via memory — for typical 8086 code
+ * pressure.  Skip the save when the destination is the register being
+ * saved, since the result must remain there. */
+typedef struct AxDxSave {
+	int save_ax;
+	int save_dx;
+} AxDxSave;
+
+static AxDxSave
+kl_save_axdx(Ref to, FILE *f)
+{
+	AxDxSave s;
+	int dst_in_ax = (rtype(to) == RTmp && to.val == RAX);
+	int dst_in_dx = (rtype(to) == RTmp && to.val == RDX);
+	s.save_ax = !dst_in_ax;
+	s.save_dx = !dst_in_dx;
+	if (s.save_ax) fprintf(f, "\tpush ax\n");
+	if (s.save_dx) fprintf(f, "\tpush dx\n");
+	return s;
+}
+
+static void
+kl_restore_axdx(AxDxSave s, FILE *f)
+{
+	if (s.save_dx) fprintf(f, "\tpop dx\n");
+	if (s.save_ax) fprintf(f, "\tpop ax\n");
+}
+
 /* Load a 32-bit operand into DX:AX.  The original 32-bit handlers only
  * handled RSlot/RCon; this also handles RTmp (treats the temp's register
  * as the low word and zero-extends DX, matching the convention in the
@@ -861,8 +893,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		case Osub:
 			/*
 			 * 32-bit subtraction: dest = src0 - src1
-			 * sub low words, then sbb high words
+			 * sub low words, then sbb high words.
+			 * Preserve AX/DX across the op (rega doesn't see the implicit
+			 * scratch — same shape as Oadd Kl).
 			 */
+			{
+			int dst_in_dx_sub = (rtype(i->to) == RTmp && i->to.val == RDX);
+			AxDxSave s_sub = kl_save_axdx(i->to, f);
+
 			/* Load src0 to DX:AX */
 			if (rtype(r0) == RSlot) {
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
@@ -894,16 +932,31 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+				/* dst is a register: it gets the low word (AX).  If dst
+				 * is DX, the value lives in AX right now — move before
+				 * the pop dx (which would otherwise clobber it).  We
+				 * skipped pushing DX in that case, so this is just the
+				 * final landing of the result. */
+				if (dst_in_dx_sub) {
+					fprintf(f, "\tmov dx, ax\n");
+				} else if (strcmp(rname[i->to.val], "ax") != 0) {
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				}
+			}
+
+			kl_restore_axdx(s_sub, f);
 			}
 			return;
 
 		case Omul:
 			/*
 			 * 32-bit multiplication: dest = src0 * src1
-			 * For simplicity, use 16x16->32 multiplication when possible
-			 * Full 32x32 multiplication requires more complex code
+			 * imul writes DX:AX unconditionally; preserve AX/DX across.
 			 */
+			{
+			int dst_in_dx_mul = (rtype(i->to) == RTmp && i->to.val == RDX);
+			AxDxSave s_mul = kl_save_axdx(i->to, f);
+
 			/* Load src0 low word to AX */
 			if (rtype(r0) == RSlot) {
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
@@ -930,7 +983,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+				if (dst_in_dx_mul) {
+					fprintf(f, "\tmov dx, ax\n");
+				} else if (strcmp(rname[i->to.val], "ax") != 0) {
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				}
+			}
+
+			kl_restore_axdx(s_mul, f);
 			}
 			return;
 
@@ -1200,8 +1260,15 @@ emitins(Ins *i, Fn *fn, FILE *f)
 
 		case Oload:
 			/*
-			 * 32-bit load from memory
+			 * 32-bit load from memory.  Uses AX:DX to stage the value;
+			 * preserve them across so rega-allocated live tmps in AX/DX
+			 * survive (they otherwise leak silently — the canonical Kl
+			 * implicit-clobber bug).
 			 */
+			{
+			int dst_in_dx_ld = (rtype(i->to) == RTmp && i->to.val == RDX);
+			AxDxSave s_ld = kl_save_axdx(i->to, f);
+
 			/* Memory address is in arg[0] */
 			if (rtype(r0) == RSlot) {
 				/* Load from local variable (stack slot that contains a 32-bit value) */
@@ -1231,7 +1298,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+				if (dst_in_dx_ld) {
+					fprintf(f, "\tmov dx, ax\n");
+				} else if (strcmp(rname[i->to.val], "ax") != 0) {
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				}
+			}
+
+			kl_restore_axdx(s_ld, f);
 			}
 			return;
 
@@ -1296,242 +1370,209 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			}
 			return;
 
-		/* 32-bit comparison operations */
+		/* 32-bit comparison operations.
+		 *
+		 * Each emits load32_dxax (clobbers AX/DX) then cmp32_high/low
+		 * (read AX/DX) and finally writes the boolean 0/1 into AX which
+		 * store_ax_to routes to the destination.  rega doesn't model the
+		 * AX/DX clobber, so live tmps in AX/DX across the compare would
+		 * be silently corrupted — wrap each case with kl_save_axdx /
+		 * kl_restore_axdx (skips push/pop for whichever scratch reg IS
+		 * the destination, since the result must remain there). */
 		case Oceql:
-			/*
-			 * 32-bit equality comparison
-			 * Compare both words, result is 1 if both equal
-			 */
-			/* Load first operand */
+			{
+			AxDxSave s_ceql = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
-
-			/* Compare high word first */
 			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjne .L_ceql_ne_%p\n", (void*)i);
-
-			/* Compare low word */
 			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjne .L_ceql_ne_%p\n", (void*)i);
-
-			/* Equal */
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, "\tjmp .L_ceql_done_%p\n", (void*)i);
 			fprintf(f, ".L_ceql_ne_%p:\n", (void*)i);
 			fprintf(f, "\txor ax, ax\n");
 			fprintf(f, ".L_ceql_done_%p:\n", (void*)i);
-
 			store_ax_to(i->to, fn, f);
+			kl_restore_axdx(s_ceql, f);
+			}
 			return;
 
 		case Ocnel:
-			/*
-			 * 32-bit inequality comparison
-			 */
+			{
+			AxDxSave s_cnel = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
-
-			/* Compare high word */
 			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjne .L_cnel_ne_%p\n", (void*)i);
-
-			/* Compare low word */
 			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjne .L_cnel_ne_%p\n", (void*)i);
-
-			/* Equal - result is 0 */
 			fprintf(f, "\txor ax, ax\n");
 			fprintf(f, "\tjmp .L_cnel_done_%p\n", (void*)i);
 			fprintf(f, ".L_cnel_ne_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_cnel_done_%p:\n", (void*)i);
-
 			store_ax_to(i->to, fn, f);
+			kl_restore_axdx(s_cnel, f);
+			}
 			return;
 
 		case Ocsltl:
-			/*
-			 * 32-bit signed less than
-			 * Compare high words first (signed), then low words (unsigned) if high equal
-			 */
+			{
+			AxDxSave s_csltl = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
-
-			/* Compare high word (signed) */
 			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjl .L_csltl_true_%p\n", (void*)i);
 			fprintf(f, "\tjg .L_csltl_false_%p\n", (void*)i);
-
-			/* High words equal, compare low (unsigned) */
 			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjb .L_csltl_true_%p\n", (void*)i);
-
 			fprintf(f, ".L_csltl_false_%p:\n", (void*)i);
 			fprintf(f, "\txor ax, ax\n");
 			fprintf(f, "\tjmp .L_csltl_done_%p\n", (void*)i);
 			fprintf(f, ".L_csltl_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_csltl_done_%p:\n", (void*)i);
-
 			store_ax_to(i->to, fn, f);
+			kl_restore_axdx(s_csltl, f);
+			}
 			return;
 
 		case Ocslel:
-			/*
-			 * 32-bit signed less than or equal
-			 */
+			{
+			AxDxSave s_cslel = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
-
 			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjl .L_cslel_true_%p\n", (void*)i);
 			fprintf(f, "\tjg .L_cslel_false_%p\n", (void*)i);
-
 			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjbe .L_cslel_true_%p\n", (void*)i);
-
 			fprintf(f, ".L_cslel_false_%p:\n", (void*)i);
 			fprintf(f, "\txor ax, ax\n");
 			fprintf(f, "\tjmp .L_cslel_done_%p\n", (void*)i);
 			fprintf(f, ".L_cslel_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_cslel_done_%p:\n", (void*)i);
-
 			store_ax_to(i->to, fn, f);
+			kl_restore_axdx(s_cslel, f);
+			}
 			return;
 
 		case Ocsgtl:
-			/*
-			 * 32-bit signed greater than
-			 */
+			{
+			AxDxSave s_csgtl = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
-
 			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjg .L_csgtl_true_%p\n", (void*)i);
 			fprintf(f, "\tjl .L_csgtl_false_%p\n", (void*)i);
-
 			cmp32_low(r1, fn, f);
 			fprintf(f, "\tja .L_csgtl_true_%p\n", (void*)i);
-
 			fprintf(f, ".L_csgtl_false_%p:\n", (void*)i);
 			fprintf(f, "\txor ax, ax\n");
 			fprintf(f, "\tjmp .L_csgtl_done_%p\n", (void*)i);
 			fprintf(f, ".L_csgtl_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_csgtl_done_%p:\n", (void*)i);
-
 			store_ax_to(i->to, fn, f);
+			kl_restore_axdx(s_csgtl, f);
+			}
 			return;
 
 		case Ocsgel:
-			/*
-			 * 32-bit signed greater than or equal
-			 */
+			{
+			AxDxSave s_csgel = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
-
 			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjg .L_csgel_true_%p\n", (void*)i);
 			fprintf(f, "\tjl .L_csgel_false_%p\n", (void*)i);
-
 			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjae .L_csgel_true_%p\n", (void*)i);
-
 			fprintf(f, ".L_csgel_false_%p:\n", (void*)i);
 			fprintf(f, "\txor ax, ax\n");
 			fprintf(f, "\tjmp .L_csgel_done_%p\n", (void*)i);
 			fprintf(f, ".L_csgel_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_csgel_done_%p:\n", (void*)i);
-
 			store_ax_to(i->to, fn, f);
+			kl_restore_axdx(s_csgel, f);
+			}
 			return;
 
 		case Ocultl:
-			/*
-			 * 32-bit unsigned less than
-			 */
+			{
+			AxDxSave s_cultl = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
-
 			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjb .L_cultl_true_%p\n", (void*)i);
 			fprintf(f, "\tja .L_cultl_false_%p\n", (void*)i);
-
 			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjb .L_cultl_true_%p\n", (void*)i);
-
 			fprintf(f, ".L_cultl_false_%p:\n", (void*)i);
 			fprintf(f, "\txor ax, ax\n");
 			fprintf(f, "\tjmp .L_cultl_done_%p\n", (void*)i);
 			fprintf(f, ".L_cultl_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_cultl_done_%p:\n", (void*)i);
-
 			store_ax_to(i->to, fn, f);
+			kl_restore_axdx(s_cultl, f);
+			}
 			return;
 
 		case Oculel:
-			/*
-			 * 32-bit unsigned less than or equal
-			 */
+			{
+			AxDxSave s_culel = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
-
 			cmp32_high(r1, fn, f);
 			fprintf(f, "\tjb .L_culel_true_%p\n", (void*)i);
 			fprintf(f, "\tja .L_culel_false_%p\n", (void*)i);
-
 			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjbe .L_culel_true_%p\n", (void*)i);
-
 			fprintf(f, ".L_culel_false_%p:\n", (void*)i);
 			fprintf(f, "\txor ax, ax\n");
 			fprintf(f, "\tjmp .L_culel_done_%p\n", (void*)i);
 			fprintf(f, ".L_culel_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_culel_done_%p:\n", (void*)i);
-
 			store_ax_to(i->to, fn, f);
+			kl_restore_axdx(s_culel, f);
+			}
 			return;
 
 		case Ocugtl:
-			/*
-			 * 32-bit unsigned greater than
-			 */
+			{
+			AxDxSave s_cugtl = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
-
 			cmp32_high(r1, fn, f);
 			fprintf(f, "\tja .L_cugtl_true_%p\n", (void*)i);
 			fprintf(f, "\tjb .L_cugtl_false_%p\n", (void*)i);
-
 			cmp32_low(r1, fn, f);
 			fprintf(f, "\tja .L_cugtl_true_%p\n", (void*)i);
-
 			fprintf(f, ".L_cugtl_false_%p:\n", (void*)i);
 			fprintf(f, "\txor ax, ax\n");
 			fprintf(f, "\tjmp .L_cugtl_done_%p\n", (void*)i);
 			fprintf(f, ".L_cugtl_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_cugtl_done_%p:\n", (void*)i);
-
 			store_ax_to(i->to, fn, f);
+			kl_restore_axdx(s_cugtl, f);
+			}
 			return;
 
 		case Ocugel:
-			/*
-			 * 32-bit unsigned greater than or equal
-			 */
+			{
+			AxDxSave s_cugel = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
-
 			cmp32_high(r1, fn, f);
 			fprintf(f, "\tja .L_cugel_true_%p\n", (void*)i);
 			fprintf(f, "\tjb .L_cugel_false_%p\n", (void*)i);
-
 			cmp32_low(r1, fn, f);
 			fprintf(f, "\tjae .L_cugel_true_%p\n", (void*)i);
-
 			fprintf(f, ".L_cugel_false_%p:\n", (void*)i);
 			fprintf(f, "\txor ax, ax\n");
 			fprintf(f, "\tjmp .L_cugel_done_%p\n", (void*)i);
 			fprintf(f, ".L_cugel_true_%p:\n", (void*)i);
 			fprintf(f, "\tmov ax, 1\n");
 			fprintf(f, ".L_cugel_done_%p:\n", (void*)i);
-
 			store_ax_to(i->to, fn, f);
+			kl_restore_axdx(s_cugel, f);
+			}
 			return;
 
 		case Omkfar:
@@ -1581,7 +1622,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 * division library routine.  Not implemented yet —
 			 * emit the 16-bit form via load32_dxax + idiv/div as a
 			 * best-effort, marked TODO so callers using `long`
-			 * division still get something traceable. */
+			 * division still get something traceable.
+			 * idiv/div writes DX:AX; preserve caller's AX/DX. */
+			{
+			int is_rem = (i->op == Orem || i->op == Ourem);
+			int dst_in_ax = (rtype(i->to) == RTmp && i->to.val == RAX);
+			int dst_in_dx = (rtype(i->to) == RTmp && i->to.val == RDX);
+			AxDxSave s_div = kl_save_axdx(i->to, f);
+
 			fprintf(f, "\t; TODO: 32-bit %s — using 16-bit truncated form\n",
 			    i->op == Odiv ? "idiv" :
 			    i->op == Oudiv ? "div" :
@@ -1603,21 +1651,28 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				    (i->op == Odiv || i->op == Orem) ? "idiv" : "div");
 				fprintf(f, "\tpop bx\n");
 			}
-			/* Result: AX (quotient) or DX (remainder) */
-			if (i->op == Orem || i->op == Ourem) {
+			/* Result: AX (quotient) or DX (remainder).  Move into dst
+			 * BEFORE restoring whichever scratch reg overlaps the dst. */
+			if (is_rem) {
 				if (rtype(i->to) == RSlot) {
 					fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn));
 					fprintf(f, "\tmov word [bp%+ld], 0\n", (long)slot(i->to, fn) + 2);
-				} else if (rtype(i->to) == RTmp) {
+				} else if (rtype(i->to) == RTmp && !dst_in_dx) {
+					/* dst != DX: copy DX (the remainder) into dst.
+					 * If dst is AX, do this BEFORE pop ax. */
 					fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
 				}
 			} else {
 				if (rtype(i->to) == RSlot) {
 					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 					fprintf(f, "\tmov word [bp%+ld], 0\n", (long)slot(i->to, fn) + 2);
-				} else if (rtype(i->to) == RTmp && i->to.val != RAX) {
-					{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+				} else if (rtype(i->to) == RTmp && !dst_in_ax) {
+					/* dst != AX: copy AX (the quotient) into dst. */
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
 				}
+			}
+
+			kl_restore_axdx(s_div, f);
 			}
 			return;
 
@@ -1626,7 +1681,13 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			/* Extend 16-bit (Kw) value to 32-bit (Kl) result.
 			 * Oextsw: sign-extend (cwd: AX → DX:AX with sign bit).
 			 * Oextuw: zero-extend (xor dx, dx).
-			 * Load arg into AX first; result in DX:AX, then store. */
+			 * Load arg into AX first; result in DX:AX, then store.
+			 * Preserve AX/DX (rega doesn't model the implicit clobber). */
+			{
+			int dst_in_ax_ext = (rtype(i->to) == RTmp && i->to.val == RAX);
+			int dst_in_dx_ext = (rtype(i->to) == RTmp && i->to.val == RDX);
+			AxDxSave s_ext = kl_save_axdx(i->to, f);
+
 			if (rtype(r0) == RSlot) {
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
 			} else if (rtype(r0) == RCon) {
@@ -1643,8 +1704,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
 				}
 			} else if (rtype(r0) == RTmp) {
-				if (i->to.val != r0.val || rtype(i->to) != RTmp)
-					{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
+				if (strcmp(rname[r0.val], "ax") != 0)
+					fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
 			}
 			if (i->op == Oextsw)
 				fprintf(f, "\tcwd\n");
@@ -1653,8 +1714,18 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			if (rtype(i->to) == RSlot) {
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
-			} else if (rtype(i->to) == RTmp && i->to.val != RAX) {
-				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+			} else if (rtype(i->to) == RTmp) {
+				/* dst is a register: take the low word (AX).
+				 * If dst is DX, copy AX→DX BEFORE pop dx restores.
+				 * If dst is AX, the result is already there. */
+				if (dst_in_dx_ext) {
+					fprintf(f, "\tmov dx, ax\n");
+				} else if (!dst_in_ax_ext) {
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				}
+			}
+
+			kl_restore_axdx(s_ext, f);
 			}
 			return;
 
