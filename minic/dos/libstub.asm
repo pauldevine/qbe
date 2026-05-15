@@ -387,6 +387,10 @@ _sprintf:
     ret
 
 ; Emit signed 16-bit AX as decimal at ES:DI, advance DI.  Clobbers AX/CX/DX.
+; Uses NEAR ret (retn) — these are internal helpers called via near `call`.
+; libstub_to_exe.py rewrites every `ret` to `retf` for the medium-model
+; .EXE build; we use `retn` so the rewrite skips us and the call/ret
+; size stays consistent.
 _spr_emit_w16:
     test ax, ax
     jns .ew_pos
@@ -409,7 +413,7 @@ _spr_emit_w16:
     mov [di], dl
     inc di
     loop .ew_pop
-    ret
+    retn
 
 ; Emit DX:AX as decimal at ES:DI.  If the high word is zero, fall back
 ; to the 16-bit emitter for simplicity.  Otherwise emit '?' as a
@@ -421,7 +425,7 @@ _spr_emit_l32:
 .el_big:
     mov byte [di], '?'
     inc di
-    ret
+    retn
 
 
 global _fprintf
