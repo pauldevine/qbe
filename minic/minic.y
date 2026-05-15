@@ -814,7 +814,7 @@ irtyp(unsigned ctyp)
 	if (k == CHR) return 'b';
 	/* Short ints are halfwords - check KIND to avoid false positives from shifted types */
 	if ((ctyp & SHORT) && k == INT) return 'h';
-	/* Longs and 8-byte types */
+	/* 32-bit longs on i8086 and 8-byte types */
 	if (k == LNG || SIZE(ctyp) == 8) return 'l';
 	/* Regular ints are words */
 	return 'w';
@@ -837,6 +837,7 @@ irtyp_ret(unsigned ctyp)
 		if (KIND(ctyp) == LNG) return 'd';  /* double */
 		return 's';  /* float */
 	}
+	if (KIND(ctyp) == LNG) return 'l';  /* 32-bit long on i8086 (SIZE 4) */
 	if (SIZE(ctyp) == 8) return 'l';
 	return 'w';  /* char, short, int all return as 'w' */
 }
