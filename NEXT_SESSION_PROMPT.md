@@ -1,140 +1,117 @@
-# Resume prompt — Stevie/QBE: filetonext corruption RESOLVED
+# Resume prompt — Stevie/QBE: Bug A + Bug B fixed, runtime smoke test next
 
 ## Status
 
-**Filemem corruption is fixed.** Empty buffer test now shows `abc14822
-24822` — Filemem stays at 0x4822 across filetonext. Three i8086 emit
-bugs found and fixed across this and the prior session.
+Both blocking codegen bugs from the previous session are fixed.  Stevie
+should now load HELLO.txt, render lines, and accept navigation keys.
+Next session: verify in DOSBox and triage whatever else surfaces.
 
-## What's fixed this session (i8086/emit.c)
+## What landed this session (2 commits on master)
 
-**3. Omul clobbered DX silently.** *(the actual root cause of the
-filetonext heisenbug)*
+```
+7225d19 qbe rega+i8086 emit: stop caller-save reg from leaking across calls
+e897434 minic: emit 'l' (32-bit on i8086) for LNG types
+```
 
-8086's single-operand `imul r/m` writes the 32-bit result as DX:AX.
-QBE's rega does not model this implicit clobber, so it freely placed
-live SSA temps in DX across mul instructions. In the no-probe build of
-`filetonext`, rega put `screenp.44` in DX at l29, then `imul bx` for
-`c*3` overwrote DX with the high word of the product (zero, for c=0).
-The inner blank loop then wrote `0x20` from address 0x000C upward,
-blasting Filemem and most of `_DATA`.
+### Bug A fix — `e897434` (minic.y)
 
-This was the "heisenbug" — probes shifted rega allocation so that
-`screenp` happened not to land in DX during a mul, masking the issue.
+`irtyp` and `irtyp_ret` returned `'w'` for `long` because they checked
+`SIZE(ctyp) == 8`, but the i8086 build sets `SIZE(LNG) = 4`.  All long
+storage and the printf `%ld` vararg slot were 2 bytes, with the high
+word coming from the next arg.  Added a `KIND(ctyp) == LNG → 'l'`
+branch before the `SIZE == 8` check in both functions.
 
-**Fix:** wrap `imul` with `push dx`/`pop dx` whenever the destination
-isn't DX. Also added a defensive swap for the case where `a1 == AX`:
-the existing `mov ax, a0` would clobber a1 before `imul a1` could read
-it. 16-bit mul is commutative for the low-word result, so swapping
-operands is safe.
+### Bug B fix — `7225d19` (rega.c + i8086/emit.c)
 
-The clean long-term fix is to model the implicit clobber in
-`i8086/isel.c` the way amd64's `seldiv` does (with `TMP(RDX)`). The
-push/pop workaround in `emit.c` is self-contained and correct but
-costs 2 instructions per mul.
+Two cooperating problems:
 
-## Pre-existing fixes from prior session (still in tree)
+1. **rega.c**: `ralloctry`'s "any free reg" fallback was setting
+   `sethint` + `tmp[t].visit` even when the picked reg was caller-save.
+   That choice then propagated to subsequent blocks via `visit`.  In
+   stevie, t39 (FILE*) was forced into RAX by pressure in `@l17`, then
+   `@l15` (which had BX/SI/DI free) inherited that, and `filemess`
+   wiped AX → getc(NULL) → -1.  Fix: skip the propagation when the
+   fallback path is taken.
 
-**1. Oswap with `to=R` was dropped silently.** rega's pmgen emits
-`Oswap to=R, arg0=src, arg1=dst` to resolve cycles in parallel
-register moves at block boundaries. The emit code had an early-return
-treating these as "QBE-internal no-op markers" — actually they're real
-xchg ops. Fix: explicit `xchg arg0, arg1` emission for `Oswap` with
-null `to`.
+2. **i8086/emit.c**: `Ocopy Kl` from `RCon` to `RSlot` was going through
+   AX:DX as scratch.  After (1), rega emitted `R1 =w copy R4; S231 =l
+   copy 0` in the @l15→@l17 parallel-move block — the first move loaded
+   t39 into AX, and the second instantly killed it.  Fix: use the
+   8086 `mov word [mem], imm16` encoding directly when both ends are
+   slots/constants.  No register touched.
 
-**2. Jjnz on a spilled condition clobbered AX.** Emit pattern for
-`jnz <slot>` was `mov ax, [bp+X]; test ax, ax` with a comment claiming
-"AX is dead at block-end." Wrong — rega freely places live SSA temps
-in any caller-save reg at block end. Fix: `cmp word [bp+X], 0` sets ZF
-directly without touching any register.
+## What's still TBD (next session)
 
-## Bisection trail (for future heisenbug hunts)
+1. **Smoke-test in DOSBox.**
+   ```sh
+   rm -rf build/stevie-orig && tools/build-stevie.sh --keep-going --model=medium
+   cat > build/stevie-orig/HELLO.TXT <<EOF
+   Hello from a non-empty file!
+   This is line 2.
+   EOF
+   dosbox -c "mount c $PWD/build/stevie-orig" -c "c:" -c "stevie.exe HELLO.txt"
+   ```
+   Expect the editor to show 2 lines of content, a status bar of the
+   form `"HELLO.txt" 2 lines, 45 characters`, and j/k navigation +
+   `:q!` to work.
 
-The fix wasn't obvious from the rega map alone. The path that found it:
+2. **Audit other Ocopy Kl emit paths for the same scratch issue.**  The
+   fix only addressed Con→Slot.  Other shapes (Slot→Slot, Tmp→Slot,
+   Slot→Tmp) also go through AX:DX.  In a parallel-move block these
+   could create the same hazard if a *prior* parallel move just landed
+   t in AX.  Audit:
+   - `Ocopy Kl Slot → Slot` (the most common 32-bit phi copy)
+   - `Ocopy Kl Tmp → Slot` (spill of a Kl temp)
+   - Any other case in `i8086/emit.c::Ocopy` that touches AX or DX.
 
-1. Confirmed corruption is INSIDE filetonext (empty stub → no corruption).
-2. Bisected by gating the main while loop (`while(0)`) → corruption pattern
-   changed from `2020` to `2121` (the cleanup blank's diagnostic char),
-   localizing to the cleanup l58 loop in that build.
-3. Read the asm for the cleanup mul: `Nextscreen + srow * Columns` →
-   noticed `imul ax` where rega'd IR said `mul Columns, srow` with srow in AX.
-4. First fix: swap operands when `a1 == AX`. This fixed the cleanup
-   case but not the main loop.
-5. Re-enabled main loop; corruption returned. Audited remaining muls:
-   l29's `imul bx` (for `c*3`) was correct in isolation but the rega
-   map showed `screenp.44 = DX` at l29 entry. The imul clobbers DX.
-6. Wrapped imul with push/pop dx → full fix.
+   A general fix may be to model the AX/DX clobber in isel so rega
+   never schedules conflicting copies — same pattern as the prior
+   `imul DX` workaround.
 
-## Probes/diagnostics state
+3. **Other implicit-clobber audits (from prior playbook):**
+   - `cbw` (AL→AX): writes AH.
+   - `cwd` (AX→DX:AX): writes DX.
+   - Shifts via CL on pre-286: writes CL.
+   - DOS `int 21h` / BIOS `int 10h` wrappers in libstub: verify cdecl-
+     conformant preservation.
 
-- `stevie-orig/screen.c` carries probes in `updatescreen()`:
-  `dbghex4((unsigned)Filemem)` before and after `filetonext()`,
-  followed by a `for(;;)` halt so the post-call value is visible.
-  Useful as a regression check. Remove these once you trust the
-  empty-buffer path.
-- `stevie-orig/alloc.c`, `edit.c`, `main.c` have probe additions
-  (`dbgFM`, `dbgmbef`, `dbgmaft`, `dbgaddr`) carried from the
-  filetonext bug hunt. These can be culled when convenient.
-
-## Next steps
-
-1. **Verify other code paths.** The empty-buffer test passes. Try
-   opening a non-empty file (cmd-line arg) and exercising more of the
-   editor to see if any other `imul`-near-live-DX cases break.
-   `lfiletonext` has a similar structure and should also be tested.
-2. **Consider the cleaner fix.** Replace the push/pop-around-imul
-   workaround with proper clobber modeling in `i8086/isel.c`. Pattern:
-   add `emit(Ocopy, k, TMP(RDX), CON_Z, R)` after the mul (or similar)
-   to tell rega DX is written. See `amd64/isel.c` `seldiv` for the
-   template. Audit other instructions with implicit register effects:
-   `cbw` (AL→AX), `cwd` (AX→DX:AX), and any shift count via CL.
-3. **Strip the debug probes** from stevie-orig once the editor is
-   stable on a non-empty buffer. The `for(;;)` after the second probe
-   in `updatescreen()` is the most important to remove.
-4. **Commit the i8086/emit.c fix** has been done (see git log). The
-   stevie-orig/ probe changes are still uncommitted — decide whether
-   to commit them as a "debug instrumentation" patch or revert.
+4. **Write-back support (`:w`).**  Still stubbed in libstub — `_fopen
+   "w"` (INT 21h AH=3C) and `_fputc`/`_fputs`/`_fwrite` are empty.
+   Add real implementations in `tools/libstub_to_exe.py::FILEIO_EXE`.
 
 ## Build & test
 
-```
+```sh
 make qbe
 rm -rf build/stevie-orig && tools/build-stevie.sh --keep-going --model=medium
-dosbox build/stevie-orig/stevie.exe
+cat > build/stevie-orig/HELLO.TXT << 'EOF'
+Hello from a non-empty file!
+This is line 2.
+EOF
+dosbox -c "mount c $PWD/build/stevie-orig" -c "c:" -c "cls" -c "stevie.exe HELLO.txt"
 ```
 
-Expected: `abc14822 24822`. (Hangs at `for(;;)` after the second '2'
-probe — that's intentional. Ctrl-F9 in DOSBox to exit.)
-
-## Probe legend (current state)
-
-- `abc` = edit() startup probes
-- `1` / `2` / `3` = updatescreen probes around filetonext / nexttoscreen
-- `for(;;)` after the '2' probe blocks further execution so the
-  Filemem value after filetonext is visible
-
-For `dbghex4(X)`: prints `XXXX ` (4 hex digits + space).
-For `dbgaddr(&X)`: prints `<addr><value>;` (avoids stale-AX bug since
-the address is a constant immediate).
-
-## Heisenbug lessons (for the playbook)
-
-- **Implicit register clobbers are silent killers.** When porting QBE
-  to a new target, audit every instruction the target uses for
-  side-effect register writes (DX:AX for mul/div, AL→AX for cbw, CL
-  for shifts on pre-286, AX for cmpxchg, etc.) and make sure rega
-  knows. The amd64 backend models these via `TMP(R<X>)` ops in isel.
-- **Heisenprobes != fixed bugs.** When adding a probe makes the
-  symptom go away, the next question is "what about rega allocation
-  changed?" — not "the probe helped, ship it." Diff the rega map with
-  and without probes (`qbe -dR`) to find the differing allocation.
-- **The corruption shape is a fingerprint.** ~10KB of `0x20` spanning
-  most of `_DATA` from `0x0C` to `0x2A74` was telling us "a blank loop
-  ran from address ~0 instead of from `Nextscreen` (`0x500E`)." That
-  pointed at screenp being clobbered to 0, not at the loop math being
-  off — which led directly to the DX-clobber root cause.
+Pre-existing-failure check: `make check` reports 3/62 failures, all
+unrelated to these fixes (arm64 far-pointer support and a link error).
 
 ## Memory entries updated
 
-- `feedback_i8086_imul_dx_clobber.md` (new) — root cause + fix.
-- `feedback_i8086_oswap_dropped.md` — Oswap/Jjnz fixes from prior session.
+- `feedback_minic_long_vararg_truncated.md` — marked fixed, root cause
+  documented.
+- `feedback_minic_readfile_register_clobber.md` — marked fixed, both
+  sub-bugs documented.
+- `MEMORY.md` index updated.
+
+## Heisenbug lessons (carried forward)
+
+- **rega's `visit` field is sticky across blocks.**  Once set, it
+  bypasses `hint.m` (the avoid mask).  Any place rega may pick a reg
+  it would normally avoid is a place that should *not* update `visit`.
+- **Parallel-move blocks make implicit-clobber bugs vicious.**  rega
+  emits a sequence of copies in one block; if any emit handler uses
+  AX/DX as scratch, a copy upstream of it in the same block can be
+  wiped without warning.  Audit handlers that touch AX/DX whenever a
+  parallel-move block "loses" a value.
+- **State the failure in registers, not C-source terms.** "Stevie loads
+  zero lines" was the symptom; "rega put FILE* in AX in @l15, filemess
+  clobbered AX, getc(NULL) returned -1" was the diagnosis.
