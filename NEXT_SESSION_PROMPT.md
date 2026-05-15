@@ -1,55 +1,48 @@
-# Resume prompt — Stevie/QBE: Kl emit AX/DX preservation extended; DOSBox test pending
+# Resume prompt — Stevie/QBE: readfile works, render loop is the bug
 
-## Status
+## Status (smoke-tested 2026-05-15)
 
-All known Kl-op emit handlers in `i8086/emit.c` now preserve AX/DX
-around their bodies (rega still doesn't model the implicit clobber, but
-the per-handler push/pop wrapper makes it correct in practice).
-Stevie builds cleanly (`make qbe && tools/build-stevie.sh
---keep-going --model=medium`).
+Current `master` (HEAD `6f0c182`) **renders HELLO.txt's "2 line" status
+bar correctly** but the screen body fills with a repeating `1`/`l`
+pattern instead of the file contents.  Keyboard input is ignored
+during the loop.
 
-Outstanding: a DOSBox smoke test against `HELLO.txt` to see whether
-readfile completes AND the screen renders correctly.  The screen-loop
-bug from last session may already be fixed — `Ocultl`/`Oculel` (used
-by `screen.c` for the topchar/botchar position comparisons) were
-silently clobbering AX/DX, which would explain the corrupted render
-loop.  Need to confirm in DOSBox.
+This is the same render-loop symptom from the previous session — my
+session-2 commit `228eb27` (extending AX/DX preservation to every
+remaining `Kl` handler) preserved the prior readfile-completes state
+without introducing new regressions.  We're now firmly in the
+"readfile works, screen rendering is broken" regime.
+
+(Side note observed during debug: I rebuilt at commit `00c3667` and
+its binary showed *only* the "HELLO.txt" prompt without "2 line".
+The previous prompt had recorded "2 line, ? character + render loop"
+for that state.  Difference is probably from non-emit.c QBE changes
+since 00c3667 was committed — not relevant to the current bug, just
+noting that the pre-state ≠ the originally recorded pre-state.)
 
 ## What landed this session
 
 ```
-<this-commit>  i8086 emit: preserve AX/DX across remaining Kl handlers
-              (Osub, Omul, Oload, Odiv/Orem, Oextsw/Oextuw, Oc*l x10)
+228eb27 i8086 emit: preserve AX/DX across remaining Kl handlers
+6f0c182 NEXT_SESSION_PROMPT.md: Kl AX/DX preservation extended; DOSBox test pending
 ```
 
-Specifically: added `AxDxSave`/`kl_save_axdx`/`kl_restore_axdx` helper
-in `i8086/emit.c` (just below `store_ax_to`), and wrapped each handler
-that uses AX:DX as scratch.  Logic: push the scratch reg that ISN'T
-the destination; pop it after the op stores its result into the dest
-(or directly into AX/DX if the dest landed there).
+The session-2 commit added `kl_save_axdx` / `kl_restore_axdx` helpers
+in `i8086/emit.c` and wrapped every `Kl` op that uses AX:DX as scratch
+(Osub, Omul, Oload, Odiv/Orem/Oudiv/Ourem, Oextsw/Oextuw, all ten
+`Oc*l` 32-bit comparisons).  See the commit message for details.
 
-Handlers wrapped this session:
-- `Osub` Kl (line ~862)
-- `Omul` Kl (line ~915)
-- `Oload` Kl (line ~1245)
-- `Odiv`/`Oudiv`/`Orem`/`Ourem` Kl (line ~1650) — also fixes the
-  `dst == AX with remainder op` case (would have pop'd over the
-  answer).
-- `Oextsw`/`Oextuw` (line ~1712) — produces a Kl result from a Kw
-  arg via `cwd` / `xor dx, dx`.
-- All ten `Oc*l` comparisons (Oceql, Ocnel, Ocsltl, Ocslel, Ocsgtl,
-  Ocsgel, Ocultl, Oculel, Ocugtl, Ocugel; lines ~1373–1556).
+The 32-bit comparison wrap is particularly important — `Ocultl` /
+`Oculel` are used by `screen.c`'s topchar/botchar checks.  Before
+this commit they silently clobbered any rega-allocated live tmp in
+AX or DX.  This was on the candidate-cause list for the render loop
+but did NOT turn out to be the (sole) root cause.
 
-Previously wrapped (commits `1ee353a`, `1594464`, `fa06a81`): `Oadd`
-Kl, `Ocopy` Kl, `Ostorel`.  Not refactored to use the new helper —
-their inline expansions handle some extra edge cases (e.g., `Ocopy`'s
-Con→Slot fast path).
-
-## How to reproduce / test
+## How to reproduce
 
 ```sh
-rm -rf build/stevie-orig
-tools/build-stevie.sh --keep-going --model=medium
+make qbe
+rm -rf build/stevie-orig && tools/build-stevie.sh --keep-going --model=medium
 cat > build/stevie-orig/HELLO.TXT << 'EOF'
 Hello from a non-empty file!
 This is line 2.
@@ -58,79 +51,121 @@ dosbox -c "mount c $PWD/build/stevie-orig" -c "c:" -c "cls" \
        -c "stevie.exe HELLO.txt"
 ```
 
-Expected (good): screen shows the two lines of HELLO.TXT in the editor;
-status bar says `"HELLO.txt" 2 line, ?? character` where `??` is the
-total chars; keyboard navigation works.
+Expected today: `"HELLO.txt" 2 line, ? character` status, screen
+body fills with `1`/`l` characters in rows.  Keyboard input ignored.
 
-Possible (still broken): screen render loops or shows `1 1 1 …`.
-That would mean some Kl-using path is STILL clobbering register state
-(or the bug is in some other category entirely — see "What's still
-suspect" below).
+## What's still broken — the render loop
 
-## What's still suspect
+`updatescreen()` → `filetonext()` → `nexttoscreen()` is producing the
+garbage screen.  `filetonext` walks the LINE list starting from
+`*Topchar`, calling `gchar(&memp)` (`screen.pp.c:490`) for each char
+and `inc(&memp)` (`screen.pp.c:491`) to advance.
 
-### 1. Kl-in-single-reg lossy
+### Suspect 1 — the LINE list itself
 
-`R5 =l load S179` with rega-assigned R5 = 16-bit reg only retains the
-low word (DX is discarded).  Symptoms surface as sign-ext junk in
-varargs (`%ld` printf) and could surface in `nchars` arithmetic on
-files >64KB.
+`lp->linep` (a near pointer) and `lp->linep->s` (a `char *` near
+pointer to the line's text buffer).  `readfile` builds the doubly
+linked list at `fileio.pp.c:548–554`:
 
-Fix options:
-- Force every Kl tmp to be slot-allocated (the principled fix).
-- Pair-allocate Kl tmps in rega (much bigger change).
-- For now: only matters when the high word actually carries data
-  beyond what fits in 16 bits.  HELLO.txt's `nchars` is tiny, so this
-  doesn't block the smoke test.
+```c
+strcpy(lp->s, buff);
+curr->next->prev = lp;
+lp->next = curr->next;
+curr->next = lp;
+lp->prev = curr;
+curr = lp;
+```
 
-### 2. r0/r1 in AX or DX (pre-existing)
+If any of these stores go to the wrong place (e.g., `lp->s` ends up
+pointing to a static string `"1"`, or `lp->next` cycles back to lp),
+filetonext would loop or read garbage.
 
-The handlers emit `mov ax, src0; ... add ax, src1` — if src1 is RTmp
-allocated to AX, src1's value was already clobbered by `mov ax, src0`.
-The push/pop preserves the *caller-side* AX but not the *operand-side*
-src1 within the op.
+**Concrete probe**: insert `fprintf(stderr, "line %d: %s\n", linecnt,
+lp->s);` after line 548 and run with `stevie.exe HELLO.txt > log
+2>&1`.  Compare log against the file content.
 
-This is a pre-existing bug (the previous handlers had it too); we just
-haven't hit it because rega tends not to put src1 in AX given hint
-propagation.  A real fix would model AX/DX in `i8086/isel.c` (the
-"strategic" route from the previous prompt).
+### Suspect 2 — line numbers spuriously enabled
 
-### 3. Screen render loop
+`params[14]` is the "nu" / number option, default `(0)` per
+`param.pp.c:441`.  If it's reading non-zero (e.g., BSS not zeroed,
+or `params[]` storage corrupted), `filetonext` would prepend `mkline(lno)`
+to every line.  `mkline` writes a sparse string with the digits of
+`n` reversed into a buffer; if `n` is corrupted to something like
+65535 you'd get "5", "5", "3", "5", "6" reversed, which read at
+`extra[--nextra]` produces "65535" — not "1"s, but a similar visual
+flood.
 
-If still broken after this session, the suspect list is unchanged:
-- `LINE.s` link-list corruption (the `*ptr = val` chain in `@l41`).
-- `Filemem`/`Filetop`/`Curschar` init.
-- `vgetc`/`inchar` returning non-blocking.
-- `need_redraw` being reset on every `edit()` iteration.
+**Concrete probe**: add `fprintf(stderr, "params[14]=%d lno=%d\n",
+params[14].value, lno);` at the top of `filetonext`.
 
-Drop a probe in `edit()` to print whether `updatescreen()` is called
-once or repeatedly.
+### Suspect 3 — `inc(&memp)` returning -1 prematurely
+
+If `inc` returns -1 (end-of-file marker) on the first char,
+`done = 1` is set immediately, the while loop exits, and the
+fallback code fills rows with `~` (vim empty marker) or `@`
+(line-too-long).  `~` is 0x7E, `@` is 0x40 — neither matches the
+visible "1"/"l" pattern, so this is less likely.
+
+### Suspect 4 — `Topchar` / `Curschar` / `Filemem` mis-init
+
+`edit()` (`edit.pp.c:438–440`) does:
+
+```c
+*Topchar = *Filemem;
+*Curschar = *Filemem;
+Cursrow = Curscol = 0;
+```
+
+If `Filemem`'s `linep` points to the sentinel start (not the first
+real line) — that's expected and `filetonext` should skip via `inc`
+to the first real line.  But if any of the LPTR struct stores went
+wrong, `Topchar` could point somewhere bogus.
 
 ## Next steps
 
-1. **DOSBox smoke test** (you, manually): run the recipe above.  If
-   the screen renders correctly, move to step 2.  If it loops, drop
-   the `edit()` probe.
-2. **Triage write-back (`:w`)** — still stubbed in libstub.
-3. **Strategic fix: model AX/DX clobbers in `i8086/isel.c`.**  This
-   replaces the tactical push/pop with explicit `Ocopy ↔ TMP(RAX)`
-   wrappers in isel, mirroring `amd64/isel.c::seldiv`.  Lower cost,
-   simpler emit handlers, and fixes the "src1 in AX" case.
-4. **Audit Kl-in-single-reg** — likely needs Kl-tmp-always-spill.
+1. **Add a printf probe to `filetonext` (Suspect 2 + Suspect 1).**
+   Insert at the top:
+   ```c
+   fprintf(stderr, "filetonext: params[14]=%d Topchar.linep=%p .s=%p [%.20s]\n",
+       params[14].value, Topchar->linep,
+       Topchar->linep ? Topchar->linep->s : 0,
+       (Topchar->linep && Topchar->linep->s) ? Topchar->linep->s : "");
+   ```
+   Need `stderr` redirected — DOSBox can do `c:\stevie.exe HELLO.txt
+   2> err.log`.  Or write to a debug file via `fopen("c:\\dbg.txt","w")`.
 
-## Memory entries updated
+2. **Audit `readfile`'s LINE-list construction** at
+   `fileio.pp.c:548–554`.  The four stores happen in tight
+   succession and at least one of them goes through a stack-slot
+   reload — a prime candidate for rega clobber.  Diff
+   `build/stevie-orig/fileio.asm` around `_readfile`'s line-build
+   block against the post-Bug-A SSA at `fileio.ssa` for those lines.
 
-- `feedback_minic_long_vararg_truncated.md` — still current.
-- `feedback_minic_readfile_register_clobber.md` — extend the Kl-implicit-clobber
-  family scope to all the handlers landed this session.
+3. **Strategic Kl AX/DX fix in isel.c** (still outstanding from the
+   previous prompt).  Push/pop is tactical; modelling RAX/RDX as
+   clobbers in `i8086/isel.c` would eliminate the per-handler
+   wrapper and fix the "src in AX/DX" edge case.
+
+4. **Audit Kl-in-single-reg lossiness.**  Not blocking HELLO.txt
+   but matters for files >64KB and `%ld` printf.
+
+## Memory entries that may need updates
+
+- `feedback_minic_readfile_register_clobber.md` — scope is now
+  broader than Bug B; the AX/DX implicit-clobber family applies to
+  every emit.c handler that uses AX:DX as scratch.
+- `feedback_minic_long_vararg_truncated.md` — Bug A is permanent;
+  no change.
 
 ## Heisenbug lessons (carried forward)
 
-- **rega's `visit` is sticky.** Fallback picks that violate the avoid
-  mask must NOT propagate via `visit`.  See `7225d19`.
-- **Multi-word ops on a single-word ISA need to be modelled or
-  wrapped.** Tactical push/pop works case-by-case; the strategic fix
-  is in isel.
-- **Comparisons can clobber.** Even though Oc*l has Kw result class,
-  the *body* uses AX:DX — easy to miss because the result class hints
-  at single-reg cleanliness.
+- **rega's `visit` is sticky.** Fallback picks that violate the
+  avoid mask must NOT propagate via `visit`.
+- **Multi-word ops on a single-word ISA need wrapping.** Tactical
+  push/pop landed in 228eb27; strategic isel-side fix still TODO.
+- **Comparisons can clobber.** Even though `Oc*l` results are Kw,
+  the body uses AX:DX — easy to miss.
+- **Side-by-side binary tests catch state-of-mind drift.** Stage
+  both pre and post binaries in `build/stevie-orig/` with distinct
+  names so DOSBox's 8.3 mangling shows them as `STEVIE~1.EXE` and
+  `STEVIE~2.EXE`; lets the user compare without rebuilding.
