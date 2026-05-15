@@ -119,6 +119,8 @@ ralloctry(RMap *m, int t, int try)
 		assert(r != -1);
 		return TMP(r);
 	}
+	{
+	int fallback = 0;
 	r = tmp[t].visit;
 	if (r == -1 || bshas(m->b, r))
 		r = *hint(t);
@@ -138,18 +140,28 @@ ralloctry(RMap *m, int t, int try)
 			if (!(regs & BIT(r)))
 				goto Found;
 		for (r=r0; r<r1; r++)
-			if (!bshas(m->b, r))
+			if (!bshas(m->b, r)) {
+				fallback = 1;
 				goto Found;
+			}
 		die("no more regs");
 	}
 Found:
 	radd(m, t, r);
-	sethint(t, r);
-	tmp[t].visit = r;
+	/* Only propagate this allocation as a preference if we picked
+	 * a reg consistent with the avoid mask.  Fallback picks (a
+	 * forced caller-save reg in a high-pressure block) must not
+	 * pin t to that reg in subsequent, lower-pressure blocks —
+	 * otherwise a call in one of those blocks clobbers the value. */
+	if (!fallback) {
+		sethint(t, r);
+		tmp[t].visit = r;
+	}
 	h = *hint(t);
 	if (h != -1 && h != r)
 		m->w[h] = t;
 	return TMP(r);
+	}
 }
 
 static inline Ref

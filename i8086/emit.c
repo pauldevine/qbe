@@ -1117,7 +1117,22 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		case Ocopy:
 			/*
 			 * 32-bit copy
+			 *
+			 * Fast path for `Slot = Con` (rega emits this for slot-resident
+			 * Kl phis in parallel-move blocks).  The naive AX/DX scratch
+			 * sequence clobbered AX/DX, which were sometimes live with a
+			 * value just moved by a preceding parallel copy.  `mov word
+			 * [mem], imm16` is a valid 8086 encoding; use it directly so
+			 * we don't touch any register.
 			 */
+			if (rtype(r0) == RCon && rtype(i->to) == RSlot) {
+				int64_t val = fn->con[r0.val].bits.i;
+				fprintf(f, "\tmov word [bp%+ld], %d\n",
+					(long)slot(i->to, fn), (int)(val & 0xFFFF));
+				fprintf(f, "\tmov word [bp%+ld], %d\n",
+					(long)slot(i->to, fn) + 2, (int)((val >> 16) & 0xFFFF));
+				return;
+			}
 			if (rtype(r0) == RSlot) {
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
 				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
