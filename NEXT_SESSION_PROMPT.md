@@ -1,143 +1,129 @@
-# Resume prompt — Stevie/QBE: filetonext PROBE staged, awaiting DOSBox readout
+# Resume prompt — Stevie/QBE: render bug ROOT-CAUSED, fix awaits
 
-## What this session did
+## Status (2026-05-15)
 
-Added a **debug probe** at the top of `filetonext()` in
-`stevie-orig/screen.c`.  The probe short-circuits the normal
-render logic and dumps the actual state of `Topchar` and the
-first three `LINE` nodes into screen rows 0–5.  Status line
-(row 23) continues to render normally via `msg(buff)`.
+**Diagnosis complete.**  The "screen fills with 'l l l l l' garbage"
+symptom is a QBE GCM + rega bug, NOT a stevie source-code or
+filetonext/LINE-list bug.  Details below.
 
-The probe is gated by `#define FTN_DEBUG_PROBE 1` (top of the
-filetonext block) and the original body is gated by `#if 0`
-just below it — both flips revert in seconds when the probe is
-no longer needed.
+## TL;DR
 
-### Files touched
+In `nexttoscreen()`, QBE's GCM sinks the `endsc = npp + (Rows-1)*Columns`
+computation past the `_anyinput → _bios_t_ci → _windgoto` call sequence.
+Rega placed `t34 = Rows` in SI before the calls (SI is callee-save, so
+that should have been safe), but **then chose to reuse SI for the spill
+reload of `t37 = Columns`** right between the calls.  At the post-call
+use site, the asm does `sub ax, 1` expecting AX to hold Rows — but
+nothing ever loaded Rows into AX, and AX holds windgoto's return
+value (0).  Result: `endsc = npp − Columns`, the loop `for (; npp <
+endsc ; ...)` exits immediately, the screen never gets painted.
 
-```
-stevie-orig/screen.c    +73 lines  (probe + #if 0 around original body)
-```
+The full memory entry is at [[feedback-qbe-gcm-sinks-load-past-call]].
 
-No changes to qbe/i8086/emit.c this session.
+## The probe sequence that got us here
 
-### MiniC bug observed while landing the probe
+`stevie-orig/screen.c` now contains `filetonext`/`nexttoscreen` probes
+gated by `#define FTN_DEBUG_PROBE 1`.  Each phase replaced one piece
+of logic to isolate the bug:
 
-MiniC's codegen emits a `ret` followed by more instructions in
-the same basic block when a `return;` is followed by additional
-statements inside the function — QBE then rejects the SSA
-with `label or } expected` (see screen.ssa:280 from the failed
-build).  Workaround: use `#if 0` to delete the unreachable code
-entirely.  Worth a memory entry if it recurs.
+| Phase | filetonext | nexttoscreen | Result |
+|-------|-----------|--------------|--------|
+| 0 | no-op return | normal | screen blank (no painting) |
+| 2 | inline writes 'A'/'B'/'C' | normal | screen still 'l l l l' |
+| 3 | blast Nextscreen with '@' | normal | screen 'lHHl l l l l' (NO '@') |
+| 4 | as 3 | early return | screen blank |
+| 5 | as 3 | `PROBE: ` + first 16 bytes of Nextscreen | `PROBE: @@@@@@@@@@@@@@@@` ✓ |
+| 6 | as 3 | trivial walk, `outchar(npp[i])` | screen '@@@@@@' ✓ |
+| 7 | as 3 | pointer-walk + `outchar(*rpp=*npp)` | screen '@@@@@@' ✓ |
+| 8 | as 3 | + `if (*np!=*rp)` + inner windgoto | **ONE '@'** then nothing |
+| 9 | as 3 | + outer windgoto + CUROFF/CURON, no inner windgoto | **screen empty** |
 
-## How to run the probe
+Phase 5 confirmed the entire data path works.  Phase 9's blank screen
+plus the asm trace pinned the bug to the endsc-after-call codegen.
+
+## What to revert when the fix lands
+
+Before flipping `FTN_DEBUG_PROBE` to 0, also drop the `#if 0` around
+the original `filetonext` body (it's intact, just gated off).  Then
+remove the probe scaffolding from `screen.c` entirely:
 
 ```sh
-make qbe  # already up to date
+git log --oneline | grep "debug probe"
+git revert <probe-commit>      # or just edit screen.c by hand
+```
+
+The `feedback_qbe_gcm_sinks_load_past_call.md` and
+`feedback_minic_ret_then_code.md` memory entries stay.
+
+## The fix — three options
+
+### A. rega.c: don't reuse a register that holds a live SSA temp
+
+The natural place.  When `rega()` picks a register for the spill
+reload of `t37`, it should consult its live-temp map and exclude
+registers currently holding live values from a DIFFERENT temp.
+Currently the conflict between `t34`-in-SI and `t37`-reload-into-SI
+isn't being detected.
+
+### B. spill.c: spill t34 across the call window
+
+If SI is going to be needed for `t37` reload between the calls,
+spill `t34` first.  Less natural — rega should own this — but
+straightforward if rega's data model doesn't fit.
+
+### C. i8086/emit.c: re-emit `mov ax, [_Rows]` at the use site
+
+Last resort.  The emit pass would need to recognize that the
+register holding `t34` was clobbered, and re-load from the source
+global if it's a `loadw $name`-style temp.  This is hacky; the
+compiler should know.
+
+Recommend **A** first.  Investigate `rega()` in `rega.c` and
+specifically how it handles spill-reload register selection.
+
+## How to reproduce / verify a fix
+
+```sh
+make qbe
 rm -rf build/stevie-orig && tools/build-stevie.sh --keep-going --model=medium
 cat > build/stevie-orig/HELLO.TXT << 'EOF'
 Hello from a non-empty file!
 This is line 2.
 EOF
+# Confirm bug:
 dosbox -c "mount c $PWD/build/stevie-orig" -c "c:" -c "cls" \
        -c "stevie.exe HELLO.TXT"
+# Expected without fix: "screen fills with l l l l..."
 ```
 
-(The above is already done as of HEAD; `build/stevie-orig/stevie.exe`
-exists with the probe linked in.)
+To verify the fix BEFORE committing:
 
-## What you should see in DOSBox
+1. Flip `FTN_DEBUG_PROBE` to 0 in `stevie-orig/screen.c`.
+2. Also re-enable the `#if 0` original filetonext body.
+3. Rebuild.  If file content renders correctly, the fix worked.
 
-Six debug rows at the top of the screen:
+## What's already in the asm to look at
 
-```
-row 0:  PROBE TC.linep=<n> TC.idx=<n> nu=<n> Rows=<n> Cols=<n>
-row 1:  lp0=<n> lp0->prev=<n> lp0->next=<n> lp0->s=<n>
-row 2:  <Topchar->linep->s content, or "lp0->s is NULL">
-row 3:  lp1=<n> lp1->s=<n>  lp2=<n>
-row 4:  <Topchar->linep->next->s content, or "lp1->s is NULL">
-row 5:  <Topchar->linep->next->next->s content, or "lp2->s is NULL">
-row 23: "HELLO.TXT" 2 line, ?? character        (status)
-```
+`build/stevie-orig/screen.asm:185..203` is the smoking gun (phase 9
+build, with my probe active).  See the memory entry for the
+annotated trace.  The corresponding SSA is at
+`build/stevie-orig/screen.ssa:140..147`.
 
-### Interpretation cheatsheet
+## Outstanding work besides this fix
 
-- `lp0->s` text should match HELLO.TXT line 1 (`Hello from a non-empty file!`)
-  IF it's the sentinel head; otherwise it could match line 2 or be NULL.
-- `lp1->s` and `lp2->s` should walk forward through the LINE list.
-- If `lp0->next == lp0` (or `lp1 == lp0`, etc.) we have a **cycle**.
-- If `lp0` itself is `0` (= NULL near pointer), `Topchar->linep` was
-  never assigned — probably an `edit()` / `*Filemem` init bug.
-- If `lp0` is sane but `lp0->s` is `0`, the `lp->s = malloc(...)`
-  inside `newline()` either failed or rega lost the malloc-return value.
-- If the printable strings show garbage that includes "1"/"l", the LINE
-  list itself is corrupt — narrows the search to `readfile`'s
-  `fileio.pp.c:548–554`.
-- `nu=` reports `params[P_NU].value`.  Should be 0; if non-zero, we
-  have a separate "params got corrupted" bug.
+Carried over from prior sessions, unchanged:
 
-## Suspects (carried from previous prompt)
+- **Strategic Kl AX/DX fix in `i8086/isel.c`** — tactical push/pop
+  landed in 228eb27, isel-level fix still TODO.
+- **Kl-in-single-reg lossiness audit** — not blocking HELLO.TXT
+  but matters for files >64KB and `%ld` printf.
 
-1. **LINE list cycle / corruption**: `readfile` builds the doubly
-   linked list at `stevie-orig/fileio.c:117–123`.  Tactical audit
-   of `build/stevie-orig/fileio.asm` lines 367–410 against
-   `fileio.ssa` lines 184–219 is still pending — the asm has a
-   suspicious lack of `mov [bp-42], cx` (the `curr = lp` store)
-   that I couldn't locate when I scanned this session.  May be a
-   missing storew or may be the slot is actually `[bp-60]`
-   (the prologue is dense; readfile has 506 bytes of stack).
-2. **`params[14]` corruption**: handled by the probe (row 0
-   shows `nu=`).
-3. **`inc(&memp)` returning -1 prematurely**: less likely
-   (would produce `~`/`@`, not "1"/"l").
-4. **`Topchar` / `Filemem` mis-init**: also covered by row 1
-   (`lp0=`, `lp0->prev=`, etc.).
+## Memory entries created this session
 
-## Reverting the probe
-
-```c
-/* in stevie-orig/screen.c near line 42 */
-#define FTN_DEBUG_PROBE 0   /* was 1 */
-```
-
-…and flip the `#if 0` below it back to `#if 1` (or remove it).
-
-## Next steps
-
-1. **Run the probe in DOSBox**, read the six rows, paste the
-   contents back into the next session.
-2. Based on the readout, jump to the appropriate suspect:
-   - Garbage `lp0->s` content → audit `readfile` line-build
-     asm at `fileio.asm:367–410` for a missing/swapped store.
-   - Cycle (`lp0->next == lp0` etc.) → also in `readfile`.
-   - `nu=1` → audit `param.c` initialization + BSS-zero crt0.
-   - `lp0 == 0` → audit `edit()` at `edit.pp.c:438–440` and
-     `Filemem` init.
-3. After the bug is understood, flip the probe off (see above)
-   and land the real fix.
-
-## Outstanding non-probe TODOs
-
-These are unchanged from the prior prompt:
-
-- **Strategic Kl AX/DX fix in `i8086/isel.c`** — replace the
-  tactical per-handler push/pop landed in commit 228eb27 with
-  proper RAX/RDX clobber-modelling so rega avoids the conflict
-  natively.
-- **Kl-in-single-reg lossiness audit** — not blocking
-  HELLO.TXT but matters for files >64KB and `%ld` printf.
-
-## Memory entries that may need updates
-
-- `feedback_minic_readfile_register_clobber.md` — scope is now
-  broader than Bug B; the AX/DX implicit-clobber family applies
-  to every emit.c handler that uses AX:DX as scratch.
-- `feedback_minic_long_vararg_truncated.md` — Bug A is
-  permanent; no change.
-- **NEW candidate**: `feedback_minic_ret_then_code.md` — minic
-  emits `ret` followed by SSA without a label when a `return;`
-  is followed by more code in the same function.  Workaround:
-  `#if 0` the unreachable code.
+- [[feedback-qbe-gcm-sinks-load-past-call]] — NEW.  The actual root
+  cause for the render-loop bug.
+- [[feedback-minic-ret-then-code]] — NEW.  MiniC emits unlabeled
+  SSA after `return;` followed by more code.  Workaround: `#if 0`.
 
 ## Heisenbug lessons (carried forward)
 
@@ -145,15 +131,15 @@ These are unchanged from the prior prompt:
   avoid mask must NOT propagate via `visit`.
 - **Multi-word ops on a single-word ISA need wrapping.** Tactical
   push/pop landed in 228eb27; strategic isel-side fix still TODO.
-- **Comparisons can clobber.** Even though `Oc*l` results are
-  Kw, the body uses AX:DX — easy to miss.
-- **Side-by-side binary tests catch state-of-mind drift.** Stage
-  both pre and post binaries in `build/stevie-orig/` with
-  distinct names so DOSBox's 8.3 mangling shows them as
-  `STEVIE~1.EXE` and `STEVIE~2.EXE`; lets the user compare
-  without rebuilding.
-- **Probe-into-screen beats stderr in DOS.** `libstub_to_exe.py`
-  only stubs read-only `fopen`/`getc`/`fclose` for the medium-
-  model `.EXE` build; `fopen` for write, `fprintf`, `fputs`,
-  `fwrite` all return 0 immediately.  Writing diagnostics into
-  the `Nextscreen` buffer is the path of least resistance.
+- **Comparisons can clobber.** Even though `Oc*l` results are Kw,
+  the body uses AX:DX — easy to miss.
+- **Probe-into-screen beats stderr in DOS.**  `libstub_to_exe.py`
+  only stubs read-only `fopen`/`getc`/`fclose`; `fopen` for write,
+  `fprintf`, `fputs`, `fwrite` all return 0 immediately.  Writing
+  diagnostics into the `Nextscreen` buffer is the path of least
+  resistance.
+- **Phased reduction beats grepping.**  When the bug-trigger is
+  unclear, replace function bodies with progressively smaller
+  versions and observe what flips.  This bug was invisible from
+  source — only the side-by-side phase-7/phase-8/phase-9 results
+  pinned the post-call register clobber.

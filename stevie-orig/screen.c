@@ -41,6 +41,7 @@ static	char	*mkline();	/* calculate line string for "number" mode */
  */
 #define FTN_DEBUG_PROBE 1
 #if FTN_DEBUG_PROBE
+static int ftn_call_count = 0;
 static void ftn_putrow(int row, char *s)
 {
 	register int col = 0;
@@ -60,47 +61,23 @@ filetonext()
 {
 #if FTN_DEBUG_PROBE
 	{
-		char buf[80];
-		LINE *lp0 = Topchar->linep;
-		LINE *lp1 = lp0 ? lp0->next : (LINE *)0;
-		LINE *lp2 = lp1 ? lp1->next : (LINE *)0;
-		register int row;
+		/* Phase 3: blast the WHOLE screen body with '@' (0x40).  If even
+		 * a single '@' shows up in the rendered output, my filetonext
+		 * is being called and writes ARE landing in the right buffer.
+		 * If we see no '@' at all, filetonext is bypassed and something
+		 * ELSE is painting the screen — likely lfiletonext getting
+		 * invoked from an unexpected path. */
+		register int i;
+		register char *ns;
 
-		/* blank the body area */
-		for (row = 0; row < Rows - 1; row++)
-			ftn_putrow(row, "");
-
-		sprintf(buf, "PROBE TC.linep=%d TC.idx=%d nu=%d Rows=%d Cols=%d",
-		        (int)lp0, Topchar->index, P(P_NU), Rows, Columns);
-		ftn_putrow(0, buf);
-
-		sprintf(buf, "lp0=%d lp0->prev=%d lp0->next=%d lp0->s=%d",
-		        (int)lp0,
-		        lp0 ? (int)lp0->prev : 0,
-		        lp0 ? (int)lp0->next : 0,
-		        lp0 ? (int)lp0->s : 0);
-		ftn_putrow(1, buf);
-
-		if (lp0 && lp0->s)
-			ftn_putrow(2, lp0->s);
-		else
-			ftn_putrow(2, "lp0->s is NULL");
-
-		sprintf(buf, "lp1=%d lp1->s=%d  lp2=%d", (int)lp1,
-		        lp1 ? (int)lp1->s : 0, (int)lp2);
-		ftn_putrow(3, buf);
-
-		if (lp1 && lp1->s)
-			ftn_putrow(4, lp1->s);
-		else
-			ftn_putrow(4, "lp1->s is NULL");
-
-		if (lp2 && lp2->s)
-			ftn_putrow(5, lp2->s);
-		else
-			ftn_putrow(5, "lp2->s is NULL");
-
-		/* satisfy the rest of stevie: Botchar must be valid */
+		ftn_call_count++;
+		ns = Nextscreen;
+		if (ns == 0) {
+			*Botchar = *Topchar;
+			return;
+		}
+		for (i = 0; i < 23 * 80; i++)
+			ns[i] = '@';
 		*Botchar = *Topchar;
 		return;
 	}
@@ -265,6 +242,8 @@ filetonext()
  * Transfer the contents of Nextscreen to the screen, using Realscreen
  * to avoid unnecessary output.
  */
+static int n2s_call_count = 0;
+
 static void
 nexttoscreen()
 {
@@ -273,6 +252,42 @@ nexttoscreen()
 	register char	*endscreen;
 	register int	row = 0, col = 0;
 	int	gorow = -1, gocol = -1;
+
+	n2s_call_count++;
+#if FTN_DEBUG_PROBE
+	/* Phase 8: add back the conditional `if (*np != *rp)` plus the
+	 * CUROFF/CURON far-call wrappers and an inner windgoto on every
+	 * diff.  Closer to the original.  If THIS paints 'l' instead of
+	 * '@', the bug is in how rega handles vars live across the
+	 * bios_t_ci/cv or windgoto far calls in this loop body. */
+	{
+		register char *npp = Nextscreen;
+		register char *rpp = Realscreen;
+		register char *endsc = &npp[(Rows - 1) * Columns];
+		register int row;
+		register int col;
+		row = 0;
+		col = 0;
+		if (anyinput()) {
+			need_redraw = TRUE;
+			return;
+		}
+		CUROFF;
+		windgoto(0, 0);   /* one-time positioning before loop */
+		for ( ; npp < endsc ; npp++, rpp++) {
+			if (*npp != *rpp) {
+				outchar(*rpp = *npp);
+			}
+			if (++col >= Columns) {
+				col = 0;
+				row++;
+			}
+		}
+		CURON;
+		flushbuf();
+		return;
+	}
+#else
 
 	if (anyinput()) {
 		need_redraw = TRUE;
@@ -309,6 +324,7 @@ nexttoscreen()
 		}
 	}
 	CURON;		/* enable cursor again */
+#endif /* FTN_DEBUG_PROBE phase 4 */
 }
 
 /*
