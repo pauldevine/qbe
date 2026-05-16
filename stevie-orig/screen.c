@@ -31,59 +31,9 @@ static	char	*mkline();	/* calculate line string for "number" mode */
  * Based on the current value of Topchar, transfer a screenfull of
  * stuff from Filemem to Nextscreen, and update Botchar.
  */
-
-/*
- * DEBUG PROBE (render-loop bug): dump Topchar state and the first three
- * LINE-list entries into Nextscreen rows 0-3, then short-circuit the
- * normal filetonext logic.  Status line is still drawn elsewhere via
- * msg(buff) so we keep that signal.  Remove this block once the bug
- * is understood.
- */
-#define FTN_DEBUG_PROBE 1
-#if FTN_DEBUG_PROBE
-static int ftn_call_count = 0;
-static void ftn_putrow(int row, char *s)
-{
-	register int col = 0;
-	while (col < Columns && s[col] != '\0') {
-		Nextscreen[row * Columns + col] = s[col];
-		col++;
-	}
-	while (col < Columns) {
-		Nextscreen[row * Columns + col] = ' ';
-		col++;
-	}
-}
-#endif
-
 static void
 filetonext()
 {
-#if FTN_DEBUG_PROBE
-	{
-		/* Phase 3: blast the WHOLE screen body with '@' (0x40).  If even
-		 * a single '@' shows up in the rendered output, my filetonext
-		 * is being called and writes ARE landing in the right buffer.
-		 * If we see no '@' at all, filetonext is bypassed and something
-		 * ELSE is painting the screen — likely lfiletonext getting
-		 * invoked from an unexpected path. */
-		register int i;
-		register char *ns;
-
-		ftn_call_count++;
-		ns = Nextscreen;
-		if (ns == 0) {
-			*Botchar = *Topchar;
-			return;
-		}
-		for (i = 0; i < 23 * 80; i++)
-			ns[i] = '@';
-		*Botchar = *Topchar;
-		return;
-	}
-#endif
-#if 0  /* original filetonext body disabled while probe is active */
-	{
 	register int	row, col;
 	register char	*screenp = Nextscreen;
 	LPTR	memp;
@@ -232,8 +182,6 @@ filetonext()
 		*Botchar = *Fileend;
 	else
 		*Botchar = memp;	/* FIX - prev? */
-	} /* end of body block (debug-probe wrap) */
-#endif /* end of original filetonext body */
 }
 
 /*
@@ -242,8 +190,6 @@ filetonext()
  * Transfer the contents of Nextscreen to the screen, using Realscreen
  * to avoid unnecessary output.
  */
-static int n2s_call_count = 0;
-
 static void
 nexttoscreen()
 {
@@ -252,42 +198,6 @@ nexttoscreen()
 	register char	*endscreen;
 	register int	row = 0, col = 0;
 	int	gorow = -1, gocol = -1;
-
-	n2s_call_count++;
-#if FTN_DEBUG_PROBE
-	/* Phase 8: add back the conditional `if (*np != *rp)` plus the
-	 * CUROFF/CURON far-call wrappers and an inner windgoto on every
-	 * diff.  Closer to the original.  If THIS paints 'l' instead of
-	 * '@', the bug is in how rega handles vars live across the
-	 * bios_t_ci/cv or windgoto far calls in this loop body. */
-	{
-		register char *npp = Nextscreen;
-		register char *rpp = Realscreen;
-		register char *endsc = &npp[(Rows - 1) * Columns];
-		register int row;
-		register int col;
-		row = 0;
-		col = 0;
-		if (anyinput()) {
-			need_redraw = TRUE;
-			return;
-		}
-		CUROFF;
-		windgoto(0, 0);   /* one-time positioning before loop */
-		for ( ; npp < endsc ; npp++, rpp++) {
-			if (*npp != *rpp) {
-				outchar(*rpp = *npp);
-			}
-			if (++col >= Columns) {
-				col = 0;
-				row++;
-			}
-		}
-		CURON;
-		flushbuf();
-		return;
-	}
-#else
 
 	if (anyinput()) {
 		need_redraw = TRUE;
@@ -324,7 +234,7 @@ nexttoscreen()
 		}
 	}
 	CURON;		/* enable cursor again */
-#endif /* FTN_DEBUG_PROBE phase 4 */
+	flushbuf();	/* commit the diff to the actual screen */
 }
 
 /*

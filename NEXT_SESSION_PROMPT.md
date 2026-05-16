@@ -1,145 +1,247 @@
-# Resume prompt — Stevie/QBE: render bug ROOT-CAUSED, fix awaits
+# Resume prompt — Stevie/QBE: rendering FIXED, cursor movement NEXT
 
-## Status (2026-05-15)
+## Status (2026-05-16)
 
-**Diagnosis complete.**  The "screen fills with 'l l l l l' garbage"
-symptom is a QBE GCM + rega bug, NOT a stevie source-code or
-filetonext/LINE-list bug.  Details below.
+**Three rendering bugs fixed today; one outstanding: cursor keys
+(j/k/h/l) do nothing.**  Stevie now displays line 1, line 2, and the
+status line correctly when opening a file.  Pressing movement keys
+has no visible effect, suggesting either input isn't reaching
+`vgetc()` or the per-keystroke redraw path isn't running.
 
-## TL;DR
+## What landed today
 
-In `nexttoscreen()`, QBE's GCM sinks the `endsc = npp + (Rows-1)*Columns`
-computation past the `_anyinput → _bios_t_ci → _windgoto` call sequence.
-Rega placed `t34 = Rows` in SI before the calls (SI is callee-save, so
-that should have been safe), but **then chose to reuse SI for the spill
-reload of `t37 = Columns`** right between the calls.  At the post-call
-use site, the asm does `sub ax, 1` expecting AX to hold Rows — but
-nothing ever loaded Rows into AX, and AX holds windgoto's return
-value (0).  Result: `endsc = npp − Columns`, the loop `for (; npp <
-endsc ; ...)` exits immediately, the screen never gets painted.
+### 1. spill.c main-loop iscall — void-call callee-save limit
 
-The full memory entry is at [[feedback-qbe-gcm-sinks-load-past-call]].
-
-## The probe sequence that got us here
-
-`stevie-orig/screen.c` now contains `filetonext`/`nexttoscreen` probes
-gated by `#define FTN_DEBUG_PROBE 1`.  Each phase replaced one piece
-of logic to isolate the bug:
-
-| Phase | filetonext | nexttoscreen | Result |
-|-------|-----------|--------------|--------|
-| 0 | no-op return | normal | screen blank (no painting) |
-| 2 | inline writes 'A'/'B'/'C' | normal | screen still 'l l l l' |
-| 3 | blast Nextscreen with '@' | normal | screen 'lHHl l l l l' (NO '@') |
-| 4 | as 3 | early return | screen blank |
-| 5 | as 3 | `PROBE: ` + first 16 bytes of Nextscreen | `PROBE: @@@@@@@@@@@@@@@@` ✓ |
-| 6 | as 3 | trivial walk, `outchar(npp[i])` | screen '@@@@@@' ✓ |
-| 7 | as 3 | pointer-walk + `outchar(*rpp=*npp)` | screen '@@@@@@' ✓ |
-| 8 | as 3 | + `if (*np!=*rp)` + inner windgoto | **ONE '@'** then nothing |
-| 9 | as 3 | + outer windgoto + CUROFF/CURON, no inner windgoto | **screen empty** |
-
-Phase 5 confirmed the entire data path works.  Phase 9's blank screen
-plus the asm trace pinned the bug to the endsc-after-call codegen.
-
-## What to revert when the fix lands
-
-Before flipping `FTN_DEBUG_PROBE` to 0, also drop the `#if 0` around
-the original `filetonext` body (it's intact, just gated off).  Then
-remove the probe scaffolding from `screen.c` entirely:
-
-```sh
-git log --oneline | grep "debug probe"
-git revert <probe-commit>      # or just edit screen.c by hand
+```c
+bscopy(u, v);
+if (iscall(i->op)
+&& (i+1 == &b->ins[b->nins] || !regcpy(i+1)))
+    /* Void call (not handled by dopm) — live-across-call temps must
+     * fit in actual callee-saves (ngpr - nrsave - nrglob). */
+    limit2(v, T.nrsave[0] + T.nrglob, T.nrsave[1], w);
+else
+    limit2(v, 0, 0, w);
 ```
 
-The `feedback_qbe_gcm_sinks_load_past_call.md` and
-`feedback_minic_ret_then_code.md` memory entries stay.
+The pre-fix `sethint(v, caller-saves)` was only an avoid hint;
+rega's fallback path ignored it when callee-saves were exhausted.
+With 4 live temps and only 3 callee-saves (i8086 BX/SI/DI),
+`t34=Rows` ended up in a caller-save reg and got clobbered by the
+`_windgoto` call.  See [[feedback-qbe-gcm-sinks-load-past-call]].
 
-## The fix — three options
+The `regcpy(i+1)` guard skips this path when dopm has already
+handled the call.  Without that guard, dopm's later `v |= argregs`
+combined with the tightened limit2 trips `slot()`'s "cannot spill
+register" assert on amd64 abi tests.
 
-### A. rega.c: don't reuse a register that holds a live SSA temp
+### 2. spill.c dopm — value-returning call callee-save limit
 
-The natural place.  When `rega()` picks a register for the spill
-reload of `t37`, it should consult its live-temp map and exclude
-registers currently holding live values from a DIFFERENT temp.
-Currently the conflict between `t34`-in-SI and `t37`-reload-into-SI
-isn't being detected.
-
-### B. spill.c: spill t34 across the call window
-
-If SI is going to be needed for `t37` reload between the calls,
-spill `t34` first.  Less natural — rega should own this — but
-straightforward if rega's data model doesn't fit.
-
-### C. i8086/emit.c: re-emit `mov ax, [_Rows]` at the use site
-
-Last resort.  The emit pass would need to recognize that the
-register holding `t34` was clobbered, and re-load from the source
-global if it's a `loadw $name`-style temp.  This is hacky; the
-compiler should know.
-
-Recommend **A** first.  Investigate `rega()` in `rega.c` and
-specifically how it handles spill-reload register selection.
-
-## How to reproduce / verify a fix
-
-```sh
-make qbe
-rm -rf build/stevie-orig && tools/build-stevie.sh --keep-going --model=medium
-cat > build/stevie-orig/HELLO.TXT << 'EOF'
-Hello from a non-empty file!
-This is line 2.
-EOF
-# Confirm bug:
-dosbox -c "mount c $PWD/build/stevie-orig" -c "c:" -c "cls" \
-       -c "stevie.exe HELLO.TXT"
-# Expected without fix: "screen fills with l l l l..."
+```c
+if (i != b->ins && iscall((i-1)->op)) {
+    v->t[0] &= ~T.retregs((i-1)->arg[1], 0);
+    limit2(v, T.nrsave[0] + T.nrglob, T.nrsave[1], 0);
+    ...
+}
 ```
 
-To verify the fix BEFORE committing:
+Same `nrsave + nrglob` formula as the main-loop fix.  Resolves the
+"`2 line, ? character`" status line: `linecnt` was landing in CX
+across `_fclose`/`_free` (caller-save calls handled via dopm).
+With both fixes in place, all 62 QBE tests pass except the 3
+pre-existing arm64 `far_pointer` ones.
 
-1. Flip `FTN_DEBUG_PROBE` to 0 in `stevie-orig/screen.c`.
-2. Also re-enable the `#if 0` original filetonext body.
-3. Rebuild.  If file content renders correctly, the fix worked.
+### 3. libstub.asm `_spr_emit_w16` — preserve BX
 
-## What's already in the asm to look at
+```asm
+_spr_emit_w16:
+    push bx        ; <-- ADDED
+    ...
+    mov bx, 10
+    div bx
+    ...
+    pop bx         ; <-- ADDED
+    retn
+```
 
-`build/stevie-orig/screen.asm:185..203` is the smoking gun (phase 9
-build, with my probe active).  See the memory entry for the
-annotated trace.  The corresponding SSA is at
-`build/stevie-orig/screen.ssa:140..147`.
+`sprintf` uses BX as the variadic-arg pointer.  `_spr_emit_w16`
+loaded `bx = 10` for `div` without saving, so every format spec
+after the first `%d` read from address 10 onward (BIOS data area).
+Status line became `"FILE" 2 line, ? character` instead of
+`"FILE" 2 lines, 22 characters`.
 
-## Outstanding work besides this fix
+### 4. stevie-orig/screen.c — `flushbuf()` at end of `nexttoscreen`
 
-Carried over from prior sessions, unchanged:
+```c
+CURON;        /* enable cursor again */
+flushbuf();   /* commit the diff to the actual screen */
+```
 
-- **Strategic Kl AX/DX fix in `i8086/isel.c`** — tactical push/pop
-  landed in 228eb27, isel-level fix still TODO.
-- **Kl-in-single-reg lossiness audit** — not blocking HELLO.TXT
-  but matters for files >64KB and `%ld` printf.
+`nexttoscreen` was buffering its diff output via `outchar` (the
+BIOS-mode `outone` macro buffers into `outbuf`).  The original
+design relies on `inchar()` calling `flushbuf` at the top of its
+loop.  Something in the current build is preventing `inchar` from
+running on the first iteration, so without an explicit flush at
+end of `nexttoscreen`, the buffered chars (including line 2)
+stayed invisible.  Adding `flushbuf()` to `nexttoscreen`'s tail
+forces the diff to materialize on screen.
 
-## Memory entries created this session
+**This is a workaround, not a root-cause fix.**  The real bug is
+likely the same one keeping j/k/h/l silent — see below.
 
-- [[feedback-qbe-gcm-sinks-load-past-call]] — NEW.  The actual root
-  cause for the render-loop bug.
-- [[feedback-minic-ret-then-code]] — NEW.  MiniC emits unlabeled
-  SSA after `return;` followed by more code.  Workaround: `#if 0`.
+## Outstanding: cursor keys j/k/h/l do nothing
+
+Symptoms (with all four fixes above applied):
+- Initial draw correct: line 1 at row 0, line 2 at row 1, tildes
+  at rows 2-22, status line at row 23.
+- Pressing j, k, h, l → no visible change.  Cursor stays at
+  row 1 col 0 (wherever the initial draw left it).
+
+The `flushbuf` workaround tells us `nexttoscreen` is being called
+once and completing.  After that, control should return to
+`edit()`'s `for (;;)` loop:
+
+```c
+for ( ;; ) {
+    cursupdate();
+    if (need_redraw && !anyinput())
+        updatescreen();
+    if (!anyinput())
+        windgoto(Cursrow,Curscol);
+    c = vgetc();           /* vgetc → inchar → flushbuf + getch */
+    if (State == NORMAL) {
+        ...
+        normal(c);
+    }
+    ...
+}
+```
+
+The fact that the flush-at-end-of-nexttoscreen workaround was
+needed strongly suggests **we never reach `vgetc()` on the first
+iteration** — because `vgetc → inchar → flushbuf()` is what
+normally flushes the diff.  If we *had* reached it, the original
+(probe-less) build would have shown line 2 on the first redraw.
+
+Three hypotheses to chase tomorrow, in order:
+
+### Hypothesis A: hang in `cursupdate()` or `windgoto()`
+
+`cursupdate()` (screen.c) walks the file to compute Cursrow/Curscol
+from Curschar.  If it has a register-clobber or infinite-loop bug,
+the main loop never reaches `vgetc()`.
+
+**Investigation steps:**
+1. Add `outstr("[A]"); flushbuf();` immediately *before* `cursupdate()`
+   in edit.c.  If `[A]` doesn't appear, we hung before the main loop
+   (i.e. in `updatescreen()` itself — unlikely since `flushbuf` at
+   end of `nexttoscreen` is reached).
+2. Add `outstr("[B]"); flushbuf();` after `cursupdate()`.  If `[A]`
+   appears but `[B]` doesn't, the hang is in `cursupdate`.
+3. Add `outstr("[C]"); flushbuf();` after `windgoto(Cursrow,Curscol)`.
+   If `[B]` appears but `[C]` doesn't, the hang is in `windgoto`
+   (unlikely — windgoto worked for the probe).
+4. Add `outstr("[D]"); flushbuf();` after `vgetc()`.  If `[C]` appears
+   but `[D]` doesn't, `vgetc`/`inchar`/`getch` is the culprit.  If
+   `[D]` appears, the loop IS running but `normal(c)` isn't
+   producing visible output.
+
+### Hypothesis B: `getch` (libstub) is broken
+
+`_getch` in `minic/dos/libstub.asm` uses `INT 16h AH=00h`.  Should
+work in DOSBox.  But after the function-key detection code path
+(lines 617+) it returns a sentinel.  If the keystroke is being
+mis-classified or the function-key state machine is stuck (e.g.
+`fn_pending` non-zero from a previous launch), `getch` might keep
+returning 0 indefinitely.
+
+**Investigation steps:**
+1. Check `_getch`'s function-key path:
+   ```
+   global _getch
+   _getch:
+       push bp
+       mov bp, sp
+       xor ah, ah
+       int 16h
+       cmp al, 0
+       jne .ascii
+       mov [cs:.fn_pending], ah
+       mov byte [cs:.fn_flag], 1
+       xor ax, ax
+       pop bp
+       retf
+   ```
+   If `fn_flag` is sticky / `ah` stays 0 the second time, j/k might
+   never deliver an ASCII byte.  Verify the `.fn_flag` reset path.
+2. Try pressing arrow keys instead of j/k.  Arrow keys use the
+   function-key path; if they work, the issue is specific to ASCII
+   delivery.
+
+### Hypothesis C: `normal(c)` runs but redraw silently fails
+
+If `vgetc` returns 'j' correctly, `normal('j')` updates Curschar.
+Then loop iterates: `cursupdate` should compute new Cursrow,
+`updatescreen` redraws (now WITH our `flushbuf` at end of
+`nexttoscreen`).
+
+**Investigation steps:**
+1. After landing the `[A]/[B]/[C]/[D]` probes, add `[E]` inside the
+   `if (State == NORMAL)` block before `normal(c)` and `[F]` after.
+   See if we get past `normal('j')`.
+2. If we do, the question is whether `updatescreen()` is being
+   called on subsequent iterations.  `need_redraw` is probably
+   FALSE after the initial draw, so `updatescreen()` is only
+   called if `j` set `need_redraw = TRUE`.  Vim/stevie usually
+   handles cursor moves via `windgoto` only (no full redraw),
+   relying on `Cursrow/Curscol` being updated.  Verify `windgoto`
+   is called with the new row.
+
+## Diagnostic infrastructure already in place
+
+- `flushbuf()` at end of `nexttoscreen` makes diffs immediately
+  visible.  Keep this in place during cursor-key debugging.
+- The `outchar/flushbuf` probe pattern from this session is the
+  go-to diagnostic.  Probe-into-Nextscreen also works (see
+  [[feedback-qbe-gcm-sinks-load-past-call]] for examples).
+
+## Memory entries
+
+- [[feedback-qbe-gcm-sinks-load-past-call]] — updated and marked
+  **Fixed** (both spill.c paths).
+- [[feedback-minic-ret-then-code]] — workaround still in place but
+  no longer needed (the original filetonext body was restored
+  during cleanup).
 
 ## Heisenbug lessons (carried forward)
 
-- **rega's `visit` is sticky.** Fallback picks that violate the
-  avoid mask must NOT propagate via `visit`.
-- **Multi-word ops on a single-word ISA need wrapping.** Tactical
-  push/pop landed in 228eb27; strategic isel-side fix still TODO.
-- **Comparisons can clobber.** Even though `Oc*l` results are Kw,
-  the body uses AX:DX — easy to miss.
-- **Probe-into-screen beats stderr in DOS.**  `libstub_to_exe.py`
-  only stubs read-only `fopen`/`getc`/`fclose`; `fopen` for write,
-  `fprintf`, `fputs`, `fwrite` all return 0 immediately.  Writing
-  diagnostics into the `Nextscreen` buffer is the path of least
-  resistance.
-- **Phased reduction beats grepping.**  When the bug-trigger is
-  unclear, replace function bodies with progressively smaller
-  versions and observe what flips.  This bug was invisible from
-  source — only the side-by-side phase-7/phase-8/phase-9 results
-  pinned the post-call register clobber.
+- **Hints aren't enforcement.**  `sethint(v, caller-saves)` only
+  tells rega what to *prefer avoiding*.  When callee-saves are
+  oversubscribed, rega's fallback ignores the hint and clobbers
+  the temp.  Use `limit2` to actually enforce.
+- **rglob counts.**  On i8086, `ngpr=8` but allocatable GPRs = 6
+  (RBP+RSP are rglob).  `limit2(v, k1, ...)` computes available
+  as `ngpr - k1`, which over-counts by `nrglob` unless rglob is
+  included in `k1`.
+- **Caller-save preservation in libstub helpers.**  Anything called
+  by sprintf/printf that uses BX/DI/SI for scratch needs to save
+  them; sprintf passes its variadic-arg pointer in BX across
+  helper calls.
+- **Don't trust default flush behavior.**  `outchar` buffers; only
+  certain code paths flush.  If a screen update needs to be
+  visible *immediately* (not just by the next inchar), call
+  `flushbuf()` explicitly.
+
+## Reproduction
+
+```sh
+cd /Users/pauldevine/projects/qbe
+rm -rf build/stevie-orig && tools/build-stevie.sh --keep-going --model=medium
+cat > build/stevie-orig/HELLO.txt << 'EOF'
+hello from vim
+LINE 2
+EOF
+dosbox -c "mount c $PWD/build/stevie-orig" -c "c:" -c "cls" -c "stevie.exe HELLO.txt"
+# Expected: row 0 shows "hello from vim", row 1 shows "LINE 2",
+# rows 2-22 show "~", row 23 shows the status line.
+# Try pressing j, k, h, l — cursor should move but currently doesn't.
+```

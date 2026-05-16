@@ -292,7 +292,9 @@ dopm(Blk *b, Ins *i, BSet *v)
 	bscopy(u, v);
 	if (i != b->ins && iscall((i-1)->op)) {
 		v->t[0] &= ~T.retregs((i-1)->arg[1], 0);
-		limit2(v, T.nrsave[0], T.nrsave[1], 0);
+		/* Same callee-save fit as the main-loop iscall path.
+		 * See feedback memory qbe-gcm-sinks-load-past-call. */
+		limit2(v, T.nrsave[0] + T.nrglob, T.nrsave[1], 0);
 		for (n=0, r=0; T.rsave[n]>=0; n++)
 			r |= BIT(T.rsave[n]);
 		v->t[0] |= T.argregs((i-1)->arg[1], 0);
@@ -479,7 +481,19 @@ spill(Fn *fn)
 					break;
 				}
 			bscopy(u, v);
-			limit2(v, 0, 0, w);
+			if (iscall(i->op)
+			&& (i+1 == &b->ins[b->nins] || !regcpy(i+1)))
+				/* Void call (no following Ocopy register-to-temp
+				 * already processed by dopm) — live-across-call
+				 * temps must fit in actual callee-saves
+				 * (ngpr - nrsave - nrglob).  Without this, rega's
+				 * fallback bypasses the sethint() avoid mask when
+				 * callee-saves are exhausted and a live temp lands
+				 * in a caller-save register that the call clobbers.
+				 * See feedback memory qbe-gcm-sinks-load-past-call. */
+				limit2(v, T.nrsave[0] + T.nrglob, T.nrsave[1], w);
+			else
+				limit2(v, 0, 0, w);
 			for (n=0; n<2; n++)
 				if (rtype(i->arg[n]) == RTmp) {
 					t = i->arg[n].val;

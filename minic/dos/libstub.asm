@@ -387,11 +387,16 @@ _sprintf:
     ret
 
 ; Emit signed 16-bit AX as decimal at ES:DI, advance DI.  Clobbers AX/CX/DX.
+; PRESERVES BX (sprintf uses BX as its variadic arg pointer; clobbering it
+; broke every format spec after the first %d — sprintf would then read %s
+; and %ld args from address 10 onward, producing garbage like "2 line, ?
+; character" instead of "2 lines, 22 characters").
 ; Uses NEAR ret (retn) — these are internal helpers called via near `call`.
 ; libstub_to_exe.py rewrites every `ret` to `retf` for the medium-model
 ; .EXE build; we use `retn` so the rewrite skips us and the call/ret
 ; size stays consistent.
 _spr_emit_w16:
+    push bx
     test ax, ax
     jns .ew_pos
     mov byte [di], '-'
@@ -413,6 +418,7 @@ _spr_emit_w16:
     mov [di], dl
     inc di
     loop .ew_pop
+    pop bx
     retn
 
 ; Emit DX:AX as decimal at ES:DI.  If the high word is zero, fall back
