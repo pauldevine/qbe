@@ -15,7 +15,16 @@ struct	param	params[] = {
 	{ "report",	"report",	5,	P_NUM },
 	{ "lines",	"lines",	25,	P_NUM },
 
-	{ "vbell",	"vb",		TRUE,	P_BOOL },
+	/* Visual bell default OFF on i8086.  vbeep() calls setcolor() twice
+	 * to flash; setcolor() ends with `screenclear() + updatescreen()`
+	 * (dos.c:812).  screenclear() blanks the BIOS screen via INT 10h
+	 * AH=09h, but the subsequent filetonext+nexttoscreen redraw fails
+	 * to repaint, leaving a blank screen on every boundary beep
+	 * (l-past-EOL, j-past-EOF, unknown command).  Confirmed 2026-05-17:
+	 * defaulting to FALSE so beep() emits an audible BEL keeps the
+	 * screen intact and the editor fully usable.  Re-enable once the
+	 * underlying screenclear+updatescreen redraw is reliable. */
+	{ "vbell",	"vb",		FALSE,	P_BOOL },
 	{ "showmatch",	"sm",		FALSE,	P_BOOL },
 	{ "wrapscan",	"ws",		TRUE,	P_BOOL },
 	{ "errorbells",	"eb",		FALSE,	P_BOOL },

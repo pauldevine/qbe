@@ -1,110 +1,96 @@
-# Resume prompt — Stevie cursor keys mostly work; boundaries still blank screen
+# Resume prompt — Stevie cursor motion fully working; screenclear+updatescreen redraw is the next deep bug
 
-## Status (2026-05-17)
+## Status (2026-05-17, late)
 
-Cursor motion fundamentally works for the first time:
-- `j`/`k`/`h`/`l` move the cursor across lines within the file.
+**Cursor motion is fully operational.** All of these work in DOSBox with HELLO.TXT:
+- `j`/`k`/`h`/`l` move the cursor.
+- `l` past end-of-line beeps without breaking the editor.
+- `j` past last line beeps without breaking the editor.
 - `G` jumps to the last line.
-- `<ESC>:q!<CR>` quits.
+- Unknown commands (`g` alone) beep without breaking the editor.
+- `<ESC>:q!<CR>` quits cleanly.
 
-Remaining issues, all on the same code path (one-past-the-end of file/line):
-- `l` at end-of-line → screen text blanks (cursor remains usable).
-- `j` past the last row → same.
-- `gg` (not actually a stevie command — falls through to default beep) → blanks the screen.
+The remaining oddity (`gg` doesn't go to line 1) is not a bug — `gg`
+is a vim extension that stevie never implemented. The first `g` falls
+through to default-beep. To go to line 1, use `1G`.
 
-## Root causes fixed this session
+## Fixed this session
 
-### 1. `i8086/emit.c` `Ostorel` clobbered the destination address (commit not yet made)
+### 1–3. (carried from prior session, see commit 2c1ea66)
+- `i8086/emit.c` `Ostorel` destination-address clobber
+- `i8086/emit.c` `Ostorel`/`Oload` BX-scratch clobber
+- minic `static` for function-local variables not persistent — worked
+  around by promoting `_nl_next`/`_pl_prev`/`_ca_lp`/`_gtl_l`/`_gl_pos`
+  to file-scope statics in `linefunc.c`, `misccmds.c`, `cmdline.c`.
 
-When the destination address was rega-allocated to AX or DX, the value
-load (`mov ax, <const>` / `cwd`) clobbered the address BEFORE the store
-emitted `mov bx, ax`.  Net effect: every `storel <const>, <ptr>` was a wild
-write to the constant value rather than the pointer.  Most visibly,
-`alloc.c:103`'s `Fileend->linep->num = 0xffff;` silently never happened,
-so every `LINEOF(Fileend)` returned 0 and every walking loop in stevie
-was confused.
+### 4. Visual bell default off (this session, uncommitted)
 
-Fix: capture the destination address into BX *before* the value load
-clobbers AX/DX.
+`stevie-orig/param.c:18` — flipped `vbell` default to FALSE.
 
-### 2. `i8086/emit.c` `Ostorel` and `Oload` didn't preserve BX
+Root cause path:
+- `vbeep()` in `stevie-orig/dos.c:376` calls `setcolor(revcolor)` then
+  `setcolor(oldcolor)` to flash colors.
+- `setcolor()` in `stevie-orig/dos.c:812` ends with
+  `if (!quitting_now) { screenclear(); updatescreen(); }`.
+- `screenclear()` blanks the BIOS screen via INT 10h AH=09h.
+- `updatescreen()` is supposed to redraw via `filetonext()` +
+  `nexttoscreen()` but FAILS to repaint, leaving the screen blank.
 
-`Ostorel`/`Oload` use BX as the address-staging scratch register.  rega
-doesn't model that clobber, so any live SSA temp it placed in BX got
-overwritten silently.  Smoking gun: the iter counter in our
-diagnostic loop ended up at `&num` instead of `iter+1`.
-
-Fix: `push bx` / `pop bx` around the storel/loadl sequence when BX is
-actually used as scratch (skipped when r1 or r0 already lives in BX).
-
-### 3. MiniC `static` for function-local variables doesn't actually persist
-
-Workaround applied in stevie source.  Code review of `minic.y`
-`emit_local_init` (4391+, 4403+) shows STATIC locals are emitted as
-`alloc4 N` (stack allocation, same as auto).  Returning the address of
-such a variable dangles after the function returns — subsequent calls
-overwrite the stack slot.  The comment at minic.y:4410 acknowledges this
-is "invisible for single-function helpers" — but stevie's
-`nextline()` / `prevline()` / `coladvance()` etc all return `&static_local`
-and ABSOLUTELY rely on persistence.
-
-Symptom: cursupdate's `for (p=Topchar; p->linep != Curschar->linep;
-p = nextline(p))` walked 11+ times in a 3-line file before our
-diagnostic break, because each iteration's returned &next pointed to a
-stack slot that `plines(p)` then overwrote.  The comparison cycled
-forever instead of terminating at Curschar.
-
-Fix (stevie-source workaround): promote `static LPTR next;`,
-`static LPTR prev;`, `static LPTR lp;`, `static LPTR pos;`,
-`static LPTR l;` to file-scope statics in linefunc.c, misccmds.c,
-cmdline.c.  These are all functions that return the address of the
-static so its persistence matters.
-
-**Better fix (not done):** teach minic's emit_local_init to emit STATIC
-locals as global storage with a mangled name (e.g.
-`_<func>_<var>`) so source code stays portable.  The grammar already has
-the STATIC token; only the emit side needs work.
-
-### 4. Other stuff in working tree from earlier sessions (kept)
-
-- `spill.c`: i8086-gated Kl forcing to slots, caller-save handling fixes.
-- `rega.c`: accept RSlot destination for slot-resident Kl temps.
-- `i8086/isel.c`: use original temp class for fast-local address materialisation.
-- `minic.y`: word-by-word struct copy expansion at line 1915+ (otherwise
-  `*Curschar = *Filemem;` truncated to 2 bytes).
+The visual-bell flash thus blanked the screen on every boundary beep.
+With audible BEL (`\007`), no screenclear runs and the screen stays
+intact.
 
 ## What remains broken
 
-When pressing a key that beeps (l-past-EOL, j-past-EOF, unknown command
-like the first `g`), the screen text disappears.  Cursor positioning
-remains functional after the blank — you can navigate, just nothing's
-visible.
+**The setcolor → screenclear() + updatescreen() pipeline does not
+restore the screen.** This is the next bug to chase. Triggers:
+- `:set co=<n>` (explicit color change via `:set`)
+- Currently no other path; setrows() uses different machinery.
 
-Initial reading of the path (oneright -> inc returns 1 -> dec rewinds
--> return FALSE -> beep() -> vbeep()) shows no obvious write to
-Topchar/Curschar/Nextscreen.  vbeep just toggles `P(P_CO)` and calls
-flushbuf/windgoto.  So the blank is most likely happening on the NEXT
-cursupdate/updatescreen cycle, triggered by some lingering corrupted
-state.
+This is the same "displaying nothing" pattern that previously forced
+`flushbuf` (dos.c:226) to abandon the AH=09 write-with-attribute path
+in favor of AH=0Eh teletype-per-char. So the redraw path through
+`nexttoscreen()` is suspect.
 
-Hypotheses to investigate:
-1. `need_redraw` getting flipped TRUE during the beep flow, then on
-   the next iteration `updatescreen()` runs with Topchar/Botchar in a
-   bad state (one of the LPTR struct copies still silently truncated
-   somewhere?).
-2. Another minic `static LPTR` survivor in screen.c or misccmds.c
-   (mkline's `static char lbuf[9]` at screen.c:402 returns its address).
-3. `lfiletonext()` / `filetonext()` rendering with `Botchar` left from a
-   prior call where filetonext's "didn't fit on screen" branch's
-   `*Botchar = save;` got truncated.  The struct-copy fix in minic.y
-   covers this in theory, but worth double-checking.
+### Hypotheses for the redraw failure
+
+1. **`filetonext()` writes Nextscreen but `nexttoscreen()` sees no
+   diff.** After `screenclear()`, both Realscreen and Nextscreen are
+   all-spaces. `filetonext()` should rebuild Nextscreen from
+   `Topchar`/`Filemem`. If `Topchar` is stale or its `*Topchar` deref
+   reads truncated data (LPTR is a long pointer; some Kl path could
+   still be truncated to 2 bytes), `filetonext()` might fill all
+   spaces and `nexttoscreen()` would see no diff.
+
+2. **`nexttoscreen()` correctly emits chars but `flushbuf`'s AH=0Eh
+   teletype loop has a latent codegen bug** that silently fails
+   on long batches (e.g. ~Cols*Rows = 2000 chars).
+
+3. **`anyinput()` is spuriously TRUE inside the redraw**, triggering
+   the early return at `screen.c:202` that sets `need_redraw=TRUE`
+   without writing. But `need_redraw` is checked in the main loop, so
+   the blank would only last one frame — yet it persists until the
+   next character keypress. So this is unlikely unless `need_redraw`
+   itself is corrupted.
+
+### Suggested debug approach
+
+- Add a static counter `n_filetonext_calls` incremented at the top
+  of `filetonext()`, and a tracer that writes the count to a fixed
+  screen position (bypassing Nextscreen) so we can see how many times
+  it runs across one `:set co=15` invocation.
+- Inspect `*Topchar` immediately on entry to `filetonext` — log
+  `Topchar->linep` (or `LINEOF(Topchar)`) to a fixed status line.
+- Compare with original setcolor behavior by writing a minimal C test
+  that calls `setcolor` directly.
 
 ## Verification
 
-- QBE test suite: 59/62 (3 pre-existing arm64 `far_pointer`/`float_simple`
-  failures, unrelated).
-- Stevie compiles (24/24 sources), links to ~142 KB medium-model .EXE.
-- Cursor motion j/k/h/l/G/q! works in DOSBox with HELLO.TXT.
+- QBE test suite: 59/62 (3 pre-existing arm64 failures unrelated).
+- Stevie compiles (24/24 sources), links to 141,888-byte medium-model
+  `.EXE`.
+- All cursor motion + boundary beeps + quit confirmed in DOSBox
+  2026-05-17.
 
 ## Reproduction
 
@@ -119,11 +105,17 @@ EOF
 dosbox -c "mount c $PWD/build/stevie-orig" -c "c:" -c "cls" -c "stevie.exe HELLO.TXT"
 ```
 
-## Memory entries worth checking next session
+In stevie, try `:set vb` to re-enable visual bell, then `l` past EOL
+— the screen will go blank. `:set novb` to restore.
 
-- `[[feedback-i8086-storel-clobbers-dest]]` (to be added) — the storel
-  destination-address-clobber bug.
-- `[[feedback-i8086-storel-loadl-bx-clobber]]` (to be added) — BX not
-  preserved across Kl ops, same shape as the AX/DX clobber bugs.
-- `[[feedback-minic-static-local-not-persistent]]` (to be added) — minic
-  treats `static <type> <var>;` inside a function as stack alloc.
+## Memory entries from this session
+
+- `feedback_stevie_vbeep_screenclear_blanks.md` (new this session) —
+  setcolor's screenclear+updatescreen leaves screen blank;
+  worked around by defaulting vbell=FALSE.
+- `feedback_i8086_storel_clobbers_dest.md` (prior) — Ostorel dest
+  address clobber.
+- `feedback_i8086_storel_loadl_bx_clobber.md` (prior) — Ostorel/Oload
+  BX scratch.
+- `feedback_minic_static_local_not_persistent.md` (prior) — minic
+  treats `static` locals as auto.
