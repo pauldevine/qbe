@@ -611,6 +611,7 @@ cursupdate()
 		Curswant = Cursvcol;
 		set_want_col = FALSE;
 	}
+	smsg("CU r=%d cn=%ld", Cursrow, Curschar->linep->num);
 }
 
 /*

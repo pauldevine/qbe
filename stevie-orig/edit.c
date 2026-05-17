@@ -22,9 +22,15 @@ edit()
 
 	Prenum = 0;
 
-	/* position the display and the cursor at the top of the file. */
+	/* position the display and the cursor at the top of the file.
+	 * MiniC truncates struct assignment to a single 16-bit word, so
+	 * `*X = *Filemem` only copies the linep pointer.  Set the index
+	 * field explicitly so the cursor starts at column 0 rather than
+	 * a malloc-garbage column. */
 	*Topchar = *Filemem;
+	Topchar->index = 0;
 	*Curschar = *Filemem;
+	Curschar->index = 0;
 	Cursrow = Curscol = 0;
 
 	do_mlines();		/* check for mode lines before starting */
@@ -316,24 +322,34 @@ int	n;
 	LPTR	p, *np;
 	register int	k;
 
-	p = *Curschar;
+	/* MiniC truncates struct assignment to a single 16-bit word, so
+	 * `p = *Curschar` and `p = *np` only copy the linep pointer.
+	 * Spell the copy as two scalar assignments to also carry the
+	 * index field — otherwise coladvance() starts at a garbage
+	 * column and the cursor never visibly moves. */
+	p.linep = Curschar->linep;
+	p.index = Curschar->index;
 	for ( k=0; k<n; k++ ) {
 		/* Look for the previous line */
 		if ( (np=prevline(&p)) == NULL ) {
-			/* If we've at least backed up a little .. */
 			if ( k > 0 )
-				break;	/* to update the cursor, etc. */
+				break;
 			else
 				return FALSE;
 		}
-		p = *np;
+		p.linep = np->linep;
+		p.index = np->index;
 	}
-	*Curschar = p;
+	Curschar->linep = p.linep;
+	Curschar->index = p.index;
 	/* This makes sure Topchar gets updated so the complete line */
-	/* is one the screen. */
+	/* is on the screen. */
 	cursupdate();
-	/* try to advance to the column we want to be at */
-	*Curschar = *coladvance(&p, Curswant);
+	{
+		LPTR *_lp = coladvance(&p, Curswant);
+		Curschar->linep = _lp->linep;
+		Curschar->index = _lp->index;
+	}
 	return TRUE;
 }
 
@@ -344,7 +360,8 @@ int	n;
 	LPTR	p, *np;
 	register int	k;
 
-	p = *Curschar;
+	p.linep = Curschar->linep;
+	p.index = Curschar->index;
 	for ( k=0; k<n; k++ ) {
 		/* Look for the next line */
 		if ( (np=nextline(&p)) == NULL ) {
@@ -353,10 +370,14 @@ int	n;
 			else
 				return FALSE;
 		}
-		p = *np;
+		p.linep = np->linep;
+		p.index = np->index;
 	}
-	/* try to advance to the column we want to be at */
-	*Curschar = *coladvance(&p, Curswant);
+	{
+		LPTR *_lp = coladvance(&p, Curswant);
+		Curschar->linep = _lp->linep;
+		Curschar->index = _lp->index;
+	}
 	return TRUE;
 }
 

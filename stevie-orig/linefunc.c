@@ -6,6 +6,21 @@
 #include "stevie.h"
 #include "ops.h"
 
+/* MiniC has a known bug: `static` for function-local variables is treated
+ * as auto stack allocation, so returning the address of a function-local
+ * static dangles and gets clobbered by subsequent function calls.  Promote
+ * these to file-scope statics so the addresses returned by nextline /
+ * prevline / coladvance persist across calls.
+ *
+ * Symptom that drove this: cursupdate's `for (p=Topchar; p->linep !=
+ * Curschar->linep; p = nextline(p))` walked the line list ELEVEN times
+ * before our break, because each iteration's returned &next pointed to a
+ * stack slot that plines() overwrote — comparison cycled forever instead
+ * of terminating at Curschar's line. */
+static	LPTR	_nl_next;
+static	LPTR	_pl_prev;
+static	LPTR	_ca_lp;
+
 /*
  * nextline(curr)
  *
@@ -17,12 +32,10 @@ LPTR *
 nextline(curr)
 LPTR	*curr;
 {
-	static	LPTR	next;
-
 	if (curr->linep->next != Fileend->linep) {
-		next.index = 0;
-		next.linep = curr->linep->next;
-		return &next;
+		_nl_next.index = 0;
+		_nl_next.linep = curr->linep->next;
+		return &_nl_next;
 	}
 	return (LPTR *) NULL;
 }
@@ -38,12 +51,10 @@ LPTR *
 prevline(curr)
 LPTR	*curr;
 {
-	static	LPTR	prev;
-
 	if (curr->linep->prev != Filetop->linep) {
-		prev.index = 0;
-		prev.linep = curr->linep->prev;
-		return &prev;
+		_pl_prev.index = 0;
+		_pl_prev.linep = curr->linep->prev;
+		return &_pl_prev;
 	}
 	return (LPTR *) NULL;
 }
@@ -59,31 +70,30 @@ coladvance(p, col)
 LPTR	*p;
 register int	col;
 {
-	static	LPTR	lp;
 	register int	c, in;
 
-	lp.linep = p->linep;
-	lp.index = p->index;
+	_ca_lp.linep = p->linep;
+	_ca_lp.index = p->index;
 
 	/* If we're on a blank ('\n' only) line, we can't do anything */
-	if (lp.linep->s[lp.index] == '\0')
-		return &lp;
+	if (_ca_lp.linep->s[_ca_lp.index] == '\0')
+		return &_ca_lp;
 	/* try to advance to the specified column */
 	for ( c=0; col-- > 0; c++ ) {
 		/* Count a tab for what it's worth (if list mode not on) */
-		if ( gchar(&lp) == TAB && !P(P_LS) ) {
+		if ( gchar(&_ca_lp) == TAB && !P(P_LS) ) {
 			in = ((P(P_TS)-1) - c%P(P_TS));
 			col -= in;
 			c += in;
 		}
 		/* Don't go past the end of */
 		/* the file or the line. */
-		if (inc(&lp)) {
-			dec(&lp);
+		if (inc(&_ca_lp)) {
+			dec(&_ca_lp);
 			break;
 		}
 	}
-	return &lp;
+	return &_ca_lp;
 }
 
 

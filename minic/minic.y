@@ -1920,6 +1920,118 @@ expr(Node *n)
 		s0 = expr(n->r);
 		s1 = lval(n->l);
 		sr = s0;
+
+		/* Struct/union assignment: emit a multi-step copy.  The
+		 * normal single-store path uses irtyp(STRUCT_T) which gives
+		 * 'w' and only copies the first 16-bit word, leaving later
+		 * fields uninitialised.  Stevie hits this constantly:
+		 * `*Curschar = *Filemem;` and `save = memp = *Topchar;`
+		 * leave the index field as malloc-garbage. */
+		if (KIND(s1.ctyp) == STRUCT_T || KIND(s1.ctyp) == UNION_T) {
+			Symb src_addr, val, off_addr;
+			int sidx = DREF(s1.ctyp);
+			int sz = structh[sidx].size;
+			int off;
+
+			/* Get RHS address.  For most cases the RHS is `*ptr` or
+			 * an identifier — lval is idempotent there.  For chained
+			 * assignment `a = b = c`, the inner `b = c` already
+			 * ran during expr(n->r); use b's address as source. */
+			if (n->r->op == '=')
+				src_addr = lval(n->r->l);
+			else
+				src_addr = lval(n->r);
+
+			/* Word-by-word copy: load to a fresh Kw temp, store it.
+			 * Keep the IR strictly Kw so QBE's loadopt doesn't try
+			 * to fuse adjacent stores into a wider Kl op (which on
+			 * i8086 triggers a chain of shl/xor scratch that
+			 * surprised us in earlier attempts). */
+			off = 0;
+			while (off + 1 < sz) {
+				if (off > 0) {
+					off_addr.t = Tmp;
+					off_addr.u.n = tmp++;
+					off_addr.ctyp = IDIR(INT);
+					fprintf(of, "\t");
+					psymb(off_addr);
+					fprintf(of, " =w add ");
+					psymb(src_addr);
+					fprintf(of, ", %d\n", off);
+				} else {
+					off_addr = src_addr;
+				}
+				val.t = Tmp;
+				val.u.n = tmp++;
+				val.ctyp = INT;
+				fprintf(of, "\t");
+				psymb(val);
+				fprintf(of, " =w loadw ");
+				psymb(off_addr);
+				fprintf(of, "\n");
+
+				if (off > 0) {
+					off_addr.t = Tmp;
+					off_addr.u.n = tmp++;
+					off_addr.ctyp = IDIR(INT);
+					fprintf(of, "\t");
+					psymb(off_addr);
+					fprintf(of, " =w add ");
+					psymb(s1);
+					fprintf(of, ", %d\n", off);
+				} else {
+					off_addr = s1;
+				}
+				fprintf(of, "\tstorew ");
+				psymb(val);
+				fprintf(of, ", ");
+				psymb(off_addr);
+				fprintf(of, "\n");
+				off += 2;
+			}
+			if (off < sz) {
+				if (off > 0) {
+					off_addr.t = Tmp;
+					off_addr.u.n = tmp++;
+					off_addr.ctyp = IDIR(CHR);
+					fprintf(of, "\t");
+					psymb(off_addr);
+					fprintf(of, " =w add ");
+					psymb(src_addr);
+					fprintf(of, ", %d\n", off);
+				} else {
+					off_addr = src_addr;
+				}
+				val.t = Tmp;
+				val.u.n = tmp++;
+				val.ctyp = CHR;
+				fprintf(of, "\t");
+				psymb(val);
+				fprintf(of, " =w loadub ");
+				psymb(off_addr);
+				fprintf(of, "\n");
+
+				if (off > 0) {
+					off_addr.t = Tmp;
+					off_addr.u.n = tmp++;
+					off_addr.ctyp = IDIR(CHR);
+					fprintf(of, "\t");
+					psymb(off_addr);
+					fprintf(of, " =w add ");
+					psymb(s1);
+					fprintf(of, ", %d\n", off);
+				} else {
+					off_addr = s1;
+				}
+				fprintf(of, "\tstoreb ");
+				psymb(val);
+				fprintf(of, ", ");
+				psymb(off_addr);
+				fprintf(of, "\n");
+			}
+			sr = s1;
+			break;
+		}
 		/* Type conversions for assignment */
 
 		/* Float/int conversions */

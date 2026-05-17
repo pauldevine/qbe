@@ -459,11 +459,14 @@ LPTR	*lower, *upper;
 	*upper = *l;
 }
 
+/* file-scope static — see linefunc.c for the minic static-local-as-stack
+ * issue this works around. */
+static	LPTR	_gl_pos;
 static LPTR *
 get_line(cp)
 char	**cp;
 {
-	static	LPTR	pos;
+#define pos _gl_pos
 	LPTR	*lp;
 	register char	*p, c;
 	register int	lnum;
@@ -521,6 +524,7 @@ char	**cp;
 
 	*cp = p;
 	return &pos;
+#undef pos
 }
 
 void

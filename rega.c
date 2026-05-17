@@ -436,6 +436,13 @@ doblk(Blk *b, RMap *cur)
 			/* fall through */
 		default:
 			if (!req(i->to, R)) {
+				if (rtype(i->to) == RSlot) {
+					/* i8086 Kl temps are forced to be
+					 * slot-resident in spill.c; the dest
+					 * already names a stack slot, so no
+					 * register allocation is needed. */
+					break;
+				}
 				assert(rtype(i->to) == RTmp);
 				r = i->to.val;
 				if (r < Tmp0 && (BIT(r) & T.rglob))

@@ -346,6 +346,7 @@ spill(Fn *fn)
 	Phi *p;
 	Mem *m;
 	bits r;
+	int force_kl_slot;
 
 	tmp = fn->tmp;
 	ntmp = fn->ntmp;
@@ -365,6 +366,19 @@ spill(Fn *fn)
 			k = KBASE(tmp[t].cls);
 		bsset(mask[k], t);
 	}
+
+	/* On i8086, Kl (32-bit) values straddle two 16-bit registers (the
+	 * DX:AX pair).  rega has no register-pair concept and assigns a Kl
+	 * temp to a single 16-bit reg, silently dropping the high half on
+	 * load/store/arith.  Force every Kl temp to be slot-resident so
+	 * every Kl op reads/writes its slot directly via the two-word
+	 * load/store paths already in i8086/emit.c.
+	 * See feedback memory: i8086-kl-load-loses-high. */
+	force_kl_slot = (strcmp(T.name, "i8086") == 0);
+	if (force_kl_slot)
+		for (t=Tmp0; t<ntmp; t++)
+			if (tmp[t].cls == Kl)
+				slot(t);
 
 	for (bp=&fn->rpo[fn->nblk]; bp!=fn->rpo;) {
 		b = *--bp;
@@ -426,6 +440,20 @@ spill(Fn *fn)
 			limit2(v, 0, 0, NULL);
 			if (!bshas(v, t))
 				b->jmp.arg = slot(t);
+		}
+		/* i8086: evict Kl temps from v before it becomes b->out.
+		 * Otherwise rega's block-entry loop sees Kl temps in
+		 * b->out and allocates registers for them — defeating
+		 * the slot-resident-Kl invariant. */
+		if (force_kl_slot) {
+			int kt = Tmp0;
+			while (bsiter(v, &kt)) {
+				if (tmp[kt].cls == Kl) {
+					bsclr(v, kt);
+					slot(kt);
+				}
+				kt++;
+			}
 		}
 		for (t=Tmp0; bsiter(b->out, &t); t++)
 			if (!bshas(v, t))
@@ -494,6 +522,29 @@ spill(Fn *fn)
 				limit2(v, T.nrsave[0] + T.nrglob, T.nrsave[1], w);
 			else
 				limit2(v, 0, 0, w);
+			/* i8086: evict Kl temps from v and u so they never get
+			 * register-allocated.  arg-rewrite below will turn Kl
+			 * arg refs to RSlot, and reloads(u, v) will skip them
+			 * (so no Oload Kl ?, slot, ? is inserted that would
+			 * recreate a Kl RTmp).  slot() ensures the slot exists
+			 * for the arg-rewrite. */
+			if (force_kl_slot) {
+				int kt;
+				kt = Tmp0;
+				while (bsiter(v, &kt)) {
+					if (tmp[kt].cls == Kl) {
+						bsclr(v, kt);
+						slot(kt);
+					}
+					kt++;
+				}
+				kt = Tmp0;
+				while (bsiter(u, &kt)) {
+					if (tmp[kt].cls == Kl)
+						bsclr(u, kt);
+					kt++;
+				}
+			}
 			for (n=0; n<2; n++)
 				if (rtype(i->arg[n]) == RTmp) {
 					t = i->arg[n].val;
@@ -509,7 +560,16 @@ spill(Fn *fn)
 			reloads(u, v);
 			if (!req(i->to, R)) {
 				t = i->to.val;
-				store(i->to, tmp[t].slot);
+				/* i8086: rewrite Kl dest directly to its slot.
+				 * The emit handler writes both AX and DX to
+				 * slot+0/slot+2 via the two-word path, so we
+				 * skip the lossy Ostorel RTmp→RSlot. */
+				if (force_kl_slot && t >= Tmp0
+				 && tmp[t].cls == Kl) {
+					i->to = slot(t);
+				} else {
+					store(i->to, tmp[t].slot);
+				}
 				if (t >= Tmp0)
 					/* in case i->to was a
 					 * dead temporary */

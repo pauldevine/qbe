@@ -29,9 +29,18 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 			/* Fast local: this temp's "value" is the address of a
 			 * stack slot allocated by Oalloc4/8/16.  Materialize
 			 * the address into a fresh temp via Oaddr (lea bp+off)
-			 * before each use — mirrors amd64/isel.c. */
-			r1 = newtmp("isel", Kl, fn);
-			emit(Oaddr, Kl, r1, SLOT(s), R);
+			 * before each use — mirrors amd64/isel.c.
+			 *
+			 * Use the ORIGINAL temp's class for the materialized
+			 * address.  alloc4 results have class Kw on i8086
+			 * (medium-model near pointers are 16-bit), so this keeps
+			 * the address temp register-resident — important since
+			 * spill.c forces Kl temps to be slot-resident, and a Kl
+			 * address temp would become an RSlot that storew/loadw
+			 * would write/read directly instead of dereferencing. */
+			int ak = fn->tmp[r0.val].cls;
+			r1 = newtmp("isel", ak, fn);
+			emit(Oaddr, ak, r1, SLOT(s), R);
 			break;
 		}
 		/* Check class compatibility */

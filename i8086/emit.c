@@ -712,8 +712,9 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	 *   shl/shr/sar reg, 1
 	 *   shl/shr/sar reg, cl
 	 * The `reg, imm8` form was added on the 186.  Counts other than 1
-	 * have to come through CL. */
-	if (i->op == Oshl || i->op == Oshr || i->op == Osar) {
+	 * have to come through CL.  Kl (32-bit) shifts fall through to the
+	 * Kl-special handler below, which emits the proper rcr/rcl pair. */
+	if ((i->op == Oshl || i->op == Oshr || i->op == Osar) && i->cls != Kl) {
 		int64_t imm_cnt = -1;  /* >=0 means "use this immediate" */
 		shiftop = (i->op == Oshl) ? "shl" :
 		          (i->op == Oshr) ? "shr" : "sar";
@@ -798,6 +799,23 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tpop cx\n");
 			}
 		}
+		return;
+	}
+
+	/* Oaddr Kl with slot dest: lea computes a 16-bit offset, but the
+	 * destination is a 32-bit slot.  Stage through AX, write low half
+	 * into slot, and zero the high half (small/medium model — DS- or
+	 * SS-relative offsets always have implicit segment 0). */
+	if (i->op == Oaddr && i->cls == Kl && rtype(i->to) == RSlot) {
+		Ref dst = i->to;
+		int dst_lo = (int)slot(dst, fn);
+		fprintf(f, "\tpush ax\n");
+		fprintf(f, "\tlea ax, ");
+		emit_memref(i->arg[0], fn, f);
+		fputc('\n', f);
+		fprintf(f, "\tmov word [bp%+d], ax\n", dst_lo);
+		fprintf(f, "\tmov word [bp%+d], 0\n", dst_lo + 2);
+		fprintf(f, "\tpop ax\n");
 		return;
 	}
 
@@ -1267,7 +1285,19 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 */
 			{
 			int dst_in_dx_ld = (rtype(i->to) == RTmp && i->to.val == RDX);
+			int dst_in_bx_ld = (rtype(i->to) == RTmp && i->to.val == RBX);
+			int addr_in_bx_ld =
+			    (rtype(r0) == RTmp && r0.val == RBX) ||
+			    (rtype(r0) == RMem && !req(fn->mem[r0.val].base, R)
+			     && rtype(fn->mem[r0.val].base) == RTmp
+			     && fn->mem[r0.val].base.val == RBX);
+			int needs_bx_ld = (rtype(r0) == RTmp || rtype(r0) == RMem);
+			/* BX is used as the address-staging scratch.  Save/restore
+			 * unless the address IS in BX (we use it directly) or the
+			 * destination is BX (we'll overwrite it anyway). */
+			int save_bx_ld = needs_bx_ld && !addr_in_bx_ld && !dst_in_bx_ld;
 			AxDxSave s_ld = kl_save_axdx(i->to, f);
+			if (save_bx_ld) fprintf(f, "\tpush bx\n");
 
 			/* Memory address is in arg[0] */
 			if (rtype(r0) == RSlot) {
@@ -1276,14 +1306,16 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
 			} else if (rtype(r0) == RTmp) {
 				/* Load from address in register */
-				fprintf(f, "\tmov bx, %s\n", rname[r0.val]);
+				if (strcmp(rname[r0.val], "bx") != 0)
+					fprintf(f, "\tmov bx, %s\n", rname[r0.val]);
 				fprintf(f, "\tmov ax, word [bx]\n");
 				fprintf(f, "\tmov dx, word [bx+2]\n");
 			} else if (rtype(r0) == RMem) {
 				/* Complex addressing mode */
 				Mem *m = &fn->mem[r0.val];
 				if (!req(m->base, R) && rtype(m->base) == RTmp) {
-					fprintf(f, "\tmov bx, %s\n", rname[m->base.val]);
+					if (strcmp(rname[m->base.val], "bx") != 0)
+						fprintf(f, "\tmov bx, %s\n", rname[m->base.val]);
 					if (m->offset.type == CBits) {
 						fprintf(f, "\tmov ax, word [bx+%"PRIi64"]\n", m->offset.bits.i);
 						fprintf(f, "\tmov dx, word [bx+%"PRIi64"]\n", m->offset.bits.i + 2);
@@ -1305,6 +1337,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				}
 			}
 
+			if (save_bx_ld) fprintf(f, "\tpop bx\n");
 			kl_restore_axdx(s_ld, f);
 			}
 			return;
@@ -1325,10 +1358,42 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			{
 			int src_in_ax = (rtype(r0) == RTmp && r0.val == RAX);
 			int src_in_dx = (rtype(r0) == RTmp && r0.val == RDX);
+			int src_in_bx = (rtype(r0) == RTmp && r0.val == RBX);
+			int addr_in_bx =
+			    (rtype(r1) == RTmp && r1.val == RBX) ||
+			    (rtype(r1) == RMem && !req(fn->mem[r1.val].base, R)
+			     && rtype(fn->mem[r1.val].base) == RTmp
+			     && fn->mem[r1.val].base.val == RBX);
+			int needs_bx = (rtype(r1) == RTmp || rtype(r1) == RMem);
 			int save_ax = !src_in_ax;
 			int save_dx = !src_in_dx;
+			/* BX is used as the destination-address scratch register; if
+			 * rega placed any live tmp in BX (and r1's reg isn't BX
+			 * itself), we must save/restore it.  Skip if the source IS
+			 * in BX (then it's being read, not corrupted by us). */
+			int save_bx = needs_bx && !addr_in_bx && !src_in_bx;
 			if (save_ax) fprintf(f, "\tpush ax\n");
 			if (save_dx) fprintf(f, "\tpush dx\n");
+			if (save_bx) fprintf(f, "\tpush bx\n");
+
+			/* Capture destination address into BX BEFORE the value load
+			 * clobbers AX/DX — otherwise, if rega placed r1's register in
+			 * AX or DX, `mov ax,<const>` (or the cwd that follows) would
+			 * destroy the address and the store would target wherever the
+			 * value happens to be (wild write).  Found by Stevie's
+			 * `Fileend->linep->num = 0xffff` silently writing to address
+			 * 0xFFFF instead of &num, which left every line-number field
+			 * as malloc-zero and made cursor motion impossible.
+			 */
+			if (rtype(r1) == RTmp) {
+				if (strcmp(rname[r1.val], "bx") != 0)
+					fprintf(f, "\tmov bx, %s\n", rname[r1.val]);
+			} else if (rtype(r1) == RMem) {
+				Mem *m = &fn->mem[r1.val];
+				if (!req(m->base, R) && rtype(m->base) == RTmp
+				    && strcmp(rname[m->base.val], "bx") != 0)
+					fprintf(f, "\tmov bx, %s\n", rname[m->base.val]);
+			}
 
 			/* Load value to store */
 			if (rtype(r0) == RSlot) {
@@ -1343,18 +1408,16 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tcwd\n");
 			}
 
-			/* Store to destination */
+			/* Store to destination (address already in BX for RTmp/RMem) */
 			if (rtype(r1) == RSlot) {
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(r1, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(r1, fn) + 2);
 			} else if (rtype(r1) == RTmp) {
-				fprintf(f, "\tmov bx, %s\n", rname[r1.val]);
 				fprintf(f, "\tmov word [bx], ax\n");
 				fprintf(f, "\tmov word [bx+2], dx\n");
 			} else if (rtype(r1) == RMem) {
 				Mem *m = &fn->mem[r1.val];
 				if (!req(m->base, R) && rtype(m->base) == RTmp) {
-					fprintf(f, "\tmov bx, %s\n", rname[m->base.val]);
 					if (m->offset.type == CBits) {
 						fprintf(f, "\tmov word [bx+%"PRIi64"], ax\n", m->offset.bits.i);
 						fprintf(f, "\tmov word [bx+%"PRIi64"], dx\n", m->offset.bits.i + 2);
@@ -1365,6 +1428,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				}
 			}
 
+			if (save_bx) fprintf(f, "\tpop bx\n");
 			if (save_dx) fprintf(f, "\tpop dx\n");
 			if (save_ax) fprintf(f, "\tpop ax\n");
 			}
@@ -2706,8 +2770,10 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tretf\n");
 			fprintf(f, ".Lfarcall_%p:\n", (void*)i);
 		} else if (rtype(target) == RSlot) {
-			/* Kl spilled to a stack slot — call far through it directly. */
-			fprintf(f, "\tcall far dword [bp%+ld]\n", (long)slot(target, fn));
+			/* Kl spilled to a stack slot — call far through it directly.
+			 * NASM in `cpu 8086` mode rejects the `dword` size hint;
+			 * `call far` already implies a 32-bit memory operand. */
+			fprintf(f, "\tcall far [bp%+ld]\n", (long)slot(target, fn));
 		} else if (rtype(target) == RCon) {
 			/* Direct far call to function */
 			Con *c = &fn->con[target.val];
@@ -3000,9 +3066,26 @@ end_load_block:
 		 * arg0 (e.g. both end up in AX) — the `mov dst, 1` would
 		 * clobber arg0 before the comparison reads it.  `mov`
 		 * doesn't modify flags on 8086, so doing cmp first then
-		 * `mov dst, 1` between cmp and jcc is safe. */
+		 * `mov dst, 1` between cmp and jcc is safe.
+		 *
+		 * 8086 has no mem-mem cmp, so when both args are slots
+		 * stage arg0 through AX (save/restore to preserve any
+		 * live value rega assigned to AX).  AX is safe scratch
+		 * because the immediately following `mov dst, 1` either
+		 * targets a slot or a different register (or AX itself,
+		 * in which case the staged value is dead by then). */
+		{
+		int both_mem = (rtype(i->arg[0]) == RSlot
+		             && rtype(i->arg[1]) == RSlot);
+		if (both_mem) {
+			fprintf(f, "\tpush ax\n");
+			fprintf(f, "\tmov ax, word [bp%+ld]\n",
+				(long)slot(i->arg[0], fn));
+		}
 		fprintf(f, "\tcmp ");
-		if (rtype(i->arg[0]) == RTmp)
+		if (both_mem)
+			fprintf(f, "ax");
+		else if (rtype(i->arg[0]) == RTmp)
 			fprintf(f, "%s", rname[i->arg[0].val]);
 		else if (rtype(i->arg[0]) == RSlot)
 			fprintf(f, "word [bp%+ld]", (long)slot(i->arg[0], fn));
@@ -3016,6 +3099,9 @@ end_load_block:
 		else if (rtype(i->arg[1]) == RCon)
 			fprintf(f, "%"PRIi64, fn->con[i->arg[1].val].bits.i);
 		fprintf(f, "\n");
+		if (both_mem)
+			fprintf(f, "\tpop ax\n");
+		}
 		/* Materialize dst = 1 (assume condition true).  No flag impact. */
 		fprintf(f, "\tmov ");
 		if (rtype(i->to) == RTmp)
