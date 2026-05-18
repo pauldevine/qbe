@@ -322,34 +322,24 @@ int	n;
 	LPTR	p, *np;
 	register int	k;
 
-	/* MiniC truncates struct assignment to a single 16-bit word, so
-	 * `p = *Curschar` and `p = *np` only copy the linep pointer.
-	 * Spell the copy as two scalar assignments to also carry the
-	 * index field — otherwise coladvance() starts at a garbage
-	 * column and the cursor never visibly moves. */
-	p.linep = Curschar->linep;
-	p.index = Curschar->index;
+	p = *Curschar;
 	for ( k=0; k<n; k++ ) {
 		/* Look for the previous line */
 		if ( (np=prevline(&p)) == NULL ) {
+			/* If we've at least backed up a little .. */
 			if ( k > 0 )
-				break;
+				break;	/* to update the cursor, etc. */
 			else
 				return FALSE;
 		}
-		p.linep = np->linep;
-		p.index = np->index;
+		p = *np;
 	}
-	Curschar->linep = p.linep;
-	Curschar->index = p.index;
+	*Curschar = p;
 	/* This makes sure Topchar gets updated so the complete line */
-	/* is on the screen. */
+	/* is one the screen. */
 	cursupdate();
-	{
-		LPTR *_lp = coladvance(&p, Curswant);
-		Curschar->linep = _lp->linep;
-		Curschar->index = _lp->index;
-	}
+	/* try to advance to the column we want to be at */
+	*Curschar = *coladvance(&p, Curswant);
 	return TRUE;
 }
 
@@ -360,8 +350,7 @@ int	n;
 	LPTR	p, *np;
 	register int	k;
 
-	p.linep = Curschar->linep;
-	p.index = Curschar->index;
+	p = *Curschar;
 	for ( k=0; k<n; k++ ) {
 		/* Look for the next line */
 		if ( (np=nextline(&p)) == NULL ) {
@@ -370,14 +359,10 @@ int	n;
 			else
 				return FALSE;
 		}
-		p.linep = np->linep;
-		p.index = np->index;
+		p = *np;
 	}
-	{
-		LPTR *_lp = coladvance(&p, Curswant);
-		Curschar->linep = _lp->linep;
-		Curschar->index = _lp->index;
-	}
+	/* try to advance to the column we want to be at */
+	*Curschar = *coladvance(&p, Curswant);
 	return TRUE;
 }
 
