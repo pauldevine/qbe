@@ -13,6 +13,7 @@ amd64_memargs(int op)
 }
 
 #define AMD64_COMMON \
+	.wordsz = 4, \
 	.gpr0 = RAX, \
 	.ngpr = NGPR, \
 	.fpr0 = XMM0, \

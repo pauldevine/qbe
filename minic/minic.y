@@ -853,6 +853,20 @@ iralign(unsigned ctyp)
 	return 4;
 }
 
+/* Format a `{ ... }` data initializer for a zero-initialized global of
+ * type `ctyp`.  Scalars use `{ <kind> 0 }`; struct/union types reserve
+ * SIZE(ctyp) bytes via `align N { z S }` so multi-word structs (e.g.
+ * `LPTR { LINE *linep; int index; }` = 4 bytes) don't overlap the next
+ * global symbol the way a single `{ w 0 }` (2 bytes on i8086) would. */
+static void
+emit_zero_init(char *buf, unsigned ctyp)
+{
+	if (KIND(ctyp) == STRUCT_T || KIND(ctyp) == UNION_T)
+		sprintf(buf, "align %d { z %d }", iralign(ctyp), SIZE(ctyp));
+	else
+		sprintf(buf, "{ %c 0 }", irtyp(ctyp));
+}
+
 void
 psymb(Symb s)
 {
@@ -3859,12 +3873,14 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
                | ';'
 {
 	/* Global variable */
+	char buf[64];
 	if (parsed_type == NIL)
 		die("invalid void declaration");
 	if (nglo == NGlo)
 		die("too many string literals");
-	ini[nglo] = alloc(sizeof "{ x 0 }");
-	sprintf(ini[nglo], "{ %c 0 }", irtyp(parsed_type));
+	emit_zero_init(buf, parsed_type);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
 	strcpy(gloname[nglo], parsed_ident);
 	varadd(parsed_ident, nglo++, parsed_type, 0);
 }
@@ -3938,7 +3954,7 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	/* First name: emit as plain global. */
 	if (nglo == NGlo)
 		die("too many globals");
-	sprintf(buf, "{ %c 0 }", irtyp(parsed_type));
+	emit_zero_init(buf, parsed_type);
 	ini[nglo] = alloc(strlen(buf) + 1);
 	strcpy(ini[nglo], buf);
 	strcpy(gloname[nglo], parsed_ident);
@@ -3959,7 +3975,7 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 		} else {
 			if (nglo == NGlo)
 				die("too many globals");
-			sprintf(buf, "{ %c 0 }", irtyp(parsed_type));
+			emit_zero_init(buf, parsed_type);
 			ini[nglo] = alloc(strlen(buf) + 1);
 			strcpy(ini[nglo], buf);
 			strcpy(gloname[nglo], n->u.v);

@@ -81,6 +81,9 @@ struct Target {
 	char apple;
 	char windows;
 	enum MemModel memmodel; /* Memory model (for 8086) */
+	int wordsz; /* byte width of Kw on this target (4 for 32/64-bit
+	             * targets; 2 for i8086, where the backend emits
+	             * `storew`/`loadw` as 16-bit `mov word`) */
 	int gpr0;   /* first general purpose reg */
 	int ngpr;
 	int fpr0;   /* first floating point reg */

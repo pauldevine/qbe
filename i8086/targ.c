@@ -30,6 +30,8 @@ i8086_memargs(int op)
 Target T_i8086 = {
 	.name = "i8086",
 	.memmodel = Msmall,  /* Default to small memory model */
+	.wordsz = 2,         /* Kw is 16 bits on 8086; storew/loadw are
+	                      * single `mov word` instructions */
 	.gpr0 = RAX,
 	.ngpr = NGPR,
 	.fpr0 = 0,  /* no FPU initially */
