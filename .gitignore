@@ -36,3 +36,6 @@ tools/lexh
 .idea/
 *.swp
 *.swo
+
+# Session scratchpad — not part of repo
+NEXT_SESSION_PROMPT.md
