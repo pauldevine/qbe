@@ -152,6 +152,10 @@ int lbl, tmp, nglo;
 int enumval; /* Current enum value */
 int cur_fn_interrupt; /* 1 if current function has __attribute__((interrupt)) */
 int cur_fn_weak;      /* 1 if current function has __attribute__((weak)) */
+char cur_fn_name[NString];  /* Name of function currently being emitted — used
+                             * to mangle function-local statics into file-scope
+                             * data globals (`static int x;` in foo() →
+                             * `data $_foo_x = ...`). */
 char *ini[NGlo];
 char gloname[NGlo][NString];  /* Real C name for each global slot — used to
                                * emit `data $foo = ...` instead of $glo1 so
@@ -164,6 +168,8 @@ struct {
 	int enumconst; /* -2 means it's an enum constant, glo stores the value */
 	int isarray; /* 1 if this is an array, 0 if it's a regular variable or pointer */
 	int isextern; /* 1 if this is an extern declaration */
+	int isstaticlocal; /* 1 if this is a function-local static (mangled global,
+	                    * but symtab entry should be cleared between functions) */
 } varh[NVar];
 
 /* Typedef table */
@@ -240,7 +246,7 @@ varclr()
 	unsigned h;
 
 	for (h=0; h<NVar; h++)
-		if (!varh[h].glo && !varh[h].enumconst)
+		if ((!varh[h].glo && !varh[h].enumconst) || varh[h].isstaticlocal)
 			varh[h].v[0] = 0;
 
 	/* Linear-probe chain repair: a freshly emptied slot can sit between
@@ -288,6 +294,7 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 			varh[h].enumconst = (glo == -2) ? 1 : 0;
 			varh[h].isarray = isarray;
 			varh[h].isextern = 0;
+			varh[h].isstaticlocal = 0;
 			return;
 		}
 		if (strcmp(varh[h].v, v) == 0) {
@@ -335,6 +342,7 @@ varaddextern(char *v, unsigned ctyp, int isarray)
 			varh[h].enumconst = 0;
 			varh[h].isarray = isarray;
 			varh[h].isextern = 1;  /* Mark as extern */
+			varh[h].isstaticlocal = 0;
 			return;
 		}
 		if (strcmp(varh[h].v, v) == 0) {
@@ -865,6 +873,50 @@ emit_zero_init(char *buf, unsigned ctyp)
 		sprintf(buf, "align %d { z %d }", iralign(ctyp), SIZE(ctyp));
 	else
 		sprintf(buf, "{ %c 0 }", irtyp(ctyp));
+}
+
+/* Emit a function-local `static` as a file-scope data global with a
+ * mangled name (`_<fnname>_<varname>`), and register the source name
+ * in the local symbol table as a reference to that global.  varclr
+ * clears the entry between functions so two functions can both have
+ * `static int pos;` without colliding.
+ *
+ *   name      — source identifier as written in C
+ *   sym_ctyp  — type to register in symtab (for arrays: pointer-to-elem)
+ *   isarray   — passed through to varadd (so address-of decays correctly)
+ *   init_buf  — full QBE init body (e.g. "{ w 42 }" or "align 4 { z 12 }").
+ *
+ * Linearly probes the symtab post-varadd to set isstaticlocal=1; that
+ * flag makes varclr discard the entry on the next varclr.
+ */
+static void
+emit_static_local(char *name, unsigned sym_ctyp, int isarray, char *init_buf)
+{
+	char mangled[NString];
+	unsigned h0, h;
+	int n;
+
+	if (cur_fn_name[0] == 0)
+		die("static local outside function context");
+	n = snprintf(mangled, sizeof mangled, "_%s_%s", cur_fn_name, name);
+	if (n < 0 || n >= (int)sizeof mangled)
+		die("static-local mangled name too long");
+	if (nglo == NGlo)
+		die("too many globals");
+	ini[nglo] = alloc(strlen(init_buf) + 1);
+	strcpy(ini[nglo], init_buf);
+	strcpy(gloname[nglo], mangled);
+	varadd(name, nglo, sym_ctyp, isarray);
+	h0 = hash(name);
+	h = h0;
+	do {
+		if (strcmp(varh[h].v, name) == 0) {
+			varh[h].isstaticlocal = 1;
+			break;
+		}
+		h = (h + 1) % NVar;
+	} while (h != h0);
+	nglo++;
 }
 
 void
@@ -3049,6 +3101,34 @@ emit_local_init(unsigned ctyp, Node *ident, Node *initexpr)
 	}
 }
 
+/* `static T name = init;` inside a function.  Lower constant shapes
+ * (integer literal, negated literal, string literal) directly into the
+ * mangled file-scope data global so the variable's address is stable
+ * across calls and the value persists.  Anything else falls back to
+ * the historical alloc-on-stack + runtime-init path; that path doesn't
+ * give true `static` semantics, but it preserves behaviour for code
+ * that only reads the variable after the (re)init runs. */
+void
+emit_static_local_init(unsigned ctyp, Node *ident, Node *initexpr)
+{
+	char buf[64];
+	if (ctyp == NIL)
+		die("invalid void declaration");
+	if (initexpr->op == 'S') {
+		sprintf(buf, "{ %c $glo%d }", irtyp(ctyp), initexpr->u.n);
+		emit_static_local(ident->u.v, ctyp, 0, buf);
+	} else if (initexpr->op == 'N') {
+		sprintf(buf, "{ %c %d }", irtyp(ctyp), initexpr->u.n);
+		emit_static_local(ident->u.v, ctyp, 0, buf);
+	} else if (initexpr->op == '-' && initexpr->l &&
+	           initexpr->l->op == 'N' && !initexpr->r) {
+		sprintf(buf, "{ %c %d }", irtyp(ctyp), -initexpr->l->u.n);
+		emit_static_local(ident->u.v, ctyp, 0, buf);
+	} else {
+		emit_local_init(ctyp, ident, initexpr);
+	}
+}
+
 /* Walk a chain of init_decl Nodes (op='I', u.v=name, l=initexpr or 0)
  * and emit a local alloc + optional store for each. */
 void
@@ -3251,6 +3331,8 @@ emit_knr_func(char *fname, Node *params)
 			varadd(n->u.v, 0, INT, 0);
 
 	curfntyp = INT;
+	strncpy(cur_fn_name, fname, NString - 1);
+	cur_fn_name[NString - 1] = 0;
 	varadd(fname, 1, FUNC(INT), 0);
 	fprintf(of, "export function w $%s(", fname);
 	n = params;
@@ -3290,6 +3372,8 @@ emit_knr_func_typed(char *fname, Node *params)
 		if (!varget(n->u.v))
 			varadd(n->u.v, 0, INT, 0);
 
+	strncpy(cur_fn_name, fname, NString - 1);
+	cur_fn_name[NString - 1] = 0;
 	varadd(fname, 1, FUNC(curfntyp), 0);
 	if (curfntyp == NIL)
 		fprintf(of, "export function $%s(", fname);
@@ -4078,6 +4162,8 @@ ansi_func_proto: '(' init_ansi par0 ')'
 	int t, m;
 
 	curfntyp = parsed_type;
+	strncpy(cur_fn_name, parsed_ident, NString - 1);
+	cur_fn_name[NString - 1] = 0;
 	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
 	if (curfntyp == NIL)
 		fprintf(of, "export function $%s(", parsed_ident);
@@ -4187,6 +4273,8 @@ prot_knr: IDENT '(' par0 ')'
 	int t, m;
 
 	curfntyp = INT;
+	strncpy(cur_fn_name, $1->u.v, NString - 1);
+	cur_fn_name[NString - 1] = 0;
 	varadd($1->u.v, 1, FUNC(INT), 0);
 	fprintf(of, "export function w $%s(", $1->u.v);
 	n = $3;
@@ -4409,37 +4497,31 @@ dcls:
 }
     | dcls STATIC type IDENT ';'
 {
-	int s;
-	char *v;
-
+	/* Function-local static scalar/struct (uninitialized): emit as a
+	 * zero-filled file-scope global with mangled name `_<fn>_<var>` so
+	 * its address persists across calls. */
+	char buf[64];
 	if ($3 == NIL)
 		die("invalid void declaration");
-	v = $4->u.v;
-	s = SIZE($3);
-	varadd(v, 0, $3, 0);
-	fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($3), s);
+	emit_zero_init(buf, $3);
+	emit_static_local($4->u.v, $3, 0, buf);
 }
-    | dcls STATIC type IDENT '=' expr ';' { emit_local_init($3, $4, $6); }
+    | dcls STATIC type IDENT '=' expr ';' { emit_static_local_init($3, $4, $6); }
     | dcls STATIC type IDENT '[' ']' '=' '{' sai_init_clear sai_list opt_trailing_comma '}' ';'
 {
 	emit_static_pointer_array($3, $4->u.v);
 }
     | dcls STATIC type IDENT '[' NUM ']' ';'
 {
-	/* Static local array — currently treated as a stack alloc.  Real C
-	 * `static` would persist across calls, but for stevie-style use cases
-	 * (single-function helpers) the difference is invisible. */
-	int s, n, total;
-	char *v;
-
+	/* Function-local static array (uninitialized) — emit as a
+	 * zero-filled file-scope data global with mangled name. */
+	char buf[64];
+	int total;
 	if ($3 == NIL)
 		die("invalid void array");
-	v = $4->u.v;
-	n = $6->u.n;
-	s = SIZE($3);
-	total = s * n;
-	varadd(v, 0, IDIR($3), 1);
-	fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($3), total);
+	total = SIZE($3) * $6->u.n;
+	sprintf(buf, "align %d { z %d }", iralign($3), total);
+	emit_static_local($4->u.v, IDIR($3), 1, buf);
 }
     | dcls EXTERN type IDENT ';'
 {
@@ -4719,14 +4801,13 @@ stmt: ';'                            { $$ = 0; }
         $$ = 0;
     }
     | STATIC type IDENT ';'          {
-        int s;
-        char *v;
+        /* Statement-scope `static T var;` — same treatment as the
+         * top-of-block form: emit as mangled file-scope data global. */
+        char buf[64];
         if ($2 == NIL)
             die("invalid void declaration");
-        v = $3->u.v;
-        s = SIZE($2);
-        varadd(v, 0, $2, 0);
-        fprintf(of, "\t%%%s =w alloc%d %d\n", v, iralign($2), s);
+        emit_zero_init(buf, $2);
+        emit_static_local($3->u.v, $2, 0, buf);
         $$ = 0;
     }
     | EXTERN type IDENT ';'          {

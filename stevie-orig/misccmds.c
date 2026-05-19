@@ -265,14 +265,12 @@ fileinfo()
  * Returns a pointer to the last line of the file if n is zero, or
  * beyond the end of the file.
  */
-/* file-scope static — see linefunc.c for the minic static-local-as-stack
- * issue this works around. */
-static	LPTR	_gtl_l;
 LPTR *
 gotoline(n)
 register int	n;
 {
-#define l _gtl_l
+	static	LPTR	l;
+
 	l.index = 0;
 
 	if ( n == 0 )
@@ -285,7 +283,6 @@ register int	n;
 				break;
 	}
 	return &l;
-#undef l
 }
 
 void
