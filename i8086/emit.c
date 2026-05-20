@@ -338,6 +338,54 @@ kl_restore_axdx(AxDxSave s, FILE *f)
 	if (s.save_ax) fprintf(f, "\tpop ax\n");
 }
 
+/* When a Kl op uses AX/DX as scratch (Oadd/Osub/Omul), an arg that
+ * rega placed in AX or DX is silently lost: `mov ax, r0` overwrites
+ * a r1-in-AX; `xor dx, dx` zeros a r1-in-DX.  Subsequent references
+ * to rname[r1.val] then resolve to the clobbered reg.  Stage such
+ * args into BX or CX before AX/DX are touched; callers reference
+ * `stage.scratch_reg` in place of rname[r1.val]. */
+typedef struct ArgStage {
+	const char *scratch_reg;  /* "bx"/"cx", or NULL if no staging */
+	int pushed;               /* whether we push'd to save caller's value */
+} ArgStage;
+
+static ArgStage
+kl_stage_arg(Ref r1, Ref r0, Ref to, FILE *f)
+{
+	ArgStage s = { NULL, 0 };
+	const char *cands[2] = { "bx", "cx" };
+	int dst_aliases_scratch;
+	int k;
+
+	if (rtype(r1) != RTmp) return s;
+	if (r1.val != RAX && r1.val != RDX) return s;
+
+	/* Pick a scratch reg that isn't r0's reg (else `mov scratch, r1`
+	 * would clobber r0 before we load it). */
+	for (k = 0; k < 2; k++) {
+		if (rtype(r0) == RTmp && strcmp(rname[r0.val], cands[k]) == 0)
+			continue;
+		s.scratch_reg = cands[k];
+		break;
+	}
+	if (!s.scratch_reg) s.scratch_reg = "bx";
+
+	dst_aliases_scratch = (rtype(to) == RTmp
+		&& strcmp(rname[to.val], s.scratch_reg) == 0);
+	if (!dst_aliases_scratch) {
+		fprintf(f, "\tpush %s\n", s.scratch_reg);
+		s.pushed = 1;
+	}
+	fprintf(f, "\tmov %s, %s\n", s.scratch_reg, rname[r1.val]);
+	return s;
+}
+
+static void
+kl_unstage_arg(ArgStage s, FILE *f)
+{
+	if (s.pushed) fprintf(f, "\tpop %s\n", s.scratch_reg);
+}
+
 /* Load a 32-bit operand into DX:AX.  The original 32-bit handlers only
  * handled RSlot/RCon; this also handles RTmp (treats the temp's register
  * as the low word and zero-extends DX, matching the convention in the
@@ -858,6 +906,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			int dst_in_dx = (rtype(i->to) == RTmp && i->to.val == RDX);
 			int save_ax = !dst_in_ax;
 			int save_dx = !dst_in_dx;
+			ArgStage r1s = kl_stage_arg(r1, r0, i->to, f);
 			if (save_ax) fprintf(f, "\tpush ax\n");
 			if (save_dx) fprintf(f, "\tpush dx\n");
 
@@ -884,7 +933,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tadd ax, %d\n", (int)(val & 0xFFFF));
 				fprintf(f, "\tadc dx, %d\n", (int)((val >> 16) & 0xFFFF));
 			} else if (rtype(r1) == RTmp) {
-				fprintf(f, "\tadd ax, %s\n", rname[r1.val]);
+				const char *r1n = r1s.scratch_reg ? r1s.scratch_reg : rname[r1.val];
+				fprintf(f, "\tadd ax, %s\n", r1n);
 				fprintf(f, "\tadc dx, 0\n");
 			}
 
@@ -905,6 +955,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 
 			if (save_dx) fprintf(f, "\tpop dx\n");
 			if (save_ax) fprintf(f, "\tpop ax\n");
+			kl_unstage_arg(r1s, f);
 			}
 			return;
 
@@ -917,6 +968,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 */
 			{
 			int dst_in_dx_sub = (rtype(i->to) == RTmp && i->to.val == RDX);
+			ArgStage r1s = kl_stage_arg(r1, r0, i->to, f);
 			AxDxSave s_sub = kl_save_axdx(i->to, f);
 
 			/* Load src0 to DX:AX */
@@ -941,7 +993,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tsub ax, %d\n", (int)(val & 0xFFFF));
 				fprintf(f, "\tsbb dx, %d\n", (int)((val >> 16) & 0xFFFF));
 			} else if (rtype(r1) == RTmp) {
-				fprintf(f, "\tsub ax, %s\n", rname[r1.val]);
+				const char *r1n = r1s.scratch_reg ? r1s.scratch_reg : rname[r1.val];
+				fprintf(f, "\tsub ax, %s\n", r1n);
 				fprintf(f, "\tsbb dx, 0\n");
 			}
 
@@ -963,6 +1016,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			}
 
 			kl_restore_axdx(s_sub, f);
+			kl_unstage_arg(r1s, f);
 			}
 			return;
 
@@ -973,6 +1027,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 */
 			{
 			int dst_in_dx_mul = (rtype(i->to) == RTmp && i->to.val == RDX);
+			ArgStage r1s = kl_stage_arg(r1, r0, i->to, f);
 			AxDxSave s_mul = kl_save_axdx(i->to, f);
 
 			/* Load src0 low word to AX */
@@ -993,7 +1048,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));
 				fprintf(f, "\timul bx\n");
 			} else if (rtype(r1) == RTmp) {
-				fprintf(f, "\timul %s\n", rname[r1.val]);
+				const char *r1n = r1s.scratch_reg ? r1s.scratch_reg : rname[r1.val];
+				fprintf(f, "\timul %s\n", r1n);
 			}
 
 			/* Store result */
@@ -1009,6 +1065,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			}
 
 			kl_restore_axdx(s_mul, f);
+			kl_unstage_arg(r1s, f);
 			}
 			return;
 
