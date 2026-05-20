@@ -297,10 +297,36 @@ _atoi:
     mov ax, 0
     ret
 
-; sprintf(char *dest, const char *fmt, ...)
-; Minimal: handles %s (string), %d (signed int), %ld (signed long),
-; %c (char), %% (literal %).  Unknown spec consumes one word arg and
-; emits the spec letter literally so it's visible during dev.
+; ============================================================================
+; sprintf(char *dest, const char *fmt, ...) — full implementation
+; ============================================================================
+;
+; Conversion specifiers:
+;   %d %i      signed decimal       (16-bit; 32-bit with `l`)
+;   %u         unsigned decimal     (16-bit; 32-bit with `l`)
+;   %x %X      hex (lower/upper)    (16-bit; 32-bit with `l`)
+;   %o         octal                (16-bit; 32-bit with `l`)
+;   %s         string
+;   %c         character
+;   %p         pointer (treated as %x with `l`)
+;   %%         literal '%'
+;
+; Flags / modifiers:
+;   -          left-align within field
+;   0          zero-pad on left (integer only; ignored if precision set)
+;   +, ' ', #  parsed but ignored
+;   <width>    minimum field width (decimal digits, no '*')
+;   .<prec>    string max length / integer min digits
+;   l          long argument (32-bit on i8086)
+;   ll         parsed; treated as `l` (no long long support)
+;   h, hh      parsed but ignored
+;
+; Not supported: floating point (%f %e %g %a), %n, %*<width|prec>.
+;
+; Internal helpers (_spr_emit_int) use `retn` so libstub_to_exe.py's
+; ret→retf rewrite doesn't break the near-call ABI used inside this file.
+; ============================================================================
+
 global _sprintf
 _sprintf:
     push bp
@@ -312,72 +338,134 @@ _sprintf:
     mov si, [bp+6]              ; fmt
     lea bx, [bp+8]              ; ptr to first variadic arg
 
-.spr_loop:
+.spr_top:
     lodsb
     test al, al
-    jz .spr_end
+    jz .spr_done
     cmp al, '%'
     je .spr_pct
     stosb
-    jmp .spr_loop
+    jmp .spr_top
 
 .spr_pct:
+    mov word [_spr_flags], 0
+    mov word [_spr_width], 0
+    mov word [_spr_prec], 0
+
+    ; -- Flags --
+.spr_pf:
     lodsb
-    test al, al
-    jz .spr_end
-    cmp al, '%'
-    je .spr_literal
-    cmp al, 's'
-    je .spr_str
-    cmp al, 'c'
-    je .spr_chr
-    cmp al, 'd'
-    je .spr_decw
+    cmp al, '-'
+    jne .pf_nminus
+    or word [_spr_flags], 1
+    jmp .spr_pf
+.pf_nminus:
+    cmp al, '0'
+    jne .pf_nzero
+    or word [_spr_flags], 2
+    jmp .spr_pf
+.pf_nzero:
+    cmp al, '+'
+    je .spr_pf
+    cmp al, ' '
+    je .spr_pf
+    cmp al, '#'
+    je .spr_pf
+
+    ; -- Width (AL has lookahead) --
+.spr_pw:
+    cmp al, '0'
+    jb .pw_done
+    cmp al, '9'
+    ja .pw_done
+    push ax
+    mov ax, [_spr_width]
+    mov cx, 10
+    mul cx
+    mov cx, ax
+    pop ax
+    sub al, '0'
+    xor ah, ah
+    add cx, ax
+    mov [_spr_width], cx
+    lodsb
+    jmp .spr_pw
+.pw_done:
+
+    ; -- Precision --
+    cmp al, '.'
+    jne .pp_done
+    or word [_spr_flags], 8     ; bit 3: precision is set
+    lodsb
+.spr_pp:
+    cmp al, '0'
+    jb .pp_done
+    cmp al, '9'
+    ja .pp_done
+    push ax
+    mov ax, [_spr_prec]
+    mov cx, 10
+    mul cx
+    mov cx, ax
+    pop ax
+    sub al, '0'
+    xor ah, ah
+    add cx, ax
+    mov [_spr_prec], cx
+    lodsb
+    jmp .spr_pp
+.pp_done:
+
+    ; -- Length modifier --
     cmp al, 'l'
-    je .spr_long
-    ; unknown — emit the char so we notice
-.spr_literal:
-    stosb
-    jmp .spr_loop
-
-.spr_chr:
-    mov ax, [bx]
-    add bx, 2
-    stosb
-    jmp .spr_loop
-
-.spr_str:
-    push si
-    mov si, [bx]
-    add bx, 2
-.spr_str_lp:
+    jne .lm_h
+    or word [_spr_flags], 4
     lodsb
+    cmp al, 'l'                 ; 'll' → consume, still treat as `l`
+    jne .lm_done
+    lodsb
+    jmp .lm_done
+.lm_h:
+    cmp al, 'h'                 ; 'h' / 'hh' → ignored (promoted to int)
+    jne .lm_done
+    lodsb
+    cmp al, 'h'
+    jne .lm_done
+    lodsb
+.lm_done:
+
+    ; -- Dispatch on conversion specifier --
     test al, al
-    jz .spr_str_dn
-    stosb
-    jmp .spr_str_lp
-.spr_str_dn:
-    pop si
-    jmp .spr_loop
-
-.spr_decw:
-    mov ax, [bx]
-    add bx, 2
-    call _spr_emit_w16
-    jmp .spr_loop
-
-.spr_long:
-    ; expect 'd' next: %ld
-    lodsb
+    jz .spr_done
+    cmp al, '%'
+    je .spr_emit_pct
+    cmp al, 'c'
+    je .do_chr
+    cmp al, 's'
+    je .do_str
     cmp al, 'd'
-    jne .spr_loop
-    mov ax, [bx]                ; low word
-    mov dx, [bx+2]              ; high word
-    add bx, 4
-    call _spr_emit_l32
-    jmp .spr_loop
+    je .do_signed
+    cmp al, 'i'
+    je .do_signed
+    cmp al, 'u'
+    je .do_unsigned
+    cmp al, 'x'
+    je .do_hex_lo
+    cmp al, 'X'
+    je .do_hex_up
+    cmp al, 'o'
+    je .do_octal
+    cmp al, 'p'
+    je .do_hex_lo
+    ; Unknown: emit literally so the bad spec is visible.
+    stosb
+    jmp .spr_top
 
-.spr_end:
+.spr_emit_pct:
+    stosb
+    jmp .spr_top
+
+.spr_done:
     mov byte [di], 0
     xor ax, ax
     pop bx
@@ -386,52 +474,392 @@ _sprintf:
     pop bp
     ret
 
-; Emit signed 16-bit AX as decimal at ES:DI, advance DI.  Clobbers AX/CX/DX.
-; PRESERVES BX (sprintf uses BX as its variadic arg pointer; clobbering it
-; broke every format spec after the first %d — sprintf would then read %s
-; and %ld args from address 10 onward, producing garbage like "2 line, ?
-; character" instead of "2 lines, 22 characters").
-; Uses NEAR ret (retn) — these are internal helpers called via near `call`.
-; libstub_to_exe.py rewrites every `ret` to `retf` for the medium-model
-; .EXE build; we use `retn` so the rewrite skips us and the call/ret
-; size stays consistent.
-_spr_emit_w16:
-    push bx
-    test ax, ax
-    jns .ew_pos
-    mov byte [di], '-'
-    inc di
-    neg ax
-.ew_pos:
-    xor cx, cx
-.ew_div:
-    xor dx, dx
-    mov bx, 10
-    div bx                       ; ax=quot, dx=rem
+    ; ---- %c ----
+.do_chr:
+    mov ax, [bx]
+    add bx, 2
+    push ax                     ; save char (AL)
+    mov cx, [_spr_width]
+    cmp cx, 1
+    jbe .chr_emit
+    dec cx                      ; CX = pad count
+    test word [_spr_flags], 1
+    jnz .chr_left
+    ; right-align: spaces, then char
+    mov al, ' '
+    rep stosb
+    pop ax
+    stosb
+    jmp .spr_top
+.chr_left:
+    pop ax
+    stosb
+    mov al, ' '
+    rep stosb
+    jmp .spr_top
+.chr_emit:
+    pop ax
+    stosb
+    jmp .spr_top
+
+    ; ---- %s ----
+.do_str:
+    push si                     ; save fmt pointer
+    mov si, [bx]
+    add bx, 2
+
+    ; Cap scan length by precision if set
+    mov cx, 0x7FFF
+    test word [_spr_flags], 8
+    jz .str_no_prec
+    mov cx, [_spr_prec]
+.str_no_prec:
+    push si                     ; save src start
+    xor dx, dx                  ; DX = length
+.str_scan:
+    test cx, cx
+    jz .str_scan_done
+    cmp byte [si], 0
+    je .str_scan_done
+    inc si
+    inc dx
+    dec cx
+    jmp .str_scan
+.str_scan_done:
+    pop si                      ; SI = src, DX = length
+
+    mov cx, [_spr_width]
+    cmp cx, dx
+    jbe .str_no_pad
+    sub cx, dx                  ; CX = pad amount
+    test word [_spr_flags], 1
+    jnz .str_pad_after
+
+    ; pad before
+    push si
     push dx
+    mov al, ' '
+    rep stosb
+    pop cx                      ; original length
+    pop si
+    rep movsb
+    pop si                      ; restore fmt
+    jmp .spr_top
+
+.str_pad_after:
+    push cx                     ; save pad count
+    mov cx, dx
+    rep movsb
+    pop cx
+    mov al, ' '
+    rep stosb
+    pop si                      ; restore fmt
+    jmp .spr_top
+
+.str_no_pad:
+    mov cx, dx
+    rep movsb
+    pop si                      ; restore fmt
+    jmp .spr_top
+
+    ; ---- %d / %i ----
+.do_signed:
+    test word [_spr_flags], 4
+    jnz .sgn_long
+    mov ax, [bx]
+    add bx, 2
+    cwd                         ; sign-extend AX → DX:AX
+    jmp .sgn_common
+.sgn_long:
+    mov ax, [bx]
+    mov dx, [bx+2]
+    add bx, 4
+.sgn_common:
+    mov byte [_spr_signc], 0
+    test dx, dx
+    jns .sgn_pos
+    mov byte [_spr_signc], '-'
+    not dx
+    neg ax
+    sbb dx, -1                  ; finish two's-complement negate of DX:AX
+.sgn_pos:
+    mov cx, 10
+    call _spr_emit_int
+    jmp .spr_top
+
+    ; ---- %u ----
+.do_unsigned:
+    test word [_spr_flags], 4
+    jnz .uns_long
+    mov ax, [bx]
+    add bx, 2
+    xor dx, dx
+    jmp .uns_common
+.uns_long:
+    mov ax, [bx]
+    mov dx, [bx+2]
+    add bx, 4
+.uns_common:
+    mov byte [_spr_signc], 0
+    mov cx, 10
+    call _spr_emit_int
+    jmp .spr_top
+
+    ; ---- %x ----
+.do_hex_lo:
+    and word [_spr_flags], 0xFFEF       ; clear uppercase
+    jmp .hex_dispatch
+.do_hex_up:
+    or word [_spr_flags], 16
+.hex_dispatch:
+    test word [_spr_flags], 4
+    jnz .hex_long
+    mov ax, [bx]
+    add bx, 2
+    xor dx, dx
+    jmp .hex_common
+.hex_long:
+    mov ax, [bx]
+    mov dx, [bx+2]
+    add bx, 4
+.hex_common:
+    mov byte [_spr_signc], 0
+    mov cx, 16
+    call _spr_emit_int
+    jmp .spr_top
+
+    ; ---- %o ----
+.do_octal:
+    test word [_spr_flags], 4
+    jnz .oct_long
+    mov ax, [bx]
+    add bx, 2
+    xor dx, dx
+    jmp .oct_common
+.oct_long:
+    mov ax, [bx]
+    mov dx, [bx+2]
+    add bx, 4
+.oct_common:
+    mov byte [_spr_signc], 0
+    mov cx, 8
+    call _spr_emit_int
+    jmp .spr_top
+
+
+; ----------------------------------------------------------------------------
+; _spr_emit_int — write an unsigned 32-bit integer to ES:DI with formatting.
+;
+; In:
+;   DX:AX = unsigned value
+;   CX    = base (8, 10, 16)
+;   [_spr_flags] = bit0='-' bit1='0' bit2='l' bit3=prec-set bit4=uppercase-hex
+;   [_spr_width] = minimum field width
+;   [_spr_prec]  = minimum digit count (only when bit3 set)
+;   [_spr_signc] = sign character ('-') or 0
+;
+; Out: DI advanced past emitted bytes.  SI preserved.  BX preserved.
+; Trashes: AX, CX, DX.
+;
+; Uses `retn` so libstub_to_exe.py doesn't rewrite the return to far.
+; ----------------------------------------------------------------------------
+_spr_emit_int:
+    push bx
+    push si                     ; SI is sprintf's fmt pointer — preserve
+    mov [_spr_base], cx
+
+    push di                     ; save output ptr; reuse DI for digit gen
+    mov di, _spr_digbuf + 12
+    xor cx, cx                  ; CX = digit count
+
+    ; Special case: value = 0 with precision = 0 → no digits at all
+    mov bx, ax
+    or bx, dx
+    jnz .gd_loop
+    test word [_spr_flags], 8
+    jz .gd_emit_zero            ; no precision → emit single '0'
+    cmp word [_spr_prec], 0
+    jne .gd_emit_zero
+    jmp .gd_after
+
+.gd_emit_zero:
+    dec di
+    mov byte [di], '0'
     inc cx
-    test ax, ax
-    jnz .ew_div
-.ew_pop:
-    pop dx
-    add dl, '0'
-    mov [di], dl
-    inc di
-    loop .ew_pop
+    jmp .gd_after
+
+.gd_loop:
+    ; 32-bit divmod: DX:AX / base → DX:AX (quotient), BX = remainder
+    push cx                     ; save digit count
+    mov cx, [_spr_base]
+    mov bx, ax                  ; stash low word
+    mov ax, dx
+    xor dx, dx
+    div cx                      ; AX = q_hi, DX = r_hi
+    mov [_spr_qhi], ax
+    mov ax, bx                  ; restore low word into AX
+    div cx                      ; AX = q_lo, DX = remainder
+    mov bx, dx                  ; BX = remainder (digit value)
+    mov dx, [_spr_qhi]          ; DX = q_hi
+    pop cx                      ; restore digit count
+
+    push ax                     ; save low quotient across digit conversion
+    mov al, bl
+    add al, '0'
+    cmp bl, 10
+    jb .gd_dig_ok
+    add al, 'a' - '0' - 10      ; bump 10-15 to 'a'-'f' (+39)
+    test word [_spr_flags], 16
+    jz .gd_dig_ok
+    sub al, 'a' - 'A'           ; uppercase: lower→upper (-32)
+.gd_dig_ok:
+    dec di
+    mov [di], al
+    inc cx
+    pop ax
+
+    mov bx, ax
+    or bx, dx
+    jnz .gd_loop
+
+.gd_after:
+    ; CX = actual digit count.  DI = start of digits in _spr_digbuf.
+    ; SI was preserved above; swap roles now.
+    mov si, di                  ; SI = digit pointer
+    pop di                      ; restore output ptr (matches push di above)
+
+    ; Effective digit count = max(actual, precision-if-set)
+    mov ax, cx
+    test word [_spr_flags], 8
+    jz .ei_eff_ok
+    cmp ax, [_spr_prec]
+    jae .ei_eff_ok
+    mov ax, [_spr_prec]
+.ei_eff_ok:
+    ; Content length = effective digit count + (sign present ? 1 : 0)
+    mov bx, ax
+    cmp byte [_spr_signc], 0
+    je .ei_clen_ok
+    inc bx
+.ei_clen_ok:
+
+    ; Compute width padding: DX = max(0, width - content_len)
+    mov dx, [_spr_width]
+    cmp dx, bx
+    jbe .ei_no_wpad
+    sub dx, bx
+    jmp .ei_dispatch
+.ei_no_wpad:
+    xor dx, dx
+.ei_dispatch:
+
+    ; Branch on alignment / padding char
+    test word [_spr_flags], 1
+    jnz .ei_left
+
+    ; right-align: choose zero vs space pad
+    test word [_spr_flags], 2
+    jz .ei_right_space
+    test word [_spr_flags], 8
+    jnz .ei_right_space         ; precision present → zero flag suppressed
+
+    ; right-align, zero-pad: sign, DX zeros, precision-zeros, digits
+    cmp byte [_spr_signc], 0
+    je .rz_nosign
+    push ax
+    mov al, [_spr_signc]
+    stosb
+    pop ax
+.rz_nosign:
+    push ax
+    push cx
+    mov cx, dx
+    mov al, '0'
+    rep stosb
+    pop cx
+    pop ax
+    sub ax, cx                  ; AX = precision-driven extra zeros
+    jz .rz_pdone
+    push cx
+    mov cx, ax
+    mov al, '0'
+    rep stosb
+    pop cx
+.rz_pdone:
+    rep movsb
+    pop si
     pop bx
     retn
 
-; Emit DX:AX as decimal at ES:DI.  If the high word is zero, fall back
-; to the 16-bit emitter for simplicity.  Otherwise emit '?' as a
-; placeholder (TODO: full 32-bit conversion).
-_spr_emit_l32:
-    test dx, dx
-    jnz .el_big
-    jmp _spr_emit_w16
-.el_big:
-    mov byte [di], '?'
-    inc di
+.ei_right_space:
+    ; right-align, space-pad: DX spaces, sign, precision-zeros, digits
+    push ax
+    push cx
+    mov cx, dx
+    mov al, ' '
+    rep stosb
+    pop cx
+    pop ax
+    cmp byte [_spr_signc], 0
+    je .rs_nosign
+    push ax
+    push cx
+    mov al, [_spr_signc]
+    stosb
+    pop cx
+    pop ax
+.rs_nosign:
+    sub ax, cx
+    jz .rs_pdone
+    push cx
+    mov cx, ax
+    mov al, '0'
+    rep stosb
+    pop cx
+.rs_pdone:
+    rep movsb
+    pop si
+    pop bx
     retn
+
+.ei_left:
+    ; left-align: sign, precision-zeros, digits, DX trailing spaces
+    push dx
+    cmp byte [_spr_signc], 0
+    je .lt_nosign
+    push ax
+    push cx
+    mov al, [_spr_signc]
+    stosb
+    pop cx
+    pop ax
+.lt_nosign:
+    sub ax, cx
+    jz .lt_pdone
+    push cx
+    mov cx, ax
+    mov al, '0'
+    rep stosb
+    pop cx
+.lt_pdone:
+    rep movsb
+    pop cx
+    mov al, ' '
+    rep stosb
+    pop si
+    pop bx
+    retn
+
+
+; sprintf state (DGROUP).  Single-threaded DOS — safe as statics.
+_spr_flags:  dw 0
+_spr_width:  dw 0
+_spr_prec:   dw 0
+_spr_base:   dw 0
+_spr_qhi:    dw 0
+_spr_signc:  db 0
+_spr_pad0:   db 0
+_spr_digbuf: db 0,0,0,0,0,0,0,0,0,0,0,0
 
 
 global _fprintf
