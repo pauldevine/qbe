@@ -28,7 +28,15 @@ PROLOGUE = """\
 bits 16
 cpu 8086
 
-%define _heap_size 32768
+; Heap budget for the medium-model .EXE.  omf_link puts SS=DS=DGROUP
+; for near-pointer correctness, so DGROUP + stack must fit in 64KB.
+; Current non-heap DGROUP ≈ 21KB, stack ≈ 8KB, leaving ≈ 36KB for the
+; heap.  We use 34816 (34KB) to keep ~1KB margin for data growth.
+; The bump allocator never reclaims memory (`_free` is a no-op), so
+; long edit sessions still leak; files needing more working memory
+; than fits here run out.  Real fix is a freelist malloc and/or far
+; pointers for line storage.
+%define _heap_size 34816
 
 ; Declare all segments with attributes up-front so subsequent `segment X`
 ; references inherit the attrs (NASM warns on redeclaration with attrs).
@@ -38,64 +46,198 @@ segment _BSS class=BSS align=2 use16
 group DGROUP _DATA _BSS
 """
 
-# malloc/free are replaced with .EXE-specific versions that bump from
-# a fixed _BSS heap buffer instead of from _heap_end_of_image (a .COM
-# image-end label).  This block is appended at the very end so it
-# overrides nothing — the auto-converter detects malloc/free in the
-# original libstub.asm and skips them.
+# malloc/free are replaced with .EXE-specific versions that allocate
+# from a fixed _BSS heap buffer.  Freelist-based: free() actually
+# reclaims memory and adjacent free blocks coalesce, so stevie's
+# allocate-free-allocate edit cycle no longer leaks.
+#
+# Block layout: 2-byte size header (total block bytes incl. header,
+# always even ≥ 4), then payload.  Free blocks chain via a freelist
+# whose `next` pointers live in the payload area.
 MALLOC_EXE = """\
 
-; -------- medium-model malloc/free --------
+; -------- medium-model malloc/free (freelist allocator) --------
 ;
 ; void *malloc(size_t sz)
 ;   sz at [bp+6] (far-call ABI: 4 bytes return addr + 2 bytes saved bp).
-;   Returns DX:AX, AX = offset within DGROUP, DX = 0 (caller treats as
-;   near pointer; the upper 2 bytes are ignored when assigning to a `w`).
+;   Returns DX:AX, AX = offset within DGROUP, DX = 0.
 ;
-; cdecl callee-save: BX, SI, DI, BP.  We touch BX and CX; CX is caller-
-; save and needs no protection, but BX must be preserved.
+; cdecl callee-save: BX, SI, DI, BP — preserved.
 ;
-; The heap is a fixed 32KB buffer in _BSS.  Bump-only; free is a no-op.
+; Each block has a 2-byte size header (total bytes including header).
+; Free blocks are chained through a sorted freelist using the first
+; word of their payload as a `next` offset (0 terminates the list).
+; On free we coalesce with adjacent free blocks.
 global _malloc
 _malloc:
     push bp
     mov bp, sp
-    push bx                     ; preserve callee-save BX
-    mov ax, [bp+6]
-    add ax, 1
-    and ax, 0xFFFE              ; word-align the size
+    push si
+    push di
+    push bx
+    mov ax, [bp+6]              ; sz
+    add ax, 3                   ; +2 header + 1 round-up bit
+    and ax, 0xFFFE              ; word-align (total even)
+    cmp ax, 4
+    jae .ok_size
+    mov ax, 4                   ; min block size
+.ok_size:
+    ; AX = total block size needed (incl. header)
+
     cmp word [_heap_initialized], 0
-    jne .post_init
+    jne .scan_free
     mov word [_heap_ptr], _heap_buf
     mov word [_heap_top], _heap_buf + _heap_size
+    mov word [_freelist_head], 0
     mov word [_heap_initialized], 1
-.post_init:
+
+.scan_free:
+    ; First-fit walk of the freelist.
+    ; DI = address of the previous node's `next` slot (head ptr to start).
+    ; SI = current block address (0 if list end).
+    mov di, _freelist_head
+    mov si, [di]
+.scan_loop:
+    test si, si
+    jz .no_fit
+    mov bx, [si]                ; current block size
+    cmp bx, ax
+    jb .next_node
+    ; Found a fit.  Decide whether to split.
+    mov cx, bx
+    sub cx, ax                  ; CX = leftover bytes
+    cmp cx, 4
+    jae .split
+
+    ; Use the whole block; unlink from freelist.
+    mov bx, [si+2]              ; current's `next`
+    mov [di], bx                ; prev's `next` = current's `next`
+    mov ax, si
+    add ax, 2                   ; return payload
+    jmp .alloc_done
+
+.split:
+    ; Carve the tail of the current block off as the allocation.
+    ; Keeping the head in the freelist avoids touching freelist links.
+    mov [si], cx                ; shrink current free block to CX
+    add si, cx                  ; SI now points at the tail (new alloc)
+    mov [si], ax                ; new alloc block size
+    mov ax, si
+    add ax, 2                   ; payload
+    jmp .alloc_done
+
+.next_node:
+    lea di, [si+2]              ; addr of current's `next` slot
+    mov si, [si+2]              ; advance
+    jmp .scan_loop
+
+.no_fit:
+    ; No freelist match — bump from the high-water mark.
     mov bx, [_heap_ptr]
     mov cx, bx
     add cx, ax
     cmp cx, [_heap_top]
     ja .fail
     mov [_heap_ptr], cx
-    mov ax, bx                  ; offset into DGROUP
+    mov [bx], ax                ; size header
+    mov ax, bx
+    add ax, 2                   ; payload
+
+.alloc_done:
     xor dx, dx
-    pop bx                      ; restore callee-save BX
+    pop bx
+    pop di
+    pop si
     pop bp
     retf
+
 .fail:
     xor ax, ax
     xor dx, dx
     pop bx
+    pop di
+    pop si
     pop bp
     retf
 
+; void free(void *p)
+;   p at [bp+6].  free(NULL) is a no-op.
+;   Inserts the block into the address-sorted freelist and coalesces
+;   with adjacent free neighbours.
 global _free
-_free:                          ; bump-allocator can't free
+_free:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    mov bx, [bp+6]
+    test bx, bx
+    jz .free_done
+    sub bx, 2                   ; BX = block header addr
+    mov cx, [bx]                ; CX = block size
+
+    ; Walk freelist to find the insertion point.
+    ; DI = addr of preceding `next` slot (head ptr to start).
+    ; SI = next free block (0 if BX goes at the end).
+    mov di, _freelist_head
+    mov si, [di]
+.free_walk:
+    test si, si
+    jz .free_insert
+    cmp si, bx
+    ja .free_insert
+    lea di, [si+2]
+    mov si, [si+2]
+    jmp .free_walk
+
+.free_insert:
+    ; Splice BX between prev (whose `next` lives at DI) and SI.
+    mov [di], bx
+    mov [bx+2], si
+
+    ; Try to coalesce with the next free block.
+    test si, si
+    jz .no_merge_next
+    mov ax, bx
+    add ax, cx
+    cmp ax, si
+    jne .no_merge_next
+    add cx, [si]                ; size += next's size
+    mov [bx], cx
+    mov ax, [si+2]
+    mov [bx+2], ax              ; next link skips over si
+.no_merge_next:
+
+    ; Try to coalesce with the previous free block.
+    ; DI points at the prev's `next` field (i.e. prev_hdr + 2) unless
+    ; DI == _freelist_head (no prev).
+    cmp di, _freelist_head
+    je .free_done
+    sub di, 2                   ; DI = prev block header
+    mov ax, [di]                ; prev size
+    add ax, di                  ; prev_end
+    cmp ax, bx
+    jne .free_done
+    ; Merge prev with current.
+    mov ax, [di]
+    add ax, cx
+    mov [di], ax
+    mov ax, [bx+2]
+    mov [di+2], ax
+
+.free_done:
+    pop bx
+    pop di
+    pop si
+    pop bp
     retf
 
 segment _DATA
 _heap_initialized:  dw 0
 _heap_ptr:          dw 0
 _heap_top:          dw 0
+_freelist_head:     dw 0
 
 segment _BSS
 _heap_buf:          resb _heap_size
