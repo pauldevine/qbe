@@ -30,13 +30,14 @@ cpu 8086
 
 ; Heap budget for the medium-model .EXE.  omf_link puts SS=DS=DGROUP
 ; for near-pointer correctness, so DGROUP + stack must fit in 64KB.
-; Current non-heap DGROUP ≈ 21KB, stack ≈ 8KB, leaving ≈ 36KB for the
-; heap.  We use 34816 (34KB) to keep ~1KB margin for data growth.
-; The bump allocator never reclaims memory (`_free` is a no-op), so
-; long edit sessions still leak; files needing more working memory
-; than fits here run out.  Real fix is a freelist malloc and/or far
-; pointers for line storage.
-%define _heap_size 34816
+; Non-heap DGROUP ≈ 21KB, stack 4KB, leaving ≈ 40KB for the heap.
+; We use 39936 (39KB) with a ~250B margin for data growth.
+;
+; Files larger than ~40KB still won't fit because line buffers live
+; in this same DGROUP heap.  The real fix is to put line storage in
+; a separately-allocated DOS far segment (INT 21h AH=48h) and switch
+; line pointers to far pointers — substantial refactor.
+%define _heap_size 39936
 
 ; Declare all segments with attributes up-front so subsequent `segment X`
 ; references inherit the attrs (NASM warns on redeclaration with attrs).
