@@ -106,6 +106,7 @@ struct Stmt {
 		If,
 		While,
 		DoWhile,
+		For,
 		Switch,
 		Case,
 		Default,
@@ -118,7 +119,7 @@ struct Stmt {
 		Label,
 		Asm,
 	} t;
-	void *p1, *p2, *p3;
+	void *p1, *p2, *p3, *p4;
 	int val; /* for case values */
 	char label[NString]; /* for goto target and label name */
 };
@@ -144,7 +145,7 @@ struct AsmStmt {
 int yylex(void), yyerror(char *);
 Symb expr(Node *), lval(Node *);
 void branch(Node *, int, int);
-int stmt(Stmt *, int);
+int stmt(Stmt *, int, int);
 
 FILE *of;
 int line;
@@ -2544,10 +2545,10 @@ collectcases(Stmt *s, Stmt **cases, int *ncase, int *defidx)
 	}
 }
 
-int genswitchbody(Stmt *s, int brk, Stmt **cases, int *caselbl, int ncase);
+int genswitchbody(Stmt *s, int brk, int cont, Stmt **cases, int *caselbl, int ncase);
 
 int
-genswitch(Symb val, Stmt *body, int brk)
+genswitch(Symb val, Stmt *body, int brk, int cont)
 {
 	Stmt *cases[128];
 	int ncase, defidx, i;
@@ -2580,7 +2581,7 @@ genswitch(Symb val, Stmt *body, int brk)
 		fprintf(of, "\tjmp @l%d\n", brk);
 
 	/* Generate switch body linearly */
-	genswitchbody(body, brk, cases, caselbl, ncase);
+	genswitchbody(body, brk, cont, cases, caselbl, ncase);
 
 	return 0;
 }
@@ -2597,7 +2598,7 @@ contains_case_label(Stmt *s)
 }
 
 int
-genswitchbody(Stmt *s, int brk, Stmt **cases, int *caselbl, int ncase)
+genswitchbody(Stmt *s, int brk, int cont, Stmt **cases, int *caselbl, int ncase)
 {
 	int i;
 
@@ -2605,14 +2606,14 @@ genswitchbody(Stmt *s, int brk, Stmt **cases, int *caselbl, int ncase)
 		return 0;
 
 	if (s->t == Seq) {
-		int r1 = genswitchbody((Stmt*)s->p1, brk, cases, caselbl, ncase);
+		int r1 = genswitchbody((Stmt*)s->p1, brk, cont, cases, caselbl, ncase);
 		/* Mirror stmt(Seq)'s short-circuit: if p1 terminates the basic
 		 * block (ret/break/continue), skip p2 unless p2 contains a case
 		 * label — case labels in a switch body must be reachable even
 		 * if a previous case fell through to a terminator. */
 		if (r1 && !contains_case_label((Stmt*)s->p2))
 			return r1;
-		int r2 = genswitchbody((Stmt*)s->p2, brk, cases, caselbl, ncase);
+		int r2 = genswitchbody((Stmt*)s->p2, brk, cont, cases, caselbl, ncase);
 		/* When p2 contains a case label it provides a fresh re-entry
 		 * point: even if p1 terminated the prior basic block, control
 		 * can resume at the case label and fall through past p2.  The
@@ -2633,16 +2634,16 @@ genswitchbody(Stmt *s, int brk, Stmt **cases, int *caselbl, int ncase)
 		}
 		/* Process the statement after the case label */
 		if (s->p2)
-			return genswitchbody((Stmt*)s->p2, brk, cases, caselbl, ncase);
+			return genswitchbody((Stmt*)s->p2, brk, cont, cases, caselbl, ncase);
 		return 0;
 	} else {
 		/* Regular statement - process normally */
-		return stmt(s, brk);
+		return stmt(s, brk, cont);
 	}
 }
 
 int
-stmt(Stmt *s, int b)
+stmt(Stmt *s, int b, int c)
 {
 	int l, r;
 	Symb x;
@@ -2667,10 +2668,9 @@ stmt(Stmt *s, int b)
 		fprintf(of, "\tjmp @l%d\n", b);
 		return 1;
 	case Continue:
-		if (b < 0)
+		if (c < 0)
 			die("continue not in loop");
-		/* Use b-1 for continue target (loop start) */
-		fprintf(of, "\tjmp @l%d\n", b-1);
+		fprintf(of, "\tjmp @l%d\n", c);
 		return 1;
 	case Expr:
 		expr(s->p1);
@@ -2680,8 +2680,8 @@ stmt(Stmt *s, int b)
 		 * terminated control flow, we still need to emit any
 		 * labels (and following code) from the second so that
 		 * `goto` jumps from earlier blocks land somewhere. */
-		int r1 = stmt(s->p1, b);
-		int r2 = stmt(s->p2, b);
+		int r1 = stmt(s->p1, b, c);
+		int r2 = stmt(s->p2, b, c);
 		return r1 || r2;
 	}
 	case If:
@@ -2689,22 +2689,22 @@ stmt(Stmt *s, int b)
 		lbl += 3;
 		branch(s->p1, l, l+1);
 		fprintf(of, "@l%d\n", l);
-		if (!(r=stmt(s->p2, b)))
+		if (!(r=stmt(s->p2, b, c)))
 		if (s->p3)
 			fprintf(of, "\tjmp @l%d\n", l+2);
 		fprintf(of, "@l%d\n", l+1);
 		if (s->p3)
-		if (!(r &= stmt(s->p3, b)))
+		if (!(r &= stmt(s->p3, b, c)))
 			fprintf(of, "@l%d\n", l+2);
 		return s->p3 && r;
 	case While:
 		l = lbl;
 		lbl += 3;
-		fprintf(of, "@l%d\n", l);
+		fprintf(of, "@l%d\n", l);              /* cond / continue target */
 		branch(s->p1, l+1, l+2);
 		fprintf(of, "@l%d\n", l+1);
-		/* Pass l for continue (will use l-1=loop start), l+2 for break */
-		if (!stmt(s->p2, l+2))
+		/* break = l+2, continue = l (cond re-check) */
+		if (!stmt(s->p2, l+2, l))
 			fprintf(of, "\tjmp @l%d\n", l);
 		fprintf(of, "@l%d\n", l+2);
 		return 0;
@@ -2712,31 +2712,53 @@ stmt(Stmt *s, int b)
 		l = lbl;
 		lbl += 3;
 		fprintf(of, "@l%d\n", l);
-		/* Pass l+1 for continue (test label), l+2 for break */
-		if (!stmt(s->p1, l+2))
+		/* break = l+2, continue = l+1 (test label) */
+		if (!stmt(s->p1, l+2, l+1))
 			fprintf(of, "\tjmp @l%d\n", l+1);
 		fprintf(of, "@l%d\n", l+1);
 		branch(s->p2, l, l+2);
 		fprintf(of, "@l%d\n", l+2);
 		return 0;
+	case For:
+		/* For loop with explicit continue target on the inc step.
+		 * Layout:
+		 *   @l   : cond check
+		 *   @l+1 : body
+		 *   @l+2 : continue target (runs inc, jmps to @l)
+		 *   @l+3 : break target (end)
+		 * p1 = cond (Node), p2 = body (Stmt), p4 = inc (Node or 0).
+		 */
+		l = lbl;
+		lbl += 4;
+		fprintf(of, "@l%d\n", l);
+		branch(s->p1, l+1, l+3);
+		fprintf(of, "@l%d\n", l+1);
+		if (!stmt(s->p2, l+3, l+2))
+			fprintf(of, "\tjmp @l%d\n", l+2);
+		fprintf(of, "@l%d\n", l+2);
+		if (s->p4)
+			expr(s->p4);
+		fprintf(of, "\tjmp @l%d\n", l);
+		fprintf(of, "@l%d\n", l+3);
+		return 0;
 	case Switch:
 		x = expr(s->p1);
 		l = lbl++;
-		genswitch(x, (Stmt*)s->p2, l);
+		genswitch(x, (Stmt*)s->p2, l, c);
 		fprintf(of, "@l%d\n", l);
 		return 0;
 	case Case:
 	case Default:
 		/* These are handled within genswitch */
 		if (s->p2)
-			stmt((Stmt*)s->p2, b);
+			stmt((Stmt*)s->p2, b, c);
 		return 0;
 	case Goto:
 		fprintf(of, "\tjmp @user_%s\n", s->label);
 		return 1;
 	case Label:
 		fprintf(of, "@user_%s\n", s->label);
-		return stmt(s->p1, b);
+		return stmt(s->p1, b, c);
 	case Asm: {
 		struct AsmStmt *a = (struct AsmStmt *)s->p1;
 		char processed[2048];
@@ -3405,26 +3427,27 @@ emit_knr_func_typed(char *fname, Node *params)
 Stmt *
 mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 {
-	Stmt *s1, *s2;
+	Stmt *s1, *forst;
 
 	if (ini)
 		s1 = mkstmt(Expr, ini, 0, 0);
 	else
 		s1 = 0;
-	if (inc) {
-		s2 = mkstmt(Expr, inc, 0, 0);
-		s2 = mkstmt(Seq, s, s2, 0);
-	} else
-		s2 = s;
 	if (!tst) {
 		tst = mknode('N', 0, 0);
 		tst->u.n = 1;
 	}
-	s2 = mkstmt(While, tst, s2, 0);
+	/* For: p1=cond (Node), p2=body (Stmt), p4=inc (Node, may be 0).
+	 * Use a dedicated statement type so that `continue` can land on the
+	 * inc step — lowering to While(cond, Seq(body, inc)) loses that, since
+	 * the lowered while's continue target is the cond check and the inc
+	 * step gets skipped. */
+	forst = mkstmt(For, tst, s, 0);
+	forst->p4 = inc;
 	if (s1)
-		return mkstmt(Seq, s1, s2, 0);
+		return mkstmt(Seq, s1, forst, 0);
 	else
-		return s2;
+		return forst;
 }
 
 %}
@@ -3475,12 +3498,12 @@ attr_kfunc: attrspec storageopt inlineopt init_attr prot_knr '{' dcls stmts '}'
 {
 	if (cur_fn_interrupt) {
 		/* Interrupt handler - emit iret instead of ret */
-		if (!stmt($8, -1))
+		if (!stmt($8, -1, -1))
 			fprintf(of, "\tasm \"iret\"\n");
 		else
 			fprintf(of, "\tasm \"iret\"\n");
 	} else {
-		if (!stmt($8, -1))
+		if (!stmt($8, -1, -1))
 			fprintf(of, "\tret 0\n");
 	}
 	fprintf(of, "}\n\n");
@@ -3935,12 +3958,12 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	/* ANSI function body */
 	if (cur_fn_interrupt) {
 		/* Interrupt handler - emit iret */
-		if (!stmt($4, -1))
+		if (!stmt($4, -1, -1))
 			fprintf(of, "\tasm \"iret\"\n");
 		else
 			fprintf(of, "\tasm \"iret\"\n");
 	} else {
-		if (!stmt($4, -1)) {
+		if (!stmt($4, -1, -1)) {
 			if (curfntyp == NIL)
 				fprintf(of, "\tret\n");
 			else
@@ -4074,7 +4097,7 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	 *   int EnvEval(s, len) char *s; int len; { ... }
 	 * The function header was already emitted when knr_func_proto
 	 * reduced (so it precedes any local-decl emit from dcls). */
-	if (!stmt($4, -1)) {
+	if (!stmt($4, -1, -1)) {
 		if (curfntyp == NIL)
 			fprintf(of, "\tret\n");
 		else
@@ -4255,12 +4278,12 @@ kfunc: storageopt inlineopt attropt init prot_knr '{' dcls stmts '}'
 {
 	if (cur_fn_interrupt) {
 		/* Interrupt handler - emit iret instead of ret */
-		if (!stmt($8, -1))
+		if (!stmt($8, -1, -1))
 			fprintf(of, "\tasm \"iret\"\n");
 		else
 			fprintf(of, "\tasm \"iret\"\n");
 	} else {
-		if (!stmt($8, -1))
+		if (!stmt($8, -1, -1))
 			fprintf(of, "\tret 0\n");
 	}
 	fprintf(of, "}\n\n");

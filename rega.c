@@ -121,10 +121,17 @@ ralloctry(RMap *m, int t, int try)
 	}
 	{
 	int fallback = 0;
+	bits avoid = tmp[phicls(t, tmp)].hint.m;
 	r = tmp[t].visit;
-	if (r == -1 || bshas(m->b, r))
+	/* Reject visit/hint.r if it conflicts with the avoid mask.
+	 * Otherwise a value previously placed in a caller-save reg (e.g.
+	 * a malloc result that the ABI returns in RAX) sticks there even
+	 * when the temp is live across a subsequent call — the call
+	 * clobbers the reg and post-call uses read garbage.  spill.c
+	 * sets the avoid mask for exactly this case. */
+	if (r == -1 || bshas(m->b, r) || (avoid & BIT(r)))
 		r = *hint(t);
-	if (r == -1 || bshas(m->b, r)) {
+	if (r == -1 || bshas(m->b, r) || (avoid & BIT(r))) {
 		if (try)
 			return R;
 		regs = tmp[phicls(t, tmp)].hint.m;
@@ -479,6 +486,7 @@ doblk(Blk *b, RMap *cur)
 		 * temporary if rf is available */
 		if (rf != -1 && (t = cur->w[rf]) != 0)
 		if (!bshas(cur->b, rf) && *hint(t) == rf
+		&& !(tmp[phicls(t, tmp)].hint.m & BIT(rf))
 		&& (rt = rfree(cur, t)) != -1) {
 			tmp[t].visit = -1;
 			ralloc(cur, t);

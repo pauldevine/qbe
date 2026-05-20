@@ -1324,6 +1324,26 @@ emitins(Ins *i, Fn *fn, FILE *f)
 						fprintf(f, "\tmov dx, word [bx+2]\n");
 					}
 				}
+			} else if (rtype(r0) == RCon) {
+				/* 32-bit load from a constant address.  For a symbol
+				 * (CAddr) this is the canonical `loadl $glo` shape used
+				 * by minic for global `long`s — emit direct memory
+				 * reads.  For a numeric constant address, treat as an
+				 * absolute address in the data segment. */
+				Con *pc = &fn->con[r0.val];
+				if (pc->type == CAddr) {
+					fprintf(f, "\tmov ax, word [");
+					emitaddr(pc, f);
+					fprintf(f, "]\n");
+					fprintf(f, "\tmov dx, word [");
+					emitaddr(pc, f);
+					fprintf(f, "+2]\n");
+				} else {
+					fprintf(f, "\tmov ax, word [%"PRIi64"]\n",
+					        pc->bits.i);
+					fprintf(f, "\tmov dx, word [%"PRIi64"]\n",
+					        pc->bits.i + 2);
+				}
 			}
 
 			if (rtype(i->to) == RSlot) {
@@ -1425,6 +1445,26 @@ emitins(Ins *i, Fn *fn, FILE *f)
 						fprintf(f, "\tmov word [bx], ax\n");
 						fprintf(f, "\tmov word [bx+2], dx\n");
 					}
+				}
+			} else if (rtype(r1) == RCon) {
+				/* 32-bit store to a constant destination address.  For a
+				 * symbol (CAddr) this is `storel _, $glo` — minic emits
+				 * it whenever a function writes a global `long`.  Without
+				 * this case the store fell through silently, leaving the
+				 * destination unchanged. */
+				Con *pc = &fn->con[r1.val];
+				if (pc->type == CAddr) {
+					fprintf(f, "\tmov word [");
+					emitaddr(pc, f);
+					fprintf(f, "], ax\n");
+					fprintf(f, "\tmov word [");
+					emitaddr(pc, f);
+					fprintf(f, "+2], dx\n");
+				} else {
+					fprintf(f, "\tmov word [%"PRIi64"], ax\n",
+					        pc->bits.i);
+					fprintf(f, "\tmov word [%"PRIi64"], dx\n",
+					        pc->bits.i + 2);
 				}
 			}
 
@@ -3089,15 +3129,25 @@ end_load_block:
 			fprintf(f, "%s", rname[i->arg[0].val]);
 		else if (rtype(i->arg[0]) == RSlot)
 			fprintf(f, "word [bp%+ld]", (long)slot(i->arg[0], fn));
-		else if (rtype(i->arg[0]) == RCon)
-			fprintf(f, "%"PRIi64, fn->con[i->arg[0].val].bits.i);
+		else if (rtype(i->arg[0]) == RCon) {
+			Con *pc0 = &fn->con[i->arg[0].val];
+			if (pc0->type == CAddr)
+				emitaddr(pc0, f);
+			else
+				fprintf(f, "%"PRIi64, pc0->bits.i);
+		}
 		fprintf(f, ", ");
 		if (rtype(i->arg[1]) == RTmp)
 			fprintf(f, "%s", rname[i->arg[1].val]);
 		else if (rtype(i->arg[1]) == RSlot)
 			fprintf(f, "word [bp%+ld]", (long)slot(i->arg[1], fn));
-		else if (rtype(i->arg[1]) == RCon)
-			fprintf(f, "%"PRIi64, fn->con[i->arg[1].val].bits.i);
+		else if (rtype(i->arg[1]) == RCon) {
+			Con *pc1 = &fn->con[i->arg[1].val];
+			if (pc1->type == CAddr)
+				emitaddr(pc1, f);
+			else
+				fprintf(f, "%"PRIi64, pc1->bits.i);
+		}
 		fprintf(f, "\n");
 		if (both_mem)
 			fprintf(f, "\tpop ax\n");
