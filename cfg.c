@@ -333,6 +333,13 @@ simpljmp(Fn *fn)
 	ret = newblk();
 	ret->id = fn->nblk++;
 	ret->jmp.type = Jret0;
+	/* Give the synthetic ret block a name.  Targets whose emit relies
+	 * on b->name (e.g. i8086) skip label/jmp emission for unnamed blocks,
+	 * which silently drops `jmp <ret>` from every non-final return path
+	 * and lets control fall through into adjacent block bodies.  Use a
+	 * non-local prefix so NASM scoping doesn't tie it to whichever
+	 * label happens to precede the epilogue. */
+	snprintf(ret->name, NString, "ret_%s", fn->name);
 	uf = emalloc(fn->nblk * sizeof uf[0]);
 	for (b=fn->start; b; b=b->link) {
 		assert(!b->phi);
