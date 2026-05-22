@@ -1448,6 +1448,324 @@ _qbe_rem32s:
     pop bp
     ret
 
+; ============================================================================
+; int86x / intdosx / segread — the segment-aware members of the DOS API trio.
+;
+; These three MUST live before `_remove` in this file: tools/libstub_to_exe.py
+; enters a SKIP region at `_remove` for the medium-model EXE rewrite (see
+; [[libstub-to-exe-skip-region]]).
+;
+; ABI follows [[libstub-cdecl-callee-save]]: cdecl, BX/SI/DI/BP callee-save,
+; pointers are 16-bit near (small/medium model code segment).
+;
+; Strategy for DS handling in int86x/intdosx:
+;   1. Snapshot the desired DS from segregs->ds into CS-relative scratch
+;      while DS still points at DGROUP.
+;   2. Set ES from segregs->es early (ES isn't used for stack/data here).
+;   3. Read inregs via DS, then mov ds, [cs:scratch] just before INT.
+;   4. After INT, snapshot callee's ES/DS to CS-rel scratch, then
+;      restore DS via `push ss; pop ds` (small/medium model: DS == SS).
+;   5. Write outregs and segregs->{es,ds} via the now-restored DS.
+;
+; SS, CS are NOT loaded into the CPU — int86x docs say only DS/ES are loaded
+; from segregs.  segregs->{cs,ss} are also NOT modified on return for the same
+; reason; Microsoft C int86x only updates es and ds on exit.
+; ============================================================================
+
+; void segread(struct SREGS *segs)
+; Snapshot ES/CS/SS/DS into the SREGS struct.  Trivial.
+global _segread
+_segread:
+    push bp
+    mov bp, sp
+    push bx
+    mov bx, [bp+4]
+    mov [bx+0], es
+    mov [bx+2], cs
+    mov [bx+4], ss
+    mov [bx+6], ds
+    pop bx
+    pop bp
+    ret
+
+
+; int int86x(int intno, union REGS *in, union REGS *out, struct SREGS *segs)
+; Stack:  [bp+4] intno, [bp+6] in, [bp+8] out, [bp+10] segs.
+global _int86x
+_int86x:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    push es
+    push ds                      ; callee-save (we will overwrite DS)
+
+    mov ax, [bp+4]
+    mov [cs:.x_int_op+1], al     ; patch INT immediate
+
+    ; Read segregs->ds (stash in CS-rel scratch) and segregs->es (load now).
+    mov bx, [bp+10]
+    mov ax, [bx+6]
+    mov [cs:.x_desired_ds], ax
+    mov ax, [bx+0]
+    mov es, ax
+
+    ; Load GPRs from inregs (DS still ours).
+    mov bx, [bp+6]
+    mov ax, [bx+0]
+    mov cx, [bx+4]
+    mov dx, [bx+6]
+    mov si, [bx+8]
+    mov di, [bx+10]
+    mov bx, [bx+2]
+
+    ; Last step before INT: swap DS to the caller-supplied value.
+    push ax
+    mov ax, [cs:.x_desired_ds]
+    mov ds, ax
+    pop ax
+.x_int_op:
+    int 21h
+
+    ; Snapshot callee's ES/DS to CS-rel scratch, then restore our DS = SS.
+    push ax
+    push ds
+    pop ax
+    mov [cs:.x_callee_ds], ax
+    push es
+    pop ax
+    mov [cs:.x_callee_es], ax
+    push ss
+    pop ds
+    pop ax
+
+    ; Write outregs via our DS.
+    push bx
+    mov bx, [bp+8]
+    mov [bx+0], ax
+    pop ax
+    mov [bx+2], ax
+    mov [bx+4], cx
+    mov [bx+6], dx
+    mov [bx+8], si
+    mov [bx+10], di
+    pushf
+    pop ax
+    mov [bx+14], ax
+    and ax, 1
+    mov [bx+12], ax
+    mov ax, [bx+0]               ; return = result AX
+
+    ; Write callee's ES/DS back into segregs->{es,ds} (cs/ss untouched).
+    push ax
+    mov bx, [bp+10]
+    mov ax, [cs:.x_callee_es]
+    mov [bx+0], ax
+    mov ax, [cs:.x_callee_ds]
+    mov [bx+6], ax
+    pop ax
+
+    pop ds
+    pop es
+    pop bx
+    pop di
+    pop si
+    pop bp
+    ret
+
+.x_desired_ds: dw 0
+.x_callee_ds:  dw 0
+.x_callee_es:  dw 0
+
+
+; int intdosx(union REGS *in, union REGS *out, struct SREGS *segs)
+; Stack:  [bp+4] in, [bp+6] out, [bp+8] segs.
+; Behaves as int86x(0x21, in, out, segs).  Body duplicated rather than
+; tail-called because calling _int86x has different near/far ABI in COM
+; vs. EXE builds (see comment on _intdos's split from _int86).
+global _intdosx
+_intdosx:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    push es
+    push ds
+
+    mov bx, [bp+8]
+    mov ax, [bx+6]
+    mov [cs:.dx_desired_ds], ax
+    mov ax, [bx+0]
+    mov es, ax
+
+    mov bx, [bp+4]
+    mov ax, [bx+0]
+    mov cx, [bx+4]
+    mov dx, [bx+6]
+    mov si, [bx+8]
+    mov di, [bx+10]
+    mov bx, [bx+2]
+
+    push ax
+    mov ax, [cs:.dx_desired_ds]
+    mov ds, ax
+    pop ax
+    int 0x21
+
+    push ax
+    push ds
+    pop ax
+    mov [cs:.dx_callee_ds], ax
+    push es
+    pop ax
+    mov [cs:.dx_callee_es], ax
+    push ss
+    pop ds
+    pop ax
+
+    push bx
+    mov bx, [bp+6]
+    mov [bx+0], ax
+    pop ax
+    mov [bx+2], ax
+    mov [bx+4], cx
+    mov [bx+6], dx
+    mov [bx+8], si
+    mov [bx+10], di
+    pushf
+    pop ax
+    mov [bx+14], ax
+    and ax, 1
+    mov [bx+12], ax
+    mov ax, [bx+0]
+
+    push ax
+    mov bx, [bp+8]
+    mov ax, [cs:.dx_callee_es]
+    mov [bx+0], ax
+    mov ax, [cs:.dx_callee_ds]
+    mov [bx+6], ax
+    pop ax
+
+    pop ds
+    pop es
+    pop bx
+    pop di
+    pop si
+    pop bp
+    ret
+
+.dx_desired_ds: dw 0
+.dx_callee_ds:  dw 0
+.dx_callee_es:  dw 0
+
+
+; ============================================================================
+; High-level DOS API wrappers (Microsoft C / Turbo C names).
+;
+; Each is a thin shim over INT 10h / 16h / 21h.  Kept in asm so they can be
+; called from C without minic having to build any extra translation units.
+; ============================================================================
+
+; void set_video_mode(int mode) — INT 10h AH=00h.
+global _set_video_mode
+_set_video_mode:
+    push bp
+    mov bp, sp
+    mov ax, [bp+4]
+    mov ah, 0
+    int 10h
+    pop bp
+    ret
+
+
+; void putpixel(int x, int y, unsigned char color) — VGA mode 13h direct write.
+; Far-pokes 0xA000:y*320+x.  Caller is responsible for being in mode 13h.
+; Args: [bp+4] x (w), [bp+6] y (w), [bp+8] color (w; low byte used).
+global _putpixel
+_putpixel:
+    push bp
+    mov bp, sp
+    push bx
+    push di
+    push es
+    mov ax, 0xA000
+    mov es, ax
+    mov ax, [bp+6]               ; y
+    mov bx, 320
+    mul bx                       ; DX:AX = y*320 (DX discarded; <64K for y<205)
+    mov di, ax
+    add di, [bp+4]               ; di = y*320 + x
+    mov ax, [bp+8]
+    mov [es:di], al
+    pop es
+    pop di
+    pop bx
+    pop bp
+    ret
+
+
+; int kbhit(void) — INT 16h AH=01h. ZF=0 means a key is waiting.
+global _kbhit
+_kbhit:
+    mov ah, 1
+    int 16h
+    jz .no_key
+    mov ax, 1
+    ret
+.no_key:
+    xor ax, ax
+    ret
+
+
+; int getche(void) — INT 16h AH=00h, then echo via INT 21h AH=02h.
+; Function/arrow keys return 0 (no echo); ASCII keys are echoed and returned.
+global _getche
+_getche:
+    push bp
+    mov bp, sp
+    push bx
+    xor ah, ah
+    int 16h                      ; AH=scancode, AL=ASCII
+    cmp al, 0
+    je .ge_func
+    mov bl, al
+    mov dl, al
+    mov ah, 2
+    int 21h                      ; echo
+    xor ax, ax
+    mov al, bl
+    pop bx
+    pop bp
+    ret
+.ge_func:
+    xor ax, ax
+    pop bx
+    pop bp
+    ret
+
+
+; int bdos(int func, int dx, int al) — Microsoft C compat.
+; Calls INT 21h with AH=func, DX=dx, AL=al; returns AX.
+; Stack: [bp+4] func, [bp+6] dx, [bp+8] al.
+global _bdos
+_bdos:
+    push bp
+    mov bp, sp
+    push bx
+    mov ax, [bp+4]               ; func (low byte)
+    mov ah, al                   ; AH = func
+    mov bx, [bp+8]
+    mov al, bl                   ; AL = al
+    mov dx, [bp+6]
+    int 21h
+    pop bx
+    pop bp
+    ret
+
+
 ; remove() is referenced but not in any source file we compile.
 global _remove
 _remove:

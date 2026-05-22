@@ -45,6 +45,14 @@ extern int intdos();
 extern int intdosx();
 extern void segread();
 
+/* High-level DOS API wrappers (Microsoft C / Turbo C names).  These are
+ * thin shims over INT 10h / 16h / 21h, implemented in asm in libstub. */
+extern void set_video_mode();   /* INT 10h AH=00h */
+extern void putpixel();         /* mode 13h far-poke */
+extern int  kbhit();            /* INT 16h AH=01h: nonzero if key waiting */
+extern int  getche();           /* INT 16h AH=00h + echo */
+extern int  bdos();             /* bdos(func, dx, al) → INT 21h */
+
 #define FP_SEG(fp) ((unsigned short)(((unsigned long)(fp)) >> 16))
 #define FP_OFF(fp) ((unsigned short)((unsigned long)(fp)))
 #define MK_FP(seg, ofs) ((void far *)(((unsigned long)(seg) << 16) | (unsigned short)(ofs)))
