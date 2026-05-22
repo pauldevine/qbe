@@ -1,3 +1,4 @@
+# skip amd64_sysv amd64_apple arm64 arm64_apple rv64
 # Test far pointer load/store operations (i8086 specific)
 # These tests verify the syntax and code generation for far pointer access
 
