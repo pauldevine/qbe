@@ -14,8 +14,8 @@
 
 set -u
 KEEP_GOING=0
-MODEL="small"
-EXE=0  # 1 → produce a .EXE via OMF objs + omf_link.py.  Implied by medium+.
+MODEL=""             # empty until explicitly set; defaulted below based on EXE
+EXE=0                # 1 → produce a .EXE via OMF objs + omf_link.py.
 for arg in "$@"; do
 	case "$arg" in
 		--keep-going) KEEP_GOING=1 ;;
@@ -25,6 +25,22 @@ for arg in "$@"; do
 		*) echo "unknown arg '$arg'" >&2; exit 1 ;;
 	esac
 done
+
+# Default model: small for .COM (flat-loaded), medium for .EXE.
+# The .EXE pipeline (crt0_exe.asm + libstub_to_exe.py) uses the far-call
+# ABI between crt0 and main, which only matches medium-or-larger memory
+# models.  Small-model .EXE compiles `main` with a near `ret`, which
+# pops only the IP half of crt0's `call far _main` return address — the
+# leftover CS sends the CPU to a wild address on main's return
+# (manifesting as DOSBox "Illegal GRP4 Call 5" or a silent immediate
+# quit).  Default to medium to keep the .EXE build coherent.
+if [ -z "$MODEL" ]; then
+	if [ $EXE -eq 1 ]; then
+		MODEL="medium"
+	else
+		MODEL="small"
+	fi
+fi
 
 # Medium and above can't be flat-loaded as .COM; force .EXE pipeline.
 case "$MODEL" in
