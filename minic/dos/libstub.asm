@@ -1280,6 +1280,174 @@ _strrchr:
     pop bp
     ret
 
+; ============================================================================
+; 32-bit divide / remainder soft helpers (referenced by qbe i8086 codegen)
+; ============================================================================
+;
+; The 8086 has no 32-bit DIV/IDIV instruction.  When the QBE i8086 backend
+; sees `Odiv`/`Oudiv`/`Orem`/`Ourem` on a Kl (32-bit) operand it emits a
+; cdecl call to one of the helpers below:
+;
+;     _qbe_div32u   unsigned long quotient
+;     _qbe_rem32u   unsigned long remainder
+;     _qbe_div32s   signed   long quotient
+;     _qbe_rem32s   signed   long remainder
+;
+; ABI:
+;     args:  (long num, long denom)   — pushed cdecl right-to-left, so:
+;            [bp+4..5]  = num   low word
+;            [bp+6..7]  = num   high word
+;            [bp+8..9]  = denom low word
+;            [bp+10..11] = denom high word
+;     return: DX:AX   (DX = high word, AX = low word)
+;     clobbers: AX, CX, DX (caller-save in libstub cdecl)
+;     preserves: BX, SI, DI (callee-save in libstub cdecl,
+;                see [[libstub-cdecl-callee-save]])
+;
+; Division by zero is not trapped — quotient is implementation-defined
+; (this implementation returns 0xFFFFFFFF, matching what x86 idiv would
+; produce in the limit case).  Real CRT div-by-zero handling is out of
+; scope; minic doesn't currently emit any check.
+;
+; Signed semantics: trunc-toward-zero quotient (C99 §6.5.5/6); remainder
+; has the sign of the dividend (C99 §6.5.5/6).
+; ============================================================================
+
+; Shared shift-subtract body — args at [bp+4..11], expects BX/SI saved
+; by the caller's prologue.  On exit:  DX:AX = quotient, CX:BX = remainder.
+; Implemented as a NASM macro (not a `call`) so the [bp+N] offsets
+; expand inside each public function's own frame.  That matters for the
+; .EXE build: libstub_to_exe.py bumps every `[bp+N]` by +2 to account for
+; the far-call return frame, and a `retn`-based internal helper would
+; pick up those bumped offsets even though it was reached via near call.
+%macro UDIVMOD32_BODY 0
+    mov ax, [bp+4]           ; Q lo (numerator)
+    mov dx, [bp+6]           ; Q hi
+    xor bx, bx               ; R lo
+    xor cx, cx               ; R hi
+    mov si, 32
+%%loop:
+    shl ax, 1
+    rcl dx, 1
+    rcl bx, 1
+    rcl cx, 1
+    cmp cx, [bp+10]
+    jb  %%skip
+    ja  %%sub
+    cmp bx, [bp+8]
+    jb  %%skip
+%%sub:
+    sub bx, [bp+8]
+    sbb cx, [bp+10]
+    or  ax, 1
+%%skip:
+    dec si
+    jnz %%loop
+%endmacro
+
+global _qbe_div32u
+_qbe_div32u:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+    UDIVMOD32_BODY
+    pop si
+    pop bx
+    pop bp
+    ret
+
+global _qbe_rem32u
+_qbe_rem32u:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+    UDIVMOD32_BODY
+    mov ax, bx
+    mov dx, cx
+    pop si
+    pop bx
+    pop bp
+    ret
+
+global _qbe_div32s
+_qbe_div32s:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+    push di
+    xor di, di               ; bit 0 = negate quotient
+    test word [bp+6], 0x8000
+    jz  .qs_npos
+    inc di
+    not word [bp+4]
+    not word [bp+6]
+    add word [bp+4], 1
+    adc word [bp+6], 0
+.qs_npos:
+    test word [bp+10], 0x8000
+    jz  .qs_dpos
+    xor di, 1
+    not word [bp+8]
+    not word [bp+10]
+    add word [bp+8], 1
+    adc word [bp+10], 0
+.qs_dpos:
+    UDIVMOD32_BODY           ; DX:AX = |num| / |denom|
+    test di, 1
+    jz  .qs_done
+    not ax
+    not dx
+    add ax, 1
+    adc dx, 0
+.qs_done:
+    pop di
+    pop si
+    pop bx
+    pop bp
+    ret
+
+global _qbe_rem32s
+_qbe_rem32s:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+    push di
+    xor di, di               ; bit 0 = negate remainder (sign follows num)
+    test word [bp+6], 0x8000
+    jz  .rs_npos
+    inc di
+    not word [bp+4]
+    not word [bp+6]
+    add word [bp+4], 1
+    adc word [bp+6], 0
+.rs_npos:
+    test word [bp+10], 0x8000
+    jz  .rs_dpos
+    not word [bp+8]
+    not word [bp+10]
+    add word [bp+8], 1
+    adc word [bp+10], 0
+.rs_dpos:
+    UDIVMOD32_BODY           ; CX:BX = |num| mod |denom|
+    mov ax, bx
+    mov dx, cx
+    test di, 1
+    jz  .rs_done
+    not ax
+    not dx
+    add ax, 1
+    adc dx, 0
+.rs_done:
+    pop di
+    pop si
+    pop bx
+    pop bp
+    ret
+
 ; remove() is referenced but not in any source file we compile.
 global _remove
 _remove:

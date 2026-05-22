@@ -438,6 +438,38 @@ cmp32_low(Ref r, Fn *fn, FILE *f)
 		fprintf(f, "\tcmp ax, %s\n", rname[r.val]);
 }
 
+/* Push a Kl operand as `push hi; push lo` so that after the pair the low
+ * word sits on top of stack — i.e. lower address than the high word.
+ * Used to set up cdecl-style 32-bit args for libstub helpers like
+ * _qbe_div32u.  Uses CX as scratch (caller is expected to have already
+ * saved CX along with AX/DX); deliberately avoids `mov ax, <reg>` /
+ * `xor dx, dx` style staging so the source operand can safely live in
+ * AX or DX without aliasing — both of which the caller has on stack and
+ * may want preserved for a subsequent emit_push_long of the other arg. */
+static void
+emit_push_long(Ref r, Fn *fn, FILE *f)
+{
+	int64_t val;
+	if (rtype(r) == RSlot) {
+		fprintf(f, "\tpush word [bp%+ld]\n", (long)slot(r, fn) + 2);
+		fprintf(f, "\tpush word [bp%+ld]\n", (long)slot(r, fn));
+	} else if (rtype(r) == RCon) {
+		val = fn->con[r.val].bits.i;
+		/* 8086 has no `push imm16` — route through CX. */
+		fprintf(f, "\tmov cx, %d\n", (int)((val >> 16) & 0xFFFF));
+		fprintf(f, "\tpush cx\n");
+		fprintf(f, "\tmov cx, %d\n", (int)(val & 0xFFFF));
+		fprintf(f, "\tpush cx\n");
+	} else if (rtype(r) == RTmp) {
+		/* Temp's register holds the low half (rega doesn't pair Kl);
+		 * high half is zero-extended.  Push 0 (via CX) for hi, then
+		 * push the temp's register directly. */
+		fprintf(f, "\txor cx, cx\n");
+		fprintf(f, "\tpush cx\n");
+		fprintf(f, "\tpush %s\n", rname[r.val]);
+	}
+}
+
 /* Detect if a Ref-as-memory-operand uses AX/CX/DX as the base register.
  * 8086 only allows BX/BP/SI/DI as memory base.  Returns the offending
  * register (RAX/RCX/RDX) or 0 if no fixup is needed.
@@ -1779,61 +1811,78 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		case Oudiv:
 		case Orem:
 		case Ourem:
-			/* 32-bit division on 16-bit hardware would need a long
-			 * division library routine.  Not implemented yet —
-			 * emit the 16-bit form via load32_dxax + idiv/div as a
-			 * best-effort, marked TODO so callers using `long`
-			 * division still get something traceable.
-			 * idiv/div writes DX:AX; preserve caller's AX/DX. */
+			/* 32-bit divide/remainder via libstub soft helper.
+			 * The 8086 has no 32-bit DIV/IDIV; call out to
+			 * _qbe_div32u/s / _qbe_rem32u/s instead.  These follow
+			 * the cdecl convention used by the rest of libstub:
+			 *
+			 *   push denom_hi; push denom_lo
+			 *   push num_hi  ; push num_lo
+			 *   call _qbe_<op>32<u|s>
+			 *   add sp, 8
+			 *
+			 * Helpers preserve BX/SI/DI; AX/CX/DX are caller-save.
+			 * Result returns in DX:AX.
+			 *
+			 * rega doesn't model the call's implicit clobber of
+			 * CX (or AX/DX), so save/restore them around the call
+			 * — same pattern as kl_save_axdx, extended to CX.
+			 */
 			{
-			int is_rem = (i->op == Orem || i->op == Ourem);
 			int dst_in_ax = (rtype(i->to) == RTmp && i->to.val == RAX);
 			int dst_in_dx = (rtype(i->to) == RTmp && i->to.val == RDX);
-			AxDxSave s_div = kl_save_axdx(i->to, f);
+			int dst_in_cx = (rtype(i->to) == RTmp && i->to.val == RCX);
+			int save_ax = !dst_in_ax;
+			int save_cx = !dst_in_cx;
+			int save_dx = !dst_in_dx;
+			const char *helper =
+			    i->op == Odiv  ? "_qbe_div32s" :
+			    i->op == Oudiv ? "_qbe_div32u" :
+			    i->op == Orem  ? "_qbe_rem32s" :
+			                     "_qbe_rem32u";
+			int farcall = (T.memmodel == Mmedium ||
+			               T.memmodel == Mlarge  ||
+			               T.memmodel == Mhuge);
 
-			fprintf(f, "\t; TODO: 32-bit %s — using 16-bit truncated form\n",
-			    i->op == Odiv ? "idiv" :
-			    i->op == Oudiv ? "div" :
-			    i->op == Orem ? "irem" : "urem");
-			load32_dxax(r0, fn, f);
-			if (rtype(r1) == RSlot)
-				fprintf(f, "\t%s word [bp%+ld]\n",
-				    (i->op == Odiv || i->op == Orem) ? "idiv" : "div",
-				    (long)slot(r1, fn));
-			else if (rtype(r1) == RTmp)
-				fprintf(f, "\t%s %s\n",
-				    (i->op == Odiv || i->op == Orem) ? "idiv" : "div",
-				    rname[r1.val]);
-			else if (rtype(r1) == RCon) {
-				fprintf(f, "\tpush bx\n");
-				fprintf(f, "\tmov bx, %d\n",
-				    (int)(fn->con[r1.val].bits.i & 0xFFFF));
-				fprintf(f, "\t%s bx\n",
-				    (i->op == Odiv || i->op == Orem) ? "idiv" : "div");
-				fprintf(f, "\tpop bx\n");
-			}
-			/* Result: AX (quotient) or DX (remainder).  Move into dst
-			 * BEFORE restoring whichever scratch reg overlaps the dst. */
-			if (is_rem) {
-				if (rtype(i->to) == RSlot) {
-					fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn));
-					fprintf(f, "\tmov word [bp%+ld], 0\n", (long)slot(i->to, fn) + 2);
-				} else if (rtype(i->to) == RTmp && !dst_in_dx) {
-					/* dst != DX: copy DX (the remainder) into dst.
-					 * If dst is AX, do this BEFORE pop ax. */
-					fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
-				}
-			} else {
-				if (rtype(i->to) == RSlot) {
-					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
-					fprintf(f, "\tmov word [bp%+ld], 0\n", (long)slot(i->to, fn) + 2);
-				} else if (rtype(i->to) == RTmp && !dst_in_ax) {
-					/* dst != AX: copy AX (the quotient) into dst. */
-					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
-				}
+			/* Save caller-save GPRs that aren't the destination.
+			 * Order: push later → pop first; nest CX between
+			 * AX/DX so kl_save_axdx idioms still line up. */
+			if (save_ax) fprintf(f, "\tpush ax\n");
+			if (save_cx) fprintf(f, "\tpush cx\n");
+			if (save_dx) fprintf(f, "\tpush dx\n");
+
+			/* Push arg1 (denominator) hi then lo, then arg0 (numerator)
+			 * hi then lo, so the helper sees args in cdecl order
+			 * (num at lower address). */
+			emit_push_long(r1, fn, f);
+			emit_push_long(r0, fn, f);
+
+			fprintf(f, "\tcall%s %s\n", farcall ? " far" : "", helper);
+			fprintf(f, "\tadd sp, 8\n");
+
+			/* Result in DX:AX.  Move into dst BEFORE restoring
+			 * whichever caller-save reg overlaps the dst (its
+			 * pre-call value would otherwise overwrite ours).
+			 * Helpers don't return the high word for now; truncate
+			 * to 16 bits for register destinations and zero the
+			 * high half for slot destinations (matches the Oadd Kl
+			 * shape — see [[i8086-kl-add-sub-mul-r1-alias]]). */
+			if (rtype(i->to) == RSlot) {
+				fprintf(f, "\tmov word [bp%+ld], ax\n",
+				    (long)slot(i->to, fn));
+				fprintf(f, "\tmov word [bp%+ld], dx\n",
+				    (long)slot(i->to, fn) + 2);
+			} else if (rtype(i->to) == RTmp && !dst_in_ax) {
+				if (dst_in_dx)
+					fprintf(f, "\tmov dx, ax\n");
+				else
+					fprintf(f, "\tmov %s, ax\n",
+					    rname[i->to.val]);
 			}
 
-			kl_restore_axdx(s_div, f);
+			if (save_dx) fprintf(f, "\tpop dx\n");
+			if (save_cx) fprintf(f, "\tpop cx\n");
+			if (save_ax) fprintf(f, "\tpop ax\n");
 			}
 			return;
 
@@ -1891,13 +1940,17 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			return;
 
 		default:
-			/* Unsupported 32-bit op: emit a TODO marker and bail out
-			 * instead of falling through.  Falling through would let the
-			 * generic format-string path emit the 16-bit form (which
-			 * silently truncates) or, for ops without a `to` (Oswap, etc.),
-			 * produce malformed output like `xchg , ax`. */
-			fprintf(f, "\t; TODO: 32-bit op %d\n", i->op);
-			return;
+			/* Unsupported 32-bit op.  Falling through to the generic
+			 * format-string path would silently emit the 16-bit form
+			 * (truncating to the low word) or, for ops without a `to`,
+			 * produce malformed output like `xchg , ax` — so abort
+			 * loudly instead.  No Kl op reaches this in stevie or any
+			 * of the in-tree minic tests as of 2026-05-22; if you hit
+			 * it, add an explicit case above (likely shapes:
+			 * kl_save_axdx + kl_stage_arg + the AX/DX scratch idiom
+			 * used by Oadd/Osub Kl).  See [[i8086-kl-add-sub-mul-r1-alias]]. */
+			die("i8086: unsupported 32-bit op %d (cls Kl) — add a case "
+			    "in i8086/emit.c's `i->cls == Kl` switch", i->op);
 		}
 	}
 
@@ -1946,7 +1999,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					fprintf(f, "]\n");
 				} else {
 					/* Integer constant treated as FP bits */
-					fprintf(f, "\t; TODO: FP immediate constant\n");
+					die("i8086: FP immediate arg0 unsupported (op %d) — minic should hoist FP literals to data segment", i->op);
 				}
 			}
 
@@ -1960,7 +2013,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					emitaddr(c, f);
 					fprintf(f, "]\n");
 				} else {
-					fprintf(f, "\t; TODO: FP immediate constant\n");
+					die("i8086: FP immediate arg1 unsupported (op %d) — minic should hoist FP literals to data segment", i->op);
 				}
 			}
 
@@ -2041,7 +2094,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					fprintf(f, "]\n");
 				} else {
 					/* Store FP constant bits directly */
-					fprintf(f, "\t; TODO: store FP immediate\n");
+					die("i8086: store of FP immediate unsupported — minic should hoist FP literals to data segment");
 				}
 			}
 			/* Store to destination address */
@@ -3269,8 +3322,7 @@ end_load_block:
 
 	if (omap[o].op == NOp) {
 		/* Instruction not in table */
-		fprintf(f, "\t; TODO: op %d cls %d\n", i->op, i->cls);
-		return;
+		die("i8086: unsupported instruction (op %d cls %d) — no entry in omap[]", i->op, i->cls);
 	}
 
 	fmt = omap[o].fmt;
@@ -3666,8 +3718,8 @@ i8086_emitfn(Fn *fn, FILE *f)
 			break;
 		default:
 			/* Unsupported jump type */
-			fprintf(f, "\t; TODO: jump type %d\n", b->jmp.type);
-			break;
+			die("i8086: unsupported jump type %d at end of @%s",
+			    b->jmp.type, b->name);
 		}
 	}
 
