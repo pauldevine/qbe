@@ -30,14 +30,12 @@ cpu 8086
 
 ; Heap budget for the medium-model .EXE.  omf_link puts SS=DS=DGROUP
 ; for near-pointer correctness, so DGROUP + stack must fit in 64KB.
-; Non-heap DGROUP ≈ 21KB, stack 4KB, leaving ≈ 40KB for the heap.
-; We use 39936 (39KB) with a ~250B margin for data growth.
-;
-; Files larger than ~40KB still won't fit because line buffers live
-; in this same DGROUP heap.  The real fix is to put line storage in
-; a separately-allocated DOS far segment (INT 21h AH=48h) and switch
-; line pointers to far pointers — substantial refactor.
-%define _heap_size 39936
+; Non-heap DGROUP ≈ 21KB + ~2KB _file_slots, stack 4KB, leaving ≈ 35KB
+; for the heap.  We use 34816 (34KB) — the proven-working budget from
+; stevie_MEDIUM.exe testing.  A bigger heap + smaller _file_slots was
+; attempted but stevie's readfile failed with "alloc() is unable to
+; find memory!" — root cause not yet pinned down, keep proven layout.
+%define _heap_size 34816
 
 ; Declare all segments with attributes up-front so subsequent `segment X`
 ; references inherit the attrs (NASM warns on redeclaration with attrs).
@@ -247,24 +245,42 @@ _heap_buf:          resb _heap_size
 # -------- File I/O via DOS INT 21h --------
 #
 # Replaces the always-fail _fopen/_getc/_fclose stubs in libstub.asm
-# with real DOS-backed implementations (read-only for now).  A fixed
-# pool of FILE slots lives in _BSS; each slot is 520 bytes:
-#   +0  handle  (word)
-#   +2  in_use  (byte)
-#   +3  eof     (byte)
-#   +4  buf_pos (word)
-#   +6  buf_len (word)
+# with real DOS-backed implementations.  A fixed pool of FILE slots
+# lives in _BSS; each slot is 520 bytes:
+#   +0  handle  (word)   — DOS file handle
+#   +2  in_use  (byte)   — slot allocated
+#   +3  flags   (byte)   — bit0 = eof, bit1 = writing
+#   +4  buf_pos (word)   — read mode: cursor in buf
+#   +6  buf_len (word)   — read mode: bytes valid in buf
 #   +8  buf[512]
+#
+# Write paths are unbuffered: every fputc/fputs/fwrite/fprintf call
+# turns into one INT 21h AH=40 write directly on the handle.  fprintf
+# formats into a 512-byte stack buffer via a re-entrant call to
+# _sprintf, then writes the result.
+#
+# stdout/stderr "FILE*" sentinels in libstub.asm are just word
+# variables holding the standard DOS handles (1, 2).  The write
+# routines extract the handle as `*(word *)file` which works uniformly
+# for both real FILE slots and these single-word sentinels.
 FILEIO_EXE = """
 
 ; -------- medium-model file I/O --------
 
-%define _FBUF_SZ 512
-%define _FILE_SZ (8 + _FBUF_SZ)
+%define _FBUF_SZ  512
+%define _FILE_SZ  (8 + _FBUF_SZ)
 %define _NUM_FILES 4
+%define _FP_BUFSZ 512                 ; stack scratch for _fprintf/_printf
 
 segment LIBSTUB_TEXT
 
+; ----------------------------------------------------------------------
+; FILE *fopen(const char *name, const char *mode)
+;
+; Supports "r", "rb", "w", "wb", "a", "ab" (and "+" variants treated as
+; the base mode).  Returns NULL on failure or when the FILE-slot pool
+; is exhausted.
+; ----------------------------------------------------------------------
 global _fopen
 _fopen:
     push bp
@@ -286,18 +302,65 @@ _fopen:
     jmp .fop_done
 
 .fop_found:
-    ; INT 21h AH=3D AL=0 — open for reading.  DS:DX = filename.
-    mov dx, [bp+6]                ; name (near in DGROUP)
-    mov ax, 0x3D00
+    ; Inspect mode[0].
+    mov bx, [bp+8]                ; mode
+    mov al, [bx]
+    cmp al, 'r'
+    je .fop_read
+    cmp al, 'w'
+    je .fop_write
+    cmp al, 'a'
+    je .fop_append
+    xor ax, ax                    ; unknown mode -> NULL
+    jmp .fop_done
+
+.fop_read:
+    mov dx, [bp+6]                ; filename
+    mov ax, 0x3D00                ; open existing, read-only
     int 0x21
     jc .fop_fail
+    mov byte [si+3], 0            ; flags: read mode
+    jmp .fop_install
 
+.fop_write:
+    mov dx, [bp+6]
+    xor cx, cx                    ; attribute = normal
+    mov ah, 0x3C                  ; create / truncate
+    int 0x21
+    jc .fop_fail
+    mov byte [si+3], 2            ; flags: bit1 = writing
+    jmp .fop_install
+
+.fop_append:
+    ; Try to open existing for read+write; if missing, create.
+    mov dx, [bp+6]
+    mov ax, 0x3D02
+    int 0x21
+    jnc .fop_seek_end
+    ; Create new (file didn't exist).
+    mov dx, [bp+6]
+    xor cx, cx
+    mov ah, 0x3C
+    int 0x21
+    jc .fop_fail
+    mov byte [si+3], 2
+    jmp .fop_install
+
+.fop_seek_end:
+    ; AX = handle.  Seek to EOF: AH=42 AL=2, CX:DX = 0.
+    mov bx, ax
+    xor cx, cx
+    xor dx, dx
+    mov ax, 0x4202
+    int 0x21
+    mov ax, bx                    ; restore handle into AX
+    mov byte [si+3], 2
+
+.fop_install:
     mov [si], ax                  ; handle
     mov byte [si+2], 1            ; in_use
-    mov byte [si+3], 0            ; eof
     mov word [si+4], 0            ; buf_pos
     mov word [si+6], 0            ; buf_len
-
     mov ax, si                    ; return slot pointer
     jmp .fop_done
 
@@ -312,6 +375,9 @@ _fopen:
     retf
 
 
+; ----------------------------------------------------------------------
+; int getc(FILE *)  — buffered byte read; returns EOF (-1) at end.
+; ----------------------------------------------------------------------
 global _getc
 _getc:
     push bp
@@ -328,8 +394,8 @@ _getc:
     cmp ax, [si+6]                ; buf_len
     jb .gc_byte
 
-    cmp byte [si+3], 0            ; eof already?
-    jne .gc_eof
+    test byte [si+3], 1           ; eof already?
+    jnz .gc_eof
 
     ; Refill: INT 21h AH=3F, BX=handle, CX=count, DS:DX=buf
     mov bx, [si]
@@ -351,12 +417,15 @@ _getc:
     mov al, [si + bx + 8]
     xor ah, ah
     inc word [si+4]
+    xor dx, dx                    ; high 16 bits of 32-bit return = 0
     jmp .gc_done
 
 .gc_set_eof:
-    mov byte [si+3], 1
+    or byte [si+3], 1
 .gc_eof:
     mov ax, -1
+    mov dx, -1                    ; high 16 bits = -1 so 32-bit return = 0xFFFFFFFF
+                                  ; (stevie compares `c == EOF` as 32-bit)
 
 .gc_done:
     pop si
@@ -365,6 +434,14 @@ _getc:
     retf
 
 
+; ----------------------------------------------------------------------
+; int fclose(FILE *)
+; Unbuffered write mode means there's nothing to flush.  Closes the
+; underlying DOS handle and frees the slot.  Safe on stdin/out/err
+; sentinels (they have in_use=0, so the slot-clear is a no-op, and
+; closing handle 0/1/2 is something we never want to do — so we only
+; act when the pointer is inside the _file_slots pool).
+; ----------------------------------------------------------------------
 global _fclose
 _fclose:
     push bp
@@ -372,21 +449,341 @@ _fclose:
     push bx
     push si
 
-    mov si, [bp+6]                ; FILE slot
+    mov si, [bp+6]                ; FILE *
     test si, si
     jz .fc_done
 
+    ; Only close if this is a real slot from our pool.
+    cmp si, _file_slots
+    jb .fc_done
+    mov ax, _file_slots
+    add ax, (_NUM_FILES * _FILE_SZ)
+    cmp si, ax
+    jae .fc_done
+
+    cmp byte [si+2], 0            ; in_use?
+    je .fc_done
+
     mov bx, [si]                  ; handle
     mov byte [si+2], 0            ; free slot
-
-    ; INT 21h AH=3E, BX=handle
-    mov ah, 0x3E
+    mov ah, 0x3E                  ; close handle
     int 0x21
 
 .fc_done:
     xor ax, ax
     pop si
     pop bx
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int fflush(FILE *)  — no-op since writes are unbuffered.
+; ----------------------------------------------------------------------
+global _fflush
+_fflush:
+    xor ax, ax
+    retf
+
+
+; ----------------------------------------------------------------------
+; size_t fwrite(const void *ptr, size_t sz, size_t n, FILE *)
+; Writes sz*n bytes via INT 21h AH=40.  Returns n on success, 0 on
+; error or zero size.
+; ----------------------------------------------------------------------
+global _fwrite
+_fwrite:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+
+    mov ax, [bp+8]                ; sz
+    mov cx, [bp+10]               ; n
+    mul cx                        ; AX = sz*n (DX overflow ignored)
+    test ax, ax
+    jz .fw_done
+    mov cx, ax                    ; byte count
+    mov dx, [bp+6]                ; ptr
+    mov si, [bp+12]               ; FILE*
+    mov bx, [si]                  ; handle (works for slot or sentinel)
+    mov ah, 0x40
+    int 0x21
+    jc .fw_err
+
+    ; AX = bytes actually written; convert back to "items written".
+    xor dx, dx
+    div word [bp+8]               ; AX = bytes / sz
+    jmp .fw_done
+.fw_err:
+    xor ax, ax
+.fw_done:
+    pop si
+    pop bx
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int fputc(int c, FILE *)  — write one byte via INT 21h AH=40.
+; ----------------------------------------------------------------------
+global _fputc
+_fputc:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+
+    mov si, [bp+8]                ; FILE*
+    mov bx, [si]                  ; handle
+    mov ax, [bp+6]                ; c (low byte)
+    push ax                       ; scratch 1-byte buffer on stack
+    mov dx, sp                    ; DS:DX -> our byte
+    mov cx, 1
+    mov ah, 0x40
+    int 0x21
+    pop ax                        ; discard scratch
+    jc .fpc_err
+
+    mov ax, [bp+6]                ; return the char written
+    and ax, 0xFF
+    jmp .fpc_done
+.fpc_err:
+    mov ax, -1
+.fpc_done:
+    pop si
+    pop bx
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int fputs(const char *s, FILE *)  — write a null-terminated string.
+; ----------------------------------------------------------------------
+global _fputs
+_fputs:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+    push di
+
+    mov si, [bp+6]                ; s
+    test si, si
+    jz .fps_err
+    mov di, si
+.fps_len:
+    cmp byte [di], 0
+    je .fps_len_done
+    inc di
+    jmp .fps_len
+.fps_len_done:
+    mov cx, di
+    sub cx, si                    ; CX = strlen
+    jz .fps_ok                    ; empty string — still success
+
+    mov dx, si                    ; DS:DX -> s
+    mov si, [bp+8]                ; FILE*
+    mov bx, [si]                  ; handle
+    mov ah, 0x40
+    int 0x21
+    jc .fps_err
+
+.fps_ok:
+    xor ax, ax                    ; success (non-negative)
+    jmp .fps_done
+.fps_err:
+    mov ax, -1
+.fps_done:
+    pop di
+    pop si
+    pop bx
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int fprintf(FILE *, const char *fmt, ...)
+;
+; Allocates a 512-byte stack scratch, far-calls _sprintf with the same
+; (up to 16-word) variadic args we received, then writes the resulting
+; string to the FILE's DOS handle via INT 21h AH=40.  _sprintf is in
+; the same LIBSTUB_TEXT segment but uses retf in the EXE build, so the
+; far-call ABI lines up.
+; ----------------------------------------------------------------------
+global _fprintf
+_fprintf:
+    push bp
+    mov bp, sp
+    sub sp, _FP_BUFSZ             ; scratch at [bp - _FP_BUFSZ]
+    push si
+    push di                       ; callee-save in cdecl
+    push bx                       ; callee-save in cdecl
+
+    ; Copy 16 words of varargs (caller frame [bp+10 .. bp+40]) onto our
+    ; stack in cdecl right-to-left order so _sprintf reads the same
+    ; values we received.  Reading past the caller's real varargs is
+    ; harmless: _sprintf only consumes what %fmt directs.
+    mov cx, 16
+.fpr_pusharg:
+    mov si, bp
+    mov ax, cx
+    shl ax, 1
+    add si, ax                    ; bp + cx*2
+    add si, 8                     ; first vararg at bp+10 = bp + 1*2 + 8
+    push word [si]
+    loop .fpr_pusharg
+
+    push word [bp+8]              ; fmt
+    lea ax, [bp - _FP_BUFSZ]
+    push ax                       ; dest buffer
+    call far _sprintf
+    add sp, 4 + 32                ; pop dest + fmt + 16 vararg words
+
+    ; Measure the formatted string.
+    lea si, [bp - _FP_BUFSZ]
+    mov dx, si                    ; DS:DX -> buf
+    xor cx, cx
+.fpr_strlen:
+    cmp byte [si], 0
+    je .fpr_strlen_done
+    inc si
+    inc cx
+    jmp .fpr_strlen
+.fpr_strlen_done:
+    test cx, cx
+    jz .fpr_ok                    ; empty output -> nothing to write
+
+    ; Write CX bytes from DS:DX to FILE's handle.
+    mov si, [bp+6]                ; FILE*
+    mov bx, [si]                  ; handle
+    mov ah, 0x40
+    int 0x21
+    jc .fpr_err
+
+.fpr_ok:
+    mov ax, cx                    ; return bytes written
+    jmp .fpr_done
+.fpr_err:
+    mov ax, -1
+.fpr_done:
+    pop bx
+    pop di
+    pop si
+    mov sp, bp
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int printf(const char *fmt, ...)
+;
+; Same as fprintf(stdout, fmt, ...).  Caller frame layout differs by
+; one slot (no leading FILE* arg) so the vararg base and fmt offsets
+; shift by 2.
+; ----------------------------------------------------------------------
+global _printf
+_printf:
+    push bp
+    mov bp, sp
+    sub sp, _FP_BUFSZ
+    push si
+    push di                       ; callee-save in cdecl
+    push bx                       ; callee-save in cdecl
+
+    mov cx, 16
+.pr_pusharg:
+    mov si, bp
+    mov ax, cx
+    shl ax, 1
+    add si, ax
+    add si, 6                     ; first vararg at bp+8 = bp + 1*2 + 6
+    push word [si]
+    loop .pr_pusharg
+
+    push word [bp+6]              ; fmt
+    lea ax, [bp - _FP_BUFSZ]
+    push ax
+    call far _sprintf
+    add sp, 4 + 32
+
+    lea si, [bp - _FP_BUFSZ]
+    mov dx, si
+    xor cx, cx
+.pr_strlen:
+    cmp byte [si], 0
+    je .pr_strlen_done
+    inc si
+    inc cx
+    jmp .pr_strlen
+.pr_strlen_done:
+    test cx, cx
+    jz .pr_ok
+
+    mov bx, 1                     ; stdout
+    mov ah, 0x40
+    int 0x21
+    jc .pr_err
+
+.pr_ok:
+    mov ax, cx
+    jmp .pr_done
+.pr_err:
+    mov ax, -1
+.pr_done:
+    pop bx
+    pop di
+    pop si
+    mov sp, bp
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int rename(const char *old, const char *new)  — INT 21h AH=56.
+; Both names must be in DGROUP (DS=ES).
+; ----------------------------------------------------------------------
+global _rename
+_rename:
+    push bp
+    mov bp, sp
+    push di
+    push es
+
+    push ds
+    pop es                        ; ES = DS = DGROUP
+    mov dx, [bp+6]                ; DS:DX = old
+    mov di, [bp+8]                ; ES:DI = new
+    mov ah, 0x56
+    int 0x21
+    jc .rn_err
+    xor ax, ax
+    jmp .rn_done
+.rn_err:
+    mov ax, -1
+.rn_done:
+    pop es
+    pop di
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int remove(const char *name)  — INT 21h AH=41.
+; ----------------------------------------------------------------------
+global _remove
+_remove:
+    push bp
+    mov bp, sp
+    mov dx, [bp+6]
+    mov ah, 0x41
+    int 0x21
+    jc .rm_err
+    xor ax, ax
+    pop bp
+    retf
+.rm_err:
+    mov ax, -1
     pop bp
     retf
 
@@ -493,7 +890,13 @@ def main():
     # The .EXE replacements live in MALLOC_EXE (appended at end of
     # output).  Detect entry into these blocks and skip until the next
     # `global _xxx` for an unrelated symbol.
-    SKIP_GLOBALS = {'_malloc', '_free', '_fopen', '_fclose', '_getc'}
+    SKIP_GLOBALS = {
+        '_malloc', '_free',
+        # All file I/O is reimplemented in FILEIO_EXE for write support.
+        '_fopen', '_fclose', '_getc',
+        '_fwrite', '_fputc', '_fputs', '_fprintf', '_printf', '_fflush',
+        '_rename', '_remove',
+    }
     SKIP_LABELS  = {'_heap_initialized', '_heap_ptr', '_heap_top'}
 
     # Second pass: route lines.  When we encounter a label whose kind is

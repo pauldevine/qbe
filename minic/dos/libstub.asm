@@ -1040,12 +1040,27 @@ _dos_getvidmode:
 ; _params now lives in param.c (compiles via struct-array initializers).
 ; _gchar and _inc live in ptrfunc.c.
 
-; FILE* stdio handles.  Near pointers (2 bytes) — values are non-zero
-; sentinels (DOS handle numbers) so NULL checks pass.
+; stdio sentinels.
+;
+; The libstub I/O routines (_fwrite/_fputc/_fputs/_fprintf/_printf)
+; treat a FILE* as a pointer to a struct whose FIRST WORD is the DOS
+; file handle, so they all do `mov bx, [filep]` to extract the handle.
+;
+; To make `fprintf(stderr, ...)` work, the C variables stdin/stdout/
+; stderr must each point at a one-word "FILE" struct holding the
+; corresponding DOS handle.  That is, the C value of `stderr` is the
+; address of a word whose contents are 2.
+;
+; In asm: `_stderr` is the C variable's storage (a word holding the
+; FILE* value).  `_stderr_file` is the one-word struct that
+; `_stderr` points at.
 global _stdin, _stdout, _stderr
-_stdin:  dw 1   ; sentinel (DOS handle 0 = stdin)
-_stdout: dw 2   ; sentinel (DOS handle 1 = stdout)
-_stderr: dw 3   ; sentinel (DOS handle 2 = stderr)
+_stdin:  dw _stdin_file    ; FILE *stdin  = &_stdin_file
+_stdout: dw _stdout_file   ; FILE *stdout = &_stdout_file
+_stderr: dw _stderr_file   ; FILE *stderr = &_stderr_file
+_stdin_file:  dw 0         ; FILE struct: handle = 0 (DOS stdin)
+_stdout_file: dw 1         ; FILE struct: handle = 1 (DOS stdout)
+_stderr_file: dw 2         ; FILE struct: handle = 2 (DOS stderr)
 
 global _updatetabstoptable
 _updatetabstoptable:

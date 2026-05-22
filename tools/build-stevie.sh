@@ -314,7 +314,7 @@ if [ $EXE -eq 1 ]; then
 		-o "$OUT_DIR/stevie.exe" \
 		--map "$OUT_DIR/stevie.map" \
 		--entry _start \
-		--stack-size 4096 \
+		--stack-size 8192 \
 		"${OBJS[@]}" 2>>"$OUT_DIR/link.err"; then
 		echo "  OK: $OUT_DIR/stevie.exe ($(wc -c <"$OUT_DIR/stevie.exe") bytes)"
 	else
