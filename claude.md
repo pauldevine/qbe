@@ -1,8 +1,8 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-22
-**Status:** ~90% Complete
+**Last Updated:** 2026-05-23
+**Status:** ~92% Complete
 
 ---
 
@@ -13,8 +13,8 @@
 ### **→ [ROADMAP.md](./ROADMAP.md) ←**
 
 The ROADMAP.md file contains:
-- **Accurate current status** of all components (updated 2026-05-22)
-- **Phase completion tracking** (Phases 0, 1, 2, 4 complete; Phase 3 ~85%)
+- **Accurate current status** of all components (updated 2026-05-23)
+- **Phase completion tracking** (Phases 0, 1, 2, 4 complete; Phase 3 ~90%)
 - **Component status table** with evidence and file references
 - **What's actually missing** vs what's been completed
 - **Original planned roadmap** for reference
@@ -40,17 +40,17 @@ The ROADMAP.md file contains:
 - **Examples** — 16 legacy + 3 modern `<dos.h>` demos (mouse_demo, vga_pixels, kbtest)
 
 **In Progress ⚠️:**
-- Memory Models — small + medium .EXE work; tiny (.COM) still over 64 KB
+- Memory Models — tiny/small/medium .EXE work; compact runs cprobe.c end-to-end in DOSBox (commit 493b84b) but `_far_strlen`/`_far_strcpy`/`_far_strcmp`/`_far_memcpy`/`_far_memcmp`/`_far_memset` still unimplemented; `_far_sprintf` `%s`/`%p` handling still consumes 2-byte near pointers
+- Tiny memory model (.COM) — stevie.com still over 64 KB ([[minic-pointer-bloat]])
 
 **Missing ❌:**
-- Tiny memory model (.COM) — stevie.com over 64 KB ([[minic-pointer-bloat]])
 - Large/huge memory models
 
 ---
 
 ## Key Documentation Files
 
-- **[ROADMAP.md](./ROADMAP.md)** - Current status and implementation plan (UPDATED 2026-05-22)
+- **[ROADMAP.md](./ROADMAP.md)** - Current status and implementation plan (UPDATED 2026-05-23)
 - **[C11_8086_ARCHITECTURE.md](./C11_8086_ARCHITECTURE.md)** - Architectural analysis
 - **[NEW_FEATURES_DOCUMENTATION.md](./NEW_FEATURES_DOCUMENTATION.md)** - MiniC feature reference
 - **[I8086_TARGET.md](./I8086_TARGET.md)** - i8086 backend reference
@@ -60,6 +60,13 @@ The ROADMAP.md file contains:
 ---
 
 ## Recent Major Accomplishments
+
+### Compact memory model end-to-end (2026-05-23, commit 493b84b)
+- ✅ `uses_far_code()` now includes Mcompact; selret emits `Jretf*`, selcall emits `Ocallfar`, crt0's `call far _main` lines up with main's `retf`
+- ✅ minic mangles known stdlib calls to `far_X` (asm `_far_X`) in compact/large/huge
+- ✅ `_far_printf` / `_far_fprintf` injected by `libstub_to_exe.py`; copy 4-byte far fmt into local DGROUP scratch, then call `_sprintf`
+- ✅ `--model=<m>` plumbed through `asm_to_omf.py`, `libstub_to_exe.py`, `omf_link.py` (reserved for future near-code coalescing)
+- ✅ Runtime-verified: `tools/build-example.sh --model=compact minic/dos/examples/cprobe.c` prints `x=42 / x=99` in DOSBox
 
 ### Tiny / cheap DOS API (2026-05-22, commits 28941ae + d36f103)
 - ✅ int86 / int86x / intdos / intdosx / segread (full `union REGS` / `struct SREGS`)
@@ -104,14 +111,16 @@ The ROADMAP.md file contains:
 
 ## Next Priorities
 
-1. **Tiny memory model (.COM)** — shrink stevie.com under the 64 KB ceiling
+1. **Round out compact** — `_far_strlen` / `_far_strcpy` / `_far_strcmp` / `_far_memcpy` / `_far_memcmp` / `_far_memset` etc.; clone `_sprintf` into `_far_sprintf` so `%s` / `%p` consume 4-byte far pointers. See `NEXT_SESSION_PROMPT.md`.
+
+2. **Large / huge memory models** — only tiny / small / medium / compact implemented
+
+3. **Tiny memory model (.COM) stevie shrink** — orthogonal to compact work
    - Path A (near-pointer narrowing) is partially landed (commit 5125e70, 98K→81K)
    - Need further shrink: dead-code elimination, library partitioning, or pointer ABI tweaks
    - See `[[minic-pointer-bloat]]` and NEXT_SESSION_PROMPT.md
 
-2. **Large / huge memory models** — only small + medium implemented
-
-3. **211-commit upstream-qbe rebase** — pure plumbing; deferred until i8086 backend stabilises
+4. **211-commit upstream-qbe rebase** — pure plumbing; deferred until i8086 backend stabilises
 
 ---
 
@@ -122,6 +131,8 @@ The ROADMAP.md file contains:
 **Main Branch:** master
 
 **Recent Key Commits:**
+- `493b84b` - i8086+minic: compact uses far-code ABI; libstub _far_printf landed
+- `1f197a0` - i8086+minic: compact far-data deref + Kl CAddr seg/off + Kl call return
 - `e70a5dc` - Roadmap: reflect DOS API + runtime close-out (~90%)
 - `d36f103` - libstub: INT 33h mouse wrappers + parameterized example build
 - `28941ae` - libstub: complete int86x/intdosx/segread plus DOS API wrappers
@@ -140,5 +151,5 @@ For detailed status, progress tracking, and implementation plans, always refer t
 
 ---
 
-*Last updated: 2026-05-22*
+*Last updated: 2026-05-23*
 *See ROADMAP.md for current status*

@@ -2,8 +2,8 @@
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
 **Original Timeline:** 10-12 weeks to production release
-**Actual Progress:** ~90% Complete (as of 2026-05-22)
-**Last Updated:** 2026-05-22
+**Actual Progress:** ~92% Complete (as of 2026-05-23)
+**Last Updated:** 2026-05-23
 
 ---
 
@@ -13,7 +13,7 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 
 ---
 
-## Actual Current Status (Updated 2026-05-22)
+## Actual Current Status (Updated 2026-05-23)
 
 **Component Status:**
 
@@ -30,7 +30,7 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 | **Function Pointers** | ✅ Complete | Full support with typedef | i8086/README.md:321 |
 | **Struct Bitfields** | ✅ Complete | Packing and read/write | i8086/README.md:322 |
 | **DOS Runtime** | ✅ **COMPLETE** | crt0_exe.asm + real printf/sprintf, freelist malloc/free, file I/O | minic/dos/libstub.asm |
-| **Memory Models** | ✅ Tiny + Small + Medium | Tiny .COM works for small programs (com_smoke.c, 1.2KB; regression-gated at 4KB via tools/test-dos.sh); medium .EXE works for stevie; large/huge missing | tools/build-com-test.sh, tools/build-stevie.sh |
+| **Memory Models** | ✅ Tiny + Small + Medium + Compact | Tiny .COM works for small programs (com_smoke.c, 1.2KB; gated at 4KB via tools/test-dos.sh); medium .EXE works for stevie; compact .EXE runs cprobe.c end-to-end in DOSBox (commit 493b84b); large/huge still missing | tools/build-com-test.sh, tools/build-stevie.sh, tools/build-example.sh |
 | **DOS API Library** | ✅ **COMPLETE** | int86/int86x/intdos/intdosx/segread + video/keyboard/mouse wrappers | minic/dos/libstub.asm, minic/include/dos.h |
 
 **Phase Completion (vs original plan):**
@@ -49,8 +49,10 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 - ✅ Stevie editor (`stevie.exe`) ports cleanly as the flagship integration test
 
 **What's Actually Missing:**
-1. **Large/huge memory models** — only tiny/small/medium implemented
-2. **Polish on the legacy examples** — 16 older `dos_putchar`-style files in `minic/dos/examples/` predate the `<dos.h>` API; modern dialect now demonstrated by `mouse_demo.c` / `vga_pixels.c` / `kbtest.c`
+1. **Large/huge memory models** — only tiny/small/medium/compact implemented
+2. **Compact-mode far-variadic %s/%p** — `_far_printf`/`_far_fprintf` copy the format string but still consume `%s`/`%p` args as 2-byte near pointers (would need a parallel `_far_sprintf`). Numeric `%d/%u/%x/%o/%ld` round-trip correctly.
+3. **Far-aware `_far_strlen/strcpy/strcmp/memcpy/memcmp/memset`** — list mangled by minic in compact, but symbols not yet defined in libstub; compact programs that use them won't link.
+4. **Polish on the legacy examples** — 16 older `dos_putchar`-style files in `minic/dos/examples/` predate the `<dos.h>` API; modern dialect now demonstrated by `mouse_demo.c` / `vga_pixels.c` / `kbtest.c`
 
 **Note on tiny model:** Stevie itself doesn't fit in .COM (currently ~87KB; see `[[minic-pointer-bloat]]` for history) and that's expected — stevie is a medium-model program by design. The tiny-model pipeline is gated end-to-end by `tools/test-dos.sh` against `minic/dos/tests/com_smoke.c` at a 4 KB ceiling, which catches regressions in libstub size, codegen bloat, or the memref-base rega hint without holding stevie hostage to the 64 KB cap.
 
@@ -1072,8 +1074,8 @@ The following features were implemented but were not part of the original roadma
 
 ---
 
-**Roadmap Version:** 3.0 (Updated post-DOS-API close-out)
-**Last Updated:** 2026-05-22
+**Roadmap Version:** 3.1 (Compact-model close-out)
+**Last Updated:** 2026-05-23
 **Original Date:** 2025-11-21
-**Actual Status:** ~90% Complete (Phases 0, 1, 2, 4 done; Phase 3 ~85%)
-**Next Priority:** Tiny memory model for .COM builds — shrink stevie under 64 KB (see `[[minic-pointer-bloat]]`)
+**Actual Status:** ~92% Complete (Phases 0, 1, 2, 4 done; Phase 3 ~90%; compact memmodel runtime-verified in DOSBox)
+**Next Priority:** Round out compact (far variants of `_strlen` / `_strcpy` / etc., far-aware `%s`/`%p` in `_far_sprintf`), then large/huge models; tiny .COM stevie shrink still parked (see `[[minic-pointer-bloat]]`)
