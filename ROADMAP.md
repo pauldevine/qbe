@@ -30,7 +30,7 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 | **Function Pointers** | ✅ Complete | Full support with typedef | i8086/README.md:321 |
 | **Struct Bitfields** | ✅ Complete | Packing and read/write | i8086/README.md:322 |
 | **DOS Runtime** | ✅ **COMPLETE** | crt0_exe.asm + real printf/sprintf, freelist malloc/free, file I/O | minic/dos/libstub.asm |
-| **Memory Models** | ⚠️ Small + Medium | Medium .EXE works (stevie ships); tiny .COM still over 64KB; large/huge missing | tools/build-stevie.sh |
+| **Memory Models** | ✅ Tiny + Small + Medium | Tiny .COM works for small programs (com_smoke.c, 1.2KB; regression-gated at 4KB via tools/test-dos.sh); medium .EXE works for stevie; large/huge missing | tools/build-com-test.sh, tools/build-stevie.sh |
 | **DOS API Library** | ✅ **COMPLETE** | int86/int86x/intdos/intdosx/segread + video/keyboard/mouse wrappers | minic/dos/libstub.asm, minic/include/dos.h |
 
 **Phase Completion (vs original plan):**
@@ -49,9 +49,10 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 - ✅ Stevie editor (`stevie.exe`) ports cleanly as the flagship integration test
 
 **What's Actually Missing:**
-1. **Tiny memory model (.COM)** — stevie.com is over 64KB; needs near-pointer narrowing or model split (see `[[minic-pointer-bloat]]`)
-2. **Large/huge memory models** — only small/medium implemented
-3. **Polish on the legacy examples** — 16 older `dos_putchar`-style files in `minic/dos/examples/` predate the `<dos.h>` API; modern dialect now demonstrated by `mouse_demo.c` / `vga_pixels.c` / `kbtest.c`
+1. **Large/huge memory models** — only tiny/small/medium implemented
+2. **Polish on the legacy examples** — 16 older `dos_putchar`-style files in `minic/dos/examples/` predate the `<dos.h>` API; modern dialect now demonstrated by `mouse_demo.c` / `vga_pixels.c` / `kbtest.c`
+
+**Note on tiny model:** Stevie itself doesn't fit in .COM (currently ~87KB; see `[[minic-pointer-bloat]]` for history) and that's expected — stevie is a medium-model program by design. The tiny-model pipeline is gated end-to-end by `tools/test-dos.sh` against `minic/dos/tests/com_smoke.c` at a 4 KB ceiling, which catches regressions in libstub size, codegen bloat, or the memref-base rega hint without holding stevie hostage to the 64 KB cap.
 
 ---
 
@@ -712,7 +713,7 @@ Currently only small model (code + data < 64K each). Add:
 - [x] DOS interrupt interface (int86 / int86x / intdos / intdosx / segread; commit 28941ae)
 - [x] Video functions (VGA mode 13h via `set_video_mode` + `putpixel`; commit 28941ae)
 - [x] Keyboard/mouse support (`kbhit`/`getche` in commit 28941ae; INT 33h mouse in d36f103)
-- [ ] Multiple memory models — small + medium done; tiny (.COM) + large + huge pending
+- [x] Multiple memory models — tiny (.COM, gated by tools/test-dos.sh), small, and medium done; large + huge pending
 - [x] 10+ DOS example programs (16 legacy + 3 modern `<dos.h>` demos = 19 total)
 
 **Success Criteria:**
