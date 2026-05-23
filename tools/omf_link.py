@@ -1102,10 +1102,10 @@ def main() -> None:
     ap.add_argument('objs', nargs='+', help='input .obj files')
     args = ap.parse_args()
 
-    if args.memory_model != 'medium':
+    if args.memory_model not in ('tiny', 'small', 'medium', 'compact',
+                                 'large', 'huge'):
         raise NotImplementedError(
-            'memory model %r not implemented (only "medium")'
-            % args.memory_model)
+            'unknown memory model %r' % args.memory_model)
 
     if args.stack_size <= 0 or args.stack_size > 0xFFFF:
         die('--stack-size must be in 1..65535')

@@ -17,13 +17,22 @@ Mechanical transforms:
 
 In:  minic/dos/libstub.asm
 Out: <argv[1]>
+
+Usage: libstub_to_exe.py [--model=<m>] <in.asm> <out.asm>
+
+Near-code memory models (tiny / small / compact) collapse all CODE
+into a shared `_TEXT` segment so the linker can coalesce the libstub
+with user code into a single 64KB CS frame.  Far-code models
+(medium / large / huge) keep the dedicated `LIBSTUB_TEXT` segment so
+each module gets its own physical 64KB code segment and the runtime
+uses `call far` / `retf` to traverse them.
 """
 import re
 import sys
 
-PROLOGUE = """\
+PROLOGUE_TEMPLATE = """\
 ; Auto-generated from minic/dos/libstub.asm by tools/libstub_to_exe.py
-; Medium-memory-model libc/runtime stubs for stevie .EXE build.
+; {model_label} libc/runtime stubs for stevie .EXE build.
 ; All functions use far-call ABI: retf, args at [bp+6] and up.
 bits 16
 cpu 8086
@@ -39,7 +48,7 @@ cpu 8086
 
 ; Declare all segments with attributes up-front so subsequent `segment X`
 ; references inherit the attrs (NASM warns on redeclaration with attrs).
-segment LIBSTUB_TEXT class=CODE align=2 use16
+segment {code_seg} class=CODE align=2 use16
 segment _DATA class=DATA align=2 use16
 segment _BSS class=BSS align=2 use16
 group DGROUP _DATA _BSS
@@ -740,6 +749,170 @@ _printf:
 
 
 ; ----------------------------------------------------------------------
+; int far_printf(const char __far *fmt, ...)  — compact/large/huge entry.
+; int far_fprintf(FILE *stream, const char __far *fmt, ...)
+;
+; In far-data memory models a pointer occupies 4 stack bytes (offset
+; then segment).  minic mangles `printf` -> `far_printf` (asm symbol
+; `_far_printf`) when memmodel ∈ {compact, large, huge}.  We copy the
+; format string off the far ptr into a local DGROUP-relative scratch
+; buffer, then call the existing `_sprintf` exactly like `_printf`.
+;
+; Limitation: variadic %s / %p arguments are still consumed as 2-byte
+; near pointers by _sprintf.  Compact callers using %s / %p would need
+; a separate _far_sprintf that also dereferences arg pointers as far —
+; not implemented here.  Numeric specifiers (%d %u %x %o %ld ...)
+; behave correctly because their stack args are still int / long sized.
+; ----------------------------------------------------------------------
+%define _FMT_BUFSZ 128                ; scratch for far->near fmt copy
+
+global _far_fprintf
+_far_fprintf:
+    push bp
+    mov bp, sp
+    sub sp, _FP_BUFSZ + _FMT_BUFSZ
+    push si
+    push di
+    push bx
+    push es
+
+    ; FILE* at [bp+6], far fmt at [bp+8]:[bp+10], first vararg at [bp+12].
+    mov bx, [bp+8]                ; fmt offset
+    mov es, [bp+10]               ; fmt segment
+    lea di, [bp - _FP_BUFSZ - _FMT_BUFSZ]
+.ffpr_cpfmt:
+    mov al, byte [es:bx]
+    mov byte [di], al
+    inc bx
+    inc di
+    test al, al
+    jnz .ffpr_cpfmt
+
+    ; Push 16 words of varargs (right-to-left).  First vararg @ [bp+12].
+    mov cx, 16
+.ffpr_pusharg:
+    mov si, bp
+    mov ax, cx
+    shl ax, 1
+    add si, ax
+    add si, 10                    ; first vararg at bp+12 = bp + 1*2 + 10
+    push word [si]
+    loop .ffpr_pusharg
+
+    lea ax, [bp - _FP_BUFSZ - _FMT_BUFSZ]
+    push ax                       ; fmt (near, points into DGROUP scratch)
+    lea ax, [bp - _FP_BUFSZ]
+    push ax                       ; dest
+    call far _sprintf
+    add sp, 4 + 32
+
+    lea si, [bp - _FP_BUFSZ]
+    mov dx, si
+    xor cx, cx
+.ffpr_strlen:
+    cmp byte [si], 0
+    je .ffpr_strlen_done
+    inc si
+    inc cx
+    jmp .ffpr_strlen
+.ffpr_strlen_done:
+    test cx, cx
+    jz .ffpr_ok
+
+    mov si, [bp+6]                ; FILE*
+    mov bx, [si]                  ; handle
+    mov ah, 0x40
+    int 0x21
+    jc .ffpr_err
+
+.ffpr_ok:
+    mov ax, cx
+    jmp .ffpr_done
+.ffpr_err:
+    mov ax, -1
+.ffpr_done:
+    pop es
+    pop bx
+    pop di
+    pop si
+    mov sp, bp
+    pop bp
+    retf
+
+
+global _far_printf
+_far_printf:
+    push bp
+    mov bp, sp
+    sub sp, _FP_BUFSZ + _FMT_BUFSZ
+    push si
+    push di
+    push bx
+    push es
+
+    ; Far fmt at [bp+6]:[bp+8], first vararg at [bp+10].
+    mov bx, [bp+6]                ; fmt offset
+    mov es, [bp+8]                ; fmt segment
+    lea di, [bp - _FP_BUFSZ - _FMT_BUFSZ]
+.fpr_cpfmt:
+    mov al, byte [es:bx]
+    mov byte [di], al
+    inc bx
+    inc di
+    test al, al
+    jnz .fpr_cpfmt
+
+    mov cx, 16
+.fpr_pusharg:
+    mov si, bp
+    mov ax, cx
+    shl ax, 1
+    add si, ax
+    add si, 8                     ; first vararg at bp+10 = bp + 1*2 + 8
+    push word [si]
+    loop .fpr_pusharg
+
+    lea ax, [bp - _FP_BUFSZ - _FMT_BUFSZ]
+    push ax                       ; fmt (near, points into DGROUP scratch)
+    lea ax, [bp - _FP_BUFSZ]
+    push ax                       ; dest
+    call far _sprintf
+    add sp, 4 + 32
+
+    lea si, [bp - _FP_BUFSZ]
+    mov dx, si
+    xor cx, cx
+.fpr_strlen:
+    cmp byte [si], 0
+    je .fpr_strlen_done
+    inc si
+    inc cx
+    jmp .fpr_strlen
+.fpr_strlen_done:
+    test cx, cx
+    jz .fpr_ok
+
+    mov bx, 1                     ; stdout
+    mov ah, 0x40
+    int 0x21
+    jc .fpr_err
+
+.fpr_ok:
+    mov ax, cx
+    jmp .fpr_done
+.fpr_err:
+    mov ax, -1
+.fpr_done:
+    pop es
+    pop bx
+    pop di
+    pop si
+    mov sp, bp
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
 ; int rename(const char *old, const char *new)  — INT 21h AH=56.
 ; Both names must be in DGROUP (DS=ES).
 ; ----------------------------------------------------------------------
@@ -822,14 +995,30 @@ def transform(line):
 
 
 def main():
-    if len(sys.argv) != 3:
+    args = sys.argv[1:]
+    model = 'medium'
+    while args and args[0].startswith('--'):
+        a = args.pop(0)
+        if a.startswith('--model='):
+            model = a[len('--model='):]
+        else:
+            print('libstub_to_exe: unknown option: ' + a, file=sys.stderr)
+            sys.exit(2)
+    if len(args) != 2:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
-    in_path, out_path = sys.argv[1], sys.argv[2]
+    in_path, out_path = args[0], args[1]
+    # Compact is currently routed through the medium-model far-call ABI
+    # (see i8086 `uses_far_code()`): the only model-specific difference
+    # is far-pointer data on the libstub side via the _far_X variants.
+    code_seg = 'LIBSTUB_TEXT'
+    model_label = 'Medium/far-code model (model=%s)' % model
+    prologue = PROLOGUE_TEMPLATE.format(code_seg=code_seg,
+                                        model_label=model_label)
     with open(in_path) as f:
         src = f.read()
 
-    out_lines = [PROLOGUE, '']
+    out_lines = [prologue, '']
 
     # Track section state.  libstub.asm has no explicit segment
     # directives in the .COM build — everything is in one stream that
@@ -845,7 +1034,7 @@ def main():
         nonlocal cur_section
         if cur_section != 'text':
             out_lines.append('')
-            out_lines.append('segment LIBSTUB_TEXT')
+            out_lines.append('segment ' + code_seg)
             cur_section = 'text'
 
     def open_data():

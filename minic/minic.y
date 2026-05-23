@@ -1228,6 +1228,49 @@ storefar(Symb d, Symb s)
 	fprintf(of, "\n");
 }
 
+/*
+ * In far-data memory models (compact/large/huge) default `char *` and
+ * other data pointers are 32-bit segment:offset. The stock libstub
+ * routines (_printf, _strlen, _strcpy, ...) all read 16-bit near
+ * pointers off the stack, so calling them with far pointers would
+ * silently shift every subsequent vararg by one slot. Re-route calls
+ * to a fixed list of well-known stdlib names to `_far_X` variants
+ * that consume 4-byte stack pointers and dereference via ES:[BX].
+ *
+ * Only data-pointer-bearing routines are mangled; routines that take
+ * no pointers (_atoi on a literal int, _isalpha, ...) keep their
+ * regular names. User-defined functions of the same name override
+ * the libstub variant the same way they always did, but in those
+ * compact-only models the user takes responsibility for matching the
+ * far-ptr ABI on their declarations.
+ */
+char *
+call_target_name(char *f)
+{
+	static const char *far_stdlib[] = {
+		"printf", "fprintf", "sprintf",
+		"puts", "fputs", "fputc", "fgets",
+		"strlen", "strcpy", "strcmp", "strncmp", "strncpy",
+		"strchr", "strcat", "strcspn", "strstr", "strrchr",
+		"memcpy", "memcmp", "memset",
+		0
+	};
+	static char mangled[NString];
+	int i;
+
+	if (NEAR_DATA())
+		return f;
+	for (i=0; far_stdlib[i]; i++) {
+		if (strcmp(f, far_stdlib[i]) == 0) {
+			/* QBE will prefix the asm symbol with `_`, so emit
+			 * `far_X` and let it become `_far_X` at link time. */
+			snprintf(mangled, sizeof mangled, "far_%s", f);
+			return mangled;
+		}
+	}
+	return f;
+}
+
 void
 call(Node *n, Symb *sr)
 {
@@ -1285,13 +1328,16 @@ call(Node *n, Symb *sr)
 	sr->ctyp = DREF(ft);
 	for (a=n->r; a; a=a->r)
 		a->u.s = expr(a->l);
+	{
+	char *cf = call_target_name(f);
 	if (sr->ctyp == NIL) {
 		/* Void function - no return value */
-		fprintf(of, "\tcall $%s(", f);
+		fprintf(of, "\tcall $%s(", cf);
 	} else {
 		fprintf(of, "\t");
 		psymb(*sr);
-		fprintf(of, " =%c call $%s(", irtyp_ret(sr->ctyp), f);
+		fprintf(of, " =%c call $%s(", irtyp_ret(sr->ctyp), cf);
+	}
 	}
 	for (a=n->r; a; a=a->r) {
 		fprintf(of, "%c ", irtyp_ret(a->u.s.ctyp));

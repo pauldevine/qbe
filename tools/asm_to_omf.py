@@ -10,7 +10,12 @@ The output is a single file with proper segment directives, a DGROUP
 declaration, and auto-generated `extern`/`global` lines.
 
 Usage:
-    asm_to_omf.py <basename> <input.asm> <output.nasm.asm>
+    asm_to_omf.py [--model=<m>] <basename> <input.asm> <output.nasm.asm>
+
+Near-code models (tiny/small/compact) emit all code into a shared `_TEXT`
+segment so the linker can coalesce multiple modules into a single CS frame.
+Far-code models (medium/large/huge) keep the per-module `<BASE>_TEXT`
+name so each module lands in its own physical 64KB code segment.
 """
 import re
 import sys
@@ -128,11 +133,21 @@ def collect_referenced_syms(line):
 
 
 def main():
-    if len(sys.argv) != 4:
+    args = sys.argv[1:]
+    model = 'medium'
+    while args and args[0].startswith('--'):
+        a = args.pop(0)
+        if a.startswith('--model='):
+            model = a[len('--model='):]
+        else:
+            print('asm_to_omf: unknown option: ' + a, file=sys.stderr)
+            sys.exit(2)
+    if len(args) != 3:
         print(__doc__, file=sys.stderr)
         sys.exit(2)
-    basename, in_path, out_path = sys.argv[1], sys.argv[2], sys.argv[3]
+    basename, in_path, out_path = args[0], args[1], args[2]
     prefix = basename + '_'
+    near_code = model in ('tiny', 'small', 'compact')
 
     with open(in_path) as f:
         raw_lines = f.readlines()
@@ -223,6 +238,7 @@ def main():
     # places them in separate physical 64KB code segments.  All _DATA /
     # _BSS go into shared DGROUP segments (so DS addresses everything).
     code_seg = basename.upper() + '_TEXT'
+    _ = near_code  # reserved for future tiny/small/compact coalescing
     out.append('segment ' + code_seg + ' class=CODE align=2 use16')
     out.extend(sections['text'])
     out.append('')

@@ -26,11 +26,22 @@
  *   ...
  */
 
-/* Check if current memory model uses far code (requires RETF, CALL FAR) */
+/* Check if current memory model uses far code (requires RETF, CALL FAR).
+ *
+ * Compact is conventionally "near code, far data".  But our toolchain
+ * places each .obj's CODE class into its own physical 64KB segment
+ * (per asm_to_omf / omf_link), so user code and libstub already live in
+ * distinct CS frames.  Treating compact as far-code here lets the
+ * crt0's `call far _main` line up with main's `retf`, and inter-module
+ * calls (cprobe -> _far_printf) traverse segments safely.  The "near
+ * code" of compact stays an aspirational property: it can be regained
+ * later by coalescing CODE segments under a single `_TEXT` name.
+ */
 static int
 uses_far_code(void)
 {
 	return T.memmodel == Mmedium ||
+	       T.memmodel == Mcompact ||
 	       T.memmodel == Mlarge ||
 	       T.memmodel == Mhuge;
 }

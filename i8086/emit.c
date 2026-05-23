@@ -1896,6 +1896,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			    i->op == Orem  ? "_qbe_rem32s" :
 			                     "_qbe_rem32u";
 			int farcall = (T.memmodel == Mmedium ||
+			               T.memmodel == Mcompact ||
 			               T.memmodel == Mlarge  ||
 			               T.memmodel == Mhuge);
 
