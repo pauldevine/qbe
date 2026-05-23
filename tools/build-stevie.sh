@@ -328,6 +328,21 @@ else
 	strip_runtime() {
 		grep -v -E '^(BITS|CPU|section|global|extern)\b' "$1"
 	}
+
+	# Prune libstub to only the chunks transitively referenced by the
+	# per-TU asm + crt0.  The .COM pipeline has no linker, so without
+	# pruning every libstub symbol shows up in the flat binary.
+	PRUNED_LIBSTUB="$OUT_DIR/libstub.pruned.asm"
+	PER_TU_ASM=()
+	for src in "${stage_pass[@]}"; do
+		base="${src%.c}"
+		[ -f "$OUT_DIR/$base.nasm.asm" ] && PER_TU_ASM+=("$OUT_DIR/$base.nasm.asm")
+	done
+	"$QBE_DIR/tools/libstub_prune.py" "$DOS_DIR/libstub.asm" \
+		"$PRUNED_LIBSTUB" "$DOS_DIR/crt0.asm" "${PER_TU_ASM[@]}" \
+		2>>"$OUT_DIR/link.err" || {
+		echo "  FAIL libstub-prune"; cat "$OUT_DIR/link.err"; exit 1; }
+
 	{
 		echo "BITS 16"
 		echo "CPU 8086"
@@ -337,11 +352,8 @@ else
 		echo "; ===== crt0 ====="
 		strip_runtime "$DOS_DIR/crt0.asm"
 		echo
-		echo "; ===== doslib ====="
-		strip_runtime "$DOS_DIR/doslib.asm"
-		echo
-		echo "; ===== libstub (placeholder libc) ====="
-		strip_runtime "$DOS_DIR/libstub.asm"
+		echo "; ===== libstub (pruned) ====="
+		strip_runtime "$PRUNED_LIBSTUB"
 		echo
 		for src in "${SOURCES[@]}"; do
 			base="${src%.c}"
