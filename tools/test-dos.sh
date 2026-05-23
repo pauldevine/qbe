@@ -14,21 +14,26 @@ set -u
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-# --- .COM smoke test -------------------------------------------------------
+# --- .COM smoke tests ------------------------------------------------------
 #
-# Bumping the limit is a code smell -- the point of the test is to catch
-# regressions that bloat tiny-model output.  If com_smoke.c grows past
-# this limit on purpose, split the heavy bits into a separate .EXE test
-# instead of raising the budget.
-COM_SMOKE_LIMIT=4096
+# Each entry: a source file in minic/dos/tests/ + a size budget (bytes).
+# Budgets are set with a small headroom over the current size so any
+# real regression in libstub size or codegen bloat fails the gate.
+# Bumping a limit is a code smell -- if a test needs more room on
+# purpose, split the heavy bits into a separate .EXE test instead.
+#
+SMOKE_TESTS=(
+	"com_smoke.c:4096"      # printf/sprintf, near-ptr arith, INT 21h
+	"long_math.c:6144"      # Kl codegen + libstub divmod32 helpers
+	"fileio.c:4096"         # fopen/fputs/fread/fclose roundtrip
+)
 
 pass=0
 fail=0
-log() { printf '  %s\n' "$*"; }
 
 run() {
 	desc="$1"; shift
-	printf '%-40s' "$desc"
+	printf '%-44s' "$desc"
 	if "$@" >/tmp/test-dos.out 2>&1; then
 		echo "[ok]"
 		pass=$((pass + 1))
@@ -43,10 +48,14 @@ run() {
 run "build qbe + minic" \
 	make -C "$QBE_DIR" -s qbe minic/minic
 
-run ".COM smoke (com_smoke.c, <= ${COM_SMOKE_LIMIT}B)" \
-	"$QBE_DIR/tools/build-com-test.sh" \
-	"$QBE_DIR/minic/dos/tests/com_smoke.c" \
-	"$COM_SMOKE_LIMIT"
+for entry in "${SMOKE_TESTS[@]}"; do
+	src="${entry%%:*}"
+	limit="${entry##*:}"
+	run ".COM smoke ($src, <= ${limit}B)" \
+		"$QBE_DIR/tools/build-com-test.sh" \
+		"$QBE_DIR/minic/dos/tests/$src" \
+		"$limit"
+done
 
 echo
 if [ "$fail" -eq 0 ]; then
