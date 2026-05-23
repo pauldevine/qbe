@@ -1766,6 +1766,60 @@ _bdos:
     ret
 
 
+; ============================================================================
+; INT 33h mouse wrappers.  Returns 0/innocuous defaults when no driver loaded.
+; ============================================================================
+
+; int mouse_reset(void) — INT 33h AX=00h.  Returns AX (0xFFFF if installed).
+global _mouse_reset
+_mouse_reset:
+    push bx
+    xor ax, ax
+    int 33h
+    pop bx
+    ret
+
+; void mouse_show(void) — INT 33h AX=01h.
+global _mouse_show
+_mouse_show:
+    push bx
+    mov ax, 1
+    int 33h
+    pop bx
+    ret
+
+; void mouse_hide(void) — INT 33h AX=02h.
+global _mouse_hide
+_mouse_hide:
+    push bx
+    mov ax, 2
+    int 33h
+    pop bx
+    ret
+
+; void mouse_get_pos(int *x, int *y, int *buttons) — INT 33h AX=03h.
+; Stack: [bp+4] x, [bp+6] y, [bp+8] buttons.
+global _mouse_get_pos
+_mouse_get_pos:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+    mov ax, 3
+    int 33h
+    ; AX=event flags (ignored), BX=buttons, CX=x, DX=y
+    mov si, [bp+4]
+    mov [si], cx
+    mov si, [bp+6]
+    mov [si], dx
+    mov si, [bp+8]
+    mov [si], bx
+    pop si
+    pop bx
+    pop bp
+    ret
+
+
 ; remove() is referenced but not in any source file we compile.
 global _remove
 _remove:

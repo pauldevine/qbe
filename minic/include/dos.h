@@ -53,6 +53,12 @@ extern int  kbhit();            /* INT 16h AH=01h: nonzero if key waiting */
 extern int  getche();           /* INT 16h AH=00h + echo */
 extern int  bdos();             /* bdos(func, dx, al) → INT 21h */
 
+/* Mouse (INT 33h).  mouse_reset returns 0xFFFF if a driver is loaded. */
+extern int  mouse_reset();
+extern void mouse_show();
+extern void mouse_hide();
+extern void mouse_get_pos();    /* (int *x, int *y, int *buttons) */
+
 #define FP_SEG(fp) ((unsigned short)(((unsigned long)(fp)) >> 16))
 #define FP_OFF(fp) ((unsigned short)((unsigned long)(fp)))
 #define MK_FP(seg, ofs) ((void far *)(((unsigned long)(seg) << 16) | (unsigned short)(ofs)))
