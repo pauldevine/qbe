@@ -884,17 +884,31 @@ emitins(Ins *i, Fn *fn, FILE *f)
 
 	/* Oaddr Kl with slot dest: lea computes a 16-bit offset, but the
 	 * destination is a 32-bit slot.  Stage through AX, write low half
-	 * into slot, and zero the high half (small/medium model — DS- or
-	 * SS-relative offsets always have implicit segment 0). */
+	 * into slot, and the segment into the high half:
+	 *   - near-data models (tiny/small/medium): zero (DS- and SS-relative
+	 *     offsets carry an implicit segment, the far value isn't really
+	 *     used as a far pointer);
+	 *   - far-data models (compact/large/huge): SS, because the address
+	 *     is necessarily of a stack slot (which is SS-relative) and the
+	 *     language-level `&local` operator now yields a far pointer that
+	 *     dereferences must honour. */
 	if (i->op == Oaddr && i->cls == Kl && rtype(i->to) == RSlot) {
 		Ref dst = i->to;
 		int dst_lo = (int)slot(dst, fn);
+		int far_data = (T.memmodel == Mcompact ||
+		                T.memmodel == Mlarge ||
+		                T.memmodel == Mhuge);
 		fprintf(f, "\tpush ax\n");
 		fprintf(f, "\tlea ax, ");
 		emit_memref(i->arg[0], fn, f);
 		fputc('\n', f);
 		fprintf(f, "\tmov word [bp%+d], ax\n", dst_lo);
-		fprintf(f, "\tmov word [bp%+d], 0\n", dst_lo + 2);
+		if (far_data) {
+			fprintf(f, "\tmov ax, ss\n");
+			fprintf(f, "\tmov word [bp%+d], ax\n", dst_lo + 2);
+		} else {
+			fprintf(f, "\tmov word [bp%+d], 0\n", dst_lo + 2);
+		}
 		fprintf(f, "\tpop ax\n");
 		return;
 	}
