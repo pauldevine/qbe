@@ -2,18 +2,18 @@
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
 **Original Timeline:** 10-12 weeks to production release
-**Actual Progress:** ~70-80% Complete (as of 2025-12-01)
-**Last Updated:** 2025-12-01
+**Actual Progress:** ~90% Complete (as of 2026-05-22)
+**Last Updated:** 2026-05-22
 
 ---
 
 ## ⚠️ DOCUMENTATION NOTE
 
-This roadmap was created on 2025-11-21 as a **plan** for implementation. However, **significant work has been completed since then** that was not documented in this file. See the "Actual Current Status" section below for accurate status.
+This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Actual Current Status" section below tracks what's actually shipped against that plan; the long Phase 1–4 sections that follow it are the original plan, preserved for reference but not edited as work landed.
 
 ---
 
-## Actual Current Status (Updated 2025-12-01)
+## Actual Current Status (Updated 2026-05-22)
 
 **Component Status:**
 
@@ -26,31 +26,32 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. However
 | **C11 Features** | ✅ **COMPLETE** | All 6 target features (PR #12) | minic/test/c11/ |
 | **Far Pointers** | ✅ **COMPLETE** | Small model support (PR #13) | commit 6492370 |
 | **ANSI Functions** | ✅ **COMPLETE** | Function definitions (PR #15) | commit 03d0b81 |
-| **32-bit Long** | ✅ Complete | DX:AX pairs working | i8086/README.md:320 |
+| **32-bit Long** | ✅ Complete | DX:AX pairs + div/rem via libstub helpers (c53ce0a) | i8086/README.md:320 |
 | **Function Pointers** | ✅ Complete | Full support with typedef | i8086/README.md:321 |
 | **Struct Bitfields** | ✅ Complete | Packing and read/write | i8086/README.md:322 |
-| **DOS Runtime** | ⚠️ **PARTIAL** | crt0.asm exists, needs expansion | minic/dos/ |
-| **Memory Models** | ⚠️ Small only | Tiny/medium/large missing | i8086/README.md:310-316 |
-| **DOS API Library** | ⚠️ Minimal | Need full printf, file I/O, malloc | - |
+| **DOS Runtime** | ✅ **COMPLETE** | crt0_exe.asm + real printf/sprintf, freelist malloc/free, file I/O | minic/dos/libstub.asm |
+| **Memory Models** | ⚠️ Small + Medium | Medium .EXE works (stevie ships); tiny .COM still over 64KB; large/huge missing | tools/build-stevie.sh |
+| **DOS API Library** | ✅ **COMPLETE** | int86/int86x/intdos/intdosx/segread + video/keyboard/mouse wrappers | minic/dos/libstub.asm, minic/include/dos.h |
 
 **Phase Completion (vs original plan):**
 - Phase 0 (Validation): ✅ **100% COMPLETE**
-- Phase 1 (Integer DOS): ✅ **~80% COMPLETE** (crt0 exists, needs full runtime)
-- Phase 2 (8087 FPU): ✅ **100% COMPLETE** (fully implemented in PR #11)
-- Phase 3 (DOS Integration): ⚠️ **~30% COMPLETE** (basic runtime, need full DOS API)
-- Phase 4 (C11 Features): ✅ **100% COMPLETE** (all features in PR #12)
+- Phase 1 (Integer DOS): ✅ **100% COMPLETE** (crt0_exe.asm + real runtime in libstub.asm)
+- Phase 2 (8087 FPU): ✅ **100% COMPLETE** (PR #11)
+- Phase 3 (DOS Integration): ✅ **~85% COMPLETE** (runtime, API wrappers, examples all done; tiny .COM memory model still pending)
+- Phase 4 (C11 Features): ✅ **100% COMPLETE** (PR #12)
 
 **Completed Features NOT in Original Roadmap:**
 - ✅ Inline assembly with clobber lists
 - ✅ Far pointer support
 - ✅ ANSI C function definitions
 - ✅ Variadic function support
+- ✅ OMF link toolchain (`tools/omf_link.py`, `tools/asm_to_omf.py`, `tools/libstub_to_exe.py`)
+- ✅ Stevie editor (`stevie.exe`) ports cleanly as the flagship integration test
 
 **What's Actually Missing:**
-1. **Complete DOS Runtime Library** - Full printf, file I/O, malloc/free
-2. **Memory Models** - Tiny (.COM), medium, large, huge models
-3. **DOS API Wrappers** - Video functions, keyboard/mouse, interrupts
-4. **Example Programs** - Only 9 examples exist (target: 10-20)
+1. **Tiny memory model (.COM)** — stevie.com is over 64KB; needs near-pointer narrowing or model split (see `[[minic-pointer-bloat]]`)
+2. **Large/huge memory models** — only small/medium implemented
+3. **Polish on the legacy examples** — 16 older `dos_putchar`-style files in `minic/dos/examples/` predate the `<dos.h>` API; modern dialect now demonstrated by `mouse_demo.c` / `vga_pixels.c` / `kbtest.c`
 
 ---
 
@@ -557,9 +558,10 @@ Create comprehensive tests in `minic/test/dos_fpu/`:
 
 ---
 
-## Phase 3: DOS System Integration (Weeks 6-8)
+## Phase 3: DOS System Integration (Weeks 6-8) ✅ ~85% COMPLETE
 
 **Goal:** Production-quality DOS programs with full API access
+**Status:** ✅ Runtime, API wrappers, and examples shipped (commits fc8d2bc, 28941ae, d36f103); tiny .COM memory model still outstanding.
 
 ### Week 6: Complete DOS Runtime
 
@@ -704,20 +706,20 @@ Currently only small model (code + data < 64K each). Add:
 
 ### Deliverables
 
-- [x] Complete printf (all format specifiers)
-- [x] File I/O (open, read, write, close)
-- [x] Memory allocation (malloc, free)
-- [x] DOS interrupt interface (int86)
-- [x] Video functions (VGA mode 13h)
-- [x] Keyboard/mouse support
-- [x] Multiple memory models
-- [x] 10+ DOS example programs
+- [x] Complete printf / sprintf (all format specifiers, including `l` modifier; commit 775fd38)
+- [x] File I/O (fopen/fclose/fread/fwrite/fprintf via INT 21h; commit fc8d2bc)
+- [x] Memory allocation (freelist malloc/free; commits 76c213e, 19f6029)
+- [x] DOS interrupt interface (int86 / int86x / intdos / intdosx / segread; commit 28941ae)
+- [x] Video functions (VGA mode 13h via `set_video_mode` + `putpixel`; commit 28941ae)
+- [x] Keyboard/mouse support (`kbhit`/`getche` in commit 28941ae; INT 33h mouse in d36f103)
+- [ ] Multiple memory models — small + medium done; tiny (.COM) + large + huge pending
+- [x] 10+ DOS example programs (16 legacy + 3 modern `<dos.h>` demos = 19 total)
 
 **Success Criteria:**
-- File I/O programs work
-- Graphics programs display correctly
-- Keyboard/mouse input responsive
-- Memory allocation reliable
+- File I/O programs work (stevie `:w` round-trips edits)
+- Graphics programs display correctly (`vga_pixels.exe` gradient verified)
+- Keyboard/mouse input responsive (`kbtest.exe`, `mouse_demo.exe`)
+- Memory allocation reliable (freelist with ~39 KB heap)
 
 ---
 
@@ -1020,10 +1022,57 @@ The following features were implemented but were not part of the original roadma
 - ANSI C-style function parameter declarations
 - Compatibility with modern C syntax
 
+### OMF Link Toolchain ✅ COMPLETE
+**Commits:** 40f836c, d5d46d7, ea48d9e
+**Files:** `tools/omf_link.py`, `tools/asm_to_omf.py`, `tools/libstub_to_exe.py`, `minic/dos/crt0_exe.asm`
+
+- Python OMF linker emits MZ .EXE images directly (no Watcom dependency)
+- `libstub_to_exe.py` rewrites near-call libstub into far-call form for medium-model EXE builds
+- `crt0_exe.asm` parses PSP command tail into argv and sets ES=DGROUP
+
+### Real DOS Runtime in libstub.asm ✅ COMPLETE
+**Commits:** 6a90dc3, 775fd38, 004c9d8, fc8d2bc, 76c213e, 19f6029, c53ce0a
+**File:** `minic/dos/libstub.asm`
+
+- Full sprintf/printf with `%d %u %x %X %o %s %c`, width/precision/flags, and `l` 32-bit modifier
+- File I/O: fopen (mode-aware), fread, fwrite, fclose, fputc, fputs, fprintf, fgetc, getc
+- Freelist malloc/free (~39 KB heap) with first-fit allocation
+- 32-bit div/rem helpers (`_qbe_div32{u,s}`, `_qbe_rem32{u,s}`) called from i8086 backend
+- String helpers (strncpy, strchr, strcat, strcspn, etc.)
+
+### DOS API (int86 family + high-level wrappers) ✅ COMPLETE
+**Commits:** 28941ae (int86x trio + cheap wrappers), d36f103 (mouse)
+**Files:** `minic/include/dos.h`, `minic/dos/libstub.asm`, `stevie-orig/int86x_probe.c`
+
+- `int86`, `int86x`, `intdos`, `intdosx`, `segread` with full `union REGS` / `struct SREGS` support
+- `set_video_mode` (INT 10h AH=00h) + `putpixel` (mode 13h far-poke at 0xA000)
+- `kbhit` (INT 16h AH=01h), `getche` (INT 16h AH=00h + echo)
+- `bdos` (Microsoft C compat shim over INT 21h)
+- INT 33h mouse: `mouse_reset`, `mouse_show`, `mouse_hide`, `mouse_get_pos`
+- Probe `int86x_probe.c` exercises the segment-aware path including AH=09h print-string
+
+### Parameterized Example Build ✅ COMPLETE
+**Commit:** d36f103
+**File:** `tools/build-example.sh`
+
+- One-shot build script for any `#include <dos.h>` demo
+- Three new demos: `mouse_demo.c`, `vga_pixels.c`, `kbtest.c`
+- Produces `build/examples/<name>/<name>.exe` linked against libstub_exe
+
+### Stevie Editor Port ✅ COMPLETE
+**Build:** `tools/build-stevie.sh --exe`
+**Status:** stevie.exe is the flagship integration test; 26 modules link into a 148 KB EXE
+
+- All 24 stevie source files compile through minic + qbe i8086 + OMF link
+- File load/edit/`:w` round-trips real DOS files
+- `/search` and regex work after the regex caller-save fix (`[[qbe-rega-avoid-mask-ignored]]`)
+- Render loop fixed (commit c95dd44, see `[[qbe-gcm-sinks-load-past-call]]`)
+- Currently medium-model .EXE only; tiny .COM build still over the 64 KB ceiling
+
 ---
 
-**Roadmap Version:** 2.0 (Updated with actual status)
-**Last Updated:** 2025-12-01
+**Roadmap Version:** 3.0 (Updated post-DOS-API close-out)
+**Last Updated:** 2026-05-22
 **Original Date:** 2025-11-21
-**Actual Status:** ~70-80% Complete (Phases 0, 2, 4 done; Phase 1 ~80%, Phase 3 ~30%)
-**Next Priority:** Complete DOS runtime library (Phase 3)
+**Actual Status:** ~90% Complete (Phases 0, 1, 2, 4 done; Phase 3 ~85%)
+**Next Priority:** Tiny memory model for .COM builds — shrink stevie under 64 KB (see `[[minic-pointer-bloat]]`)
