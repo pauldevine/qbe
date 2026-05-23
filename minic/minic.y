@@ -2177,8 +2177,12 @@ expr(Node *n)
 		         ((KIND(s1.ctyp) & ~UNSIGNED) == (KIND(s0.ctyp) & ~UNSIGNED))
 		         || ((KIND(s1.ctyp) & ~FLOAT) == (KIND(s0.ctyp) & ~FLOAT))))
 			die("invalid assignment");
-		/* Check if storing through a far pointer */
-		if (ISFAR(s1.ctyp)) {
+		/* Storing through a dereferenced far pointer uses storef*.
+		 * A far flag on a PTR-kind lvalue (e.g. `vga = expr;` where
+		 * `vga` is itself a far pointer variable) is regular storage —
+		 * the slot lives in normal memory and holds the 4-byte far
+		 * pointer value, so use storel/storew per irtyp. */
+		if (ISFAR(s1.ctyp) && KIND(s1.ctyp) != PTR && KIND(s1.ctyp) != FUN) {
 			char t = irtyp(s1.ctyp);
 			if (t == 'b')
 				fprintf(of, "\tstorefb ");
@@ -4711,7 +4715,8 @@ initlist: inititem                    { $$ = mknode(0, $1, 0); }
 
 type: type TFAR '*'                  { $$ = IDIR_FAR($1); }
         | type '*' TFAR              { $$ = IDIR_FAR($1); }
-        | type '*'                   { $$ = IDIR($1); }
+        | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1 & ~FAR) : IDIR($1); }
+        | TFAR type                  { $$ = $2 | FAR; }
         | TCHAR                      { $$ = CHR; }
         | TSHORT                     { $$ = INT | SHORT; }
     | TINT     { $$ = INT; }
@@ -5429,7 +5434,8 @@ yylex()
 		{ "__attribute", ATTRIBUTE },
 		{ 0, 0 }
 	};
-	int i, c, c1, n;
+	int i, c, c1;
+	unsigned long n;
 	char v[NString], *p;
 
 	do {
@@ -5502,9 +5508,16 @@ yylex()
 						n += c - 'A' + 10;
 					c = getchar();
 				}
+				/* Consume integer suffixes: U, L, UL, LU, ULL, LLU, etc. */
+				for (i = 0; i < 3; i++) {
+					if (c == 'u' || c == 'U' || c == 'l' || c == 'L')
+						c = getchar();
+					else
+						break;
+				}
 				ungetc(c, stdin);
 				yylval.n = mknode('N', 0, 0);
-				yylval.n->u.n = n;
+				yylval.n->u.n = (int)n;
 				return NUM;
 			} else if (c >= '0' && c <= '7') {
 				/* Octal */
@@ -5513,9 +5526,16 @@ yylex()
 					n += c - '0';
 					c = getchar();
 				}
+				/* Consume integer suffixes: U, L, UL, LU, ULL, LLU, etc. */
+				for (i = 0; i < 3; i++) {
+					if (c == 'u' || c == 'U' || c == 'l' || c == 'L')
+						c = getchar();
+					else
+						break;
+				}
 				ungetc(c, stdin);
 				yylval.n = mknode('N', 0, 0);
-				yylval.n->u.n = n;
+				yylval.n->u.n = (int)n;
 				return NUM;
 			} else {
 				/* Could be 0, 0.5, or 0e10 */
@@ -5610,7 +5630,7 @@ yylex()
 			return FNUM;
 		} else {
 			yylval.n = mknode('N', 0, 0);
-			yylval.n->u.n = n;
+			yylval.n->u.n = (int)n;
 			return NUM;
 		}
 	}
@@ -5676,7 +5696,7 @@ yylex()
 		if (c != '\'')
 			die("unclosed character literal");
 		yylval.n = mknode('N', 0, 0);
-		yylval.n->u.n = n;
+		yylval.n->u.n = (int)n;
 		return NUM;
 	}
 

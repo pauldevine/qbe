@@ -2581,8 +2581,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * Load byte through far pointer
 		 * arg[0] = far pointer (32-bit: segment:offset)
 		 * result = byte value (zero-extended to word)
+		 *
+		 * The libstub ABI assumes ES = DS = DGROUP at every call (sprintf
+		 * uses stosb against ES:DI; INT 21h handle writes don't, but ES
+		 * stays caller-visible).  Push/pop ES around the far access so
+		 * the caller's invariant survives.
 		 */
 		r0 = i->arg[0];
+		fprintf(f, "\tpush es\n");
 		/* Load far pointer components into ES:BX */
 		if (rtype(r0) == RSlot) {
 			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r0, fn));      /* offset */
@@ -2600,6 +2606,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		/* Load byte through ES:BX */
 		fprintf(f, "\tmov al, byte ptr es:[bx]\n");
 		fprintf(f, "\txor ah, ah\n");  /* zero-extend to word */
+		fprintf(f, "\tpop es\n");
 		/* Store result */
 		if (rtype(i->to) == RTmp)
 			{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
@@ -2613,8 +2620,11 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * Load word through far pointer
 		 * arg[0] = far pointer (32-bit: segment:offset)
 		 * result = word value
+		 *
+		 * Push/pop ES around the access — see Oloadfb for rationale.
 		 */
 		r0 = i->arg[0];
+		fprintf(f, "\tpush es\n");
 		/* Load far pointer components into ES:BX */
 		if (rtype(r0) == RSlot) {
 			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r0, fn));      /* offset */
@@ -2631,6 +2641,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		/* Load word through ES:BX */
 		fprintf(f, "\tmov ax, word ptr es:[bx]\n");
+		fprintf(f, "\tpop es\n");
 		/* Store result */
 		if (rtype(i->to) == RTmp)
 			{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
@@ -2643,9 +2654,12 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * Store byte through far pointer
 		 * arg[0] = value to store (word, low byte used)
 		 * arg[1] = far pointer (32-bit: segment:offset)
+		 *
+		 * Push/pop ES around the access — see Oloadfb for rationale.
 		 */
 		r0 = i->arg[0];  /* value */
 		r1 = i->arg[1];  /* far pointer */
+		fprintf(f, "\tpush es\n");
 		/* Load value to store into CL (to preserve AX for far pointer) */
 		if (rtype(r0) == RTmp)
 			fprintf(f, "\tmov cl, %s\n", rname8[r0.val]);
@@ -2669,6 +2683,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		/* Store byte through ES:BX */
 		fprintf(f, "\tmov byte ptr es:[bx], cl\n");
+		fprintf(f, "\tpop es\n");
 		return;
 
 	case Ostorefh:
@@ -2677,9 +2692,12 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * Store word through far pointer
 		 * arg[0] = value to store (word)
 		 * arg[1] = far pointer (32-bit: segment:offset)
+		 *
+		 * Push/pop ES around the access — see Oloadfb for rationale.
 		 */
 		r0 = i->arg[0];  /* value */
 		r1 = i->arg[1];  /* far pointer */
+		fprintf(f, "\tpush es\n");
 		/* Load value to store into CX (preserve AX for segment load) */
 		if (rtype(r0) == RTmp)
 			fprintf(f, "\tmov cx, %s\n", rname[r0.val]);
@@ -2703,6 +2721,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		/* Store word through ES:BX */
 		fprintf(f, "\tmov word ptr es:[bx], cx\n");
+		fprintf(f, "\tpop es\n");
 		return;
 
 	case Ofarseg:
