@@ -6,13 +6,43 @@
  * It needs significant expansion to handle all QBE IR operations.
  */
 
+static int
+is_addr_arg(Ins *i, Ref *r)
+{
+	/* Returns 1 if r is the pointer-position operand of a non-far
+	 * load or store.  Fast-local alloc addresses used in this slot
+	 * can be safely narrowed to Kw — the SS-relative offset is the
+	 * direct stack location and the high half (SS segment) is
+	 * implicit from [bp+X] addressing. */
+	if (!i)
+		return 0;
+	switch (i->op) {
+	case Ostoreb:
+	case Ostoreh:
+	case Ostorew:
+	case Ostorel:
+	case Ostores:
+	case Ostored:
+		return r == &i->arg[1];
+	case Oload:
+	case Oloadsb:
+	case Oloadub:
+	case Oloadsh:
+	case Oloaduh:
+	case Oloadsw:
+	case Oloaduw:
+		return r == &i->arg[0];
+	default:
+		return 0;
+	}
+}
+
 static void
 fixarg(Ref *r, int k, Ins *i, Fn *fn)
 {
 	Ref r0, r1;
 	int s;
 
-	(void)i; /* unused for now */
 	r0 = r1 = *r;
 
 	switch (rtype(r0)) {
@@ -37,8 +67,22 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 			 * the address temp register-resident — important since
 			 * spill.c forces Kl temps to be slot-resident, and a Kl
 			 * address temp would become an RSlot that storew/loadw
-			 * would write/read directly instead of dereferencing. */
+			 * would write/read directly instead of dereferencing.
+			 *
+			 * In compact/large/huge the original alloc tmp has class
+			 * Kl (default pointers are 32-bit far) so the synthesized
+			 * address is normally lowered through the Oaddr Kl→Slot
+			 * handler that writes SS:off into a 4-byte spill slot.
+			 * But when the address is consumed directly by a near
+			 * load/store (`storew %v, %x`), narrowing back to Kw
+			 * avoids that spill: the load/store dereferences the
+			 * stack slot using BP-relative addressing, and SS is
+			 * implicit.  Escape uses (passing &x to a function,
+			 * storing &x into a pointer variable) still materialize
+			 * the synthesized far pointer via the Kl path. */
 			int ak = fn->tmp[r0.val].cls;
+			if (ak == Kl && is_addr_arg(i, r))
+				ak = Kw;
 			r1 = newtmp("isel", ak, fn);
 			emit(Oaddr, ak, r1, SLOT(s), R);
 			break;

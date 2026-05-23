@@ -274,8 +274,6 @@ selret(Blk *b, Fn *fn)
 	Ref r0;
 	int farret;
 
-	(void)fn;  /* unused */
-
 	j = b->jmp.type;
 	farret = uses_far_code();
 
@@ -299,9 +297,24 @@ selret(Blk *b, Fn *fn)
 		cty = 1;  /* 1 GP register used (AX) */
 		b->jmp.type = farret ? Jretfw : Jret0;
 	} else if (j == Jretl) {
-		/* Long return - DX:AX */
-		emit(Ocopy, Kw, TMP(RDX), r0, R);  /* High word */
-		emit(Ocopy, Kw, TMP(RAX), r0, R);  /* Low word */
+		/* Long return - DX:AX pair.  For Kl RSlot or RCon, the high
+		 * word lives at slot+2 or in the constant's high half; treating
+		 * r0 as Kw via Ocopy would collapse both halves to the low word.
+		 * Ofarseg/Ofaroff route around this by emitting the explicit
+		 * high/low split; for CAddr returns (e.g. `char *gptr(){return
+		 * "...";}` in compact/large/huge), this materialises DX as the
+		 * symbol's segment selector and AX as its offset. */
+		if (rtype(r0) == RSlot
+		    || (rtype(r0) == RCon && fn->con[r0.val].type == CAddr)
+		    || (rtype(r0) == RCon
+		        && fn->con[r0.val].type == CBits
+		        && fn->con[r0.val].bits.i >> 16)) {
+			emit(Ofarseg, Kw, TMP(RDX), r0, R);
+			emit(Ofaroff, Kw, TMP(RAX), r0, R);
+		} else {
+			emit(Ocopy, Kw, TMP(RDX), r0, R);  /* High word */
+			emit(Ocopy, Kw, TMP(RAX), r0, R);  /* Low word */
+		}
 		cty = 2;  /* 2 GP registers used (DX:AX) */
 		b->jmp.type = farret ? Jretfl : Jret0;
 	} else {

@@ -386,6 +386,31 @@ kl_unstage_arg(ArgStage s, FILE *f)
 	if (s.pushed) fprintf(f, "\tpop %s\n", s.scratch_reg);
 }
 
+/* Emit a Kl RCon value into AX:DX.  CBits gets the literal split into
+ * low/high words.  CAddr is materialized as a far pointer: `sym+addend`
+ * for the offset, `seg sym` for the segment selector — NASM emits the
+ * appropriate FIXUP records so omf_link resolves both at link time.
+ * Used in far-data models where minic emits `storel $glo, slot` (e.g.
+ * the format-string arg of a variadic printf call). */
+static void
+load32_axdx_con(Con *pc, FILE *f)
+{
+	int64_t val;
+	if (pc->type == CAddr) {
+		fprintf(f, "\tmov ax, ");
+		emitaddr(pc, f);
+		fputc('\n', f);
+		fprintf(f, "\tmov dx, seg ");
+		fputs(T.assym, f);
+		fputs(str(pc->sym.id), f);
+		fputc('\n', f);
+	} else {
+		val = pc->bits.i;
+		fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
+		fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
+	}
+}
+
 /* Load a 32-bit operand into DX:AX.  The original 32-bit handlers only
  * handled RSlot/RCon; this also handles RTmp (treats the temp's register
  * as the low word and zero-extends DX, matching the convention in the
@@ -393,14 +418,11 @@ kl_unstage_arg(ArgStage s, FILE *f)
 static void
 load32_dxax(Ref r, Fn *fn, FILE *f)
 {
-	int64_t val;
 	if (rtype(r) == RSlot) {
 		fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r, fn));
 		fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r, fn) + 2);
 	} else if (rtype(r) == RCon) {
-		val = fn->con[r.val].bits.i;
-		fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-		fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
+		load32_axdx_con(&fn->con[r.val], f);
 	} else if (rtype(r) == RTmp) {
 		fprintf(f, "\tmov ax, %s\n", rname[r.val]);
 		fprintf(f, "\txor dx, dx\n");
@@ -1334,11 +1356,27 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 * need any register at all.
 			 */
 			if (rtype(r0) == RCon && rtype(i->to) == RSlot) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov word [bp%+ld], %d\n",
-					(long)slot(i->to, fn), (int)(val & 0xFFFF));
-				fprintf(f, "\tmov word [bp%+ld], %d\n",
-					(long)slot(i->to, fn) + 2, (int)((val >> 16) & 0xFFFF));
+				Con *pc = &fn->con[r0.val];
+				if (pc->type == CAddr) {
+					/* Far-symbol value: low half = offset (sym+addend),
+					 * high half = seg sym.  Both relocations resolve
+					 * via NASM's symbol/seg operators. */
+					fprintf(f, "\tmov word [bp%+ld], ",
+						(long)slot(i->to, fn));
+					emitaddr(pc, f);
+					fputc('\n', f);
+					fprintf(f, "\tmov word [bp%+ld], seg ",
+						(long)slot(i->to, fn) + 2);
+					fputs(T.assym, f);
+					fputs(str(pc->sym.id), f);
+					fputc('\n', f);
+				} else {
+					int64_t val = pc->bits.i;
+					fprintf(f, "\tmov word [bp%+ld], %d\n",
+						(long)slot(i->to, fn), (int)(val & 0xFFFF));
+					fprintf(f, "\tmov word [bp%+ld], %d\n",
+						(long)slot(i->to, fn) + 2, (int)((val >> 16) & 0xFFFF));
+				}
 				return;
 			}
 
@@ -1358,13 +1396,18 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
 				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
 			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
+				load32_axdx_con(&fn->con[r0.val], f);
 			} else if (rtype(r0) == RTmp) {
-				/* Register to register - just copy low word, extend high */
+				/* RTmp source for a Kl Ocopy: rega doesn't pair Kl
+				 * temps, so only the low word lives in a register.
+				 * The previous `cwd` sign-extension was wrong for
+				 * the canonical use case (staging a DX:AX call
+				 * return into a slot — DX already holds the high
+				 * word and cwd would overwrite it).  Preserve DX as
+				 * the high half; for non-call sources DX is
+				 * undefined but the high word of an unpaired Kl
+				 * temp is undefined anyway. */
 				{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
-				fprintf(f, "\tcwd\n");  /* Sign-extend AX to DX:AX */
 			}
 
 			if (rtype(i->to) == RSlot) {
@@ -1523,9 +1566,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
 				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
 			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
+				load32_axdx_con(&fn->con[r0.val], f);
 			} else if (rtype(r0) == RTmp) {
 				{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
 				fprintf(f, "\tcwd\n");
@@ -2743,23 +2784,44 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * Extract segment from far pointer
 		 * arg[0] = far pointer (32-bit)
 		 * result = segment (word)
+		 *
+		 * Emit directly into the destination register when possible so
+		 * we don't clobber AX as a scratch — selret pairs an Ofarseg
+		 * RDX with an Ofaroff RAX to materialise a Kl return; if both
+		 * used AX as scratch the second would overwrite the first.
 		 */
 		r0 = i->arg[0];
-		/* Load segment (high word of far pointer) */
+		{
+		const char *dstn = NULL;
+		if (rtype(i->to) == RTmp)
+			dstn = rname[i->to.val];
+		else
+			dstn = "ax";  /* slot dest: stage through AX */
+
 		if (rtype(r0) == RSlot) {
-			fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
+			fprintf(f, "\tmov %s, word [bp%+ld]\n",
+			        dstn, (long)slot(r0, fn) + 2);
 		} else if (rtype(r0) == RCon) {
-			int64_t val = fn->con[r0.val].bits.i;
-			fprintf(f, "\tmov ax, %d\n", (int)((val >> 16) & 0xFFFF));
+			Con *pc = &fn->con[r0.val];
+			if (pc->type == CAddr) {
+				/* NASM `seg sym` emits a base-segment FIXUP
+				 * that omf_link resolves at link time. */
+				fprintf(f, "\tmov %s, seg ", dstn);
+				fputs(T.assym, f);
+				fputs(str(pc->sym.id), f);
+				fputc('\n', f);
+			} else {
+				fprintf(f, "\tmov %s, %d\n", dstn,
+				        (int)((pc->bits.i >> 16) & 0xFFFF));
+			}
 		} else if (rtype(r0) == RTmp) {
 			/* Far pointer in DX:AX - segment is in DX */
-			fprintf(f, "\tmov ax, dx\n");
+			if (strcmp(dstn, "dx") != 0)
+				fprintf(f, "\tmov %s, dx\n", dstn);
 		}
-		/* Store result */
-		if (rtype(i->to) == RTmp)
-			{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
-		else if (rtype(i->to) == RSlot)
+		if (rtype(i->to) == RSlot)
 			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+		}
 		return;
 
 	case Ofaroff:
@@ -2769,20 +2831,36 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * result = offset (word)
 		 */
 		r0 = i->arg[0];
-		/* Load offset (low word of far pointer) */
-		if (rtype(r0) == RSlot) {
-			fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-		} else if (rtype(r0) == RCon) {
-			int64_t val = fn->con[r0.val].bits.i;
-			fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-		} else if (rtype(r0) == RTmp) {
-			/* Far pointer in DX:AX - offset is already in AX, nothing needed */
-		}
-		/* Store result */
+		{
+		const char *dstn = NULL;
 		if (rtype(i->to) == RTmp)
-			{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
-		else if (rtype(i->to) == RSlot)
+			dstn = rname[i->to.val];
+		else
+			dstn = "ax";
+
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tmov %s, word [bp%+ld]\n",
+			        dstn, (long)slot(r0, fn));
+		} else if (rtype(r0) == RCon) {
+			Con *pc = &fn->con[r0.val];
+			if (pc->type == CAddr) {
+				fprintf(f, "\tmov %s, ", dstn);
+				emitaddr(pc, f);
+				fputc('\n', f);
+			} else {
+				fprintf(f, "\tmov %s, %d\n", dstn,
+				        (int)(pc->bits.i & 0xFFFF));
+			}
+		} else if (rtype(r0) == RTmp) {
+			/* Far pointer in DX:AX — offset is in AX.  If dst is
+			 * already AX (common selret path), no move; otherwise
+			 * copy to dst. */
+			if (strcmp(dstn, "ax") != 0)
+				fprintf(f, "\tmov %s, ax\n", dstn);
+		}
+		if (rtype(i->to) == RSlot)
 			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+		}
 		return;
 
 	default:

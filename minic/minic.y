@@ -53,7 +53,14 @@ int memmodel = MSmall;
 #define UNSIGNED  (1 << 17)  /* Unsigned flag for types */
 #define FLOAT     (1 << 18)  /* Float flag for types (float=INT|FLOAT, double=LNG|FLOAT) */
 #define FAR       (1 << 24)  /* Far pointer flag (32-bit segment:offset) */
-#define IDIR(x) (((x) << 3) + PTR)
+/* IDIR builds a pointer-to-x type.  In far-data memory models
+ * (compact/large/huge), default data pointers are 32-bit segment:offset
+ * (FAR), so dereferences route through loadfX/storefX.  Code pointers,
+ * IDIR(FUN-kind), stay near in compact (encoded via CODEPTR_T(); FAR is
+ * left off so storage/loads stay 16-bit).  In large/huge, code is also
+ * far but CODEPTR_T() returns 'l', so FAR is not required there either. */
+#define IDIR(x) ((((x) << 3) + PTR) | \
+	((NEAR_DATA() || KIND(x) == FUN) ? 0 : FAR))
 #define IDIR_FAR(x) ((((x) << 3) + PTR) | FAR)  /* Far pointer to type */
 #define FUNC(x) (((x) << 3) + FUN)
 #define DREF(x) ((x) >> 3)
