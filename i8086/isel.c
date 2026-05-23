@@ -233,6 +233,35 @@ selfp(Ins i, Fn *fn)
 	fixarg(&i0->arg[1], argcls(&i, 1), i0, fn);
 }
 
+/* 8086 [reg] addressing is restricted to BX/BP/SI/DI.  rega doesn't
+ * know that, so by default a pointer can land in AX/CX/DX and emit.c
+ * pays a 2x `xchg bx, <reg>` + 1-byte clobber per load/store to work
+ * around it ([[i8086-codegen-bugs]] family).  Steer near-pointer
+ * address temps away from AX/CX/DX so they land in BX/SI/DI/BP
+ * directly.  hint.m is a soft preference: under register pressure
+ * rega still falls back to AX/CX/DX and the existing xchg-bx fixup
+ * keeps codegen correct.
+ *
+ * Skip far-pointer ops (Oloadf[bhw], Ostoref[bhw]) -- their operand
+ * is the far pointer itself, loaded into ES:BX or DX:AX explicitly,
+ * so the hint would be wrong. */
+static void
+hint_addr_avoid_clobber(Ref r, Fn *fn)
+{
+	bits avoid = BIT(RAX) | BIT(RCX) | BIT(RDX);
+	Mem *m;
+
+	if (rtype(r) == RTmp && r.val >= Tmp0) {
+		fn->tmp[r.val].hint.m |= avoid;
+	} else if (rtype(r) == RMem) {
+		m = &fn->mem[r.val];
+		if (rtype(m->base) == RTmp && m->base.val >= Tmp0)
+			fn->tmp[m->base.val].hint.m |= avoid;
+		if (rtype(m->index) == RTmp && m->index.val >= Tmp0)
+			fn->tmp[m->index.val].hint.m |= avoid;
+	}
+}
+
 static void
 sel(Ins i, Fn *fn)
 {
@@ -305,6 +334,29 @@ sel(Ins i, Fn *fn)
 		i0 = curi; /* fixarg() can change curi */
 		fixarg(&i0->arg[0], argcls(&i, 0), i0, fn);
 		fixarg(&i0->arg[1], argcls(&i, 1), i0, fn);
+
+		/* Steer address temps away from AX/CX/DX for near load/store
+		 * ops (see hint_addr_avoid_clobber for rationale).  Loads
+		 * carry the address in arg[0]; stores carry it in arg[1]. */
+		switch (i0->op) {
+		case Oload:
+		case Oloadsb:
+		case Oloadub:
+		case Oloadsh:
+		case Oloaduh:
+		case Oloadsw:
+		case Oloaduw:
+			hint_addr_avoid_clobber(i0->arg[0], fn);
+			break;
+		case Ostoreb:
+		case Ostoreh:
+		case Ostorew:
+		case Ostorel:
+			hint_addr_avoid_clobber(i0->arg[1], fn);
+			break;
+		default:
+			break;
+		}
 	}
 }
 
