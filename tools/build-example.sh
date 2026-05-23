@@ -7,18 +7,33 @@
 
 set -eu
 
-if [ $# -lt 1 ]; then
-	echo "usage: $0 <source.c>" >&2
+MODEL="medium"
+SRC=""
+for arg in "$@"; do
+	case "$arg" in
+		--model=*) MODEL="${arg#--model=}" ;;
+		-h|--help)
+			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] <source.c>" >&2
+			exit 0 ;;
+		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
+		*)
+			if [ -z "$SRC" ]; then SRC="$arg"
+			else echo "$0: extra argument: $arg" >&2; exit 2
+			fi ;;
+	esac
+done
+
+if [ -z "$SRC" ]; then
+	echo "usage: $0 [--model=<m>] <source.c>" >&2
 	exit 2
 fi
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="$1"
 if [ ! -f "$SRC" ]; then
-	SRC="$QBE_DIR/$1"
+	SRC="$QBE_DIR/$SRC"
 fi
 if [ ! -f "$SRC" ]; then
-	echo "$0: cannot find source file: $1" >&2
+	echo "$0: cannot find source file" >&2
 	exit 2
 fi
 
@@ -54,10 +69,10 @@ pp="$OUT_DIR/$base.pp.c"
 cpp -P -nostdinc -isysroot/var/empty -DDOS -D__TURBOC__ \
 	"-I$INC_DIR" "-I$(dirname "$SRC")" \
 	"$SRC" 2>"$ERR" | tr -d '\r\032' | sed "$NORMALIZE_TYPES" > "$pp"
-"$MINIC" -m medium < "$pp" > "$OUT_DIR/$base.ssa" 2>>"$ERR"
+"$MINIC" -m "$MODEL" < "$pp" > "$OUT_DIR/$base.ssa" 2>>"$ERR"
 
 # Stage 2: SSA → ASM
-"$QBE" -t i8086 -m medium "$OUT_DIR/$base.ssa" > "$OUT_DIR/$base.asm" 2>>"$ERR"
+"$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$base.ssa" > "$OUT_DIR/$base.asm" 2>>"$ERR"
 
 # Stage 3: ASM normalize (same sed/awk/perl pipeline as build-int86x-probe.sh).
 prefix="${base}_"

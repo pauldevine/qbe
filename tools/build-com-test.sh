@@ -17,17 +17,32 @@
 
 set -eu
 
-if [ $# -lt 1 ]; then
-	echo "usage: $0 <source.c> [size_limit]" >&2
+MODEL="small"
+SRC=""
+LIMIT="65536"
+for arg in "$@"; do
+	case "$arg" in
+		--model=*) MODEL="${arg#--model=}" ;;
+		-h|--help)
+			echo "usage: $0 [--model=<tiny|small>] <source.c> [size_limit]" >&2
+			exit 0 ;;
+		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
+		*)
+			if [ -z "$SRC" ]; then SRC="$arg"
+			else LIMIT="$arg"
+			fi ;;
+	esac
+done
+
+if [ -z "$SRC" ]; then
+	echo "usage: $0 [--model=<m>] <source.c> [size_limit]" >&2
 	exit 2
 fi
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="$1"
-LIMIT="${2:-65536}"
-if [ ! -f "$SRC" ]; then SRC="$QBE_DIR/$1"; fi
+if [ ! -f "$SRC" ]; then SRC="$QBE_DIR/$SRC"; fi
 if [ ! -f "$SRC" ]; then
-	echo "$0: cannot find source: $1" >&2
+	echo "$0: cannot find source" >&2
 	exit 2
 fi
 
@@ -63,10 +78,10 @@ pp="$OUT_DIR/$base.pp.c"
 cpp -P -nostdinc -isysroot/var/empty -DDOS -D__TURBOC__ \
 	"-I$INC_DIR" "-I$(dirname "$SRC")" \
 	"$SRC" 2>"$ERR" | tr -d '\r\032' | sed "$NORMALIZE_TYPES" > "$pp"
-"$MINIC" -m small < "$pp" > "$OUT_DIR/$base.ssa" 2>>"$ERR"
+"$MINIC" -m "$MODEL" < "$pp" > "$OUT_DIR/$base.ssa" 2>>"$ERR"
 
-# Stage 3: qbe -t i8086 -m small
-"$QBE" -t i8086 -m small "$OUT_DIR/$base.ssa" > "$OUT_DIR/$base.asm" 2>>"$ERR"
+# Stage 3: qbe -t i8086 -m <MODEL>
+"$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$base.ssa" > "$OUT_DIR/$base.asm" 2>>"$ERR"
 
 # Stage 4: normalise to NASM (same pipeline as build-example.sh /
 # build-stevie.sh; .COM-side prefixes labels so multi-TU concats don't
