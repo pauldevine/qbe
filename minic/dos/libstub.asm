@@ -2073,6 +2073,172 @@ _qbe_rem32s:
     ret
 
 ; ============================================================================
+; Huge memory model pointer arithmetic — phase A of [[huge-mode-plan]].
+;
+; In the huge memory model a pointer p carries a 20-bit linear address
+; packed as seg:off, but arithmetic `p + N` must be performed on the
+; linear value and the result renormalised so off ∈ [0,16).  These
+; helpers wrap the multi-instruction sequence behind a CALL — same
+; isolation pattern as _qbe_div32{u,s} / _qbe_rem32{u,s} — so per-site
+; codegen stays small once Phase B routes Mhuge Kl arith through them.
+;
+; ABI: cdecl, callee-save BX/SI/DI/BP (per [[libstub-cdecl-callee-save]]).
+;     unsigned long _qbe_huge_norm(unsigned long ptr);
+;     unsigned long _qbe_huge_add (unsigned long ptr, long offset);
+;     unsigned long _qbe_huge_sub (unsigned long ptr, long offset);
+;     long          _qbe_huge_cmp (unsigned long p1,  unsigned long p2);
+;
+; `ptr` is packed as low-word = off, high-word = seg — matches the
+; on-stack representation of a 32-bit unsigned that minic uses for far
+; pointers.  Return: DX:AX, with DX = new seg, AX = new off (normalise
+; helpers); DX:AX = signed linear difference (cmp).
+;
+; Worst-case linear address is 0x10FFEF (seg=0xFFFF, off=0xFFFF) — 21
+; bits — so a 32-bit accumulator holds the intermediate cleanly.  Bits
+; above bit 19 fold into new_seg by ordinary 16-bit truncation; this
+; matches the "wrap on segment overflow" semantics that real-mode DOS
+; programs observe.
+; ============================================================================
+
+global _qbe_huge_norm
+_qbe_huge_norm:
+    push bp
+    mov bp, sp
+    mov ax, [bp+4]               ; off
+    mov dx, [bp+6]               ; seg
+    mov cx, ax
+    shr cx, 1
+    shr cx, 1
+    shr cx, 1
+    shr cx, 1                    ; cx = off >> 4
+    add dx, cx                   ; new_seg = seg + (off >> 4)  (mod 0x10000)
+    and ax, 000Fh                ; new_off = off & 0xF
+    pop bp
+    ret
+
+global _qbe_huge_add
+_qbe_huge_add:
+    push bp
+    mov bp, sp
+    push bx
+    ; DX:AX = seg << 4   (32-bit, top 4 bits of seg spill into DX bits 0..3)
+    mov ax, [bp+6]               ; seg
+    xor dx, dx
+    shl ax, 1
+    rcl dx, 1
+    shl ax, 1
+    rcl dx, 1
+    shl ax, 1
+    rcl dx, 1
+    shl ax, 1
+    rcl dx, 1
+    ; + off   (16-bit zero-extended)
+    add ax, [bp+4]
+    adc dx, 0
+    ; + offset   (signed 32-bit)
+    add ax, [bp+8]
+    adc dx, [bp+10]
+    ; DX:AX = new_linear (32-bit, modular).
+    mov bx, ax                   ; save low word for new_off
+    shr dx, 1
+    rcr ax, 1
+    shr dx, 1
+    rcr ax, 1
+    shr dx, 1
+    rcr ax, 1
+    shr dx, 1
+    rcr ax, 1                    ; DX:AX = new_linear >> 4
+    mov dx, ax                   ; new_seg = low 16 of (linear >> 4)
+    mov ax, bx
+    and ax, 000Fh                ; new_off
+    pop bx
+    pop bp
+    ret
+
+global _qbe_huge_sub
+_qbe_huge_sub:
+    push bp
+    mov bp, sp
+    push bx
+    mov ax, [bp+6]
+    xor dx, dx
+    shl ax, 1
+    rcl dx, 1
+    shl ax, 1
+    rcl dx, 1
+    shl ax, 1
+    rcl dx, 1
+    shl ax, 1
+    rcl dx, 1
+    add ax, [bp+4]
+    adc dx, 0
+    sub ax, [bp+8]
+    sbb dx, [bp+10]
+    mov bx, ax
+    shr dx, 1
+    rcr ax, 1
+    shr dx, 1
+    rcr ax, 1
+    shr dx, 1
+    rcr ax, 1
+    shr dx, 1
+    rcr ax, 1
+    mov dx, ax
+    mov ax, bx
+    and ax, 000Fh
+    pop bx
+    pop bp
+    ret
+
+global _qbe_huge_cmp
+_qbe_huge_cmp:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+    push di
+    ; linear1 → SI:DI
+    mov ax, [bp+6]               ; p1.seg
+    xor dx, dx
+    shl ax, 1
+    rcl dx, 1
+    shl ax, 1
+    rcl dx, 1
+    shl ax, 1
+    rcl dx, 1
+    shl ax, 1
+    rcl dx, 1
+    add ax, [bp+4]               ; + p1.off
+    adc dx, 0
+    mov di, ax
+    mov si, dx                   ; SI:DI = linear1 (32-bit)
+    ; linear2 → DX:AX
+    mov ax, [bp+10]              ; p2.seg
+    xor dx, dx
+    shl ax, 1
+    rcl dx, 1
+    shl ax, 1
+    rcl dx, 1
+    shl ax, 1
+    rcl dx, 1
+    shl ax, 1
+    rcl dx, 1
+    add ax, [bp+8]               ; + p2.off
+    adc dx, 0
+    ; (SI:DI) - (DX:AX) → BX:CX, then move to return DX:AX
+    mov cx, di
+    sub cx, ax
+    mov bx, si
+    sbb bx, dx
+    mov ax, cx
+    mov dx, bx
+    pop di
+    pop si
+    pop bx
+    pop bp
+    ret
+
+; ============================================================================
 ; int86x / intdosx / segread — the segment-aware members of the DOS API trio.
 ;
 ; These three MUST live before `_remove` in this file: tools/libstub_to_exe.py

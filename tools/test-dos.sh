@@ -40,6 +40,7 @@ SMOKE_TESTS=(
 #
 COM_RUNTIME_TESTS=(
 	"minic/dos/examples/tinyprobe.c:minic/dos/tests/tinyprobe.golden.txt:tiny"
+	"minic/dos/examples/huge_arith_probe.c:minic/dos/tests/huge_arith_probe.golden.txt:tiny"
 )
 
 # --- DOS runtime tests -----------------------------------------------------
