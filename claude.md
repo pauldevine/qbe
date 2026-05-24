@@ -1,7 +1,7 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-24 (r — Phase C huge >64K arrays)
+**Last Updated:** 2026-05-24 (s — far DOS-API + puts under large/huge)
 **Status:** ~95% Complete
 
 ---
@@ -40,10 +40,10 @@ The ROADMAP.md file contains:
 - **Examples** — 16 legacy + 3 modern `<dos.h>` demos (mouse_demo, vga_pixels, kbtest)
 
 **In Progress ⚠️:**
-- Memory Models — runtime gate covers tiny/medium/compact/large/huge (23/23 ok in `tools/test-dos.sh`).  Huge Phase C landed 2026-05-24 (r): per-symbol `_HUGE_<sym>` segments let huge mode hold arrays > 64K.  asm_to_omf splits >65520-byte fills across paragraph-adjacent chunks; omf_link places them outside DGROUP; minic emits `section "_HUGE_<sym>"` for globals > 64K under --model=huge.  hugeprobe.c (`static char arr[80000]`) verifies cross-64K read/write.
+- Memory Models — runtime gate covers tiny/medium/compact/large/huge (25/25 ok in `tools/test-dos.sh`).  Huge Phase C landed 2026-05-24 (r): per-symbol `_HUGE_<sym>` segments let huge mode hold arrays > 64K.  Far DOS-API trio + puts landed 2026-05-24 (s): `_far_intdos` / `_far_int86` / `_far_segread` / `_far_puts` in EPILOGUE; `intdos`/`int86`/`segread` added to `far_stdlib[]`; `dos_far_probe.c` exercises them under large + huge.
 - Tiny memory model (.COM) — stevie.com still over 64 KB ([[minic-pointer-bloat]])
 - Small .EXE — architecturally broken: libstub_to_exe.py rewrites every `ret` to `retf`, mismatches small's near-call ABI → DOSBox hangs.  Needs near+far libstub variants or model-conditional ret rewrite.  See [[per-model-gate]].
-- Large/huge DOS-API + stdio — `_intdos`/`_int86`/`_segread`/`_fputs`/`_fputc`/`_fgets`/`_puts` still consume near pointers; under large/huge the caller pushes 4-byte far pointers so results write to garbage.  Needs `_far_intdos`/`_far_int86`/`_far_segread`/`_far_fputs`/etc + adding those names to `far_stdlib[]` in `minic.y:1252`.  See [[large-huge-bringup]].
+- Large/huge stdio FILE* — `_far_fputs`/`_far_fputc`/`_far_fgets` are listed in `far_stdlib[]` (minic.y:1278) but unimplemented because FILE* under far-data needs to be 4 bytes: `fopen` must return DX:AX, `stdin`/`stdout`/`stderr` need 4-byte sentinel storage, and EPILOGUE needs model-conditional emission.  Deferred to a follow-up session.  See [[large-huge-bringup]].
 - Latent Kl-CAddr arith — Phase B routes most through `_qbe_huge_add`, but ~10 sites in i8086/emit.c (lines 986/1000/1047/...) and far-ptr inc/dec at minic.y:2189, 2234 still consult `bits.i` directly without a CAddr check.  Not exercised by any in-tree probe.
 - Kl shift AX clobber ([[i8086-kl-shift-clobbers-ax]]) — Oshl/Oshr/Osar Kl handlers clobber AX/DX without telling rega; latent.  Fix mirror of [[i8086-kl-add-sub-mul-r1-alias]].
 - Phase B storel-via-Kl-slot gap ([[huge-phase-b-storel-gap]]) — backend writes value→[bp+slot] directly even when slot holds a pointer VALUE; not yet exercised by any in-tree probe.
@@ -62,6 +62,13 @@ The ROADMAP.md file contains:
 ---
 
 ## Recent Major Accomplishments
+
+### Far DOS-API + puts under large/huge (2026-05-24, session s)
+- ✅ `tools/libstub_to_exe.py` — new `FAR_DOSIO_EXE` constant in EPILOGUE with `_far_intdos`, `_far_int86`, `_far_segread`, `_far_puts`.  Each reads/writes its struct arg(s) via ES:BX (loaded from the 4-byte far ptr), swaps ES between in/out structs when needed, restores caller's ES on exit.  `_far_segread` stashes caller ES in SI before overwriting it.  `_far_puts` writes via `mov ds, es` temporarily then restores DS=DGROUP via `push ss; pop ds`.
+- ✅ `minic/minic.y` — `far_stdlib[]` extended with `intdos`, `int86`, `segread` so calls under MCompact/MLarge/MHuge mangle to `_far_X` (puts/fputs/fputc/fgets were already listed but most had no near-helper backing).
+- ✅ `minic/dos/examples/dos_far_probe.c` + golden — 8 assertions under `--model=large`: segread invariants, intdos AH=0x30/0x3300, int86 AH=0x30, `puts()` writes a string.
+- ✅ `tools/test-dos.sh` — `dos_far_probe` wired under large + huge.  Gate now **25/25 ok**.
+- Carry-over: `_far_fputs`/`_far_fputc`/`_far_fgets` still need FILE* sizing under far-data (4-byte representation, model-aware EPILOGUE for stdin/stdout/stderr sentinels, `_far_fopen`/`_far_fclose`).  See [[large-huge-bringup]] / NEXT_SESSION_PROMPT.md.
 
 ### Huge Phase C — per-symbol _HUGE_<sym> segments (2026-05-24, session r)
 - ✅ `tools/asm_to_omf.py` — recognises `.section "_HUGE_<sym>"` markers, splits `times N db 0` bodies across paragraph-aligned chunks (HUGE_CHUNK_BYTES = 65520 = 4095 paragraphs each), emits each as `segment _HUGE_<sym>_<N> class=HUGE align=16 use16`.

@@ -1387,7 +1387,248 @@ _far_sprintf:
     jmp .fsp_top
 """
 
-EPILOGUE = MALLOC_EXE + FILEIO_EXE + FAR_SPRINTF_EXE
+# ----------------------------------------------------------------------------
+# Far-data DOS API + stdio helpers.
+#
+# Under compact/large/huge, all data pointers are 4 bytes (off:seg).  The
+# unmangled _intdos/_int86/_segread in libstub.asm consume *near* pointers
+# (2 bytes), so the caller pushes 4 bytes per ptr and the helpers read
+# garbage.  Same shape for _fputs/_fputc/_fgets and _puts (the latter has
+# no near impl yet — it's added here).
+#
+# The frontend mangles intdos/int86/segread/puts/fputs/fputc/fgets to
+# _far_X in far-data models via the far_stdlib[] list in minic.y.  Each
+# far helper saves the caller's ES, points ES:BX into the relevant struct,
+# performs the operation, then restores ES.  When two distinct far args
+# are involved (e.g. intdos's in/out) we swap ES between them via push/pop.
+#
+# Stack-arg offsets are written for a far call (4-byte return address),
+# so the first arg lives at [bp+6].
+# ----------------------------------------------------------------------------
+FAR_DOSIO_EXE = """
+
+segment LIBSTUB_TEXT
+
+; ----------------------------------------------------------------------
+; int far_intdos(union REGS __far *in, union REGS __far *out)
+;
+; Stack: [bp+6] in.off, [bp+8] in.seg, [bp+10] out.off, [bp+12] out.seg.
+; ----------------------------------------------------------------------
+global _far_intdos
+_far_intdos:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    push es
+
+    mov ax, [bp+8]                ; in.seg
+    mov es, ax
+    mov bx, [bp+6]                ; ES:BX -> in
+    mov ax, [es:bx+0]
+    mov cx, [es:bx+4]
+    mov dx, [es:bx+6]
+    mov si, [es:bx+8]
+    mov di, [es:bx+10]
+    mov bx, [es:bx+2]             ; BX = in.bx (in ptr discarded)
+    int 0x21
+
+    push bx                       ; save call-result BX
+    mov bx, [bp+12]               ; out.seg
+    mov es, bx
+    mov bx, [bp+10]               ; ES:BX -> out
+    mov [es:bx+0], ax
+    pop ax
+    mov [es:bx+2], ax
+    mov [es:bx+4], cx
+    mov [es:bx+6], dx
+    mov [es:bx+8], si
+    mov [es:bx+10], di
+    pushf
+    pop ax
+    mov [es:bx+14], ax
+    and ax, 1
+    mov [es:bx+12], ax
+    mov ax, [es:bx+0]             ; return = call AX
+
+    pop es
+    pop bx
+    pop di
+    pop si
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int far_int86(int intno, union REGS __far *in, union REGS __far *out)
+;
+; Stack: [bp+6] intno, [bp+8] in.off, [bp+10] in.seg,
+;        [bp+12] out.off, [bp+14] out.seg.
+;
+; Patches the INT immediate via self-modifying code (same idiom as
+; _int86 in libstub.asm).
+; ----------------------------------------------------------------------
+global _far_int86
+_far_int86:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    push es
+
+    mov ax, [bp+6]
+    mov [cs:.fi86_op+1], al
+
+    mov ax, [bp+10]               ; in.seg
+    mov es, ax
+    mov bx, [bp+8]                ; ES:BX -> in
+    mov ax, [es:bx+0]
+    mov cx, [es:bx+4]
+    mov dx, [es:bx+6]
+    mov si, [es:bx+8]
+    mov di, [es:bx+10]
+    mov bx, [es:bx+2]
+.fi86_op:
+    int 0x21
+
+    push bx
+    mov bx, [bp+14]               ; out.seg
+    mov es, bx
+    mov bx, [bp+12]               ; ES:BX -> out
+    mov [es:bx+0], ax
+    pop ax
+    mov [es:bx+2], ax
+    mov [es:bx+4], cx
+    mov [es:bx+6], dx
+    mov [es:bx+8], si
+    mov [es:bx+10], di
+    pushf
+    pop ax
+    mov [es:bx+14], ax
+    and ax, 1
+    mov [es:bx+12], ax
+    mov ax, [es:bx+0]
+
+    pop es
+    pop bx
+    pop di
+    pop si
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int far_puts(const char __far *s)
+;
+; Writes s followed by CR+LF to stdout (DOS handle 1).  Returns 0 on
+; success, -1 on error.  Mirrors a near _puts but there is no near
+; _puts in libstub today; this far variant is the only impl, so any
+; caller of puts() under any model needs it.  Reads s via ES:SI; swaps
+; DS to s.seg briefly for the AH=40h call, restores DS=DGROUP after.
+;
+; Stack: [bp+6] s.off, [bp+8] s.seg.
+; ----------------------------------------------------------------------
+global _far_puts
+_far_puts:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    push es
+    push ds
+
+    mov ax, [bp+8]                ; s.seg
+    mov es, ax
+    mov si, [bp+6]                ; ES:SI -> s
+    mov di, si
+.fps_len:
+    cmp byte [es:di], 0
+    je .fps_len_done
+    inc di
+    jmp .fps_len
+.fps_len_done:
+    mov cx, di
+    sub cx, si                    ; CX = strlen
+    jz .fps_nl                    ; empty body, just emit newline
+
+    ; AH=40h needs DS:DX -> buf.  Swap DS to ES (= s.seg) temporarily.
+    mov ax, es
+    mov ds, ax
+    mov dx, si                    ; DS:DX = (s.seg):(s.off)
+    mov bx, 1                     ; stdout handle
+    mov ah, 0x40
+    int 0x21
+    push ss
+    pop ds                        ; restore DS = DGROUP (= SS)
+    jc .fps_err
+
+.fps_nl:
+    ; Emit CR LF via a stack-resident 2-byte buffer.  DS is back to
+    ; DGROUP=SS at this point.  8086 has no `push imm16`, stage via AX.
+    mov ax, 0x0A0D                ; little-endian: byte 0x0D (CR), byte 0x0A (LF)
+    push ax
+    mov dx, sp                    ; DS=SS so DS:DX -> the pushed word
+    mov bx, 1
+    mov cx, 2
+    mov ah, 0x40
+    int 0x21
+    pop ax                        ; discard scratch word
+    jc .fps_err
+
+    xor ax, ax                    ; success
+    jmp .fps_done
+.fps_err:
+    mov ax, -1
+.fps_done:
+    pop ds
+    pop es
+    pop bx
+    pop di
+    pop si
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; void far_segread(struct SREGS __far *segs)
+;
+; Stack: [bp+6] segs.off, [bp+8] segs.seg.
+;
+; We need to read ES BEFORE overwriting it to point at segs, so we stash
+; the caller's ES in SI (callee-save) first.
+; ----------------------------------------------------------------------
+global _far_segread
+_far_segread:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+    push es
+
+    push es
+    pop si                        ; SI = caller's ES (pre-overwrite)
+
+    mov ax, [bp+8]                ; segs.seg
+    mov es, ax
+    mov bx, [bp+6]                ; ES:BX -> segs
+
+    mov [es:bx+0], si             ; segs.es = caller's ES
+    mov [es:bx+2], cs
+    mov [es:bx+4], ss
+    mov [es:bx+6], ds
+
+    pop es
+    pop si
+    pop bx
+    pop bp
+    retf
+"""
+
+
+EPILOGUE = MALLOC_EXE + FILEIO_EXE + FAR_SPRINTF_EXE + FAR_DOSIO_EXE
 
 
 def shift_bp_offset(line):

@@ -1286,6 +1286,7 @@ call_target_name(char *f)
 		"strlen", "strcpy", "strcmp", "strncmp", "strncpy",
 		"strchr", "strcat", "strcspn", "strstr", "strrchr",
 		"memcpy", "memcmp", "memset",
+		"intdos", "int86", "segread",
 		0
 	};
 	static char mangled[NString];

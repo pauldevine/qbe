@@ -1,0 +1,8 @@
+seg_cs_nz=1 (want 1)
+seg_ds_eq_ss=1 (want 1)
+seg_es_nz=1 (want 1)
+dos_major_ge_3=1 (want 1)
+dos_major_le_15=1 (want 1)
+brk_dl_in_range=1 (want 1)
+i86_dos_ge_3=1 (want 1)
+puts_ok=1 (want 1)
