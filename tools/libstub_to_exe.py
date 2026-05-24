@@ -2044,6 +2044,133 @@ _far_fgets:
     pop bx
     pop bp
     retf
+
+
+; ----------------------------------------------------------------------
+; size_t far_fread(void __far *buf, size_t sz, size_t n, FILE __far *fp)
+;
+; Stack: [bp+6]  buf.off, [bp+8]  buf.seg,
+;        [bp+10] sz,      [bp+12] n,
+;        [bp+14] fp.off,  [bp+16] fp.seg (ignored — slot in DGROUP).
+;
+; Direct INT 21h AH=3F read of sz*n bytes into far buf.  Returns item
+; count (= bytes / sz).  Bypasses the FILE slot's line buffer — mixing
+; with _far_fgets on the same handle is UB, same as the near version.
+; ----------------------------------------------------------------------
+global _far_fread
+_far_fread:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+    push ds
+
+    mov ax, [bp+10]               ; sz
+    mul word [bp+12]              ; sz*n -> DX:AX
+    test dx, dx
+    jnz .ffr_err                  ; > 64KB unsupported
+    mov cx, ax                    ; total bytes
+    test cx, cx
+    jz .ffr_zero
+
+    mov si, [bp+14]               ; fp.off
+    test si, si
+    jz .ffr_err
+    mov bx, [si]                  ; DOS handle (DS=DGROUP still)
+
+    ; AH=3F needs DS:DX -> buf.  Swap DS to buf.seg.
+    mov ax, [bp+8]                ; buf.seg
+    mov ds, ax
+    mov dx, [bp+6]                ; buf.off
+    mov ah, 0x3F
+    int 0x21
+    push ss
+    pop ds                        ; restore DS=DGROUP
+    jc .ffr_err
+
+    ; AX = bytes actually read.  Convert to item count.
+    mov cx, [bp+10]               ; sz
+    test cx, cx
+    jz .ffr_done                  ; sz=0: leave AX as bytes (UB)
+    xor dx, dx
+    div cx                        ; AX = bytes / sz
+    jmp .ffr_done
+.ffr_zero:
+    xor ax, ax
+    jmp .ffr_done
+.ffr_err:
+    xor ax, ax
+.ffr_done:
+    pop ds
+    pop si
+    pop bx
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; size_t far_fwrite(const void __far *buf, size_t sz, size_t n,
+;                   FILE __far *fp)
+;
+; Same arg layout as _far_fread.  AH=40 instead of AH=3F.
+; ----------------------------------------------------------------------
+global _far_fwrite
+_far_fwrite:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+    push ds
+
+    mov ax, [bp+10]               ; sz
+    mul word [bp+12]              ; sz*n -> DX:AX
+    test dx, dx
+    jnz .ffw_err
+    mov cx, ax                    ; total bytes
+    test cx, cx
+    jz .ffw_done_zero
+
+    mov si, [bp+14]               ; fp.off
+    test si, si
+    jz .ffw_err
+    mov bx, [si]                  ; DOS handle (DS=DGROUP still)
+
+    ; AH=40 needs DS:DX -> buf.  Swap DS to buf.seg.
+    mov ax, [bp+8]                ; buf.seg
+    mov ds, ax
+    mov dx, [bp+6]                ; buf.off
+    mov ah, 0x40
+    int 0x21
+    push ss
+    pop ds                        ; restore DS=DGROUP
+    jc .ffw_err
+
+    ; AX = bytes actually written.  Convert to item count.
+    xor dx, dx
+    div word [bp+10]              ; AX = bytes / sz
+    jmp .ffw_done
+.ffw_done_zero:
+    xor ax, ax
+    jmp .ffw_done
+.ffw_err:
+    xor ax, ax
+.ffw_done:
+    pop ds
+    pop si
+    pop bx
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int far_fflush(FILE __far *fp)  — no-op (writes are unbuffered).
+;
+; Stack: [bp+6] fp.off, [bp+8] fp.seg.
+; ----------------------------------------------------------------------
+global _far_fflush
+_far_fflush:
+    xor ax, ax
+    retf
 """
 
 

@@ -1284,6 +1284,7 @@ call_target_name(char *f)
 		"printf", "fprintf", "sprintf",
 		"puts", "fputs", "fputc", "fgets",
 		"fopen", "fclose",
+		"fread", "fwrite", "fflush",
 		"strlen", "strcpy", "strcmp", "strncmp", "strncpy",
 		"strchr", "strcat", "strcspn", "strstr", "strrchr",
 		"memcpy", "memcmp", "memset",
