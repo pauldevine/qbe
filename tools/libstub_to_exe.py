@@ -534,6 +534,56 @@ _fwrite:
 
 
 ; ----------------------------------------------------------------------
+; size_t fread(void *ptr, size_t size, size_t nmemb, FILE *)
+;
+; Direct INT 21h AH=3F read of size*nmemb bytes into ptr.  Returns the
+; number of *items* read (= bytes / size).  Bypasses the FILE slot's
+; line buffer used by _getc; mixing fread + getc on the same handle is
+; not supported (the standard makes no such guarantee either).
+; ----------------------------------------------------------------------
+global _fread
+_fread:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+
+    mov ax, [bp+8]                ; size
+    mul word [bp+10]              ; size*nmemb -> DX:AX
+    test dx, dx
+    jnz .fr_err                   ; byte count > 64KB — unsupported
+    mov cx, ax                    ; total bytes
+    test cx, cx
+    jz .fr_zero
+    mov dx, [bp+6]                ; DS:DX -> ptr
+    mov si, [bp+12]               ; FILE *
+    test si, si
+    jz .fr_err
+    mov bx, [si]                  ; DOS handle
+    mov ah, 0x3F
+    int 0x21
+    jc .fr_err
+
+    ; AX = bytes actually read.  Convert to item count.
+    mov cx, [bp+8]                ; size
+    test cx, cx
+    jz .fr_done                   ; size=0: leave AX as bytes (UB anyway)
+    xor dx, dx
+    div cx                        ; AX = bytes / size
+    jmp .fr_done
+.fr_zero:
+    xor ax, ax
+    jmp .fr_done
+.fr_err:
+    xor ax, ax
+.fr_done:
+    pop si
+    pop bx
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
 ; int fputc(int c, FILE *)  — write one byte via INT 21h AH=40.
 ; ----------------------------------------------------------------------
 global _fputc
@@ -1453,7 +1503,7 @@ def main():
         '_malloc', '_free',
         # All file I/O is reimplemented in FILEIO_EXE for write support.
         '_fopen', '_fclose', '_getc',
-        '_fwrite', '_fputc', '_fputs', '_fprintf', '_printf', '_fflush',
+        '_fwrite', '_fread', '_fputc', '_fputs', '_fprintf', '_printf', '_fflush',
         '_rename', '_remove',
     }
     SKIP_LABELS  = {'_heap_initialized', '_heap_ptr', '_heap_top'}

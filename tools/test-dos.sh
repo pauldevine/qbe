@@ -28,15 +28,19 @@ SMOKE_TESTS=(
 	"fileio.c:4096"         # fopen/fputs/fread/fclose roundtrip
 )
 
-# --- Compact-model runtime tests -------------------------------------------
+# --- DOS runtime tests -----------------------------------------------------
 #
-# Each entry: source path + golden output path.  The probe is built at
-# --model=compact via tools/build-example.sh, then run headlessly under
-# DOSBox via tools/run-dos-exe.sh; output (CRLF stripped) is diff'd
-# against the golden file.  Skipped (not failed) when DOSBox is missing.
+# Each entry: `<src>:<golden>:<model>`.  The probe is built via
+# tools/build-example.sh --model=<model>, run headlessly under DOSBox
+# via tools/run-dos-exe.sh; CRLF-stripped stdout is diff'd against the
+# golden.  Skipped (not failed) when DOSBox is missing.
 #
 RUNTIME_TESTS=(
-	"minic/dos/examples/cstrprobe.c:minic/dos/tests/cstrprobe.golden.txt"
+	"minic/dos/examples/cstrprobe.c:minic/dos/tests/cstrprobe.golden.txt:compact"
+	"minic/dos/examples/compactprobe_extra.c:minic/dos/tests/compactprobe_extra.golden.txt:compact"
+	"minic/dos/examples/mediumprobe.c:minic/dos/tests/mediumprobe.golden.txt:medium"
+	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:medium"
+	"minic/dos/examples/dosapi_probe.c:minic/dos/tests/dosapi_probe.golden.txt:medium"
 )
 
 pass=0
@@ -63,15 +67,16 @@ run() {
 	fi
 }
 
-# Build a compact-model probe and diff its DOSBox stdout against a golden.
-# Two-step: build (fail fast) then run+diff.  We propagate exit 77 from
-# run-dos-exe.sh so missing-DOSBox shows up as "skip", not "fail".
-run_compact_probe() {
+# Build a probe at the requested memory model and diff its DOSBox stdout
+# against a golden.  Two-step: build (fail fast) then run+diff.  Exit 77
+# from run-dos-exe.sh propagates so missing-DOSBox shows "skip", not "fail".
+run_runtime_probe() {
 	src="$1"
 	golden="$2"
+	model="$3"
 	base="$(basename "$src" .c)"
 	exe="$QBE_DIR/build/examples/$base/$base.exe"
-	"$QBE_DIR/tools/build-example.sh" --model=compact "$QBE_DIR/$src" >/dev/null
+	"$QBE_DIR/tools/build-example.sh" --model="$model" "$QBE_DIR/$src" >/dev/null
 	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
 	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
 }
@@ -91,9 +96,11 @@ done
 
 for entry in "${RUNTIME_TESTS[@]}"; do
 	src="${entry%%:*}"
-	golden="${entry##*:}"
-	desc="compact runtime ($(basename "$src" .c))"
-	run "$desc" run_compact_probe "$src" "$golden"
+	rest="${entry#*:}"
+	golden="${rest%%:*}"
+	model="${rest##*:}"
+	desc="$model runtime ($(basename "$src" .c))"
+	run "$desc" run_runtime_probe "$src" "$golden" "$model"
 done
 
 echo

@@ -17,6 +17,40 @@
 ; image at 0xFFFE so _heap_end_of_image points past the truncation and
 ; into garbage.  Once the .COM size is fixed (Path A or B), this lights
 ; up automatically.
+
+; Shared shift-subtract 32-bit divide body — used by _qbe_div32u /
+; _qbe_rem32u / _qbe_div32s / _qbe_rem32s below.  Args at [bp+4..11],
+; caller's prologue must have saved BX/SI.  On exit:
+;   DX:AX = quotient   CX:BX = remainder
+; Defined here (in the always-emitted header region) so that
+; tools/libstub_prune.py doesn't drop the macro along with an unrelated
+; chunk if only one of the 4 helpers is reached from a .COM TU.  See
+; also [[libstub-to-exe-skip-region]].
+%macro UDIVMOD32_BODY 0
+    mov ax, [bp+4]           ; Q lo (numerator)
+    mov dx, [bp+6]           ; Q hi
+    xor bx, bx               ; R lo
+    xor cx, cx               ; R hi
+    mov si, 32
+%%loop:
+    shl ax, 1
+    rcl dx, 1
+    rcl bx, 1
+    rcl cx, 1
+    cmp cx, [bp+10]
+    jb  %%skip
+    ja  %%sub
+    cmp bx, [bp+8]
+    jb  %%skip
+%%sub:
+    sub bx, [bp+8]
+    sbb cx, [bp+10]
+    or  ax, 1
+%%skip:
+    dec si
+    jnz %%loop
+%endmacro
+
 global _malloc
 _malloc:
     push bp
@@ -1280,6 +1314,127 @@ _strrchr:
     pop bp
     ret
 
+; void *memcpy(void *dst, const void *src, size_t n) — near pointers (DS).
+global _memcpy
+_memcpy:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    mov di, [bp+4]      ; dst
+    mov si, [bp+6]      ; src
+    mov cx, [bp+8]      ; n
+    cld
+    rep movsb
+    mov ax, [bp+4]      ; return dst
+    pop di
+    pop si
+    pop bp
+    ret
+
+; void *memset(void *s, int c, size_t n) — near pointer (DS).
+global _memset
+_memset:
+    push bp
+    mov bp, sp
+    push di
+    mov di, [bp+4]      ; s
+    mov ax, [bp+6]      ; c (AL significant)
+    mov cx, [bp+8]      ; n
+    cld
+    rep stosb
+    mov ax, [bp+4]      ; return s
+    pop di
+    pop bp
+    ret
+
+; int memcmp(const void *s1, const void *s2, size_t n) — near pointers (DS).
+global _memcmp
+_memcmp:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    mov si, [bp+4]      ; s1
+    mov di, [bp+6]      ; s2
+    mov cx, [bp+8]      ; n
+    xor ax, ax
+    jcxz .mc_done
+.mc_loop:
+    mov bl, [si]
+    mov bh, [di]
+    cmp bl, bh
+    jne .mc_diff
+    inc si
+    inc di
+    dec cx
+    jnz .mc_loop
+    jmp .mc_done
+.mc_diff:
+    xor ax, ax
+    xor dx, dx
+    mov al, bl
+    mov dl, bh
+    sub ax, dx
+.mc_done:
+    pop bx
+    pop di
+    pop si
+    pop bp
+    ret
+
+; char *strstr(const char *haystack, const char *needle) — near pointers (DS).
+; Returns near pointer to first match in haystack, or NULL if not found.
+; Empty needle matches at haystack[0].
+global _strstr
+_strstr:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    mov bx, [bp+6]      ; needle base
+    ; Empty needle?  Return haystack as-is.
+    mov al, [bx]
+    test al, al
+    jne .ss_outer_init
+    mov ax, [bp+4]
+    jmp .ss_done
+.ss_outer_init:
+    mov ax, [bp+4]      ; current haystack cursor
+.ss_outer:
+    mov si, ax          ; si = haystack cursor
+    mov di, bx          ; di = needle cursor
+    ; If *haystack==0 here we've exhausted haystack without match.
+    mov dl, [si]
+    test dl, dl
+    je .ss_miss
+.ss_inner:
+    mov dl, [di]
+    test dl, dl
+    je .ss_match        ; needle done -> match (ax holds cursor)
+    mov dh, [si]
+    cmp dh, dl
+    jne .ss_advance
+    inc si
+    inc di
+    jmp .ss_inner
+.ss_advance:
+    inc ax
+    jmp .ss_outer
+.ss_match:
+    ; ax is already the match pointer
+    jmp .ss_done
+.ss_miss:
+    xor ax, ax
+.ss_done:
+    pop bx
+    pop di
+    pop si
+    pop bp
+    ret
+
 ; ============================================================================
 ; Far-pointer variants of str/mem helpers.
 ;
@@ -1810,37 +1965,9 @@ _far_memset:
 ; has the sign of the dividend (C99 §6.5.5/6).
 ; ============================================================================
 
-; Shared shift-subtract body — args at [bp+4..11], expects BX/SI saved
-; by the caller's prologue.  On exit:  DX:AX = quotient, CX:BX = remainder.
-; Implemented as a NASM macro (not a `call`) so the [bp+N] offsets
-; expand inside each public function's own frame.  That matters for the
-; .EXE build: libstub_to_exe.py bumps every `[bp+N]` by +2 to account for
-; the far-call return frame, and a `retn`-based internal helper would
-; pick up those bumped offsets even though it was reached via near call.
-%macro UDIVMOD32_BODY 0
-    mov ax, [bp+4]           ; Q lo (numerator)
-    mov dx, [bp+6]           ; Q hi
-    xor bx, bx               ; R lo
-    xor cx, cx               ; R hi
-    mov si, 32
-%%loop:
-    shl ax, 1
-    rcl dx, 1
-    rcl bx, 1
-    rcl cx, 1
-    cmp cx, [bp+10]
-    jb  %%skip
-    ja  %%sub
-    cmp bx, [bp+8]
-    jb  %%skip
-%%sub:
-    sub bx, [bp+8]
-    sbb cx, [bp+10]
-    or  ax, 1
-%%skip:
-    dec si
-    jnz %%loop
-%endmacro
+; UDIVMOD32_BODY macro is defined in the always-emitted libstub.asm
+; header (above) so that the .COM pruner can never drop the definition
+; even when only one of the 4 helpers below is reached from a TU.
 
 global _qbe_div32u
 _qbe_div32u:

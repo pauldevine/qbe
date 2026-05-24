@@ -2264,8 +2264,13 @@ expr(Node *n)
 		s0.t = Tmp;
 		s0.u.n = tmp++;
 		s0.ctyp = sl.ctyp & ~FAR;  /* Remove FAR for value type */
-		/* Load current value (handle far pointer) */
-		if (ISFAR(sl.ctyp)) {
+		/* Load current value (handle far pointer).  Far load/store only
+		 * applies when the lvalue is itself a far scalar (i.e. reached
+		 * through a far-pointer dereference).  A far-pointer-typed
+		 * *variable* lives in normal memory and its slot holds the
+		 * 4-byte pointer value -- use plain load/store, matching the
+		 * assignment case below.  See [[minic-far-var-assign-storefw]]. */
+		if (ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) {
 			loadfar(s0, sl);
 		} else {
 			load(s0, sl);
@@ -2283,7 +2288,7 @@ expr(Node *n)
 		psymb(s1);
 		fprintf(of, "\n");
 		/* Store new value (handle far pointer) */
-		if (ISFAR(sl.ctyp)) {
+		if (ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) {
 			char t = irtyp(sl.ctyp);
 			if (t == 'b')
 				fprintf(of, "\tstorefb ");
@@ -2309,8 +2314,8 @@ expr(Node *n)
 		s0.t = Tmp;
 		s0.u.n = tmp++;
 		s0.ctyp = sl.ctyp & ~FAR;  /* Remove FAR for value type */
-		/* Load current value (handle far pointer) */
-		if (ISFAR(sl.ctyp)) {
+		/* Load current value (see note above on PTR/FUN exclusion). */
+		if (ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) {
 			loadfar(s0, sl);
 		} else {
 			load(s0, sl);
@@ -2365,6 +2370,10 @@ expr(Node *n)
 		} else if (strchr("<l", o) && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp))) {
 			/* Unsigned integer comparison */
 			fprintf(of, " %s%s ", o == '<' ? "cult" : "cule", ty);
+		} else if ((o == '/' || o == '%')
+		           && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp))) {
+			/* Unsigned integer divide / modulo. */
+			fprintf(of, " %s%s ", o == '/' ? "udiv" : "urem", ty);
 		} else {
 			/* Signed integer comparison or other operations */
 			fprintf(of, " %s%s ", otoa[o], ty);
@@ -2386,8 +2395,8 @@ expr(Node *n)
 		sr.u.n = tmp++;
 	}
 	if (n->op == 'P' || n->op == 'M') {
-		/* Store new value (handle far pointer) */
-		if (ISFAR(sl.ctyp)) {
+		/* Store new value (see note on the p/m prefix case above). */
+		if (ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) {
 			char t = irtyp(sl.ctyp);
 			if (t == 'b')
 				fprintf(of, "\tstorefb ");
