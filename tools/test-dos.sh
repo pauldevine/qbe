@@ -44,6 +44,21 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/dosapi_probe.c:minic/dos/tests/dosapi_probe.golden.txt:medium"
 )
 
+# --- Stevie size budget ----------------------------------------------------
+#
+# Stevie is the integration testbed: it exercises far-data, file I/O,
+# regex, BIOS keyboard, struct globals, static locals, fn-ptr tables,
+# and the malloc heap end-to-end through ~10K lines of K&R-era C.
+# A successful link with no codegen-bloat regression is itself a
+# meaningful smoke test -- many of this project's worst codegen and
+# libstub bugs first surfaced as a stevie size jump or link failure.
+#
+# Budget set with ~1KB headroom over current size (146992 B at
+# 2026-05-23 commit 5508961).  Bumping the limit when libstub grows
+# is fine; bumping it because codegen got fatter is not.
+STEVIE_BUDGET=148000
+
+
 pass=0
 fail=0
 skip=0
@@ -66,6 +81,25 @@ run() {
 			fail=$((fail + 1))
 		fi
 	fi
+}
+
+# Build stevie.exe via tools/build-stevie.sh --exe and fail if the
+# resulting binary exceeds the size budget.  Captures the build log
+# in /tmp/test-dos.out via the run() wrapper.
+run_stevie_size() {
+	limit="$1"
+	exe="$QBE_DIR/build/stevie-orig/stevie.exe"
+	"$QBE_DIR/tools/build-stevie.sh" --exe >/dev/null
+	if [ ! -f "$exe" ]; then
+		echo "stevie.exe not produced by build-stevie.sh --exe" >&2
+		return 1
+	fi
+	size=$(stat -f %z "$exe" 2>/dev/null || stat -c %s "$exe")
+	if [ "$size" -gt "$limit" ]; then
+		echo "stevie.exe is $size bytes (over budget $limit)" >&2
+		return 1
+	fi
+	echo "stevie.exe = $size bytes (<= $limit)" >&2
 }
 
 # Build a probe at the requested memory model and diff its DOSBox stdout
@@ -103,6 +137,9 @@ for entry in "${RUNTIME_TESTS[@]}"; do
 	desc="$model runtime ($(basename "$src" .c))"
 	run "$desc" run_runtime_probe "$src" "$golden" "$model"
 done
+
+run "stevie.exe size (<= ${STEVIE_BUDGET}B)" \
+	run_stevie_size "$STEVIE_BUDGET"
 
 echo
 total=$((pass + fail))
