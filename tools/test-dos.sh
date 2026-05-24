@@ -28,8 +28,20 @@ SMOKE_TESTS=(
 	"fileio.c:4096"         # fopen/fputs/fread/fclose roundtrip
 )
 
+# --- Compact-model runtime tests -------------------------------------------
+#
+# Each entry: source path + golden output path.  The probe is built at
+# --model=compact via tools/build-example.sh, then run headlessly under
+# DOSBox via tools/run-dos-exe.sh; output (CRLF stripped) is diff'd
+# against the golden file.  Skipped (not failed) when DOSBox is missing.
+#
+RUNTIME_TESTS=(
+	"minic/dos/examples/cstrprobe.c:minic/dos/tests/cstrprobe.golden.txt"
+)
+
 pass=0
 fail=0
+skip=0
 
 run() {
 	desc="$1"; shift
@@ -38,10 +50,30 @@ run() {
 		echo "[ok]"
 		pass=$((pass + 1))
 	else
-		echo "[FAIL]"
-		sed 's/^/    /' /tmp/test-dos.out
-		fail=$((fail + 1))
+		rc=$?
+		if [ "$rc" -eq 77 ]; then
+			echo "[skip]"
+			sed 's/^/    /' /tmp/test-dos.out
+			skip=$((skip + 1))
+		else
+			echo "[FAIL]"
+			sed 's/^/    /' /tmp/test-dos.out
+			fail=$((fail + 1))
+		fi
 	fi
+}
+
+# Build a compact-model probe and diff its DOSBox stdout against a golden.
+# Two-step: build (fail fast) then run+diff.  We propagate exit 77 from
+# run-dos-exe.sh so missing-DOSBox shows up as "skip", not "fail".
+run_compact_probe() {
+	src="$1"
+	golden="$2"
+	base="$(basename "$src" .c)"
+	exe="$QBE_DIR/build/examples/$base/$base.exe"
+	"$QBE_DIR/tools/build-example.sh" --model=compact "$QBE_DIR/$src" >/dev/null
+	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
+	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
 }
 
 # Ensure qbe/minic are built before anything else.
@@ -57,11 +89,23 @@ for entry in "${SMOKE_TESTS[@]}"; do
 		"$limit"
 done
 
+for entry in "${RUNTIME_TESTS[@]}"; do
+	src="${entry%%:*}"
+	golden="${entry##*:}"
+	desc="compact runtime ($(basename "$src" .c))"
+	run "$desc" run_compact_probe "$src" "$golden"
+done
+
 echo
+total=$((pass + fail))
 if [ "$fail" -eq 0 ]; then
-	echo "DOS pipeline: $pass/$((pass + fail)) ok"
+	if [ "$skip" -gt 0 ]; then
+		echo "DOS pipeline: $pass/$total ok ($skip skipped)"
+	else
+		echo "DOS pipeline: $pass/$total ok"
+	fi
 	exit 0
 else
-	echo "DOS pipeline: $fail of $((pass + fail)) tests FAILED"
+	echo "DOS pipeline: $fail of $total tests FAILED ($skip skipped)"
 	exit 1
 fi

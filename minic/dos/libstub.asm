@@ -1281,6 +1281,503 @@ _strrchr:
     ret
 
 ; ============================================================================
+; Far-pointer variants of str/mem helpers.
+;
+; In compact / large / huge memory models, minic call_target_name() mangles
+; strlen, strcpy, strcmp, strncmp, strncpy, strchr, strcat, strcspn, strstr,
+; strrchr, memcpy, memcmp, memset to _far_X — each pointer arg occupies 4
+; stack bytes (offset:segment).  size_t / int args remain 2 bytes.
+;
+; Pointer-returning variants return DX:AX (DX = segment, AX = offset);
+; on "not found" return DX=0, AX=0.  Integer-returning variants use AX only.
+;
+; Libstub callee-save (see [[libstub-cdecl-callee-save]]): BX/SI/DI/BP/ES
+; preserved; DS preserved when touched.  Inside each function we may set
+; DS to one far ptr's segment and ES to another, do the work, then restore.
+; Stack args via [bp+N] always use SS implicitly, so segment juggling is
+; safe for reads of the args themselves.
+; ============================================================================
+
+; size_t strlen(__far const char *s)
+; s.off [bp+4], s.seg [bp+6]
+global _far_strlen
+_far_strlen:
+    push bp
+    mov bp, sp
+    push si
+    push es
+    mov si, [bp+4]
+    mov es, [bp+6]
+    xor ax, ax
+.l:
+    cmp byte [es:si], 0
+    je .d
+    inc ax
+    inc si
+    jmp .l
+.d:
+    pop es
+    pop si
+    pop bp
+    ret
+
+; char *strcpy(__far char *dest, __far const char *src)
+; dest @ bp+4..7, src @ bp+8..11
+global _far_strcpy
+_far_strcpy:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push es
+    push ds
+    mov di, [bp+4]
+    mov ax, [bp+6]
+    mov es, ax
+    mov si, [bp+8]
+    mov ax, [bp+10]
+    mov ds, ax
+.l:
+    lodsb
+    mov [es:di], al
+    inc di
+    test al, al
+    jne .l
+    pop ds
+    mov ax, [bp+4]
+    mov dx, [bp+6]
+    pop es
+    pop di
+    pop si
+    pop bp
+    ret
+
+; int strcmp(__far const char *s1, __far const char *s2)
+; s1 @ bp+4..7, s2 @ bp+8..11
+global _far_strcmp
+_far_strcmp:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    push es
+    push ds
+    mov si, [bp+4]
+    mov ax, [bp+6]
+    mov ds, ax
+    mov di, [bp+8]
+    mov ax, [bp+10]
+    mov es, ax
+    xor ax, ax
+.loop:
+    mov bl, [si]
+    mov bh, [es:di]
+    cmp bl, bh
+    jne .diff
+    cmp bl, 0
+    je .done
+    inc si
+    inc di
+    jmp .loop
+.diff:
+    xor ax, ax
+    xor dx, dx
+    mov al, bl
+    mov dl, bh
+    sub ax, dx
+.done:
+    pop ds
+    pop es
+    pop bx
+    pop di
+    pop si
+    pop bp
+    ret
+
+; int strncmp(__far const char *s1, __far const char *s2, size_t n)
+; s1 @ bp+4..7, s2 @ bp+8..11, n @ bp+12
+global _far_strncmp
+_far_strncmp:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    push es
+    push ds
+    mov si, [bp+4]
+    mov ax, [bp+6]
+    mov ds, ax
+    mov di, [bp+8]
+    mov ax, [bp+10]
+    mov es, ax
+    mov cx, [bp+12]
+    xor ax, ax
+    jcxz .done
+.loop:
+    mov bl, [si]
+    mov bh, [es:di]
+    cmp bl, bh
+    jne .diff
+    cmp bl, 0
+    je .done
+    inc si
+    inc di
+    dec cx
+    jnz .loop
+    jmp .done
+.diff:
+    xor ax, ax
+    xor dx, dx
+    mov al, bl
+    mov dl, bh
+    sub ax, dx
+.done:
+    pop ds
+    pop es
+    pop bx
+    pop di
+    pop si
+    pop bp
+    ret
+
+; char *strncpy(__far char *dest, __far const char *src, size_t n)
+global _far_strncpy
+_far_strncpy:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push es
+    push ds
+    mov di, [bp+4]
+    mov ax, [bp+6]
+    mov es, ax
+    mov si, [bp+8]
+    mov ax, [bp+10]
+    mov ds, ax
+    mov cx, [bp+12]
+    jcxz .nclend
+.lnc1:
+    lodsb
+    mov [es:di], al
+    inc di
+    test al, al
+    je .lnc2
+    loop .lnc1
+    jmp .nclend
+.lnc2:
+    dec cx
+    jcxz .nclend
+.lncp:
+    xor al, al
+    mov [es:di], al
+    inc di
+    loop .lncp
+.nclend:
+    pop ds
+    mov ax, [bp+4]
+    mov dx, [bp+6]
+    pop es
+    pop di
+    pop si
+    pop bp
+    ret
+
+; char *strchr(__far const char *s, int c)
+; s @ bp+4..7, c @ bp+8
+global _far_strchr
+_far_strchr:
+    push bp
+    mov bp, sp
+    push si
+    push es
+    mov si, [bp+4]
+    mov es, [bp+6]
+    mov ax, [bp+8]              ; AL = c
+.lsc:
+    mov ah, [es:si]
+    cmp ah, al
+    je .fsc
+    test ah, ah
+    je .nfsc
+    inc si
+    jmp .lsc
+.fsc:
+    mov ax, si
+    mov dx, [bp+6]
+    pop es
+    pop si
+    pop bp
+    ret
+.nfsc:
+    xor ax, ax
+    xor dx, dx
+    pop es
+    pop si
+    pop bp
+    ret
+
+; char *strrchr(__far const char *s, int c)
+global _far_strrchr
+_far_strrchr:
+    push bp
+    mov bp, sp
+    push si
+    push bx
+    push es
+    mov si, [bp+4]
+    mov es, [bp+6]
+    mov bl, [bp+8]
+    xor ax, ax
+    xor dx, dx                  ; no match yet
+.loop:
+    mov bh, [es:si]
+    cmp bh, 0
+    je .done
+    cmp bh, bl
+    jne .skip
+    mov ax, si
+    mov dx, [bp+6]
+.skip:
+    inc si
+    jmp .loop
+.done:
+    pop es
+    pop bx
+    pop si
+    pop bp
+    ret
+
+; char *strcat(__far char *dest, __far const char *src)
+global _far_strcat
+_far_strcat:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push es
+    push ds
+    mov di, [bp+4]
+    mov ax, [bp+6]
+    mov es, ax
+.lac:
+    mov al, [es:di]
+    test al, al
+    je .acdn
+    inc di
+    jmp .lac
+.acdn:
+    mov si, [bp+8]
+    mov ax, [bp+10]
+    mov ds, ax
+.lacc:
+    lodsb
+    mov [es:di], al
+    inc di
+    test al, al
+    jne .lacc
+    pop ds
+    mov ax, [bp+4]
+    mov dx, [bp+6]
+    pop es
+    pop di
+    pop si
+    pop bp
+    ret
+
+; size_t strcspn(__far const char *s, __far const char *reject)
+global _far_strcspn
+_far_strcspn:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    push es
+    push ds
+    mov si, [bp+4]
+    mov ax, [bp+6]
+    mov ds, ax
+    xor cx, cx
+.lcsp:
+    mov al, [si]
+    test al, al
+    je .csdn
+    mov di, [bp+8]
+    mov bx, [bp+10]
+    mov es, bx
+.lcsr:
+    mov bl, [es:di]
+    test bl, bl
+    je .csno
+    cmp al, bl
+    je .csdn
+    inc di
+    jmp .lcsr
+.csno:
+    inc si
+    inc cx
+    jmp .lcsp
+.csdn:
+    mov ax, cx
+    pop ds
+    pop es
+    pop bx
+    pop di
+    pop si
+    pop bp
+    ret
+
+; char *strstr(__far const char *hay, __far const char *needle)
+; Naive O(n*m).  Empty needle → returns hay (standard C behavior since
+; the inner match loop sees needle[0]==0 immediately and reports found).
+global _far_strstr
+_far_strstr:
+    push bp
+    mov bp, sp
+    sub sp, 2                   ; [bp-2] = current hay offset
+    push si
+    push di
+    push bx
+    push es
+    push ds
+    mov ax, [bp+4]
+    mov [bp-2], ax
+.ss_outer:
+    mov di, [bp+8]
+    mov ax, [bp+10]
+    mov es, ax
+    mov ax, [bp+6]
+    mov ds, ax
+    mov si, [bp-2]
+.ss_match:
+    mov al, [es:di]
+    test al, al
+    je .ss_found
+    mov ah, [si]
+    test ah, ah
+    je .ss_null
+    cmp al, ah
+    jne .ss_advance
+    inc si
+    inc di
+    jmp .ss_match
+.ss_advance:
+    inc word [bp-2]
+    jmp .ss_outer
+.ss_found:
+    mov ax, [bp-2]
+    mov dx, [bp+6]
+    jmp .ss_ret
+.ss_null:
+    xor ax, ax
+    xor dx, dx
+.ss_ret:
+    pop ds
+    pop es
+    pop bx
+    pop di
+    pop si
+    mov sp, bp
+    pop bp
+    ret
+
+; void *memcpy(__far void *dest, __far const void *src, size_t n)
+; dest @ bp+4..7, src @ bp+8..11, n @ bp+12
+global _far_memcpy
+_far_memcpy:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push es
+    push ds
+    mov di, [bp+4]
+    mov ax, [bp+6]
+    mov es, ax
+    mov si, [bp+8]
+    mov ax, [bp+10]
+    mov ds, ax
+    mov cx, [bp+12]
+    cld
+    rep movsb
+    pop ds
+    mov ax, [bp+4]
+    mov dx, [bp+6]
+    pop es
+    pop di
+    pop si
+    pop bp
+    ret
+
+; int memcmp(__far const void *s1, __far const void *s2, size_t n)
+global _far_memcmp
+_far_memcmp:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    push es
+    push ds
+    mov si, [bp+4]
+    mov ax, [bp+6]
+    mov ds, ax
+    mov di, [bp+8]
+    mov ax, [bp+10]
+    mov es, ax
+    mov cx, [bp+12]
+    xor ax, ax
+    jcxz .done
+.loop:
+    mov bl, [si]
+    mov bh, [es:di]
+    cmp bl, bh
+    jne .diff
+    inc si
+    inc di
+    dec cx
+    jnz .loop
+    jmp .done
+.diff:
+    xor ax, ax
+    xor dx, dx
+    mov al, bl
+    mov dl, bh
+    sub ax, dx
+.done:
+    pop ds
+    pop es
+    pop bx
+    pop di
+    pop si
+    pop bp
+    ret
+
+; void *memset(__far void *s, int c, size_t n)
+; s @ bp+4..7, c @ bp+8, n @ bp+10
+global _far_memset
+_far_memset:
+    push bp
+    mov bp, sp
+    push di
+    push es
+    mov di, [bp+4]
+    mov es, [bp+6]
+    mov ax, [bp+8]              ; c (AL significant)
+    mov cx, [bp+10]
+    cld
+    rep stosb
+    mov ax, [bp+4]
+    mov dx, [bp+6]
+    pop es
+    pop di
+    pop bp
+    ret
+
+; ============================================================================
 ; 32-bit divide / remainder soft helpers (referenced by qbe i8086 codegen)
 ; ============================================================================
 ;

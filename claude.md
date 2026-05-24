@@ -40,7 +40,7 @@ The ROADMAP.md file contains:
 - **Examples** — 16 legacy + 3 modern `<dos.h>` demos (mouse_demo, vga_pixels, kbtest)
 
 **In Progress ⚠️:**
-- Memory Models — tiny/small/medium .EXE work; compact runs cprobe.c end-to-end in DOSBox (commit 493b84b) but `_far_strlen`/`_far_strcpy`/`_far_strcmp`/`_far_memcpy`/`_far_memcmp`/`_far_memset` still unimplemented; `_far_sprintf` `%s`/`%p` handling still consumes 2-byte near pointers
+- Memory Models — tiny/small/medium .EXE work; compact runs cprobe.c + cstrprobe.c end-to-end in DOSBox (printf %s/%d/%p + strlen/strcpy/strcmp/strncmp/strchr/strrchr/strncpy/strcat/strcspn/strstr/memcpy/memcmp/memset all via 4-byte far-ptr ABI).  cstrprobe.c is wired into `tools/test-dos.sh` as the `compact runtime (cstrprobe)` step — DOSBox stdout is auto-diffed against `minic/dos/tests/cstrprobe.golden.txt`. Latent: Kl arith on CAddr (~10 sites in i8086/emit.c) and far-ptr inc/dec (minic.y:2189, 2234) still consult `bits.i` directly; compact-mode `loadfb` clobbers AX without telling rega (see `[[i8086-compact-loadfb-aliases-ax]]`).
 - Tiny memory model (.COM) — stevie.com still over 64 KB ([[minic-pointer-bloat]])
 
 **Missing ❌:**
@@ -60,6 +60,16 @@ The ROADMAP.md file contains:
 ---
 
 ## Recent Major Accomplishments
+
+### Compact runtime test wired into test-dos.sh (2026-05-23)
+- ✅ `tools/run-dos-exe.sh` — generic runner: copies .EXE to 8.3 short name, generates a DOSBox autoexec.bat-equivalent conf, captures `OUT.TXT`, strips CRLF.  Handles `$DOSBOX` env override, `dosbox` on PATH, and the macOS .app path; exit 77 = skip-not-fail when DOSBox is unavailable.
+- ✅ `tools/test-dos.sh` adds a `compact runtime (cstrprobe)` step that builds via `tools/build-example.sh --model=compact` and diffs against `minic/dos/tests/cstrprobe.golden.txt`.  Now reports 5/5 ok.
+- ✅ `cstrprobe.c` extended to cover all 13 `_far_X` helpers + `%p`.  Validation uses `strcmp`/`strlen`/`memcmp` returns (single int per printf) instead of multi-byte loadfb varargs, side-stepping the pre-existing `[[i8086-compact-loadfb-aliases-ax]]` register-allocation bug.
+
+### Compact far-helpers + `_far_sprintf` (2026-05-23)
+- ✅ 13 new `_far_X` helpers in `minic/dos/libstub.asm`: strlen, strcpy, strcmp, strncmp, strncpy, strchr, strrchr, strcat, strcspn, strstr, memcpy, memcmp, memset — each takes 4-byte far pointer args; pointer returns via DX:AX (seg:off).  Functions that need two distinct source segments swap DS/ES with save/restore.
+- ✅ `_far_sprintf` added to `tools/libstub_to_exe.py` EPILOGUE: clones the `_sprintf` format engine but writes to a far dest (ES:DI), copies the far fmt into a DGROUP scratch up front, consumes %s/%p as 4-byte far ptrs (with DS-swap for the source-string copy), and forces %p to the 32-bit hex path.  `_far_printf` / `_far_fprintf` now delegate to it.
+- ✅ Runtime-verified: `tools/build-example.sh --model=compact minic/dos/examples/cstrprobe.c` prints all 16 expected lines including `%s` over DGROUP literals + stack-local buffers, width/precision/left-align padding, and mixed `%s`/`%d` varargs.
 
 ### Compact memory model end-to-end (2026-05-23, commit 493b84b)
 - ✅ `uses_far_code()` now includes Mcompact; selret emits `Jretf*`, selcall emits `Ocallfar`, crt0's `call far _main` lines up with main's `retf`
@@ -111,9 +121,9 @@ The ROADMAP.md file contains:
 
 ## Next Priorities
 
-1. **Round out compact** — `_far_strlen` / `_far_strcpy` / `_far_strcmp` / `_far_memcpy` / `_far_memcmp` / `_far_memset` etc.; clone `_sprintf` into `_far_sprintf` so `%s` / `%p` consume 4-byte far pointers. See `NEXT_SESSION_PROMPT.md`.
+1. **Large / huge memory models** — only tiny / small / medium / compact implemented
 
-2. **Large / huge memory models** — only tiny / small / medium / compact implemented
+2. **Latent Kl-CAddr arith** — ~10 sites in `i8086/emit.c` (lines 986/1000/1047/1060/1105/1115/1150/1173/1196/...) and far-ptr inc/dec in `minic.y:2189, 2234` still use `bits.i` directly without a CAddr check.  Not exercised by cprobe/cstrprobe but a latent bug for `p + offsetof_constant` style code.
 
 3. **Tiny memory model (.COM) stevie shrink** — orthogonal to compact work
    - Path A (near-pointer narrowing) is partially landed (commit 5125e70, 98K→81K)

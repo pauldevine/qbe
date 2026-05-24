@@ -754,17 +754,12 @@ _printf:
 ;
 ; In far-data memory models a pointer occupies 4 stack bytes (offset
 ; then segment).  minic mangles `printf` -> `far_printf` (asm symbol
-; `_far_printf`) when memmodel ∈ {compact, large, huge}.  We copy the
-; format string off the far ptr into a local DGROUP-relative scratch
-; buffer, then call the existing `_sprintf` exactly like `_printf`.
-;
-; Limitation: variadic %s / %p arguments are still consumed as 2-byte
-; near pointers by _sprintf.  Compact callers using %s / %p would need
-; a separate _far_sprintf that also dereferences arg pointers as far —
-; not implemented here.  Numeric specifiers (%d %u %x %o %ld ...)
-; behave correctly because their stack args are still int / long sized.
+; `_far_printf`) when memmodel ∈ {compact, large, huge}.  Both
+; functions delegate to `_far_sprintf` (defined below), which writes
+; into a DGROUP-local scratch buffer and correctly consumes 4-byte far
+; %s / %p arguments.
 ; ----------------------------------------------------------------------
-%define _FMT_BUFSZ 128                ; scratch for far->near fmt copy
+%define _FMT_BUFSZ 128                ; legacy reserve (unused after _far_sprintf)
 
 global _far_fprintf
 _far_fprintf:
@@ -777,18 +772,9 @@ _far_fprintf:
     push es
 
     ; FILE* at [bp+6], far fmt at [bp+8]:[bp+10], first vararg at [bp+12].
-    mov bx, [bp+8]                ; fmt offset
-    mov es, [bp+10]               ; fmt segment
-    lea di, [bp - _FP_BUFSZ - _FMT_BUFSZ]
-.ffpr_cpfmt:
-    mov al, byte [es:bx]
-    mov byte [di], al
-    inc bx
-    inc di
-    test al, al
-    jnz .ffpr_cpfmt
-
-    ; Push 16 words of varargs (right-to-left).  First vararg @ [bp+12].
+    ; Push 16 words of varargs (right-to-left), then call _far_sprintf
+    ; with the original far fmt (it does its own DGROUP scratch copy)
+    ; and a DGROUP-local far dest (seg=SS, off=local output buffer).
     mov cx, 16
 .ffpr_pusharg:
     mov si, bp
@@ -799,12 +785,16 @@ _far_fprintf:
     push word [si]
     loop .ffpr_pusharg
 
-    lea ax, [bp - _FP_BUFSZ - _FMT_BUFSZ]
-    push ax                       ; fmt (near, points into DGROUP scratch)
+    ; Push fmt (far, as-is from caller)
+    push word [bp+10]             ; fmt.seg
+    push word [bp+8]              ; fmt.off
+    ; Push dest as far ptr: seg=SS (=DGROUP), off=local output buffer
+    mov ax, ss
+    push ax                       ; dest.seg
     lea ax, [bp - _FP_BUFSZ]
-    push ax                       ; dest
-    call far _sprintf
-    add sp, 4 + 32
+    push ax                       ; dest.off
+    call far _far_sprintf
+    add sp, 8 + 32                ; 4 (dest far) + 4 (fmt far) + 32 (varargs)
 
     lea si, [bp - _FP_BUFSZ]
     mov dx, si
@@ -851,17 +841,6 @@ _far_printf:
     push es
 
     ; Far fmt at [bp+6]:[bp+8], first vararg at [bp+10].
-    mov bx, [bp+6]                ; fmt offset
-    mov es, [bp+8]                ; fmt segment
-    lea di, [bp - _FP_BUFSZ - _FMT_BUFSZ]
-.fpr_cpfmt:
-    mov al, byte [es:bx]
-    mov byte [di], al
-    inc bx
-    inc di
-    test al, al
-    jnz .fpr_cpfmt
-
     mov cx, 16
 .fpr_pusharg:
     mov si, bp
@@ -872,12 +851,16 @@ _far_printf:
     push word [si]
     loop .fpr_pusharg
 
-    lea ax, [bp - _FP_BUFSZ - _FMT_BUFSZ]
-    push ax                       ; fmt (near, points into DGROUP scratch)
+    ; Push fmt (far, as-is from caller)
+    push word [bp+8]              ; fmt.seg
+    push word [bp+6]              ; fmt.off
+    ; Push dest as far ptr: seg=SS, off=local output buffer
+    mov ax, ss
+    push ax
     lea ax, [bp - _FP_BUFSZ]
-    push ax                       ; dest
-    call far _sprintf
-    add sp, 4 + 32
+    push ax
+    call far _far_sprintf
+    add sp, 8 + 32
 
     lea si, [bp - _FP_BUFSZ]
     mov dx, si
@@ -965,7 +948,394 @@ segment _BSS
 _file_slots: resb (_NUM_FILES * _FILE_SZ)
 """
 
-EPILOGUE = MALLOC_EXE + FILEIO_EXE
+
+# ----------------------------------------------------------------------------
+# _far_sprintf — sprintf with far dest, far fmt, and far %s/%p source pointers.
+#
+# Far-data memory models (compact/large/huge) have minic mangle `sprintf` to
+# `_far_sprintf` and pass every char-pointer argument as a 4-byte far ptr.
+# _far_sprintf is structurally identical to _sprintf's format engine but:
+#   - dest is far: output via `mov [es:di], al` (we set ES = dest.seg)
+#   - fmt is far: copied to a DGROUP scratch buffer up front, then walked
+#     with DS=DGROUP (so [_spr_*] state variables remain reachable)
+#   - %s consumes 4 stack bytes (off:seg); during the string copy we swap
+#     DS to src.seg and access [_spr_width]/[_spr_flags] via `ss:` override
+#   - %p consumes 4 stack bytes and prints as 32-bit hex (always 'l')
+#   - calls into shared `_spr_emit_int` for numeric specifiers — that helper
+#     emits via stosb (ES:DI) which is exactly what we need
+#
+# Numeric specifier args (%d/%u/%x/%o) remain 2-byte; %ld/%lu/%lx/%lo remain
+# 4-byte. %c stays 2-byte.
+# ----------------------------------------------------------------------------
+FAR_SPRINTF_EXE = """
+
+segment LIBSTUB_TEXT
+
+%define _FSP_FMTBUF_SZ 256
+
+global _far_sprintf
+_far_sprintf:
+    push bp
+    mov bp, sp
+    sub sp, _FSP_FMTBUF_SZ
+    push si
+    push di
+    push bx
+    push es
+    push ds
+
+    ; Stack: [bp+6..9] dest (far), [bp+10..13] fmt (far), [bp+14] varargs.
+
+    ; --- Copy far fmt into local DGROUP scratch buffer ---
+    mov si, [bp+10]                 ; fmt.off
+    mov ax, [bp+12]                 ; fmt.seg
+    mov es, ax
+    lea di, [bp - _FSP_FMTBUF_SZ]
+.fsp_cpfmt:
+    mov al, [es:si]
+    mov [di], al                    ; DS=DGROUP here, writes via DS:DI
+    inc si
+    inc di
+    test al, al
+    jnz .fsp_cpfmt
+
+    ; --- Engine register setup ---
+    mov di, [bp+6]                  ; DI = dest.off
+    mov ax, [bp+8]
+    mov es, ax                      ; ES = dest.seg  (stosb → ES:DI = far dest)
+    lea si, [bp - _FSP_FMTBUF_SZ]   ; SI = fmt scratch (DGROUP)
+    lea bx, [bp+14]                 ; BX = vararg ptr (DGROUP via SS=DS)
+
+.fsp_top:
+    lodsb
+    test al, al
+    jz .fsp_done
+    cmp al, '%'
+    je .fsp_pct
+    stosb
+    jmp .fsp_top
+
+.fsp_pct:
+    mov word [_spr_flags], 0
+    mov word [_spr_width], 0
+    mov word [_spr_prec], 0
+
+.fsp_pf:
+    lodsb
+    cmp al, '-'
+    jne .fsp_pf_nminus
+    or word [_spr_flags], 1
+    jmp .fsp_pf
+.fsp_pf_nminus:
+    cmp al, '0'
+    jne .fsp_pf_nzero
+    or word [_spr_flags], 2
+    jmp .fsp_pf
+.fsp_pf_nzero:
+    cmp al, '+'
+    je .fsp_pf
+    cmp al, ' '
+    je .fsp_pf
+    cmp al, '#'
+    je .fsp_pf
+
+.fsp_pw:
+    cmp al, '0'
+    jb .fsp_pw_done
+    cmp al, '9'
+    ja .fsp_pw_done
+    push ax
+    mov ax, [_spr_width]
+    mov cx, 10
+    mul cx
+    mov cx, ax
+    pop ax
+    sub al, '0'
+    xor ah, ah
+    add cx, ax
+    mov [_spr_width], cx
+    lodsb
+    jmp .fsp_pw
+.fsp_pw_done:
+
+    cmp al, '.'
+    jne .fsp_pp_done
+    or word [_spr_flags], 8
+    lodsb
+.fsp_pp:
+    cmp al, '0'
+    jb .fsp_pp_done
+    cmp al, '9'
+    ja .fsp_pp_done
+    push ax
+    mov ax, [_spr_prec]
+    mov cx, 10
+    mul cx
+    mov cx, ax
+    pop ax
+    sub al, '0'
+    xor ah, ah
+    add cx, ax
+    mov [_spr_prec], cx
+    lodsb
+    jmp .fsp_pp
+.fsp_pp_done:
+
+    cmp al, 'l'
+    jne .fsp_lm_h
+    or word [_spr_flags], 4
+    lodsb
+    cmp al, 'l'
+    jne .fsp_lm_done
+    lodsb
+    jmp .fsp_lm_done
+.fsp_lm_h:
+    cmp al, 'h'
+    jne .fsp_lm_done
+    lodsb
+    cmp al, 'h'
+    jne .fsp_lm_done
+    lodsb
+.fsp_lm_done:
+
+    test al, al
+    jz .fsp_done
+    cmp al, '%'
+    je .fsp_emit_pct
+    cmp al, 'c'
+    je .fsp_do_chr
+    cmp al, 's'
+    je .fsp_do_str
+    cmp al, 'd'
+    je .fsp_do_signed
+    cmp al, 'i'
+    je .fsp_do_signed
+    cmp al, 'u'
+    je .fsp_do_unsigned
+    cmp al, 'x'
+    je .fsp_do_hex_lo
+    cmp al, 'X'
+    je .fsp_do_hex_up
+    cmp al, 'o'
+    je .fsp_do_octal
+    cmp al, 'p'
+    je .fsp_do_ptr
+    stosb
+    jmp .fsp_top
+
+.fsp_emit_pct:
+    stosb
+    jmp .fsp_top
+
+.fsp_done:
+    mov byte [es:di], 0
+    xor ax, ax
+    pop ds
+    pop es
+    pop bx
+    pop di
+    pop si
+    mov sp, bp
+    pop bp
+    retf
+
+    ; ---- %c ----
+.fsp_do_chr:
+    mov ax, [bx]
+    add bx, 2
+    push ax
+    mov cx, [_spr_width]
+    cmp cx, 1
+    jbe .fsp_chr_emit
+    dec cx
+    test word [_spr_flags], 1
+    jnz .fsp_chr_left
+    mov al, ' '
+    rep stosb
+    pop ax
+    stosb
+    jmp .fsp_top
+.fsp_chr_left:
+    pop ax
+    stosb
+    mov al, ' '
+    rep stosb
+    jmp .fsp_top
+.fsp_chr_emit:
+    pop ax
+    stosb
+    jmp .fsp_top
+
+    ; ---- %s (4-byte far ptr arg) ----
+.fsp_do_str:
+    push si                         ; save fmt scratch position
+
+    ; Snapshot precision cap into CX while DS=DGROUP
+    mov cx, 0x7FFF
+    test word [_spr_flags], 8
+    jz .fsp_str_have_cap
+    mov cx, [_spr_prec]
+.fsp_str_have_cap:
+
+    mov si, [bx]                    ; src.off
+    mov ax, [bx+2]                  ; src.seg
+    add bx, 4
+
+    push ds
+    mov ds, ax                      ; DS = src.seg (subsequent [si] reads from far)
+
+    ; Scan length up to NUL or cap
+    push si                         ; save src start
+    xor dx, dx                      ; length
+.fsp_str_scan:
+    test cx, cx
+    jz .fsp_str_scan_done
+    cmp byte [si], 0
+    je .fsp_str_scan_done
+    inc si
+    inc dx
+    dec cx
+    jmp .fsp_str_scan
+.fsp_str_scan_done:
+    pop si                          ; SI = src.off (start), DX = length
+
+    ; Access DGROUP state vars via ss: override (DS = src.seg right now,
+    ; but DS=SS in medium model so [ss:label] reaches DGROUP).
+    mov cx, [ss:_spr_width]
+    cmp cx, dx
+    jbe .fsp_str_no_pad
+    sub cx, dx
+    test word [ss:_spr_flags], 1
+    jnz .fsp_str_pad_after
+
+    ; pad before
+    push si
+    push dx
+    mov al, ' '
+    rep stosb
+    pop cx
+    pop si
+    rep movsb                       ; ES:DI ← DS:SI
+    pop ds
+    pop si
+    jmp .fsp_top
+
+.fsp_str_pad_after:
+    push cx
+    mov cx, dx
+    rep movsb
+    pop cx
+    mov al, ' '
+    rep stosb
+    pop ds
+    pop si
+    jmp .fsp_top
+
+.fsp_str_no_pad:
+    mov cx, dx
+    rep movsb
+    pop ds
+    pop si
+    jmp .fsp_top
+
+    ; ---- %d / %i ----
+.fsp_do_signed:
+    test word [_spr_flags], 4
+    jnz .fsp_sgn_long
+    mov ax, [bx]
+    add bx, 2
+    cwd
+    jmp .fsp_sgn_common
+.fsp_sgn_long:
+    mov ax, [bx]
+    mov dx, [bx+2]
+    add bx, 4
+.fsp_sgn_common:
+    mov byte [_spr_signc], 0
+    test dx, dx
+    jns .fsp_sgn_pos
+    mov byte [_spr_signc], '-'
+    not dx
+    neg ax
+    sbb dx, -1
+.fsp_sgn_pos:
+    mov cx, 10
+    call _spr_emit_int
+    jmp .fsp_top
+
+    ; ---- %u ----
+.fsp_do_unsigned:
+    test word [_spr_flags], 4
+    jnz .fsp_uns_long
+    mov ax, [bx]
+    add bx, 2
+    xor dx, dx
+    jmp .fsp_uns_common
+.fsp_uns_long:
+    mov ax, [bx]
+    mov dx, [bx+2]
+    add bx, 4
+.fsp_uns_common:
+    mov byte [_spr_signc], 0
+    mov cx, 10
+    call _spr_emit_int
+    jmp .fsp_top
+
+    ; ---- %x ----
+.fsp_do_hex_lo:
+    and word [_spr_flags], 0xFFEF
+    jmp .fsp_hex_dispatch
+.fsp_do_hex_up:
+    or word [_spr_flags], 16
+.fsp_hex_dispatch:
+    test word [_spr_flags], 4
+    jnz .fsp_hex_long
+    mov ax, [bx]
+    add bx, 2
+    xor dx, dx
+    jmp .fsp_hex_common
+.fsp_hex_long:
+    mov ax, [bx]
+    mov dx, [bx+2]
+    add bx, 4
+.fsp_hex_common:
+    mov byte [_spr_signc], 0
+    mov cx, 16
+    call _spr_emit_int
+    jmp .fsp_top
+
+    ; ---- %p (always 4-byte far ptr, printed as 32-bit hex) ----
+.fsp_do_ptr:
+    or word [_spr_flags], 4         ; force 'l' (long) path
+    and word [_spr_flags], 0xFFEF   ; lowercase hex
+    mov ax, [bx]
+    mov dx, [bx+2]
+    add bx, 4
+    mov byte [_spr_signc], 0
+    mov cx, 16
+    call _spr_emit_int
+    jmp .fsp_top
+
+    ; ---- %o ----
+.fsp_do_octal:
+    test word [_spr_flags], 4
+    jnz .fsp_oct_long
+    mov ax, [bx]
+    add bx, 2
+    xor dx, dx
+    jmp .fsp_oct_common
+.fsp_oct_long:
+    mov ax, [bx]
+    mov dx, [bx+2]
+    add bx, 4
+.fsp_oct_common:
+    mov byte [_spr_signc], 0
+    mov cx, 8
+    call _spr_emit_int
+    jmp .fsp_top
+"""
+
+EPILOGUE = MALLOC_EXE + FILEIO_EXE + FAR_SPRINTF_EXE
 
 
 def shift_bp_offset(line):
