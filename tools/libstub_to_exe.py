@@ -1628,7 +1628,437 @@ _far_segread:
 """
 
 
-EPILOGUE = MALLOC_EXE + FILEIO_EXE + FAR_SPRINTF_EXE + FAR_DOSIO_EXE
+# ----------------------------------------------------------------------------
+# Far-data stdio: 4-byte FILE* sentinels + _far_fopen/_far_fclose/
+# _far_fputs/_far_fputc/_far_fgets.
+#
+# Under compact/large/huge, the C variable `FILE *` is 4 bytes (off:seg).
+# All FILE slots live in DGROUP (the _file_slots pool from FILEIO_EXE), so
+# FILE*.seg always equals SS (= DGROUP at runtime in our EXE layout).  The
+# helpers ignore FILE*.seg and read the handle via FILE*.off from the
+# current DS=DGROUP.
+#
+# stdin/stdout/stderr replace the 2-byte sentinels in libstub.asm; the
+# corresponding 1-word `_stdin_file`/`_stdout_file`/`_stderr_file` storage
+# is re-emitted here (the libstub.asm versions are eaten by the SKIP_GLOBALS
+# region that starts at `global _stdin, _stdout, _stderr`).
+#
+# _far_fopen returns DX:AX where AX = slot offset in DGROUP, DX = SS.  The
+# helpers below mirror the FILEIO_EXE near-data versions byte-for-byte
+# except for: 4-byte arg layout, ES:BX-loaded reads of name/mode/string,
+# DS-swap for the AH=40h/AH=3C/AH=3D calls (whose DS:DX must point at the
+# far source), and DX:AX returns.
+# ----------------------------------------------------------------------------
+FAR_STDIO_EXE = """
+
+; -------- far-data stdio (compact/large/huge) --------
+
+segment _DATA
+
+; 4-byte stdio sentinels: off:seg pointing at the matching _stdin_file etc.
+; `seg X` emits a 16-bit segment fixup that omf_link resolves to a runtime
+; relocation in the MZ header.
+global _stdin, _stdout, _stderr
+_stdin:  dw _stdin_file,  seg _stdin_file
+_stdout: dw _stdout_file, seg _stdout_file
+_stderr: dw _stderr_file, seg _stderr_file
+_stdin_file:  dw 0
+_stdout_file: dw 1
+_stderr_file: dw 2
+
+segment LIBSTUB_TEXT
+
+; ----------------------------------------------------------------------
+; FILE *far_fopen(const char __far *name, const char __far *mode)
+;
+; Stack: [bp+6] name.off, [bp+8] name.seg,
+;        [bp+10] mode.off, [bp+12] mode.seg.
+;
+; Returns DX:AX where AX = slot offset in DGROUP, DX = SS (= DGROUP).
+; Returns 0:0 on failure.
+; ----------------------------------------------------------------------
+global _far_fopen
+_far_fopen:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    push es
+    push ds
+
+    ; Find a free FILE slot (DS=DGROUP still).
+    mov si, _file_slots
+    mov di, _NUM_FILES
+.ffop_find:
+    cmp byte [si + 2], 0          ; in_use?
+    je .ffop_found
+    add si, _FILE_SZ
+    dec di
+    jnz .ffop_find
+    xor ax, ax                    ; no free slot -> NULL
+    xor dx, dx
+    jmp .ffop_done
+
+.ffop_found:
+    ; Inspect mode[0] via ES:BX -> mode.
+    mov ax, [bp+12]               ; mode.seg
+    mov es, ax
+    mov bx, [bp+10]               ; mode.off
+    mov al, [es:bx]
+    cmp al, 'r'
+    je .ffop_read
+    cmp al, 'w'
+    je .ffop_write
+    cmp al, 'a'
+    je .ffop_append
+    xor ax, ax                    ; unknown mode -> NULL
+    xor dx, dx
+    jmp .ffop_done
+
+.ffop_read:
+    ; AH=3D AL=00: open existing, read-only.  DS:DX -> name (far).
+    mov ax, [bp+8]                ; name.seg
+    mov ds, ax
+    mov dx, [bp+6]                ; name.off
+    mov ax, 0x3D00
+    int 0x21
+    push ss
+    pop ds                        ; restore DS=DGROUP
+    jc .ffop_fail
+    mov byte [si+3], 0            ; flags: read mode
+    jmp .ffop_install
+
+.ffop_write:
+    mov ax, [bp+8]
+    mov ds, ax
+    mov dx, [bp+6]
+    xor cx, cx                    ; attribute = normal
+    mov ah, 0x3C                  ; create / truncate
+    int 0x21
+    push ss
+    pop ds
+    jc .ffop_fail
+    mov byte [si+3], 2            ; flags: bit1 = writing
+    jmp .ffop_install
+
+.ffop_append:
+    ; Try to open existing for read+write; if missing, create.
+    mov ax, [bp+8]
+    mov ds, ax
+    mov dx, [bp+6]
+    mov ax, 0x3D02
+    int 0x21
+    push ss
+    pop ds
+    jnc .ffop_seek_end
+    ; Create new (file didn't exist).
+    mov ax, [bp+8]
+    mov ds, ax
+    mov dx, [bp+6]
+    xor cx, cx
+    mov ah, 0x3C
+    int 0x21
+    push ss
+    pop ds
+    jc .ffop_fail
+    mov byte [si+3], 2
+    jmp .ffop_install
+
+.ffop_seek_end:
+    ; AX = handle.  Seek to EOF: AH=42 AL=2, CX:DX = 0.
+    mov bx, ax
+    xor cx, cx
+    xor dx, dx
+    mov ax, 0x4202
+    int 0x21
+    mov ax, bx                    ; restore handle into AX
+    mov byte [si+3], 2
+
+.ffop_install:
+    mov [si], ax                  ; handle
+    mov byte [si+2], 1            ; in_use
+    mov word [si+4], 0            ; buf_pos
+    mov word [si+6], 0            ; buf_len
+    mov ax, si                    ; AX = slot offset in DGROUP
+    mov dx, ss                    ; DX = DGROUP segment (= SS at runtime)
+    jmp .ffop_done
+
+.ffop_fail:
+    xor ax, ax
+    xor dx, dx
+
+.ffop_done:
+    pop ds
+    pop es
+    pop bx
+    pop di
+    pop si
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int far_fclose(FILE __far *fp)
+;
+; Stack: [bp+6] fp.off, [bp+8] fp.seg (ignored — slots are in DGROUP).
+; ----------------------------------------------------------------------
+global _far_fclose
+_far_fclose:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+
+    mov si, [bp+6]                ; fp.off
+    test si, si
+    jz .ffc_done
+
+    ; Only close if this is a real slot from our pool.
+    cmp si, _file_slots
+    jb .ffc_done
+    mov ax, _file_slots
+    add ax, (_NUM_FILES * _FILE_SZ)
+    cmp si, ax
+    jae .ffc_done
+
+    cmp byte [si+2], 0            ; in_use?
+    je .ffc_done
+
+    mov bx, [si]                  ; handle
+    mov byte [si+2], 0            ; free slot
+    mov ah, 0x3E                  ; close handle
+    int 0x21
+
+.ffc_done:
+    xor ax, ax
+    pop si
+    pop bx
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int far_fputc(int c, FILE __far *fp)
+;
+; Stack: [bp+6] c, [bp+8] fp.off, [bp+10] fp.seg.
+; ----------------------------------------------------------------------
+global _far_fputc
+_far_fputc:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+
+    mov si, [bp+8]                ; fp.off (FILE slot or stdio sentinel)
+    mov bx, [si]                  ; handle (DS=DGROUP at entry)
+    mov ax, [bp+6]                ; c (low byte)
+    push ax                       ; scratch 1-byte buffer on stack
+    mov dx, sp                    ; DS:DX -> our byte (DS=SS=DGROUP)
+    mov cx, 1
+    mov ah, 0x40
+    int 0x21
+    pop ax                        ; discard scratch
+    jc .ffpc_err
+
+    mov ax, [bp+6]                ; return the char written
+    and ax, 0xFF
+    jmp .ffpc_done
+.ffpc_err:
+    mov ax, -1
+.ffpc_done:
+    pop si
+    pop bx
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; int far_fputs(const char __far *s, FILE __far *fp)
+;
+; Stack: [bp+6] s.off, [bp+8] s.seg,
+;        [bp+10] fp.off, [bp+12] fp.seg (ignored).
+;
+; Reads s via ES:DI to measure length, then swaps DS to s.seg for the
+; AH=40h call (whose DS:DX must point at the source string).
+; ----------------------------------------------------------------------
+global _far_fputs
+_far_fputs:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    push es
+    push ds
+
+    ; Read handle from FILE slot (in DGROUP) while DS=DGROUP.
+    mov si, [bp+10]               ; fp.off
+    mov bx, [si]                  ; handle
+
+    ; Measure strlen via ES:DI on s (far).
+    mov ax, [bp+8]                ; s.seg
+    mov es, ax
+    mov si, [bp+6]                ; ES:SI -> s
+    mov di, si
+.ffps_len:
+    cmp byte [es:di], 0
+    je .ffps_len_done
+    inc di
+    jmp .ffps_len
+.ffps_len_done:
+    mov cx, di
+    sub cx, si                    ; CX = strlen
+    jz .ffps_ok                   ; empty string still succeeds
+
+    ; AH=40h needs DS:DX -> buf.  Swap DS to s.seg (= ES) temporarily.
+    mov ax, es
+    mov ds, ax
+    mov dx, si                    ; DS:DX = (s.seg):(s.off)
+    mov ah, 0x40
+    int 0x21
+    push ss
+    pop ds                        ; restore DS=DGROUP
+    jc .ffps_err
+
+.ffps_ok:
+    xor ax, ax                    ; success (non-negative)
+    jmp .ffps_done
+.ffps_err:
+    mov ax, -1
+.ffps_done:
+    pop ds
+    pop es
+    pop bx
+    pop di
+    pop si
+    pop bp
+    retf
+
+
+; ----------------------------------------------------------------------
+; char *far_fgets(char __far *buf, int n, FILE __far *fp)
+;
+; Stack: [bp+6] buf.off, [bp+8] buf.seg,
+;        [bp+10] n,
+;        [bp+12] fp.off, [bp+14] fp.seg.
+;
+; Returns DX:AX = buf (success) or 0:0 (EOF, no bytes read).
+;
+; Inlined slot-buffered reader mirroring `_getc` in FILEIO_EXE.  Writes
+; output bytes via ES:DI on the caller's far buf.
+; ----------------------------------------------------------------------
+global _far_fgets
+_far_fgets:
+    push bp
+    mov bp, sp
+    push bx
+    push si
+    push di
+    push es
+
+    ; Validate FILE slot belongs to our pool (stdin handle 0 would be a
+    ; sentinel pointer, which can't refill via the slot buffer; we treat
+    ; it as EOF — fgets on stdin isn't supported by this implementation).
+    mov si, [bp+12]               ; fp.off
+    test si, si
+    jz .ffg_null
+    cmp si, _file_slots
+    jb .ffg_null
+    mov ax, _file_slots
+    add ax, (_NUM_FILES * _FILE_SZ)
+    cmp si, ax
+    jae .ffg_null
+
+    mov cx, [bp+10]               ; n
+    cmp cx, 2
+    jl .ffg_null                  ; n < 2 -> no room for char + NUL
+    dec cx                        ; reserve byte for terminator
+
+    mov ax, [bp+8]                ; buf.seg
+    mov es, ax
+    mov di, [bp+6]                ; ES:DI -> buf
+
+.ffg_loop:
+    test cx, cx
+    jz .ffg_end_ok                ; filled n-1 bytes
+    mov ax, [si+4]                ; buf_pos
+    cmp ax, [si+6]                ; buf_len
+    jb .ffg_byte
+
+    test byte [si+3], 1           ; eof already?
+    jnz .ffg_end_check
+
+    ; Refill: INT 21h AH=3F, BX=handle, CX=count, DS:DX=buf.
+    push cx
+    push di
+    mov bx, [si]
+    mov cx, _FBUF_SZ
+    mov dx, si
+    add dx, 8                     ; buf at slot+8
+    mov ah, 0x3F
+    int 0x21
+    pop di
+    pop cx
+    jc .ffg_set_eof
+    test ax, ax
+    jz .ffg_set_eof
+    mov [si+6], ax                ; buf_len
+    mov word [si+4], 0            ; buf_pos
+    jmp .ffg_loop
+
+.ffg_set_eof:
+    or byte [si+3], 1
+    jmp .ffg_end_check
+
+.ffg_byte:
+    mov bx, [si+4]                ; buf_pos
+    mov al, [si + bx + 8]
+    mov [es:di], al
+    inc di
+    inc word [si+4]
+    dec cx
+    cmp al, 10                    ; '\\n' -> stop after copying it
+    je .ffg_end_ok
+    jmp .ffg_loop
+
+.ffg_end_check:
+    ; If we've read at least one byte, return buf; else return NULL.
+    cmp di, [bp+6]
+    je .ffg_null
+
+.ffg_end_ok:
+    mov byte [es:di], 0           ; NUL-terminate
+    mov ax, [bp+6]                ; return buf
+    mov dx, [bp+8]
+    jmp .ffg_done
+
+.ffg_null:
+    xor ax, ax
+    xor dx, dx
+
+.ffg_done:
+    pop es
+    pop di
+    pop si
+    pop bx
+    pop bp
+    retf
+"""
+
+
+def far_data_model(model):
+    """Compact/large/huge models use 4-byte data pointers; medium does not."""
+    return model in ('compact', 'large', 'huge')
+
+
+def build_epilogue(model):
+    """Assemble the EPILOGUE; the 4-byte stdio sentinels + _far_fX helpers
+    are appended only under far-data models."""
+    parts = [MALLOC_EXE, FILEIO_EXE, FAR_SPRINTF_EXE, FAR_DOSIO_EXE]
+    if far_data_model(model):
+        parts.append(FAR_STDIO_EXE)
+    return ''.join(parts)
 
 
 def shift_bp_offset(line):
@@ -1749,6 +2179,15 @@ def main():
         '_fwrite', '_fread', '_fputc', '_fputs', '_fprintf', '_printf', '_fflush',
         '_rename', '_remove',
     }
+    if far_data_model(model):
+        # FAR_STDIO_EXE re-emits 4-byte _stdin/_stdout/_stderr sentinels (+
+        # the matching _stdin_file/_stdout_file/_stderr_file storage); skip
+        # the 2-byte libstub.asm versions.  `global _stdin, _stdout, _stderr`
+        # is a single line whose first symbol triggers the skip, and the
+        # skip region runs until the next `global` (= `_updatetabstoptable`),
+        # which is exactly the data block we want to suppress.
+        SKIP_GLOBALS = set(SKIP_GLOBALS)
+        SKIP_GLOBALS.add('_stdin')
     SKIP_LABELS  = {'_heap_initialized', '_heap_ptr', '_heap_top'}
 
     # Second pass: route lines.  When we encounter a label whose kind is
@@ -1830,7 +2269,7 @@ def main():
         out_lines.append(transform(raw))
         i += 1
 
-    out_lines.append(EPILOGUE)
+    out_lines.append(build_epilogue(model))
 
     with open(out_path, 'w') as f:
         f.write('\n'.join(out_lines) + '\n')

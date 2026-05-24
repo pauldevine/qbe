@@ -1283,6 +1283,7 @@ call_target_name(char *f)
 	static const char *far_stdlib[] = {
 		"printf", "fprintf", "sprintf",
 		"puts", "fputs", "fputc", "fgets",
+		"fopen", "fclose",
 		"strlen", "strcpy", "strcmp", "strncmp", "strncpy",
 		"strchr", "strcat", "strcspn", "strstr", "strrchr",
 		"memcpy", "memcmp", "memset",

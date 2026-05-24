@@ -148,8 +148,8 @@ nasm -w-label-redef-late -f obj "$OUT_DIR/$base.omf.asm" \
 
 # Stage 5: crt0_exe.obj and libstub_exe.obj
 nasm -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" 2>>"$ERR"
-"$QBE_DIR/tools/libstub_to_exe.py" "$DOS_DIR/libstub.asm" \
-	"$OUT_DIR/libstub_exe.asm" 2>>"$ERR"
+"$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" \
+	"$DOS_DIR/libstub.asm" "$OUT_DIR/libstub_exe.asm" 2>>"$ERR"
 nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR"
 
 # Stage 6: Link
