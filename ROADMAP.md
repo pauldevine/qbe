@@ -30,7 +30,7 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 | **Function Pointers** | ✅ Complete | Full support with typedef | i8086/README.md:321 |
 | **Struct Bitfields** | ✅ Complete | Packing and read/write | i8086/README.md:322 |
 | **DOS Runtime** | ✅ **COMPLETE** | crt0_exe.asm + real printf/sprintf, freelist malloc/free, file I/O | minic/dos/libstub.asm |
-| **Memory Models** | ✅ Tiny + Small + Medium + Compact | Tiny .COM works for small programs (com_smoke.c, 1.2KB; gated at 4KB via tools/test-dos.sh); medium .EXE works for stevie; compact .EXE runs cprobe.c + cstrprobe.c (printf %s/%d + strlen/strcpy/strcmp/memcpy/memcmp/memset over DGROUP + stack-local strings) end-to-end in DOSBox; large/huge still missing | tools/build-com-test.sh, tools/build-stevie.sh, tools/build-example.sh |
+| **Memory Models** | ✅ Tiny + Small + Medium + Compact + Large + Huge (DOS-API/stdio only on compact for far-data models) | Tiny .COM gated at 4KB via tools/test-dos.sh; medium .EXE works for stevie; compact/large/huge each pass the same 4 runtime probes (cstrprobe / compactprobe_extra / fnptrprobe / farretprobe) in DOSBox (12 entries in tools/test-dos.sh).  Large/huge **DOS-API** (intdos/int86/segread) and **stdio** (fputs/fputc/fgets/puts) still need `_far_X` libstub variants — caller pushes far pointers but current helpers read near pointers off [bp+4]/[bp+6]. | tools/build-com-test.sh, tools/build-stevie.sh, tools/build-example.sh |
 | **DOS API Library** | ✅ **COMPLETE** | int86/int86x/intdos/intdosx/segread + video/keyboard/mouse wrappers | minic/dos/libstub.asm, minic/include/dos.h |
 
 **Phase Completion (vs original plan):**
@@ -49,7 +49,7 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 - ✅ Stevie editor (`stevie.exe`) ports cleanly as the flagship integration test
 
 **What's Actually Missing:**
-1. **Large/huge memory models** — only tiny/small/medium/compact implemented
+1. **Large/huge DOS-API + stdio surface** — large/huge build + run cleanly for the compact runtime-probe surface (strings, mem, fn-ptrs, %s/%p, far-ptr arith); but `_intdos`/`_int86`/`_intdosx`/`_int86x`/`_segread` and `_fputs`/`_fputc`/`_fgets`/`_puts` still consume near pointers off the stack.  Need `_far_X` variants in libstub.asm + add their names to `far_stdlib[]` in `minic.y:1252`.  See `[[large-huge-bringup]]`.
 2. **Compact far-variant inc/dec / Kl arith on CAddr** — far-ptr inc/dec (minic.y:2189, 2234) and the ~10 Kl Oadd/Osub/Ocopy/Oand/Oor/Oxor sites in i8086/emit.c that still consult `bits.i` directly without a CAddr check. Latent bugs for `p + offsetof_constant` style code; not exercised by cprobe/cstrprobe.
 3. **i8086 compact loadfb AX-aliasing** — `loadfb`'s implicit AX clobber isn't surfaced to the register allocator; two back-to-back loadfb's whose results both reach the same printf vararg call alias each other (second clobbers first). See `[[i8086-compact-loadfb-aliases-ax]]`.
 4. **Polish on the legacy examples** — 16 older `dos_putchar`-style files in `minic/dos/examples/` predate the `<dos.h>` API; modern dialect now demonstrated by `mouse_demo.c` / `vga_pixels.c` / `kbtest.c` / `cprobe.c` / `cstrprobe.c`

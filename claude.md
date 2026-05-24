@@ -1,8 +1,8 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-23
-**Status:** ~92% Complete
+**Last Updated:** 2026-05-24
+**Status:** ~94% Complete
 
 ---
 
@@ -40,11 +40,9 @@ The ROADMAP.md file contains:
 - **Examples** — 16 legacy + 3 modern `<dos.h>` demos (mouse_demo, vga_pixels, kbtest)
 
 **In Progress ⚠️:**
-- Memory Models — tiny/small/medium .EXE work; compact runs cprobe.c + cstrprobe.c end-to-end in DOSBox (printf %s/%d/%p + strlen/strcpy/strcmp/strncmp/strchr/strrchr/strncpy/strcat/strcspn/strstr/memcpy/memcmp/memset all via 4-byte far-ptr ABI).  cstrprobe.c is wired into `tools/test-dos.sh` as the `compact runtime (cstrprobe)` step — DOSBox stdout is auto-diffed against `minic/dos/tests/cstrprobe.golden.txt`. Latent: Kl arith on CAddr (~10 sites in i8086/emit.c) and far-ptr inc/dec (minic.y:2189, 2234) still consult `bits.i` directly; compact-mode `loadfb` clobbers AX without telling rega (see `[[i8086-compact-loadfb-aliases-ax]]`).
+- Memory Models — tiny/small/medium/compact/large/huge .EXE all build and pass the same 4 compact runtime probes (cstrprobe / compactprobe_extra / fnptrprobe / farretprobe) verbatim under `--model=compact|large|huge` (16 entries in `tools/test-dos.sh`).  Gate currently 20/20.  Latent: Kl arith on CAddr (~10 sites in i8086/emit.c) and far-ptr inc/dec (minic.y:2189, 2234) still consult `bits.i` directly; compact-mode `loadfb` clobbers AX without telling rega ([[i8086-compact-loadfb-aliases-ax]]).
 - Tiny memory model (.COM) — stevie.com still over 64 KB ([[minic-pointer-bloat]])
-
-**Missing ❌:**
-- Large/huge memory models
+- Large/huge DOS-API + stdio — `_intdos`/`_int86`/`_segread`/`_fputs`/`_fputc`/`_fgets`/`_puts` still consume near pointers; under large/huge the caller pushes 4-byte far pointers so results write to garbage.  Needs `_far_intdos`/`_far_int86`/`_far_segread`/`_far_fputs`/etc + adding those names to `far_stdlib[]` in `minic.y:1252`.  See [[large-huge-bringup]].
 
 ---
 
@@ -60,6 +58,12 @@ The ROADMAP.md file contains:
 ---
 
 ## Recent Major Accomplishments
+
+### Large + huge memory models bring-up (2026-05-24, session n)
+- ✅ All 4 compact-mode runtime probes (cstrprobe / compactprobe_extra / fnptrprobe / farretprobe) pass verbatim under `--model=large` and `--model=huge` — same goldens.
+- ✅ `tools/test-dos.sh` gate extended to 20/20 with 8 new entries (4 probes × {large, huge}).
+- ✅ No qbe / minic / libstub changes were required — the existing `_far_X` helper family + `uses_far_code()` / `NEAR_CODE()` model gating already covered the surface.
+- Carry-over: large/huge **DOS-API** (`intdos`/`int86`/`segread`) and **stdio** (`fputs`/`fputc`/`fgets`/`puts`) still read near pointers off the stack, so they corrupt under large/huge.  Needs `_far_intdos`/`_far_int86`/`_far_segread`/`_far_fputs`/... + adding those names to `far_stdlib[]` in `minic.y:1252`.  See [[large-huge-bringup]].
 
 ### Compact runtime test wired into test-dos.sh (2026-05-23)
 - ✅ `tools/run-dos-exe.sh` — generic runner: copies .EXE to 8.3 short name, generates a DOSBox autoexec.bat-equivalent conf, captures `OUT.TXT`, strips CRLF.  Handles `$DOSBOX` env override, `dosbox` on PATH, and the macOS .app path; exit 77 = skip-not-fail when DOSBox is unavailable.
