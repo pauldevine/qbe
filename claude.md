@@ -40,9 +40,11 @@ The ROADMAP.md file contains:
 - **Examples** — 16 legacy + 3 modern `<dos.h>` demos (mouse_demo, vga_pixels, kbtest)
 
 **In Progress ⚠️:**
-- Memory Models — tiny/small/medium/compact/large/huge .EXE all build and pass the same 4 compact runtime probes (cstrprobe / compactprobe_extra / fnptrprobe / farretprobe) verbatim under `--model=compact|large|huge` (16 entries in `tools/test-dos.sh`).  Gate currently 20/20.  Latent: Kl arith on CAddr (~10 sites in i8086/emit.c) and far-ptr inc/dec (minic.y:2189, 2234) still consult `bits.i` directly; compact-mode `loadfb` clobbers AX without telling rega ([[i8086-compact-loadfb-aliases-ax]]).
+- Memory Models — runtime gate covers tiny/medium/compact/large/huge (21/21 ok in `tools/test-dos.sh`): tinyprobe.c (.COM, inline-asm INT 21h since libstub printf is a stub for .COM), 3 medium probes, 4 compact probes, 4 large probes (compact probes verbatim), 4 huge probes (compact probes verbatim).  Latent: Kl arith on CAddr (~10 sites in i8086/emit.c) and far-ptr inc/dec (minic.y:2189, 2234) still consult `bits.i` directly; compact-mode `loadfb` clobbers AX without telling rega ([[i8086-compact-loadfb-aliases-ax]]).
 - Tiny memory model (.COM) — stevie.com still over 64 KB ([[minic-pointer-bloat]])
+- Small .EXE — architecturally broken: libstub_to_exe.py rewrites every `ret` to `retf`, mismatches small's near-call ABI → DOSBox hangs.  Needs near+far libstub variants or model-conditional ret rewrite.  See [[per-model-gate]].
 - Large/huge DOS-API + stdio — `_intdos`/`_int86`/`_segread`/`_fputs`/`_fputc`/`_fgets`/`_puts` still consume near pointers; under large/huge the caller pushes 4-byte far pointers so results write to garbage.  Needs `_far_intdos`/`_far_int86`/`_far_segread`/`_far_fputs`/etc + adding those names to `far_stdlib[]` in `minic.y:1252`.  See [[large-huge-bringup]].
+- Huge >64K data — no pointer normalization in i8086/emit.c; `tools/omf_link.py` is 64K/segment with all data coalesced into DGROUP.  Huge is functionally equivalent to large until both pieces land.  See [[per-model-gate]].
 
 ---
 
@@ -58,6 +60,11 @@ The ROADMAP.md file contains:
 ---
 
 ## Recent Major Accomplishments
+
+### Per-model runtime gate (2026-05-24, session o)
+- ✅ `minic/dos/examples/tinyprobe.c` — first real tiny .COM runtime probe.  Uses inline-asm INT 21h AH=40h for output (libstub `_printf` is a stub for .COM; `_sprintf` IS implemented in libstub.asm so we sprintf-then-write).  17 verified lines: arithmetic, near-ptr pass, fn-ptr table, struct global, static local, 32-bit divmod, sprintf widths, near-pointer walk, local-array deref.
+- ✅ `tools/test-dos.sh` extended with `COM_RUNTIME_TESTS` block + `run_com_runtime_probe` helper.  Gate now **21/21 ok**.
+- Documented 3 architectural gaps in `[[per-model-gate]]`: small .EXE (libstub_to_exe ret→retf rewrite breaks small near-call ABI), large/huge DOS-API + stdio (libstub helpers consume near pointers), huge >64K data (no normalization + 64K/segment linker).
 
 ### Large + huge memory models bring-up (2026-05-24, session n)
 - ✅ All 4 compact-mode runtime probes (cstrprobe / compactprobe_extra / fnptrprobe / farretprobe) pass verbatim under `--model=large` and `--model=huge` — same goldens.

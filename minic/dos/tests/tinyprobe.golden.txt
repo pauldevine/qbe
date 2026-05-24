@@ -1,0 +1,17 @@
+sum=14699
+addptr=14699
+op_add=12
+op_sub=2
+op_mul=35
+origin=(100,200)
+sticky=6
+sdiv=142857
+srem=1
+udec=4000000000
+hex=beef
+uhex=ffff
+pad=[   42]
+zpad=[00042]
+01234
+arr=11,22,33,44
+OK

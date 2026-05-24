@@ -28,6 +28,20 @@ SMOKE_TESTS=(
 	"fileio.c:4096"         # fopen/fputs/fread/fclose roundtrip
 )
 
+# --- .COM runtime tests ----------------------------------------------------
+#
+# Each entry: `<src>:<golden>:<model>` (model is tiny or small for .COM).
+# Built via tools/build-com-test.sh --model=<model>, run headlessly under
+# DOSBox via tools/run-dos-exe.sh.  The .COM libstub has STUB printf/file
+# I/O (the real versions live in libstub_to_exe.py and are .EXE-only), so
+# .COM probes must output via inline-asm INT 21h AH=40h on top of the
+# real _sprintf in libstub.asm.  See minic/dos/examples/tinyprobe.c for
+# the pattern.
+#
+COM_RUNTIME_TESTS=(
+	"minic/dos/examples/tinyprobe.c:minic/dos/tests/tinyprobe.golden.txt:tiny"
+)
+
 # --- DOS runtime tests -----------------------------------------------------
 #
 # Each entry: `<src>:<golden>:<model>`.  The probe is built via
@@ -125,6 +139,18 @@ run_runtime_probe() {
 	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
 }
 
+# Same as run_runtime_probe but for .COM via tools/build-com-test.sh.
+run_com_runtime_probe() {
+	src="$1"
+	golden="$2"
+	model="$3"
+	base="$(basename "$src" .c)"
+	com="$QBE_DIR/build/com-test/$base/$base.com"
+	"$QBE_DIR/tools/build-com-test.sh" --model="$model" "$QBE_DIR/$src" >/dev/null
+	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$com")" || return $?
+	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
+}
+
 # Ensure qbe/minic are built before anything else.
 run "build qbe + minic" \
 	make -C "$QBE_DIR" -s qbe minic/minic
@@ -136,6 +162,15 @@ for entry in "${SMOKE_TESTS[@]}"; do
 		"$QBE_DIR/tools/build-com-test.sh" \
 		"$QBE_DIR/minic/dos/tests/$src" \
 		"$limit"
+done
+
+for entry in "${COM_RUNTIME_TESTS[@]}"; do
+	src="${entry%%:*}"
+	rest="${entry#*:}"
+	golden="${rest%%:*}"
+	model="${rest##*:}"
+	desc="$model runtime ($(basename "$src" .c))"
+	run "$desc" run_com_runtime_probe "$src" "$golden" "$model"
 done
 
 for entry in "${RUNTIME_TESTS[@]}"; do
