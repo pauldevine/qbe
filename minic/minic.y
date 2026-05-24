@@ -1354,6 +1354,85 @@ call(Node *n, Symb *sr)
 	fprintf(of, "...)\n");
 }
 
+/*
+ * Huge memory model: pointer +/- offset must be normalised so the
+ * resulting (seg, off) pair represents the same 20-bit linear address
+ * after any carry into the segment.  The flat 32-bit `add ax, lo; adc
+ * dx, hi` we use in compact/large model does NOT compute a normalised
+ * pointer (it carries between bit 15 and bit 16, but a real-mode
+ * segment carry happens at bit 4) and therefore mis-addresses any
+ * array > 64K under huge.  Route the arithmetic through the libstub
+ * helpers _qbe_huge_add / _qbe_huge_sub instead.  See
+ * [[huge-mode-plan]] / [[huge-phase-a]].
+ *
+ * Returns 1 if a call was emitted (caller skips its usual add/sub
+ * format-string emission), 0 otherwise.  Float operands, non-pointer
+ * results, and non-FAR pointer types fall through to the regular path.
+ */
+static int
+huge_ptr_binop(int op, Symb dst, Symb lhs, Symb rhs)
+{
+	Symb sptr, soff;
+
+	if (memmodel != MHuge) return 0;
+	if (op != '+' && op != '-') return 0;
+	if (KIND(dst.ctyp) != PTR) return 0;
+	/* Function pointers live in CS, not DS — their arithmetic is not
+	 * subject to segment normalisation.  Exclude direct fn-ptr type. */
+	if (KIND(DREF(dst.ctyp)) == FUN) return 0;
+	if (ISFLOAT(lhs.ctyp) || ISFLOAT(rhs.ctyp)) return 0;
+	/* When either operand is a direct local-variable Symb (Symb.t == Var),
+	 * the pointer is a stack address that the i8086 backend stores in
+	 * the variable's alloca SLOT — and Ostorel through a slot writes
+	 * value→[bp+slot] directly, NOT through the slot's contents.  A
+	 * normalised stack pointer would have a different (seg, off) but
+	 * the same linear address, so the direct-slot store would land in
+	 * the wrong place.  Keep stack arithmetic on the existing flat
+	 * `add ax, lo; adc dx, hi` path until backend storel/loadl learn
+	 * to honour seg on a non-alloca Kl pointer (see
+	 * [[huge-phase-b-storel-gap]]).  Globals (Glo/Ext) and loaded
+	 * temps (Tmp) still route through the helper. */
+	if (lhs.t == Var || rhs.t == Var) return 0;
+	/* Under MHuge, default data pointers are 32-bit (l) regardless of
+	 * the FAR flag's presence — prefix ++/-- strips FAR before calling
+	 * prom() ([[minic.y:2353]]), so we can't rely on ISFAR here. */
+
+	/* The pointer side is whichever operand has PTR kind; the other is
+	 * the (already-scaled) byte offset.  For '+' either order is legal;
+	 * for '-' the LHS must be the pointer (N - ptr is invalid C). */
+	if (KIND(lhs.ctyp) == PTR) {
+		sptr = lhs;
+		soff = rhs;
+	} else {
+		sptr = rhs;
+		soff = lhs;
+	}
+
+	/* Helper signature: unsigned long _qbe_huge_add(unsigned long ptr,
+	 * long offset).  The offset arg must be Kl, so widen narrower tmps
+	 * with the right signedness.  Constants take their class from the
+	 * call signature (we emit `l <N>`), so they need no extension. */
+	if (soff.t == Tmp && irtyp(soff.ctyp) != 'l') {
+		const char *ext = ISUNSIGNED(soff.ctyp) ? "extuw" : "extsw";
+		fprintf(of, "\t%%t%d =l %s ", tmp, ext);
+		psymb(soff);
+		fprintf(of, "\n");
+		soff.t = Tmp;
+		soff.ctyp = ISUNSIGNED(soff.ctyp) ? (LNG | UNSIGNED) : LNG;
+		soff.u.n = tmp++;
+	}
+
+	fprintf(of, "\t");
+	psymb(dst);
+	fprintf(of, " =l call $%s(l ",
+		op == '+' ? "qbe_huge_add" : "qbe_huge_sub");
+	psymb(sptr);
+	fprintf(of, ", l ");
+	psymb(soff);
+	fprintf(of, ")\n");
+	return 1;
+}
+
 Symb
 expr(Node *n)
 {
@@ -2293,13 +2372,15 @@ expr(Node *n)
 		s1.ctyp = INT;
 		/* Compute new value */
 		sr.ctyp = prom(o, &s0, &s1);
-		fprintf(of, "\t");
-		psymb(sr);
-		fprintf(of, " =%c %s ", irtyp(sr.ctyp), o == '+' ? "add" : "sub");
-		psymb(s0);
-		fprintf(of, ", ");
-		psymb(s1);
-		fprintf(of, "\n");
+		if (!huge_ptr_binop(o, sr, s0, s1)) {
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =%c %s ", irtyp(sr.ctyp), o == '+' ? "add" : "sub");
+			psymb(s0);
+			fprintf(of, ", ");
+			psymb(s1);
+			fprintf(of, "\n");
+		}
 		/* Store new value (handle far pointer) */
 		if (ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) {
 			char t = irtyp(sl.ctyp);
@@ -2344,6 +2425,13 @@ expr(Node *n)
 		o = n->op;
 	Binop:
 		sr.ctyp = prom(o, &s0, &s1);
+
+		/* Under MHuge, pointer +/- offset must normalise; route the
+		 * arithmetic through libstub's _qbe_huge_add / _qbe_huge_sub
+		 * instead of emitting flat 32-bit add/sub.  See
+		 * [[huge-mode-plan]] / [[huge-phase-a]]. */
+		if (huge_ptr_binop(o, sr, s0, s1))
+			break;
 
 		/* Validate operations on floating-point types */
 		if (ISFLOAT(sr.ctyp)) {

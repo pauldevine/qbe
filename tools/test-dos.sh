@@ -60,9 +60,15 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/fnptrprobe.c:minic/dos/tests/fnptrprobe.golden.txt:large"
 	"minic/dos/examples/farretprobe.c:minic/dos/tests/farretprobe.golden.txt:large"
 	"minic/dos/examples/cstrprobe.c:minic/dos/tests/cstrprobe.golden.txt:huge"
-	"minic/dos/examples/compactprobe_extra.c:minic/dos/tests/compactprobe_extra.golden.txt:huge"
+	# compactprobe_extra is intentionally a non-normalising-arith probe
+	# (`(char *)0x12345000L + 7 == 12345007`).  Phase B of [[huge-mode-plan]]
+	# makes huge mode normalise such CAddr arithmetic — so the same source
+	# yields a DIFFERENT (correct under huge) result.  Keep the probe gated
+	# on compact/large only; huge_norm_probe below pins the normalised
+	# semantics under huge instead.
 	"minic/dos/examples/fnptrprobe.c:minic/dos/tests/fnptrprobe.golden.txt:huge"
 	"minic/dos/examples/farretprobe.c:minic/dos/tests/farretprobe.golden.txt:huge"
+	"minic/dos/examples/huge_norm_probe.c:minic/dos/tests/huge_norm_probe.golden.txt:huge"
 	"minic/dos/examples/mediumprobe.c:minic/dos/tests/mediumprobe.golden.txt:medium"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:medium"
 	"minic/dos/examples/dosapi_probe.c:minic/dos/tests/dosapi_probe.golden.txt:medium"

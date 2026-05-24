@@ -40,11 +40,11 @@ The ROADMAP.md file contains:
 - **Examples** — 16 legacy + 3 modern `<dos.h>` demos (mouse_demo, vga_pixels, kbtest)
 
 **In Progress ⚠️:**
-- Memory Models — runtime gate covers tiny/medium/compact/large/huge (21/21 ok in `tools/test-dos.sh`): tinyprobe.c (.COM, inline-asm INT 21h since libstub printf is a stub for .COM), 3 medium probes, 4 compact probes, 4 large probes (compact probes verbatim), 4 huge probes (compact probes verbatim).  Latent: Kl arith on CAddr (~10 sites in i8086/emit.c) and far-ptr inc/dec (minic.y:2189, 2234) still consult `bits.i` directly; compact-mode `loadfb` clobbers AX without telling rega ([[i8086-compact-loadfb-aliases-ax]]).
+- Memory Models — runtime gate covers tiny/medium/compact/large/huge (22/22 ok in `tools/test-dos.sh`).  Huge Phase B landed 2026-05-24 (q): minic routes Mhuge pointer +/- offset through `_qbe_huge_add`/`sub` so normalisation actually happens for Glo/Ext/Tmp pointer operands.  Stack-local arith (`Symb.t == Var`) still uses flat add to dodge [[huge-phase-b-storel-gap]].  Latent: Kl arith on CAddr (~10 sites in i8086/emit.c) and far-ptr inc/dec (minic.y:2189, 2234) still consult `bits.i` directly; compact-mode `loadfb` clobbers AX without telling rega ([[i8086-compact-loadfb-aliases-ax]]).
 - Tiny memory model (.COM) — stevie.com still over 64 KB ([[minic-pointer-bloat]])
 - Small .EXE — architecturally broken: libstub_to_exe.py rewrites every `ret` to `retf`, mismatches small's near-call ABI → DOSBox hangs.  Needs near+far libstub variants or model-conditional ret rewrite.  See [[per-model-gate]].
 - Large/huge DOS-API + stdio — `_intdos`/`_int86`/`_segread`/`_fputs`/`_fputc`/`_fgets`/`_puts` still consume near pointers; under large/huge the caller pushes 4-byte far pointers so results write to garbage.  Needs `_far_intdos`/`_far_int86`/`_far_segread`/`_far_fputs`/etc + adding those names to `far_stdlib[]` in `minic.y:1252`.  See [[large-huge-bringup]].
-- Huge >64K data — no pointer normalization in i8086/emit.c; `tools/omf_link.py` is 64K/segment with all data coalesced into DGROUP.  Huge is functionally equivalent to large until both pieces land.  See [[per-model-gate]].
+- Huge >64K data — Phase B routes pointer arith through helpers, but the storel-via-Kl-slot backend gap ([[huge-phase-b-storel-gap]]) and the linker's 64K/segment DGROUP coalescing still block real >64K arrays.  Huge is functionally equivalent to large for stack/Var arith and TRULY normalising for global/computed pointers, but not yet end-to-end usable for an 80000-byte array.
 
 ---
 
