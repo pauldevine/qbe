@@ -666,7 +666,15 @@ class Linker:
     def _layout_segments(self) -> None:
         """Lay out output segments: CODE first (per-module, no coalescing),
         then DATA (coalesced by name), then BSS (coalesced by name), then a
-        STACK segment of --stack-size."""
+        STACK segment of --stack-size, then any HUGE-class segments (each
+        kept distinct so the linker can place a > 64K array as a series
+        of paragraph-adjacent chunks).
+
+        HUGE segments are deliberately laid out AFTER the stack and AFTER
+        DGROUP coalescing so they cannot inflate the DGROUP/SP overflow
+        check at _build_image.  They get their own paragraph bases and
+        the existing segment-relocation machinery generates the right
+        MZ-header fixups for far-pointer references."""
         # CODE: each module's CODE-class segments stay distinct.
         # Within a module, segments appear in SEGDEF declaration order.
         for mi, m in enumerate(self.modules):
@@ -701,7 +709,29 @@ class Linker:
         self.stack_seg_idx = len(self.out_segs)
         self.out_segs.append(stack)
 
-        # Compute paragraph bases.
+        # HUGE: each segment stays distinct (no name-coalescing).  Chunks
+        # of the same logical array carry the `_HUGE_<sym>_N` convention
+        # from asm_to_omf.py and rely on sorted N to be paragraph-
+        # adjacent at layout time.  We sort by (name) so `_0`, `_1`, `_2`
+        # land in lexical order; for arrays whose chunk count fits in a
+        # single decimal digit this is also numeric order.
+        huge_segs: List[Tuple[int, int]] = []
+        for mi, m in enumerate(self.modules):
+            for si, seg in enumerate(m.segments):
+                if seg is None:
+                    continue
+                if seg.cls.upper() == 'HUGE':
+                    huge_segs.append((mi, si))
+        huge_segs.sort(key=lambda p: self.modules[p[0]].segments[p[1]].name)
+        for mi, si in huge_segs:
+            seg = self.modules[mi].segments[si]
+            self._place_distinct(mi, si, seg)
+
+        # Compute paragraph bases.  HUGE chunks already arrive in
+        # `_HUGE_<sym>_N` order so the `_0`, `_1`, ... chunks of the
+        # same array land at consecutive paragraph bases — provided
+        # _0's length is a paragraph multiple (HUGE_CHUNK_BYTES in
+        # asm_to_omf.py is 65520, == 4095 paragraphs).
         cur_byte = 0
         for os_ in self.out_segs:
             # Round up to alignment (paragraph at minimum)

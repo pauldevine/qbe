@@ -108,11 +108,21 @@ RUNTIME_SYMS = set()  # populated below if/when needed
 
 
 # Skip-list of GAS directives we drop entirely.  Section markers
-# (.text/.data/.bss) are handled separately to switch buckets.
+# (.text/.data/.bss) and `.section "_HUGE_..."` overrides are handled
+# separately to switch buckets — they are NOT in this list.
 DROP_PREFIXES = (
-    '.balign', '.section', '.local', '.type', '.size', '.file',
+    '.balign', '.local', '.type', '.size', '.file',
     '.ident', '.string', '.p2align', '.model', '.code',
 )
+
+# Largest payload we put inside a single OMF SEGDEF.  NASM emits a valid
+# big-form SEGDEF (length=0, big_bit=1, interpreted as 64K) when the
+# segment is exactly 65536 bytes, but silently mis-encodes anything
+# larger.  Keep huge chunks at a safe paragraph-aligned 65520 bytes so
+# we never trip that path and so two consecutive chunks always sit at
+# paragraph (P) and (P + chunk_paras) with no inter-chunk padding.
+HUGE_CHUNK_BYTES = 65520
+assert HUGE_CHUNK_BYTES % 16 == 0
 
 
 def is_label_def(line):
@@ -130,6 +140,53 @@ def collect_referenced_syms(line):
     for m in re.finditer(r'\b(_[A-Za-z][\w]*)\b', code):
         syms.add(m.group(1))
     return syms
+
+
+def emit_huge_section(out, sec_name, lines):
+    """Emit one `.section "_HUGE_<sym>"` bucket as one or more NASM
+    `segment` blocks of at most HUGE_CHUNK_BYTES.  Splits the trailing
+    `times N db 0` directive across chunks; everything before the fill
+    (label, comments) is kept in the first chunk."""
+    # Find the `times N db 0` directive in the bucket.  qbe emits at
+    # most one per data global because `{ z N }` collapses to a single
+    # .fill which our sed pipeline rewrites to `times N db 0`.
+    fill_idx = None
+    fill_count = 0
+    for i, ln in enumerate(lines):
+        m = re.match(r'^\s*times\s+(\d+)\s+db\s+0\s*$', ln)
+        if m:
+            fill_idx = i
+            fill_count = int(m.group(1))
+            break
+
+    if fill_idx is None or fill_count <= HUGE_CHUNK_BYTES:
+        # Small enough to live in one segment; emit verbatim under the
+        # `_HUGE_<sym>_0` name so the linker's huge-segment matcher
+        # (any segment whose name starts with `_HUGE_`) catches it
+        # uniformly.
+        out.append('segment %s_0 class=HUGE align=16 use16' % sec_name)
+        out.extend(lines)
+        out.append('')
+        return
+
+    # Split: first chunk holds the label + first HUGE_CHUNK_BYTES of
+    # fill.  Subsequent chunks hold the rest, named `_0`, `_1`, ... so
+    # the linker can place them at adjacent paragraphs.
+    chunk0 = lines[:fill_idx] + ['\ttimes %d db 0' % HUGE_CHUNK_BYTES]
+    out.append('segment %s_0 class=HUGE align=16 use16' % sec_name)
+    out.extend(chunk0)
+    out.append('')
+
+    remaining = fill_count - HUGE_CHUNK_BYTES
+    idx = 1
+    while remaining > 0:
+        take = min(remaining, HUGE_CHUNK_BYTES)
+        out.append('segment %s_%d class=HUGE align=16 use16'
+                   % (sec_name, idx))
+        out.append('\ttimes %d db 0' % take)
+        out.append('')
+        remaining -= take
+        idx += 1
 
 
 def main():
@@ -153,10 +210,22 @@ def main():
         raw_lines = f.readlines()
 
     sections = {'text': [], 'data': [], 'bss': []}
+    # `huge_sections` is OrderedDict-like: maps `_HUGE_<sym>` → list of
+    # lines emitted by qbe between the `.section "_HUGE_<sym>"` marker
+    # and the next section/text/data/bss marker.  Each huge section
+    # gets its own NASM `segment` (split into 64KB-1para chunks for
+    # arrays > 65520 bytes) and is laid out outside DGROUP by the
+    # linker so it can hold > 64K data.
+    huge_sections = {}
     current = 'text'
+    current_huge = None   # active `_HUGE_<sym>` key when current == 'huge'
     publics = []          # symbols declared via `.globl`
     defined = set()       # all labels actually defined in this file
     referenced = set()    # all `_xxx` references seen in operands
+
+    # Match `.section "_HUGE_foo"` or `.section _HUGE_foo` (qbe quotes
+    # the string but accept either to be tolerant of pipeline changes).
+    huge_re = re.compile(r'^\.section\s+"?(_HUGE_[A-Za-z_][\w]*)"?\s*$')
 
     for raw in raw_lines:
         line = raw.rstrip('\n')
@@ -164,11 +233,23 @@ def main():
 
         # Section markers
         if s == '.text':
-            current = 'text'; continue
+            current = 'text'; current_huge = None; continue
         if s == '.data':
-            current = 'data'; continue
+            current = 'data'; current_huge = None; continue
         if s == '.bss':
-            current = 'bss'; continue
+            current = 'bss'; current_huge = None; continue
+        m = huge_re.match(s)
+        if m:
+            current_huge = m.group(1)
+            huge_sections.setdefault(current_huge, [])
+            current = 'huge'
+            continue
+
+        # Drop any other `.section` directive we don't recognize so
+        # foreign linkage hints from qbe don't leak into the OMF
+        # output.  Same goes for the other GAS-only prefixes.
+        if s.startswith('.section'):
+            continue
 
         # GAS-only directives we drop
         if any(s.startswith(p) for p in DROP_PREFIXES):
@@ -193,7 +274,10 @@ def main():
             defined.add(lbl)
         referenced |= collect_referenced_syms(line)
 
-        sections[current].append(line)
+        if current == 'huge':
+            huge_sections[current_huge].append(line)
+        else:
+            sections[current].append(line)
 
     # Auto-export every `_xxx`-prefixed label defined in this file.
     # minic doesn't currently emit qbe `export` markers for file-scope
@@ -250,6 +334,16 @@ def main():
     out.append('segment _BSS class=BSS align=2 use16')
     out.extend(sections['bss'])
     out.append('')
+
+    # Huge data segments: one per `.section "_HUGE_<sym>"` marker.  Each
+    # segment is class=HUGE so the linker can recognise it and place it
+    # outside DGROUP.  Arrays larger than HUGE_CHUNK_BYTES are split
+    # across multiple paragraph-aligned chunks so we never blow OMF's
+    # 16-bit segment-length field.  The label (e.g. `_arr:`) lives at
+    # offset 0 of the first chunk; subsequent chunks are anonymous BSS
+    # tail extending the array.
+    for sec_name, lines in huge_sections.items():
+        emit_huge_section(out, sec_name, lines)
 
     with open(out_path, 'w') as f:
         f.write('\n'.join(out) + '\n')

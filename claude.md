@@ -1,8 +1,8 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-24
-**Status:** ~94% Complete
+**Last Updated:** 2026-05-24 (r — Phase C huge >64K arrays)
+**Status:** ~95% Complete
 
 ---
 
@@ -40,11 +40,13 @@ The ROADMAP.md file contains:
 - **Examples** — 16 legacy + 3 modern `<dos.h>` demos (mouse_demo, vga_pixels, kbtest)
 
 **In Progress ⚠️:**
-- Memory Models — runtime gate covers tiny/medium/compact/large/huge (22/22 ok in `tools/test-dos.sh`).  Huge Phase B landed 2026-05-24 (q): minic routes Mhuge pointer +/- offset through `_qbe_huge_add`/`sub` so normalisation actually happens for Glo/Ext/Tmp pointer operands.  Stack-local arith (`Symb.t == Var`) still uses flat add to dodge [[huge-phase-b-storel-gap]].  Latent: Kl arith on CAddr (~10 sites in i8086/emit.c) and far-ptr inc/dec (minic.y:2189, 2234) still consult `bits.i` directly; compact-mode `loadfb` clobbers AX without telling rega ([[i8086-compact-loadfb-aliases-ax]]).
+- Memory Models — runtime gate covers tiny/medium/compact/large/huge (23/23 ok in `tools/test-dos.sh`).  Huge Phase C landed 2026-05-24 (r): per-symbol `_HUGE_<sym>` segments let huge mode hold arrays > 64K.  asm_to_omf splits >65520-byte fills across paragraph-adjacent chunks; omf_link places them outside DGROUP; minic emits `section "_HUGE_<sym>"` for globals > 64K under --model=huge.  hugeprobe.c (`static char arr[80000]`) verifies cross-64K read/write.
 - Tiny memory model (.COM) — stevie.com still over 64 KB ([[minic-pointer-bloat]])
 - Small .EXE — architecturally broken: libstub_to_exe.py rewrites every `ret` to `retf`, mismatches small's near-call ABI → DOSBox hangs.  Needs near+far libstub variants or model-conditional ret rewrite.  See [[per-model-gate]].
 - Large/huge DOS-API + stdio — `_intdos`/`_int86`/`_segread`/`_fputs`/`_fputc`/`_fgets`/`_puts` still consume near pointers; under large/huge the caller pushes 4-byte far pointers so results write to garbage.  Needs `_far_intdos`/`_far_int86`/`_far_segread`/`_far_fputs`/etc + adding those names to `far_stdlib[]` in `minic.y:1252`.  See [[large-huge-bringup]].
-- Huge >64K data — Phase B routes pointer arith through helpers, but the storel-via-Kl-slot backend gap ([[huge-phase-b-storel-gap]]) and the linker's 64K/segment DGROUP coalescing still block real >64K arrays.  Huge is functionally equivalent to large for stack/Var arith and TRULY normalising for global/computed pointers, but not yet end-to-end usable for an 80000-byte array.
+- Latent Kl-CAddr arith — Phase B routes most through `_qbe_huge_add`, but ~10 sites in i8086/emit.c (lines 986/1000/1047/...) and far-ptr inc/dec at minic.y:2189, 2234 still consult `bits.i` directly without a CAddr check.  Not exercised by any in-tree probe.
+- Kl shift AX clobber ([[i8086-kl-shift-clobbers-ax]]) — Oshl/Oshr/Osar Kl handlers clobber AX/DX without telling rega; latent.  Fix mirror of [[i8086-kl-add-sub-mul-r1-alias]].
+- Phase B storel-via-Kl-slot gap ([[huge-phase-b-storel-gap]]) — backend writes value→[bp+slot] directly even when slot holds a pointer VALUE; not yet exercised by any in-tree probe.
 
 ---
 
@@ -60,6 +62,13 @@ The ROADMAP.md file contains:
 ---
 
 ## Recent Major Accomplishments
+
+### Huge Phase C — per-symbol _HUGE_<sym> segments (2026-05-24, session r)
+- ✅ `tools/asm_to_omf.py` — recognises `.section "_HUGE_<sym>"` markers, splits `times N db 0` bodies across paragraph-aligned chunks (HUGE_CHUNK_BYTES = 65520 = 4095 paragraphs each), emits each as `segment _HUGE_<sym>_<N> class=HUGE align=16 use16`.
+- ✅ `tools/omf_link.py` — 4th layout phase after STACK places HUGE-class segments distinctly, sorted by name so consecutive `_0/_1/_2` chunks land at adjacent paragraph bases (no inter-chunk padding).  Existing fixup machinery handles MZ segment relocations unchanged.
+- ✅ `minic/minic.y` — new `glosec[NGlo][NString]` + `maybe_mark_huge_global(idx, sym, total)`.  Under `MHuge` with `total > 65536`, sets `glosec[i] = "_HUGE_<sym>"`; global-emit loop prepends `section "..."` to the data decl.  Wired into file-scope-array and static-local-array rules.
+- ✅ `minic/dos/examples/hugeprobe.c` + golden — `static char arr[80000]` exercises arr[0]/arr[65535]/arr[65536]/arr[79999] via both subscript and pointer arith.
+- Gate now **23/23 ok**.  `large` and `huge` are finally genuinely distinct.
 
 ### Per-model runtime gate (2026-05-24, session o)
 - ✅ `minic/dos/examples/tinyprobe.c` — first real tiny .COM runtime probe.  Uses inline-asm INT 21h AH=40h for output (libstub `_printf` is a stub for .COM; `_sprintf` IS implemented in libstub.asm so we sprintf-then-write).  17 verified lines: arithmetic, near-ptr pass, fn-ptr table, struct global, static local, 32-bit divmod, sprintf widths, near-pointer walk, local-array deref.

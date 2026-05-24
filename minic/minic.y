@@ -184,6 +184,12 @@ char gloname[NGlo][NString];  /* Real C name for each global slot — used to
                                * emit `data $foo = ...` instead of $glo1 so
                                * cross-translation-unit linkage uses the
                                * source-level identifier. */
+char glosec[NGlo][NString];   /* Optional section override for each global.
+                               * Used by huge memory model to route arrays
+                               * larger than 64K into per-symbol segments
+                               * (`_HUGE_<sym>`) that the linker keeps out
+                               * of DGROUP; asm_to_omf.py picks these up
+                               * via `.section "_HUGE_<sym>"` markers. */
 struct {
 	char v[NString];
 	unsigned ctyp;
@@ -896,6 +902,26 @@ emit_zero_init(char *buf, unsigned ctyp)
 		sprintf(buf, "align %d { z %d }", iralign(ctyp), SIZE(ctyp));
 	else
 		sprintf(buf, "{ %c 0 }", irtyp(ctyp));
+}
+
+/* Under MHuge, a global array whose total size won't fit in a 64K
+ * DGROUP segment is moved into its own per-symbol segment
+ * (`_HUGE_<symname>`).  asm_to_omf.py recognises the section override
+ * and splits the segment across paragraph-aligned chunks; omf_link.py
+ * places the chunks outside DGROUP at consecutive paragraph bases so
+ * pointer arithmetic through `_qbe_huge_add` normalises into a
+ * contiguous linear region.  Returns 1 if the override was applied. */
+static int
+maybe_mark_huge_global(int idx, char *symname, int total_bytes)
+{
+	int n;
+	if (memmodel != MHuge) return 0;
+	if (total_bytes <= 65536) return 0;
+	if (symname == 0 || symname[0] == 0) return 0;
+	n = snprintf(glosec[idx], sizeof glosec[idx], "_HUGE_%s", symname);
+	if (n < 0 || n >= (int)sizeof glosec[idx])
+		die("huge-section name too long");
+	return 1;
 }
 
 /* Emit a function-local `static` as a file-scope data global with a
@@ -4206,6 +4232,7 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	ini[nglo] = alloc(strlen(buf) + 1);
 	strcpy(ini[nglo], buf);
 	strcpy(gloname[nglo], parsed_ident);
+	maybe_mark_huge_global(nglo, parsed_ident, total);
 	/* Register as pointer to element type with array flag set. */
 	varadd(parsed_ident, nglo++, IDIR(parsed_type), 1);
 }
@@ -4727,6 +4754,7 @@ dcls:
 	total = SIZE($3) * $6->u.n;
 	sprintf(buf, "align %d { z %d }", iralign($3), total);
 	emit_static_local($4->u.v, IDIR($3), 1, buf);
+	maybe_mark_huge_global(nglo - 1, gloname[nglo - 1], total);
 }
     | dcls EXTERN type IDENT ';'
 {
@@ -6116,6 +6144,8 @@ main(int argc, char **argv)
 	if (yyparse() != 0)
 		die("parse error");
 	for (i=1; i<nglo; i++) {
+		if (glosec[i][0] != 0)
+			fprintf(of, "section \"%s\" ", glosec[i]);
 		if (gloname[i][0] != 0)
 			fprintf(of, "data $%s = %s\n", gloname[i], ini[i]);
 		else
