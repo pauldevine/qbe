@@ -1,7 +1,7 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-24 (t — far stdio FILE* under large/huge)
+**Last Updated:** 2026-05-24 (v — mediumprobe portable under large/huge; _malloc returns DX=SS)
 **Status:** ~96% Complete
 
 ---
@@ -40,10 +40,9 @@ The ROADMAP.md file contains:
 - **Examples** — 16 legacy + 3 modern `<dos.h>` demos (mouse_demo, vga_pixels, kbtest)
 
 **In Progress ⚠️:**
-- Memory Models — runtime gate covers tiny/medium/compact/large/huge (27/27 ok in `tools/test-dos.sh`).  Huge Phase C landed 2026-05-24 (r): per-symbol `_HUGE_<sym>` segments let huge mode hold arrays > 64K.  Far DOS-API + puts landed 2026-05-24 (s).  Far stdio FILE* landed 2026-05-24 (t): `_far_fopen`/`_far_fclose`/`_far_fputs`/`_far_fputc`/`_far_fgets` in FAR_STDIO_EXE; 4-byte `_stdin`/`_stdout`/`_stderr` sentinels; `stdio_far_probe.c` exercises under large + huge.
+- Memory Models — runtime gate covers tiny/medium/compact/large/huge (29/29 ok in `tools/test-dos.sh`).  Huge Phase C landed 2026-05-24 (r): per-symbol `_HUGE_<sym>` segments let huge mode hold arrays > 64K.  Far DOS-API + puts landed 2026-05-24 (s).  Far stdio FILE* landed 2026-05-24 (t/u): full `_far_f{open,close,puts,putc,gets,read,write,flush}` in FAR_STDIO_EXE.  Session (v): `_malloc` now returns DX=SS so mediumprobe.c (file I/O + heap churn + 32-bit printf) passes verbatim under large/huge.
 - Tiny memory model (.COM) — stevie.com still over 64 KB ([[minic-pointer-bloat]])
 - Small .EXE — architecturally broken: libstub_to_exe.py rewrites every `ret` to `retf`, mismatches small's near-call ABI → DOSBox hangs.  Needs near+far libstub variants or model-conditional ret rewrite.  See [[per-model-gate]].
-- Large/huge fread/fwrite/fflush/fprintf — still not in `far_stdlib[]`.  Probes don't exercise them under far-data yet; if a caller tries, near-pointer ABI mismatch.  Deferred until a real consumer needs them.
 - Latent Kl-CAddr arith — Phase B routes most through `_qbe_huge_add`, but ~10 sites in i8086/emit.c (lines 986/1000/1047/...) and far-ptr inc/dec at minic.y:2189, 2234 still consult `bits.i` directly without a CAddr check.  Not exercised by any in-tree probe.
 - Kl shift AX clobber ([[i8086-kl-shift-clobbers-ax]]) — Oshl/Oshr/Osar Kl handlers clobber AX/DX without telling rega; latent.  Fix mirror of [[i8086-kl-add-sub-mul-r1-alias]].
 - Phase B storel-via-Kl-slot gap ([[huge-phase-b-storel-gap]]) — backend writes value→[bp+slot] directly even when slot holds a pointer VALUE; not yet exercised by any in-tree probe.

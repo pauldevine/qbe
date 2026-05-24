@@ -68,7 +68,10 @@ MALLOC_EXE = """\
 ;
 ; void *malloc(size_t sz)
 ;   sz at [bp+6] (far-call ABI: 4 bytes return addr + 2 bytes saved bp).
-;   Returns DX:AX, AX = offset within DGROUP, DX = 0.
+;   Returns DX:AX, AX = offset within DGROUP, DX = SS (= DGROUP segment).
+;   Medium-model callers read only AX (void* is 2 bytes); the DX=SS write
+;   is harmless there.  Far-data callers (compact/large/huge) read DX:AX
+;   as a 4-byte far pointer.
 ;
 ; cdecl callee-save: BX, SI, DI, BP — preserved.
 ;
@@ -152,7 +155,7 @@ _malloc:
     add ax, 2                   ; payload
 
 .alloc_done:
-    xor dx, dx
+    mov dx, ss                  ; DGROUP segment (far-data ABI)
     pop bx
     pop di
     pop si
