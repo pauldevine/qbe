@@ -308,24 +308,14 @@ selret(Blk *b, Fn *fn)
 		cty = 1;  /* 1 GP register used (AX) */
 		b->jmp.type = farret ? Jretfw : Jret0;
 	} else if (j == Jretl) {
-		/* Long return - DX:AX pair.  For Kl RSlot or RCon, the high
-		 * word lives at slot+2 or in the constant's high half; treating
-		 * r0 as Kw via Ocopy would collapse both halves to the low word.
-		 * Ofarseg/Ofaroff route around this by emitting the explicit
-		 * high/low split; for CAddr returns (e.g. `char *gptr(){return
-		 * "...";}` in compact/large/huge), this materialises DX as the
-		 * symbol's segment selector and AX as its offset. */
-		if (rtype(r0) == RSlot
-		    || (rtype(r0) == RCon && fn->con[r0.val].type == CAddr)
-		    || (rtype(r0) == RCon
-		        && fn->con[r0.val].type == CBits
-		        && fn->con[r0.val].bits.i >> 16)) {
-			emit(Ofarseg, Kw, TMP(RDX), r0, R);
-			emit(Ofaroff, Kw, TMP(RAX), r0, R);
-		} else {
-			emit(Ocopy, Kw, TMP(RDX), r0, R);  /* High word */
-			emit(Ocopy, Kw, TMP(RAX), r0, R);  /* Low word */
-		}
+		/* Always route through Ofarseg/Ofaroff: Ocopy Kw on a Kl source
+		 * extracts only the low word (rega has no register-pair concept
+		 * on 8086), so the fallback path produced `mov dx, [slot+0]` for
+		 * the high half: duplicate low word in DX:AX, segment lost.
+		 * Surfaced 2026-05-23 (j) by fnptrprobe.c via an indirect call
+		 * returning `char *` (Kl) in compact mode. */
+		emit(Ofarseg, Kw, TMP(RDX), r0, R);
+		emit(Ofaroff, Kw, TMP(RAX), r0, R);
 		cty = 2;  /* 2 GP registers used (DX:AX) */
 		b->jmp.type = farret ? Jretfl : Jret0;
 	} else {

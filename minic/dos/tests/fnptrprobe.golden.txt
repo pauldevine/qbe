@@ -1,0 +1,5 @@
+apply_add=42 (want 42)
+apply_sub=42 (want 42)
+apply_mul=42 (want 42)
+scan_first=104 (want 104)
+local_fp=42 (want 42)

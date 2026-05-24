@@ -34,7 +34,13 @@ enum {
 	MHuge,
 };
 int memmodel = MSmall;
-#define NEAR_CODE() (memmodel == MTiny || memmodel == MSmall || memmodel == MCompact)
+/* NEAR_CODE excludes MCompact: although the original x86 compact model
+ * specifies near code, this port's compact uses the far-code ABI
+ * (uses_far_code() in i8086/abi.c) so that cross-segment calls work
+ * across multiple per-module CODE segments.  Fn-ptrs must therefore be
+ * 4 bytes (segment:offset) — otherwise the indirect-call emit assumes a
+ * DX:AX target it never gets and retfs to garbage. */
+#define NEAR_CODE() (memmodel == MTiny || memmodel == MSmall)
 #define NEAR_DATA() (memmodel == MTiny || memmodel == MSmall || memmodel == MMedium)
 #define CODEPTR_T() (NEAR_CODE() ? 'w' : 'l')
 #define DATAPTR_T() (NEAR_DATA() ? 'w' : 'l')
