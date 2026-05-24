@@ -1357,7 +1357,9 @@ _far_sprintf:
     ; ---- %p (always 4-byte far ptr, printed as 32-bit hex) ----
 .fsp_do_ptr:
     or word [_spr_flags], 4         ; force 'l' (long) path
+    or word [_spr_flags], 2         ; zero-fill
     and word [_spr_flags], 0xFFEF   ; lowercase hex
+    mov word [_spr_width], 8        ; pad to 8 hex digits
     mov ax, [bx]
     mov dx, [bx+2]
     add bx, 4

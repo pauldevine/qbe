@@ -103,5 +103,14 @@ int main()
 	p = (char *)0xCAFE0008L - 4;
 	printf("kl_caddr_hi=%p (want cafe0004)\r\n", p);
 
+	/* ------------------------------------------------------------------ */
+	/* (3) %p zero-pads to 8 hex digits regardless of value width.        */
+	/* ------------------------------------------------------------------ */
+	/* Pre-fix _far_sprintf %p emitted variable-width hex with no padding
+	 * (cosmetic per [[compactprobe_extra %p padding]]).  The fix forces
+	 * width=8 + zero-fill so short values like 0x42 print as 00000042. */
+	p = (char *)0x00000042L;
+	printf("kl_padded=%p (want 00000042)\r\n", p);
+
 	return 0;
 }
