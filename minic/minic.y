@@ -66,7 +66,8 @@ int memmodel = MSmall;
  * left off so storage/loads stay 16-bit).  In large/huge, code is also
  * far but CODEPTR_T() returns 'l', so FAR is not required there either. */
 #define IDIR(x) ((((x) << 3) + PTR) | \
-	((NEAR_DATA() || KIND(x) == FUN) ? 0 : FAR))
+	((NEAR_DATA() || KIND(x) == FUN || \
+	  (KIND(x) == PTR && KIND(DREF(x)) == FUN)) ? 0 : FAR))
 #define IDIR_FAR(x) ((((x) << 3) + PTR) | FAR)  /* Far pointer to type */
 #define FUNC(x) (((x) << 3) + FUN)
 #define DREF(x) ((x) >> 3)
@@ -1763,6 +1764,12 @@ expr(Node *n)
 		if (KIND(s0.ctyp) != PTR)
 			die("dereference of a non-pointer");
 		sr.ctyp = DREF(s0.ctyp);
+		/* `*fp` on a function pointer is a function designator, not a
+		 * memory load — the value of fp IS the call target. */
+		if (KIND(sr.ctyp) == FUN) {
+			sr = s0;
+			break;
+		}
 		/* Check if dereferencing a far pointer */
 		if (ISFAR(s0.ctyp)) {
 			loadfar(sr, s0);
@@ -3910,6 +3917,13 @@ smembers:
 	for (n = $5; n; n = n->r)
 		structaddmember(curstruct, n->u.v, $2);
 }
+        | smembers type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
+{
+	/* Function-pointer member literal: `int (*fn)(int, int);` */
+	if ($2 == NIL)
+		die("invalid void function pointer member");
+	structaddmember(curstruct, $5->u.v, IDIR(FUNC($2)));
+}
         | smembers anonstruct
         | smembers anonunion
         ;
@@ -4748,6 +4762,23 @@ dcls:
 	varadd(v, 0, fptr_type, 0);  /* Not an array */
 	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
 }
+    | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr ';'
+{
+	/* Function pointer declaration with initializer:
+	 *   int (*fptr)(int, int) = adder;  */
+	char *v;
+	unsigned fptr_type;
+	Node *init_node;
+
+	if ($2 == NIL)
+		die("invalid void function pointer");
+	v = $5->u.v;
+	fptr_type = IDIR(FUNC($2));
+	varadd(v, 0, fptr_type, 0);
+	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
+	init_node = mknode('=', $5, $11);
+	expr(init_node);
+}
     | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' ',' ext_decllist ';'
 {
 	/* Function pointer + K&R protos in one decl:
@@ -4903,6 +4934,33 @@ stmt: ';'                            { $$ = 0; }
          * same helper as the dcls-context multi-decl rule. */
         emit_local_multi_decl($1, $2->u.v, $4);
         $$ = 0;
+    }
+    | type '(' '*' IDENT ')' '(' fptpar0 ')' ';' {
+        /* Block-scoped function pointer: `int (*fp)(int, int);` */
+        char *v;
+        unsigned fptr_type;
+        if ($1 == NIL)
+            die("invalid void function pointer");
+        v = $4->u.v;
+        fptr_type = IDIR(FUNC($1));
+        varadd(v, 0, fptr_type, 0);
+        fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
+        $$ = 0;
+    }
+    | type '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr ';' {
+        /* Block-scoped fn-ptr with initializer:
+         *   int (*fp)(int, int) = adder; */
+        char *v;
+        unsigned fptr_type;
+        Node *init_node;
+        if ($1 == NIL)
+            die("invalid void function pointer");
+        v = $4->u.v;
+        fptr_type = IDIR(FUNC($1));
+        varadd(v, 0, fptr_type, 0);
+        fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
+        init_node = mknode('=', $4, $10);
+        $$ = mkstmt(Expr, init_node, 0, 0);
     }
     | STATIC type IDENT ';'          {
         /* Statement-scope `static T var;` — same treatment as the
@@ -5403,14 +5461,8 @@ post: NUM
          * otherwise indirect (e.g. (*fp)(...), arr[i](...), etc.). */
         if ($1->op == 'V')
             $$ = mknode('C', $1, $3);
-        else if ($1->op == '@') {
-            /* Pre-existing convention: indirect-call node 'I' wraps the
-             * function-pointer expression directly (the deref is folded in).
-             * Strip a leading deref so codegen sees the plain pointer. */
-            $$ = mknode('I', $1->l, $3);
-        } else {
+        else
             $$ = mknode('I', $1, $3);
-        }
     }
     | post '[' expr ']'   { $$ = mkidx($1, $3); }
     | post PP             { $$ = mknode('P', $1, 0); }

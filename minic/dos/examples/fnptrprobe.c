@@ -71,6 +71,12 @@ static int scan_first(scan_t f, char *buf)
 	return *p;
 }
 
+/* (4) Struct with inline fn-ptr member (literal syntax, no typedef). */
+struct dispatch {
+	int (*op)(int, int);
+	int tag;
+};
+
 int main()
 {
 	int r;
@@ -100,6 +106,36 @@ int main()
 		fp = adder;
 		r = apply(fp, 10, 32);
 		printf("local_fp=%d (want 42)\r\n", r);
+	}
+
+	/* (4) Declarator with initializer:  int (*fp)(int,int) = adder; */
+	{
+		int (*fp)(int, int) = adder;
+		r = apply(fp, 20, 22);
+		printf("init_decl=%d (want 42)\r\n", r);
+	}
+
+	/* (5) table[i](args) — indirect call via array subscript. */
+	{
+		binop_t table[3];
+		table[0] = adder;
+		table[1] = subtr;
+		table[2] = mulr;
+		r = table[0](40, 2);
+		printf("table0=%d (want 42)\r\n", r);
+		r = table[1](50, 8);
+		printf("table1=%d (want 42)\r\n", r);
+		r = table[2](7, 6);
+		printf("table2=%d (want 42)\r\n", r);
+	}
+
+	/* (6) Struct with inline fn-ptr member literal. */
+	{
+		struct dispatch d;
+		d.op = adder;
+		d.tag = 0;
+		r = d.op(38, 4);
+		printf("struct_fp=%d (want 42)\r\n", r);
 	}
 
 	return 0;
