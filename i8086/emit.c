@@ -439,6 +439,34 @@ load_farptr_con(Con *pc, FILE *f)
 	}
 }
 
+/* Emit a 32-bit immediate bitwise op (and/or/xor) against DX:AX from
+ * a Kl RCon.  Handles both CBits (split low/high 16) and CAddr (same
+ * `sym+addend` / `seg sym` relocation pair the Kl Oadd/Osub handlers
+ * use).  NASM accepts a relocatable immediate for any arithmetic or
+ * logical op, and omf_link resolves both fixups at MZ assembly.
+ * Without this, e.g. `x | (uint32_t)&g` would lose the segment word
+ * because `op dx, %d` would emit `bits.i >> 16` which is 0 for CAddr
+ * — CAddr carries only the addend in bits.i; the segment comes from
+ * the relocation.  Same family as the Oadd/Osub Kl fix in 141f2e8. */
+static void
+emit32_logop_axdx_con(const char *op, Con *pc, FILE *f)
+{
+	int64_t val;
+	if (pc->type == CAddr) {
+		fprintf(f, "\t%s ax, ", op);
+		emitaddr(pc, f);
+		fputc('\n', f);
+		fprintf(f, "\t%s dx, seg ", op);
+		fputs(T.assym, f);
+		fputs(str(pc->sym.id), f);
+		fputc('\n', f);
+	} else {
+		val = pc->bits.i;
+		fprintf(f, "\t%s ax, %d\n", op, (int)(val & 0xFFFF));
+		fprintf(f, "\t%s dx, %d\n", op, (int)((val >> 16) & 0xFFFF));
+	}
+}
+
 /* 8086-safe `shift reg, N`: the multi-bit immediate form (e.g. `shl
  * dx, 8`) was introduced on the 80186, so under `cpu 8086` NASM
  * rejects it.  Emit `shift reg, 1` for N==1 (8086-valid), else stage
@@ -1213,9 +1241,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tand ax, word [bp%+ld]\n", (long)slot(r1, fn));
 				fprintf(f, "\tand dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
 			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tand ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tand dx, %d\n", (int)((val >> 16) & 0xFFFF));
+				emit32_logop_axdx_con("and", &fn->con[r1.val], f);
 			}
 
 			if (rtype(i->to) == RSlot) {
@@ -1236,9 +1262,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tor ax, word [bp%+ld]\n", (long)slot(r1, fn));
 				fprintf(f, "\tor dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
 			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tor ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tor dx, %d\n", (int)((val >> 16) & 0xFFFF));
+				emit32_logop_axdx_con("or", &fn->con[r1.val], f);
 			}
 
 			if (rtype(i->to) == RSlot) {
@@ -1259,9 +1283,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\txor ax, word [bp%+ld]\n", (long)slot(r1, fn));
 				fprintf(f, "\txor dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
 			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\txor ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\txor dx, %d\n", (int)((val >> 16) & 0xFFFF));
+				emit32_logop_axdx_con("xor", &fn->con[r1.val], f);
 			}
 
 			if (rtype(i->to) == RSlot) {

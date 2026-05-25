@@ -1,7 +1,7 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-25 (aa — minic.y `>>` now lowers to Osar for signed left operand; pinned by 5 new kl_shift_probe cases; gate 38/38)
+**Last Updated:** 2026-05-25 (bb — Oand/Oor/Oxor Kl r1 CAddr portable via emit32_logop_axdx_con; pinned by caddr_logop_probe across compact/large/huge; gate 41/41)
 **Status:** ~96% Complete
 
 ---
@@ -43,7 +43,7 @@ The ROADMAP.md file contains:
 - Memory Models — runtime gate covers tiny/medium/compact/large/huge (34/34 ok in `tools/test-dos.sh`).  Huge Phase C landed 2026-05-24 (r): per-symbol `_HUGE_<sym>` segments let huge mode hold arrays > 64K.  Far DOS-API + puts landed 2026-05-24 (s).  Far stdio FILE* landed 2026-05-24 (t/u): full `_far_f{open,close,puts,putc,gets,read,write,flush}` in FAR_STDIO_EXE.  Session (v): `_malloc` now returns DX=SS so mediumprobe.c passes verbatim under large/huge.  Session (w): mathprobe (Kl mul/div/rem + sext + `%ld`/`%lu`/`%lx`) and dosapi_probe (segread + intdos + bdos) also pass verbatim under large/huge — no source or backend changes.  Session (x): stdio_far_probe (full 22-assertion far-stdio surface) now also passes under compact, closing the last carve-out in the far-stdio coverage matrix.
 - Tiny memory model (.COM) — stevie.com still over 64 KB ([[minic-pointer-bloat]])
 - Small .EXE — architecturally broken: libstub_to_exe.py rewrites every `ret` to `retf`, mismatches small's near-call ABI → DOSBox hangs.  Needs near+far libstub variants or model-conditional ret rewrite.  See [[per-model-gate]].
-- Latent Kl-CAddr arith — Phase B routes most through `_qbe_huge_add`, but ~10 sites in i8086/emit.c (lines 986/1000/1047/...) and far-ptr inc/dec at minic.y:2189, 2234 still consult `bits.i` directly without a CAddr check.  Not exercised by any in-tree probe.
+- Latent Kl-CAddr arith — **closed 2026-05-25 (aa/bb)**: 141f2e8 fixed Oloadf*/Ostoref*/Oadd/Osub; the current session fixed Oand/Oor/Oxor.  Ocopy was already CAddr-safe.  Omul Kl with CAddr is unreachable from C semantics.
 - Kl shift AX clobber ([[i8086-kl-shift-clobbers-ax]]) — Oshl/Oshr/Osar Kl handlers clobber AX/DX without telling rega; latent.  Fix mirror of [[i8086-kl-add-sub-mul-r1-alias]].
 - Phase B storel-via-Kl-slot gap ([[huge-phase-b-storel-gap]]) — backend writes value→[bp+slot] directly even when slot holds a pointer VALUE; not yet exercised by any in-tree probe.
 

@@ -2,7 +2,7 @@
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
 **Original Timeline:** 10-12 weeks to production release
-**Actual Progress:** ~96% Complete (as of 2026-05-25)
+**Actual Progress:** ~97% Complete (as of 2026-05-25)
 **Last Updated:** 2026-05-25
 
 ---
@@ -30,7 +30,7 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 | **Function Pointers** | ✅ Complete | Full support with typedef | i8086/README.md:321 |
 | **Struct Bitfields** | ✅ Complete | Packing and read/write | i8086/README.md:322 |
 | **DOS Runtime** | ✅ **COMPLETE** | crt0_exe.asm + real printf/sprintf, freelist malloc/free, file I/O | minic/dos/libstub.asm |
-| **Memory Models** | ✅ Tiny + Medium + Compact + Large + Huge incl. >64K arrays (Small .EXE still broken) | Per-model runtime gate at **38/38** in tools/test-dos.sh.  Tiny .COM (tinyprobe via inline-asm INT 21h); medium (mediumprobe + mathprobe + dosapi_probe); compact (cstrprobe + compactprobe_extra + fnptrprobe + farretprobe + stdio_far_probe + caddr_arith_probe + kl_shift_probe); large + huge run those compact probes verbatim plus dos_far_probe / stdio_far_probe / mediumprobe / mathprobe / dosapi_probe.  Huge >64K data covered by hugeprobe.c (`static char arr[80000]` across paragraph-aligned `_HUGE_<sym>` segments).  Small .EXE still hangs DOSBox (libstub_to_exe ret→retf rewrite mismatches small's near-call ABI). | tools/build-com-test.sh, tools/build-stevie.sh, tools/build-example.sh |
+| **Memory Models** | ✅ Tiny + Medium + Compact + Large + Huge incl. >64K arrays (Small .EXE still broken) | Per-model runtime gate at **41/41** in tools/test-dos.sh.  Tiny .COM (tinyprobe via inline-asm INT 21h); medium (mediumprobe + mathprobe + dosapi_probe); compact (cstrprobe + compactprobe_extra + fnptrprobe + farretprobe + stdio_far_probe + caddr_arith_probe + kl_shift_probe); large + huge run those compact probes verbatim plus dos_far_probe / stdio_far_probe / mediumprobe / mathprobe / dosapi_probe.  Huge >64K data covered by hugeprobe.c (`static char arr[80000]` across paragraph-aligned `_HUGE_<sym>` segments).  Small .EXE still hangs DOSBox (libstub_to_exe ret→retf rewrite mismatches small's near-call ABI). | tools/build-com-test.sh, tools/build-stevie.sh, tools/build-example.sh |
 | **DOS API Library** | ✅ **COMPLETE** | int86/int86x/intdos/intdosx/segread + video/keyboard/mouse wrappers | minic/dos/libstub.asm, minic/include/dos.h |
 
 **Phase Completion (vs original plan):**
@@ -51,7 +51,7 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 **What's Actually Missing:**
 1. **Small .EXE architecturally broken** — `tools/libstub_to_exe.py` rewrites every `ret` to `retf`, which mismatches small model's near-call ABI → DOSBox hangs.  Needs either near+far libstub variants or model-conditional `ret` rewrite.  See `[[per-model-gate]]`.
 2. **Tiny .COM stevie still over 64 KB** — stevie.com ~87 KB; Path A near-pointer narrowing already landed (commit 5125e70, 98KB→81KB).  Needs further shrink (dead-code elimination, library partitioning, or pointer ABI tweaks).  See `[[minic-pointer-bloat]]`.  Stevie is a medium-model program by design, so this is "nice to have" rather than blocking.
-3. **Latent Kl-CAddr arith sites** — `141f2e8` fixed 6 emit.c sites (Oloadf{b,h,w}/Ostoref{b,h,w}/Oadd Kl/Osub Kl) and pinned them with `caddr_arith_probe`.  Still ~4 Kl Oand/Oor/Oxor/Ocopy sites in `i8086/emit.c` plus far-ptr inc/dec at `minic.y:2189, 2234` consult `bits.i` directly without a CAddr check.  Not exercised by any in-tree probe; latent bug for `p + offsetof_constant` style code.
+3. ~~**Latent Kl-CAddr arith sites**~~ — **closed 2026-05-25**: Oloadf*/Ostoref*/Oadd/Osub fixed in `141f2e8`; Oand/Oor/Oxor fixed via new `emit32_logop_axdx_con` helper.  Ocopy Kl was already CAddr-safe; the minic.y:2189, 2234 far-ptr inc/dec note was stale (current code uses literal `1` / CBits).  `caddr_logop_probe.c` pins the new fixes under compact/large/huge.  Omul Kl with CAddr remains unhandled but is semantically dead (no C op multiplies a pointer by a constant).
 4. **Huge Phase B storel-via-Kl-slot gap** — backend writes value→[bp+slot] directly even when slot holds a pointer VALUE (call result of a helper).  Safe for alloca slots; not yet exercised by any in-tree probe.  See `[[huge-phase-b-storel-gap]]`.
 5. **i8086 compact loadfb AX-aliasing** — `loadfb`'s implicit AX clobber isn't surfaced to the register allocator; two back-to-back loadfb's whose results both reach the same printf vararg call alias each other.  Worked around in probes by using coarse-grained validators (strcmp/strlen).  See `[[i8086-compact-loadfb-aliases-ax]]`.
 6. **Polish on the legacy examples** — 16 older `dos_putchar`-style files in `minic/dos/examples/` predate the `<dos.h>` API; modern dialect now demonstrated by `mouse_demo.c` / `vga_pixels.c` / `kbtest.c` / `cprobe.c` / `cstrprobe.c`.
@@ -1076,8 +1076,8 @@ The following features were implemented but were not part of the original roadma
 
 ---
 
-**Roadmap Version:** 3.3 (Full memory-model matrix + far stdio + Kl shift portable)
+**Roadmap Version:** 3.4 (Kl-CAddr matrix closed; signed `>>` portable)
 **Last Updated:** 2026-05-25
 **Original Date:** 2025-11-21
-**Actual Status:** ~96% Complete (Phases 0, 1, 2, 4 done; Phase 3 ~95%; tiny/medium/compact/large/huge all runtime-verified in DOSBox via 38/38 per-model probe gate; huge >64K data via `_HUGE_<sym>` segments)
-**Next Priority:** (1) small .EXE ABI mismatch (libstub ret→retf rewrite); (2) latent Kl-CAddr sites in i8086/emit.c (Kl Oand/Oor/Oxor/Ocopy + far-ptr inc/dec at minic.y:2189, 2234); (3) tiny .COM stevie shrink still parked (`[[minic-pointer-bloat]]`).  ✅ Minic signed `>>` fixed 2026-05-25 (aa).
+**Actual Status:** ~97% Complete (Phases 0, 1, 2, 4 done; Phase 3 ~96%; tiny/medium/compact/large/huge all runtime-verified in DOSBox via 41/41 per-model probe gate; huge >64K data via `_HUGE_<sym>` segments)
+**Next Priority:** (1) small .EXE ABI mismatch (libstub ret→retf rewrite); (2) tiny .COM stevie shrink still parked (`[[minic-pointer-bloat]]`); (3) i8086 compact loadfb AX-aliasing (`[[i8086-compact-loadfb-aliases-ax]]`); (4) huge Phase B storel-via-Kl-slot gap (`[[huge-phase-b-storel-gap]]`).  ✅ Minic signed `>>` fixed 2026-05-25 (aa); ✅ Kl-CAddr Oand/Oor/Oxor fixed 2026-05-25 (bb).
