@@ -1,7 +1,7 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-25 (kk — track (l) build phase: stevie 24/24 modules compile + link under `--model=compact` (230KB EXE). Surfaced and fixed 4 latent bugs: minic DREF macro polluted by FAR bit; 3 hardcoded `=w add` for struct member offsets under far-data; i8086 Ostorefb SI/DI rname8 NULL deref; build-stevie.sh missing --model passthrough to libstub_to_exe.py. Runtime not yet verified — see [[stevie-compact]]. Gate stays 59/59; SSA make check green; medium baseline unchanged.)
+**Last Updated:** 2026-05-25 (kk — track (l) **closed**: stevie 24/24 modules compile + link under `--model=compact` (230KB EXE); user manually verified in DOSBox (loads, edits, saves, quits). Surfaced and fixed 4 latent bugs: minic DREF macro polluted by FAR bit; 3 hardcoded `=w add` for struct member offsets under far-data; i8086 Ostorefb SI/DI rname8 NULL deref; build-stevie.sh missing --model passthrough to libstub_to_exe.py. .EXE size trim via MZ min_alloc PARKED (would shave ~53KB; no runtime issue). Gate stays 59/59; SSA make check green; medium baseline unchanged. See [[stevie-compact]].)
 **Status:** ~97% Complete
 
 ---
