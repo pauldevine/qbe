@@ -97,6 +97,9 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/caddr_div_probe.c:minic/dos/tests/caddr_div_probe.golden.txt:large"
 	"minic/dos/examples/caddr_div_probe.c:minic/dos/tests/caddr_div_probe.golden.txt:huge"
 	"minic/dos/examples/kl_shift_probe.c:minic/dos/tests/kl_shift_probe.golden.txt:compact"
+	"minic/dos/examples/phase_bprime_probe.c:minic/dos/tests/phase_bprime_probe.golden.txt:compact"
+	"minic/dos/examples/phase_bprime_probe.c:minic/dos/tests/phase_bprime_probe.golden.txt:large"
+	"minic/dos/examples/phase_bprime_probe.c:minic/dos/tests/phase_bprime_probe.golden.txt:huge"
 )
 
 # --- Stevie size budget ----------------------------------------------------

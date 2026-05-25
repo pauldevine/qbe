@@ -1,0 +1,4 @@
+storel_kl_slot ok
+storel_kl_slot_alt ok
+storel_chain_a ok
+storel_chain_b ok

@@ -1645,6 +1645,16 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 * preserve them across so rega-allocated live tmps in AX/DX
 			 * survive (they otherwise leak silently — the canonical Kl
 			 * implicit-clobber bug).
+			 *
+			 * Phase B' fix: when r0 is RSlot, the slot HOLDS a
+			 * pointer VALUE — same invariant as the Ostorel handler.
+			 * Spill.c's force_kl_slot evicts every Kl temp to a slot
+			 * AND its reload pass skips Kl temps entirely (see
+			 * spill.c::reloads + the force_kl_slot guard), so any
+			 * Oload Kl with arg[0]=RSlot in the emit stream is from
+			 * the frontend and means "load through a pointer stored
+			 * in this slot," NOT "reload a value from its spill
+			 * slot."  Dereference via BX (and ES under far-data).
 			 */
 			{
 			int dst_in_dx_ld = (rtype(i->to) == RTmp && i->to.val == RDX);
@@ -1654,19 +1664,58 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			    (rtype(r0) == RMem && !req(fn->mem[r0.val].base, R)
 			     && rtype(fn->mem[r0.val].base) == RTmp
 			     && fn->mem[r0.val].base.val == RBX);
-			int needs_bx_ld = (rtype(r0) == RTmp || rtype(r0) == RMem);
+			/* Phase B' deref only when the slot is a spilled-tmp slot
+			 * (slot index >= arg_slot_top OR < 0).  Slot index < 0 is
+			 * a selpar incoming-param slot (above BP) — those are
+			 * direct memory, not pointer-bearing.  Slot indices in
+			 * [0, arg_slot_top) are selcall outgoing-arg slots — also
+			 * direct memory.  Everything else (alloca-via-Oaddr-spill
+			 * + spill.c-evicted Kl tmps) HOLDS a pointer.  Note that
+			 * the only Oload Kl with RSlot from selpar uses Kl params
+			 * (caller's Kl arg sitting in the param region) — those
+			 * stay direct-read by the slot_index<0 gate. */
+			int slot_src_ld = (rtype(r0) == RSlot);
+			int slot_src_idx_ld = slot_src_ld ? rsval(r0) : 0;
+			int slot_src_deref_ld = slot_src_ld
+			                && slot_src_idx_ld >= 0
+			                && slot_src_idx_ld >= fn->arg_slot_top;
+			int far_data_ld = (T.memmodel == Mcompact ||
+			                   T.memmodel == Mlarge ||
+			                   T.memmodel == Mhuge);
+			int needs_bx_ld = (rtype(r0) == RTmp || rtype(r0) == RMem
+			                   || slot_src_deref_ld);
+			int needs_es_ld = slot_src_deref_ld && far_data_ld;
 			/* BX is used as the address-staging scratch.  Save/restore
 			 * unless the address IS in BX (we use it directly) or the
 			 * destination is BX (we'll overwrite it anyway). */
 			int save_bx_ld = needs_bx_ld && !addr_in_bx_ld && !dst_in_bx_ld;
 			AxDxSave s_ld = kl_save_axdx(i->to, f);
 			if (save_bx_ld) fprintf(f, "\tpush bx\n");
+			if (needs_es_ld) fprintf(f, "\tpush es\n");
 
 			/* Memory address is in arg[0] */
 			if (rtype(r0) == RSlot) {
-				/* Load from local variable (stack slot that contains a 32-bit value) */
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
+				if (slot_src_deref_ld) {
+					/* Spilled-Kl-ptr slot: slot HOLDS a pointer
+					 * value.  Load it into BX (and ES under
+					 * far-data) and read the 32-bit value through
+					 * [ES:BX] / [BX]. */
+					fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r0, fn));
+					if (far_data_ld) {
+						fprintf(f, "\tmov es, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
+						fprintf(f, "\tmov ax, word ptr es:[bx]\n");
+						fprintf(f, "\tmov dx, word ptr es:[bx+2]\n");
+					} else {
+						fprintf(f, "\tmov ax, word [bx]\n");
+						fprintf(f, "\tmov dx, word [bx+2]\n");
+					}
+				} else {
+					/* ABI-direct slot (incoming Kl param or call-
+					 * arg area): slot IS the source storage.  Read
+					 * its 4 bytes directly. */
+					fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
+					fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
+				}
 			} else if (rtype(r0) == RTmp) {
 				/* Load from address in register */
 				if (strcmp(rname[r0.val], "bx") != 0)
@@ -1720,6 +1769,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				}
 			}
 
+			if (needs_es_ld) fprintf(f, "\tpop es\n");
 			if (save_bx_ld) fprintf(f, "\tpop bx\n");
 			kl_restore_axdx(s_ld, f);
 			}
@@ -1737,6 +1787,21 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 * them around the sequence — same pattern as the `imul`
 			 * workaround above.  Skip the save if the source already
 			 * lives in AX or DX (it's being read, not corrupted).
+			 *
+			 * Phase B' fix: when r1 is RSlot, the slot HOLDS a
+			 * pointer VALUE — per spill.c's force_kl_slot invariant,
+			 * every Kl temp the spill pass evicts to a slot stores
+			 * its computed value there (a 4-byte far pointer under
+			 * compact/large/huge, a 2-byte near pointer under
+			 * tiny/small/medium).  Load that pointer from the slot
+			 * into BX (and ES under far-data) and dereference
+			 * through [ES:BX] / [BX].  Previously the handler wrote
+			 * AX:DX directly to [bp+slot(r1)], which only matches
+			 * "slot IS storage" — never true after isel's Oaddr
+			 * rewrite of alloca tmps.  Latent because QBE constant-
+			 * folded realistic `*p = q` shapes; surfaced by Phase B's
+			 * opaque `_qbe_huge_add` insertions.  See [[huge-phase-b
+			 * -storel-gap]] and minic/dos/examples/phase_bprime_probe.c.
 			 */
 			{
 			int src_in_ax = (rtype(r0) == RTmp && r0.val == RAX);
@@ -1747,7 +1812,26 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			    (rtype(r1) == RMem && !req(fn->mem[r1.val].base, R)
 			     && rtype(fn->mem[r1.val].base) == RTmp
 			     && fn->mem[r1.val].base.val == RBX);
-			int needs_bx = (rtype(r1) == RTmp || rtype(r1) == RMem);
+			/* Phase B' deref only when the slot is a spilled-tmp slot.
+			 * ABI's selcall writes call args directly into slot indices
+			 * [0, fn->arg_slot_top); those slots ARE the destination
+			 * memory.  Everything else with an RSlot dest is a Kl tmp
+			 * that spill.c evicted to a slot — its slot HOLDS a
+			 * pointer.  See arg_slot_top in all.h for the layout. */
+			int slot_dest = (rtype(r1) == RSlot);
+			int slot_dest_idx = slot_dest ? rsval(r1) : 0;
+			int slot_dest_deref = slot_dest
+			                && slot_dest_idx >= 0
+			                && slot_dest_idx >= fn->arg_slot_top;
+			int far_data = (T.memmodel == Mcompact ||
+			                T.memmodel == Mlarge ||
+			                T.memmodel == Mhuge);
+			int needs_bx = (rtype(r1) == RTmp || rtype(r1) == RMem
+			                || slot_dest_deref);
+			/* RSlot deref dest needs ES under far-data: the slot holds
+			 * a 4-byte far pointer; segment goes to ES so the
+			 * dereference is `es:[bx]`. */
+			int needs_es = slot_dest_deref && far_data;
 			int save_ax = !src_in_ax;
 			int save_dx = !src_in_dx;
 			/* BX is used as the destination-address scratch register; if
@@ -1758,77 +1842,118 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			if (save_ax) fprintf(f, "\tpush ax\n");
 			if (save_dx) fprintf(f, "\tpush dx\n");
 			if (save_bx) fprintf(f, "\tpush bx\n");
+			if (needs_es) fprintf(f, "\tpush es\n");
 
-			/* Capture destination address into BX BEFORE the value load
-			 * clobbers AX/DX — otherwise, if rega placed r1's register in
-			 * AX or DX, `mov ax,<const>` (or the cwd that follows) would
-			 * destroy the address and the store would target wherever the
-			 * value happens to be (wild write).  Found by Stevie's
-			 * `Fileend->linep->num = 0xffff` silently writing to address
-			 * 0xFFFF instead of &num, which left every line-number field
-			 * as malloc-zero and made cursor motion impossible.
-			 */
-			if (rtype(r1) == RTmp) {
-				if (strcmp(rname[r1.val], "bx") != 0)
-					fprintf(f, "\tmov bx, %s\n", rname[r1.val]);
-			} else if (rtype(r1) == RMem) {
-				Mem *m = &fn->mem[r1.val];
-				if (!req(m->base, R) && rtype(m->base) == RTmp
-				    && strcmp(rname[m->base.val], "bx") != 0)
-					fprintf(f, "\tmov bx, %s\n", rname[m->base.val]);
-			}
+			if (slot_dest_deref) {
+				/* Spilled-Kl-ptr slot dest: load r0 → AX:DX FIRST
+				 * (in case r0 RTmp aliases BX), then load far
+				 * pointer from slot(r1) into BX:ES.  `mov es, mem`
+				 * is a single-instruction load from memory on the
+				 * 8086, so no scratch register is needed for the
+				 * segment word. */
+				if (rtype(r0) == RSlot) {
+					/* r0's slot itself: same arg_slot_top check —
+					 * a value-source slot (alloca / spilled non-
+					 * pointer Kl value) is direct-read; a spilled
+					 * Kl ptr would need deref but storel's arg[0]
+					 * is the VALUE, not a deref source, so direct
+					 * read is correct here. */
+					fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
+					fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
+				} else if (rtype(r0) == RCon) {
+					load32_axdx_con(&fn->con[r0.val], f);
+				} else if (rtype(r0) == RTmp) {
+					if (strcmp(rname[r0.val], "ax") != 0)
+						fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+					fprintf(f, "\tcwd\n");
+				}
+				fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r1, fn));
+				if (far_data) {
+					fprintf(f, "\tmov es, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
+					fprintf(f, "\tmov word ptr es:[bx], ax\n");
+					fprintf(f, "\tmov word ptr es:[bx+2], dx\n");
+				} else {
+					fprintf(f, "\tmov word [bx], ax\n");
+					fprintf(f, "\tmov word [bx+2], dx\n");
+				}
+			} else {
+				/* RTmp/RMem/RCon dest: existing path —
+				 * capture destination address into BX BEFORE
+				 * the value load clobbers AX/DX (otherwise, if
+				 * rega placed r1's register in AX or DX, the
+				 * value mov would destroy the address and the
+				 * store would land at the wrong place).  Found
+				 * by Stevie's `Fileend->linep->num = 0xffff`
+				 * silently writing to address 0xFFFF instead
+				 * of &num, leaving every line-number field as
+				 * malloc-zero. */
+				if (rtype(r1) == RTmp) {
+					if (strcmp(rname[r1.val], "bx") != 0)
+						fprintf(f, "\tmov bx, %s\n", rname[r1.val]);
+				} else if (rtype(r1) == RMem) {
+					Mem *m = &fn->mem[r1.val];
+					if (!req(m->base, R) && rtype(m->base) == RTmp
+					    && strcmp(rname[m->base.val], "bx") != 0)
+						fprintf(f, "\tmov bx, %s\n", rname[m->base.val]);
+				}
 
-			/* Load value to store */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			} else if (rtype(r0) == RCon) {
-				load32_axdx_con(&fn->con[r0.val], f);
-			} else if (rtype(r0) == RTmp) {
-				{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
-				fprintf(f, "\tcwd\n");
-			}
+				/* Load value to store */
+				if (rtype(r0) == RSlot) {
+					fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
+					fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
+				} else if (rtype(r0) == RCon) {
+					load32_axdx_con(&fn->con[r0.val], f);
+				} else if (rtype(r0) == RTmp) {
+					if (strcmp(rname[r0.val], "ax") != 0)
+						fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+					fprintf(f, "\tcwd\n");
+				}
 
-			/* Store to destination (address already in BX for RTmp/RMem) */
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(r1, fn));
-				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(r1, fn) + 2);
-			} else if (rtype(r1) == RTmp) {
-				fprintf(f, "\tmov word [bx], ax\n");
-				fprintf(f, "\tmov word [bx+2], dx\n");
-			} else if (rtype(r1) == RMem) {
-				Mem *m = &fn->mem[r1.val];
-				if (!req(m->base, R) && rtype(m->base) == RTmp) {
-					if (m->offset.type == CBits) {
-						fprintf(f, "\tmov word [bx+%"PRIi64"], ax\n", m->offset.bits.i);
-						fprintf(f, "\tmov word [bx+%"PRIi64"], dx\n", m->offset.bits.i + 2);
+				/* Store to destination */
+				if (slot_dest) {
+					/* Direct slot dest (slot index in
+					 * [0, arg_slot_top) — ABI's selcall write
+					 * target).  The slot IS the destination
+					 * memory; write 4 bytes into it. */
+					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(r1, fn));
+					fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(r1, fn) + 2);
+				} else if (rtype(r1) == RTmp) {
+					fprintf(f, "\tmov word [bx], ax\n");
+					fprintf(f, "\tmov word [bx+2], dx\n");
+				} else if (rtype(r1) == RMem) {
+					Mem *m = &fn->mem[r1.val];
+					if (!req(m->base, R) && rtype(m->base) == RTmp) {
+						if (m->offset.type == CBits) {
+							fprintf(f, "\tmov word [bx+%"PRIi64"], ax\n", m->offset.bits.i);
+							fprintf(f, "\tmov word [bx+%"PRIi64"], dx\n", m->offset.bits.i + 2);
+						} else {
+							fprintf(f, "\tmov word [bx], ax\n");
+							fprintf(f, "\tmov word [bx+2], dx\n");
+						}
+					}
+				} else if (rtype(r1) == RCon) {
+					/* 32-bit store to a constant destination address.
+					 * For a symbol (CAddr) this is `storel _, $glo` —
+					 * minic emits it whenever a function writes a
+					 * global `long`. */
+					Con *pc = &fn->con[r1.val];
+					if (pc->type == CAddr) {
+						fprintf(f, "\tmov word [");
+						emitaddr(pc, f);
+						fprintf(f, "], ax\n");
+						fprintf(f, "\tmov word [");
+						emitaddr(pc, f);
+						fprintf(f, "+2], dx\n");
 					} else {
-						fprintf(f, "\tmov word [bx], ax\n");
-						fprintf(f, "\tmov word [bx+2], dx\n");
+						fprintf(f, "\tmov word [%"PRIi64"], ax\n",
+						        pc->bits.i);
+						fprintf(f, "\tmov word [%"PRIi64"], dx\n",
+						        pc->bits.i + 2);
 					}
 				}
-			} else if (rtype(r1) == RCon) {
-				/* 32-bit store to a constant destination address.  For a
-				 * symbol (CAddr) this is `storel _, $glo` — minic emits
-				 * it whenever a function writes a global `long`.  Without
-				 * this case the store fell through silently, leaving the
-				 * destination unchanged. */
-				Con *pc = &fn->con[r1.val];
-				if (pc->type == CAddr) {
-					fprintf(f, "\tmov word [");
-					emitaddr(pc, f);
-					fprintf(f, "], ax\n");
-					fprintf(f, "\tmov word [");
-					emitaddr(pc, f);
-					fprintf(f, "+2], dx\n");
-				} else {
-					fprintf(f, "\tmov word [%"PRIi64"], ax\n",
-					        pc->bits.i);
-					fprintf(f, "\tmov word [%"PRIi64"], dx\n",
-					        pc->bits.i + 2);
-				}
 			}
 
+			if (needs_es) fprintf(f, "\tpop es\n");
 			if (save_bx) fprintf(f, "\tpop bx\n");
 			if (save_dx) fprintf(f, "\tpop dx\n");
 			if (save_ax) fprintf(f, "\tpop ax\n");

@@ -1,8 +1,8 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-25 (ee — Omul Kl + CAddr now die()s defensively; pointer multiplication is C-illegal so unreachable from realistic frontend output, but bug-loud if ever emitted; closes the full Kl-CAddr matrix; gate 47/47)
-**Status:** ~96% Complete
+**Last Updated:** 2026-05-25 (ff — Phase B' lands; Ostorel/Oload Kl with RSlot pointer arg now derefs through ES:BX for spilled-Kl-ptr slots, while ABI direct-slot writes (call args / incoming params) preserved via fn->arg_slot_top threshold; closes [[huge-phase-b-storel-gap]]; gate 50/50)
+**Status:** ~97% Complete
 
 ---
 
@@ -45,7 +45,7 @@ The ROADMAP.md file contains:
 - Small .EXE — architecturally broken: libstub_to_exe.py rewrites every `ret` to `retf`, mismatches small's near-call ABI → DOSBox hangs.  Needs near+far libstub variants or model-conditional ret rewrite.  See [[per-model-gate]].
 - Latent Kl-CAddr arith — **CLOSED 2026-05-25 (aa/bb/cc/dd/ee)**: 141f2e8 fixed Oloadf*/Ostoref*/Oadd/Osub; (bb) fixed Oand/Oor/Oxor; (cc) fixed cmp32_high/cmp32_low (all 10 Kl Oc*l handlers); (dd) fixed emit_push_long (Odiv/Orem Kl signed + unsigned); (ee) Omul Kl + CAddr now die()s defensively — pointer multiplication is C-illegal, unreachable from realistic frontend output but bug-loud if ever hit.  Ocopy was already CAddr-safe.  Matrix closed.
 - Kl shift AX clobber ([[i8086-kl-shift-clobbers-ax]]) — Oshl/Oshr/Osar Kl handlers clobber AX/DX without telling rega; latent.  Fix mirror of [[i8086-kl-add-sub-mul-r1-alias]].
-- Phase B storel-via-Kl-slot gap ([[huge-phase-b-storel-gap]]) — backend writes value→[bp+slot] directly even when slot holds a pointer VALUE; not yet exercised by any in-tree probe.
+- Phase B' storel-via-Kl-slot gap ([[huge-phase-b-storel-gap]]) — **CLOSED 2026-05-25 (ff)**: `fn->arg_slot_top` threshold lets emit distinguish ABI direct-slot writes (call args / params) from spilled-Kl-ptr slots; latter now derefs through ES:BX (far-data) or [BX] (near-data).  Probe `phase_bprime_probe.c` pins all 3 far-data models.
 
 ---
 
@@ -61,6 +61,13 @@ The ROADMAP.md file contains:
 ---
 
 ## Recent Major Accomplishments
+
+### Phase B' — storel/loadl Kl with spilled-ptr slot (2026-05-25, session ff)
+- ✅ `all.h` — added `int arg_slot_top` to `struct Fn` (call-arg slot count, set by i8086 ABI).
+- ✅ `i8086/abi.c` — `i8086_abi()` sets `fn->arg_slot_top = max_arg_words` after reserving call-arg slots at the bottom of the locals frame.
+- ✅ `i8086/emit.c` — `Ostorel` and `Oload Kl` handlers branch on `slot_idx >= fn->arg_slot_top`: ABI direct-slot writes (call args at low indices, selpar params at negative indices) keep the old direct-bytes semantics; spilled Kl tmp slots (high indices) now load the pointer from the slot to ES:BX (far-data) or BX (near-data) and dereference.  Closes the long-latent gap that masked any `*p = q` where `p` is a Kl ptr opaque to QBE folding.
+- ✅ `minic/dos/examples/phase_bprime_probe.c` — 4 assertions of `*pp = q` where `pp` is a `long **` opaqued through identity-call (defeats constant folding).  Cross-checks via direct global load.
+- ✅ `tools/test-dos.sh` — 3 new RUNTIME_TESTS entries (compact + large + huge).  Gate **50/50 ok**.  SSA `make check` green.
 
 ### Far DOS-API + puts under large/huge (2026-05-24, session s)
 - ✅ `tools/libstub_to_exe.py` — new `FAR_DOSIO_EXE` constant in EPILOGUE with `_far_intdos`, `_far_int86`, `_far_segread`, `_far_puts`.  Each reads/writes its struct arg(s) via ES:BX (loaded from the 4-byte far ptr), swaps ES between in/out structs when needed, restores caller's ES on exit.  `_far_segread` stashes caller ES in SI before overwriting it.  `_far_puts` writes via `mov ds, es` temporarily then restores DS=DGROUP via `push ss; pop ds`.

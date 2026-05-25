@@ -369,6 +369,13 @@ i8086_abi(Fn *fn)
 			max_arg_words = call_words;
 	}
 	fn->slot += max_arg_words;
+	/* Record the call-arg slot count so emit can distinguish ABI's
+	 * direct-slot writes (Ostorel %val, SLOT(off) where off lives in
+	 * the call-arg region at the bottom of the frame) from frontend
+	 * spilled-Kl-ptr writes (Ostorel %val, %ptr_spilled_to_slot where
+	 * the slot HOLDS a pointer value).  See [[huge-phase-b-storel-gap]]
+	 * and i8086/emit.c's Ostorel + Oload Kl handlers. */
+	fn->arg_slot_top = max_arg_words;
 
 	/* Lower parameters in the entry block */
 	b = fn->start;

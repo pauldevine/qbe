@@ -456,6 +456,18 @@ struct Fn {
 	bits reg;
 	int slot;
 	int salign;
+	int arg_slot_top;  /* i8086: # of slot indices at the bottom of the
+	                    * frame reserved for outgoing call args (set by
+	                    * i8086_abi).  Slot indices in [0, arg_slot_top)
+	                    * are ABI call-arg slots (selcall writes the
+	                    * call arg DIRECTLY into the slot — the slot IS
+	                    * the destination memory).  Slot indices >=
+	                    * arg_slot_top come from isel alloca + spill.c
+	                    * tmp evictions; for a Kl tmp these slots HOLD
+	                    * a pointer VALUE that needs dereferencing.
+	                    * Used by i8086/emit.c Ostorel/Oload Kl to
+	                    * pick "direct slot" vs "deref through slot"
+	                    * semantics.  See [[huge-phase-b-storel-gap]]. */
 	char vararg;
 	char dynalloc;
 	char leaf;
