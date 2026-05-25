@@ -103,6 +103,9 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/huge_stack_arith_probe.c:minic/dos/tests/huge_stack_arith_probe.golden.txt:compact"
 	"minic/dos/examples/huge_stack_arith_probe.c:minic/dos/tests/huge_stack_arith_probe.golden.txt:large"
 	"minic/dos/examples/huge_stack_arith_probe.c:minic/dos/tests/huge_stack_arith_probe.golden.txt:huge"
+	"minic/dos/examples/storefl_probe.c:minic/dos/tests/storefl_probe.golden.txt:compact"
+	"minic/dos/examples/storefl_probe.c:minic/dos/tests/storefl_probe.golden.txt:large"
+	"minic/dos/examples/storefl_probe.c:minic/dos/tests/storefl_probe.golden.txt:huge"
 )
 
 # --- Stevie size budget ----------------------------------------------------

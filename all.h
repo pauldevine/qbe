@@ -234,9 +234,9 @@ enum {
 };
 
 #define INRANGE(x, l, u) ((unsigned)(x) - l <= u - l) /* linear in x */
-#define isstore(o) (INRANGE(o, Ostoreb, Ostored) || INRANGE(o, Ostorefb, Ostorefw))
+#define isstore(o) (INRANGE(o, Ostoreb, Ostored) || INRANGE(o, Ostorefb, Ostorefl))
 #define isload(o) INRANGE(o, Oloadsb, Oload)
-#define isloadfar(o) INRANGE(o, Oloadfb, Oloadfw)
+#define isloadfar(o) INRANGE(o, Oloadfb, Oloadfl)
 #define isalloc(o) INRANGE(o, Oalloc4, Oalloc16)
 #define isext(o) INRANGE(o, Oextsb, Oextuw)
 #define ispar(o) INRANGE(o, Opar, Opare)

@@ -62,7 +62,7 @@ storesz(Ins *s)
 	case Ostoreh: case Ostorefh: return 2;
 	case Ostorew: case Ostorefw: return T.wordsz;
 	case Ostores: return 4; /* IEEE single, always 4 bytes */
-	case Ostorel: return 2 * T.wordsz;
+	case Ostorel: case Ostorefl: return 2 * T.wordsz;
 	case Ostored: return 8; /* IEEE double, always 8 bytes */
 	}
 	die("unreachable");

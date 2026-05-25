@@ -1223,11 +1223,17 @@ loadfar(Symb d, Symb s)
 	psymb(d);
 	t = irtyp(d.ctyp);
 
-	/* Far pointer loads - use loadfb/loadfh/loadfw */
+	/* Far pointer loads - use loadfb/loadfh/loadfw/loadfl.
+	 * `l` (LNG/long, 4 bytes on i8086) gets its own op so the high 16
+	 * bits aren't silently truncated — pre-fix the else branch routed
+	 * `long` reads through `loadfw` and dropped the high half.  See
+	 * [[storefar-lacks-storefl]]. */
 	if (t == 'b') {
 		fprintf(of, " =w loadfb ");
 	} else if (t == 'h') {
 		fprintf(of, " =w loadfh ");
+	} else if (t == 'l') {
+		fprintf(of, " =l loadfl ");  /* 32-bit long through far ptr */
 	} else {
 		fprintf(of, " =w loadfw ");  /* Word (16-bit) load through far ptr */
 	}
@@ -1247,11 +1253,16 @@ storefar(Symb d, Symb s)
 	t = irtyp(d.ctyp);
 
 	fprintf(of, "\t");
-	/* Far pointer stores - use storefb/storefh/storefw */
+	/* Far pointer stores - use storefb/storefh/storefw/storefl.
+	 * `l` (LNG/long) gets its own op; pre-fix the else branch routed
+	 * `long` writes through `storefw` and silently truncated the high
+	 * 16 bits.  See [[storefar-lacks-storefl]]. */
 	if (t == 'b') {
 		fprintf(of, "storefb ");
 	} else if (t == 'h') {
 		fprintf(of, "storefh ");
+	} else if (t == 'l') {
+		fprintf(of, "storefl ");  /* 32-bit long through far ptr */
 	} else {
 		fprintf(of, "storefw ");  /* Word (16-bit) store through far ptr */
 	}
@@ -2367,6 +2378,8 @@ expr(Node *n)
 				fprintf(of, "\tstorefb ");
 			else if (t == 'h')
 				fprintf(of, "\tstorefh ");
+			else if (t == 'l')
+				fprintf(of, "\tstorefl ");
 			else
 				fprintf(of, "\tstorefw ");
 		} else {
@@ -2414,6 +2427,8 @@ expr(Node *n)
 				fprintf(of, "\tstorefb ");
 			else if (t == 'h')
 				fprintf(of, "\tstorefh ");
+			else if (t == 'l')
+				fprintf(of, "\tstorefl ");
 			else
 				fprintf(of, "\tstorefw ");
 		} else {
@@ -2534,6 +2549,8 @@ expr(Node *n)
 				fprintf(of, "\tstorefb ");
 			else if (t == 'h')
 				fprintf(of, "\tstorefh ");
+			else if (t == 'l')
+				fprintf(of, "\tstorefl ");
 			else
 				fprintf(of, "\tstorefw ");
 		} else {

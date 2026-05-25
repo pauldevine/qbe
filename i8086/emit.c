@@ -1059,7 +1059,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	 * pointers in small/medium model).  Let it fall through to the
 	 * format-string `lea %=, %M0` template — rega allocates a single
 	 * register and the omap entry is `Ki` (matches both Kw and Kl). */
-	if ((i->cls == Kl && i->op != Oaddr) || i->op == Ostorel
+	if ((i->cls == Kl && i->op != Oaddr && i->op != Oloadfl) || i->op == Ostorel
 	    || INRANGE(i->op, Oceql, Ocultl)) {
 		/*
 		 * 32-bit operations on 16-bit x86 require multi-instruction sequences.
@@ -3060,6 +3060,55 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 		return;
 
+	case Oloadfl:
+		/*
+		 * Load 32-bit long through far pointer.
+		 * arg[0] = far pointer (Kl, segment:offset)
+		 * result = 32-bit value (Kl)
+		 *
+		 * Both halves load to AX (low) / DX (high); result lands in the
+		 * destination slot per spill.c's Kl-slot-resident invariant.  Use
+		 * kl_save_axdx to preserve any rega-placed live tmps in AX/DX
+		 * (Oloadf{b,h,w} only clobber AX, so they don't need DX-save;
+		 * this handler clobbers both).  Push/pop ES + BX around the
+		 * access — same rationale as Oloadfb.
+		 */
+		r0 = i->arg[0];
+		{
+		AxDxSave s_loadfl = kl_save_axdx(i->to, f);
+		fprintf(f, "\tpush es\n");
+		fprintf(f, "\tpush bx\n");
+		/* Load far pointer components into ES:BX */
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r0, fn));      /* offset */
+			fprintf(f, "\tmov es, word [bp%+ld]\n", (long)slot(r0, fn) + 2);  /* segment */
+		} else if (rtype(r0) == RCon) {
+			load_farptr_con(&fn->con[r0.val], f);
+		} else if (rtype(r0) == RTmp) {
+			/* Defensive: Kl-slot-resident invariant makes this unreachable
+			 * for real workloads, but mirror Oloadf{b,h,w} just in case. */
+			fprintf(f, "\tmov bx, ax\n");  /* offset in AX -> BX */
+			fprintf(f, "\tmov es, dx\n");  /* segment in DX -> ES */
+		}
+		/* Load 32-bit value through ES:BX */
+		fprintf(f, "\tmov ax, word ptr es:[bx]\n");
+		fprintf(f, "\tmov dx, word ptr es:[bx+2]\n");
+		fprintf(f, "\tpop bx\n");
+		fprintf(f, "\tpop es\n");
+		/* Store result into destination */
+		if (rtype(i->to) == RSlot) {
+			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
+		} else if (rtype(i->to) == RTmp) {
+			/* Defensive: Kl RTmp shouldn't appear post-spill; write low
+			 * half only (matches the Oload Kl tmp path). */
+			if (strcmp(rname[i->to.val], "ax") != 0)
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+		}
+		kl_restore_axdx(s_loadfl, f);
+		}
+		return;
+
 	case Ostorefb:
 		/*
 		 * Store byte through far pointer
@@ -3131,6 +3180,68 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		fprintf(f, "\tmov word ptr es:[bx], cx\n");
 		fprintf(f, "\tpop bx\n");
 		fprintf(f, "\tpop es\n");
+		return;
+
+	case Ostorefl:
+		/*
+		 * Store 32-bit long through far pointer.
+		 * arg[0] = value to store (Kl, 32-bit)
+		 * arg[1] = far pointer (Kl, segment:offset)
+		 *
+		 * Staging dance: the value needs DX:AX and the far-ptr load
+		 * (load_farptr_con under RCon) also uses AX as a scratch.  Stage
+		 * the value into DX:AX FIRST, then push it onto the stack, load
+		 * the far ptr into ES:BX (free to clobber AX/DX), pop the value
+		 * back into DX:AX, write through ES:BX.  Always save AX/DX (no
+		 * destination to alias against — Ostorefl has no result reg).
+		 * Push/pop ES + BX too, per [[i8086-farptr-es-clobber]] +
+		 * [[i8086-farptr-bx-clobber]].
+		 */
+		r0 = i->arg[0];  /* value */
+		r1 = i->arg[1];  /* far pointer */
+		fprintf(f, "\tpush ax\n");
+		fprintf(f, "\tpush dx\n");
+		fprintf(f, "\tpush es\n");
+		fprintf(f, "\tpush bx\n");
+		/* Stage value into DX:AX (read source BEFORE far-ptr load may
+		 * clobber AX as scratch). */
+		if (rtype(r0) == RSlot) {
+			fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
+			fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
+		} else if (rtype(r0) == RCon) {
+			load32_axdx_con(&fn->con[r0.val], f);
+		} else if (rtype(r0) == RTmp) {
+			/* Defensive per spill.c Kl-slot-resident invariant. */
+			if (strcmp(rname[r0.val], "ax") != 0)
+				fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+			fprintf(f, "\tcwd\n");
+		}
+		/* Park value on stack so the far-ptr load can use AX freely. */
+		fprintf(f, "\tpush dx\n");
+		fprintf(f, "\tpush ax\n");
+		/* Load far pointer into ES:BX */
+		if (rtype(r1) == RSlot) {
+			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r1, fn));      /* offset */
+			fprintf(f, "\tmov es, word [bp%+ld]\n", (long)slot(r1, fn) + 2);  /* segment */
+		} else if (rtype(r1) == RCon) {
+			load_farptr_con(&fn->con[r1.val], f);
+		} else if (rtype(r1) == RTmp) {
+			/* Defensive: per Kl-slot-resident invariant, a Kl ptr RTmp
+			 * shouldn't appear here.  If it ever does, AX/DX have been
+			 * parked on the stack, so reading r1 from DX:AX is wrong —
+			 * die rather than emit silently broken code. */
+			die("Ostorefl: RTmp far ptr arg unreachable under Kl-slot-resident invariant");
+		}
+		/* Restore value into DX:AX */
+		fprintf(f, "\tpop ax\n");
+		fprintf(f, "\tpop dx\n");
+		/* Store 32-bit value through ES:BX */
+		fprintf(f, "\tmov word ptr es:[bx], ax\n");
+		fprintf(f, "\tmov word ptr es:[bx+2], dx\n");
+		fprintf(f, "\tpop bx\n");
+		fprintf(f, "\tpop es\n");
+		fprintf(f, "\tpop dx\n");
+		fprintf(f, "\tpop ax\n");
 		return;
 
 	case Ofarseg:
