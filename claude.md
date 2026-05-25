@@ -1,7 +1,7 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-25 (y — Oadd/Osub Kl + Oloadf*/Ostoref* CAddr portable; gate 37/37)
+**Last Updated:** 2026-05-25 (z — Oshl/Oshr/Osar Kl AX/DX/CX save bracket + 8086 shift-imm fix; gate 38/38)
 **Status:** ~96% Complete
 
 ---

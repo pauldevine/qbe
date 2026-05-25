@@ -439,6 +439,23 @@ load_farptr_con(Con *pc, FILE *f)
 	}
 }
 
+/* 8086-safe `shift reg, N`: the multi-bit immediate form (e.g. `shl
+ * dx, 8`) was introduced on the 80186, so under `cpu 8086` NASM
+ * rejects it.  Emit `shift reg, 1` for N==1 (8086-valid), else stage
+ * the count into CL.  Caller must have preserved CX (the Kl shift
+ * handlers already push/pop CX as part of the AX/DX/CX bracket). */
+static void
+emit_shift_imm(const char *op, const char *reg, int n, FILE *f)
+{
+	if (n <= 0) return;
+	if (n == 1) {
+		fprintf(f, "\t%s %s, 1\n", op, reg);
+	} else {
+		fprintf(f, "\tmov cl, %d\n", n);
+		fprintf(f, "\t%s %s, cl\n", op, reg);
+	}
+}
+
 /* Load a 32-bit operand into DX:AX.  The original 32-bit handlers only
  * handled RSlot/RCon; this also handles RTmp (treats the temp's register
  * as the low word and zero-extends DX, matching the convention in the
@@ -1257,10 +1274,30 @@ emitins(Ins *i, Fn *fn, FILE *f)
 
 		case Oshl:
 			/*
-			 * 32-bit left shift
-			 * For shifts by constant < 16, we can use shld/shl
-			 * For larger shifts, more complex handling needed
+			 * 32-bit left shift.  load32_dxax clobbers AX/DX; the
+			 * loop body clobbers CX (loop counter).  rega doesn't
+			 * model any of these implicit scratch uses, so wrap
+			 * with AX/DX save bracket + push/pop cx — same shape
+			 * as the Oadd/Osub/Omul Kl fix
+			 * ([[i8086-kl-add-sub-mul-r1-alias]]) plus a CX layer.
+			 *
+			 * Extra wrinkle: r1 (shift count) is Kw, not Kl.  If
+			 * r1 RTmp lives in AX/DX, capture it into CX BEFORE
+			 * load32_dxax clobbers AX/DX.  If r1 lives in CX, the
+			 * standard "mov cx, r1" is a no-op.
 			 */
+			{
+			int dst_in_ax_shl = (rtype(i->to) == RTmp && i->to.val == RAX);
+			int dst_in_dx_shl = (rtype(i->to) == RTmp && i->to.val == RDX);
+			int dst_in_cx_shl = (rtype(i->to) == RTmp && i->to.val == RCX);
+			int save_cx = !dst_in_cx_shl;
+			int r1_in_axdx = (rtype(r1) == RTmp
+			    && (r1.val == RAX || r1.val == RDX));
+
+			if (save_cx) fprintf(f, "\tpush cx\n");
+			if (r1_in_axdx)
+				fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
+			AxDxSave s_shl = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
 
 			if (rtype(r1) == RCon) {
@@ -1269,9 +1306,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					/* Shift by 16+: low word becomes 0, high = low << (n-16) */
 					fprintf(f, "\tmov dx, ax\n");
 					fprintf(f, "\txor ax, ax\n");
-					if (shift > 16) {
-						fprintf(f, "\tshl dx, %d\n", shift - 16);
-					}
+					emit_shift_imm("shl", "dx", shift - 16, f);
 				} else if (shift > 0) {
 					/* Use loop for shift */
 					fprintf(f, "\tmov cx, %d\n", shift);
@@ -1282,9 +1317,13 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				}
 			} else {
 				/* Variable shift count - use loop */
-				if (rtype(r1) == RTmp)
-					fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
-				else if (rtype(r1) == RSlot)
+				if (rtype(r1) == RTmp) {
+					if (!r1_in_axdx
+					    && strcmp(rname[r1.val], "cx") != 0)
+						fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
+					/* r1 in AX/DX: already captured to CX above.
+					 * r1 in CX: mov cx, cx no-op, skip. */
+				} else if (rtype(r1) == RSlot)
 					fprintf(f, "\tmov cx, word [bp%+ld]\n", (long)slot(r1, fn));
 				fprintf(f, "\tjcxz .L_shl32_done_%p\n", (void*)i);
 				fprintf(f, ".L_shl32_%p:\n", (void*)i);
@@ -1298,14 +1337,37 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+				/* Move result low (AX) to dst BEFORE the pops
+				 * restore the saved registers. */
+				if (dst_in_dx_shl) {
+					fprintf(f, "\tmov dx, ax\n");
+				} else if (!dst_in_ax_shl) {
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				}
+			}
+
+			kl_restore_axdx(s_shl, f);
+			if (save_cx) fprintf(f, "\tpop cx\n");
 			}
 			return;
 
 		case Oshr:
 			/*
-			 * 32-bit logical right shift (unsigned)
+			 * 32-bit logical right shift (unsigned).  Same
+			 * AX/DX/CX-clobber bracketing as Oshl.
 			 */
+			{
+			int dst_in_ax_shr = (rtype(i->to) == RTmp && i->to.val == RAX);
+			int dst_in_dx_shr = (rtype(i->to) == RTmp && i->to.val == RDX);
+			int dst_in_cx_shr = (rtype(i->to) == RTmp && i->to.val == RCX);
+			int save_cx = !dst_in_cx_shr;
+			int r1_in_axdx = (rtype(r1) == RTmp
+			    && (r1.val == RAX || r1.val == RDX));
+
+			if (save_cx) fprintf(f, "\tpush cx\n");
+			if (r1_in_axdx)
+				fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
+			AxDxSave s_shr = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
 
 			if (rtype(r1) == RCon) {
@@ -1314,9 +1376,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					/* Shift by 16+: high word becomes 0, low = high >> (n-16) */
 					fprintf(f, "\tmov ax, dx\n");
 					fprintf(f, "\txor dx, dx\n");
-					if (shift > 16) {
-						fprintf(f, "\tshr ax, %d\n", shift - 16);
-					}
+					emit_shift_imm("shr", "ax", shift - 16, f);
 				} else if (shift > 0) {
 					fprintf(f, "\tmov cx, %d\n", shift);
 					fprintf(f, ".L_shr32_%p:\n", (void*)i);
@@ -1325,9 +1385,11 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					fprintf(f, "\tloop .L_shr32_%p\n", (void*)i);
 				}
 			} else {
-				if (rtype(r1) == RTmp)
-					fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
-				else if (rtype(r1) == RSlot)
+				if (rtype(r1) == RTmp) {
+					if (!r1_in_axdx
+					    && strcmp(rname[r1.val], "cx") != 0)
+						fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
+				} else if (rtype(r1) == RSlot)
 					fprintf(f, "\tmov cx, word [bp%+ld]\n", (long)slot(r1, fn));
 				fprintf(f, "\tjcxz .L_shr32_done_%p\n", (void*)i);
 				fprintf(f, ".L_shr32_%p:\n", (void*)i);
@@ -1341,25 +1403,47 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+				if (dst_in_dx_shr) {
+					fprintf(f, "\tmov dx, ax\n");
+				} else if (!dst_in_ax_shr) {
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				}
+			}
+
+			kl_restore_axdx(s_shr, f);
+			if (save_cx) fprintf(f, "\tpop cx\n");
 			}
 			return;
 
 		case Osar:
 			/*
-			 * 32-bit arithmetic right shift (signed)
+			 * 32-bit arithmetic right shift (signed).  Same
+			 * AX/DX/CX-clobber bracketing as Oshl.
 			 */
+			{
+			int dst_in_ax_sar = (rtype(i->to) == RTmp && i->to.val == RAX);
+			int dst_in_dx_sar = (rtype(i->to) == RTmp && i->to.val == RDX);
+			int dst_in_cx_sar = (rtype(i->to) == RTmp && i->to.val == RCX);
+			int save_cx = !dst_in_cx_sar;
+			int r1_in_axdx = (rtype(r1) == RTmp
+			    && (r1.val == RAX || r1.val == RDX));
+
+			if (save_cx) fprintf(f, "\tpush cx\n");
+			if (r1_in_axdx)
+				fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
+			AxDxSave s_sar = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
 
 			if (rtype(r1) == RCon) {
 				int shift = (int)fn->con[r1.val].bits.i;
 				if (shift >= 16) {
-					/* Shift by 16+: sign-extend high word, low = high >> (n-16) */
+					/* Shift by 16+: low = high >> (n-16), sign-extend.
+					 * `mov ax, dx; cwd` puts sign(dx) into DX:AX so DX
+					 * becomes the sign mask (-1 or 0).  8086-safe — vs
+					 * the prior `sar dx, 15` which is 80186+. */
 					fprintf(f, "\tmov ax, dx\n");
-					fprintf(f, "\tsar dx, 15\n");  /* Sign-extend */
-					if (shift > 16) {
-						fprintf(f, "\tsar ax, %d\n", shift - 16);
-					}
+					fprintf(f, "\tcwd\n");
+					emit_shift_imm("sar", "ax", shift - 16, f);
 				} else if (shift > 0) {
 					fprintf(f, "\tmov cx, %d\n", shift);
 					fprintf(f, ".L_sar32_%p:\n", (void*)i);
@@ -1368,9 +1452,11 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					fprintf(f, "\tloop .L_sar32_%p\n", (void*)i);
 				}
 			} else {
-				if (rtype(r1) == RTmp)
-					fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
-				else if (rtype(r1) == RSlot)
+				if (rtype(r1) == RTmp) {
+					if (!r1_in_axdx
+					    && strcmp(rname[r1.val], "cx") != 0)
+						fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
+				} else if (rtype(r1) == RSlot)
 					fprintf(f, "\tmov cx, word [bp%+ld]\n", (long)slot(r1, fn));
 				fprintf(f, "\tjcxz .L_sar32_done_%p\n", (void*)i);
 				fprintf(f, ".L_sar32_%p:\n", (void*)i);
@@ -1384,7 +1470,15 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+				if (dst_in_dx_sar) {
+					fprintf(f, "\tmov dx, ax\n");
+				} else if (!dst_in_ax_sar) {
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				}
+			}
+
+			kl_restore_axdx(s_sar, f);
+			if (save_cx) fprintf(f, "\tpop cx\n");
 			}
 			return;
 
