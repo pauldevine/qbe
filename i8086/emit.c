@@ -3141,10 +3141,18 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		r1 = i->arg[1];  /* far pointer */
 		fprintf(f, "\tpush es\n");
 		fprintf(f, "\tpush bx\n");
-		/* Load value to store into CL (to preserve AX for far pointer) */
-		if (rtype(r0) == RTmp)
-			fprintf(f, "\tmov cl, %s\n", rname8[r0.val]);
-		else if (rtype(r0) == RSlot)
+		/* Load value to store into CL (to preserve AX for far pointer).
+		 * Only AX/CX/DX/BX have 8-bit subregister names; for SI/DI/BP/SP
+		 * the rega-placed value lives in a register without a byte form,
+		 * so go through the full-word `mov cx, reg16` and let CL pick up
+		 * the low byte.  Mirror the [[i8086-compact-loadfb-aliases-ax]]
+		 * fix for Oextsb at line ~3574. */
+		if (rtype(r0) == RTmp) {
+			if (r0.val <= RBX)
+				fprintf(f, "\tmov cl, %s\n", rname8[r0.val]);
+			else
+				fprintf(f, "\tmov cx, %s\n", rname[r0.val]);
+		} else if (rtype(r0) == RSlot)
 			fprintf(f, "\tmov cl, byte [bp%+ld]\n", (long)slot(r0, fn));
 		else if (rtype(r0) == RCon)
 			fprintf(f, "\tmov cl, %d\n", (int)(fn->con[r0.val].bits.i & 0xFF));

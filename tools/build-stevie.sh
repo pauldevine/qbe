@@ -294,8 +294,11 @@ if [ $EXE -eq 1 ]; then
 	nasm -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" \
 		2>>"$OUT_DIR/link.err" || {
 		echo "  FAIL nasm-obj: crt0_exe"; cat "$OUT_DIR/link.err"; exit 1; }
-	# 3. libstub_exe.obj (auto-converted from libstub.asm).
-	"$QBE_DIR/tools/libstub_to_exe.py" "$DOS_DIR/libstub.asm" \
+	# 3. libstub_exe.obj (auto-converted from libstub.asm).  Thread
+	#    the model so far-data builds (compact/large/huge) get the
+	#    FAR_STDIO_EXE epilogue with _far_fopen/_far_fclose/_far_fgets/etc.
+	"$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" \
+		"$DOS_DIR/libstub.asm" \
 		"$OUT_DIR/libstub_exe.asm" 2>>"$OUT_DIR/link.err" || {
 		echo "  FAIL libstub-conv"; exit 1; }
 	nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" \

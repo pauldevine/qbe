@@ -1,7 +1,7 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-25 (jj — track (j) closed: narrow `Oloadf{b,h,w}` handlers in `i8086/emit.c` wrap with `kl_save_axdx`/`kl_restore_axdx`. Back-to-back narrow far-loads no longer alias via AX. loadfb_alias_probe (6 asserts × 3 models) pins. Closes [[i8086-compact-loadfb-aliases-ax]]; gate 59/59)
+**Last Updated:** 2026-05-25 (kk — track (l) build phase: stevie 24/24 modules compile + link under `--model=compact` (230KB EXE). Surfaced and fixed 4 latent bugs: minic DREF macro polluted by FAR bit; 3 hardcoded `=w add` for struct member offsets under far-data; i8086 Ostorefb SI/DI rname8 NULL deref; build-stevie.sh missing --model passthrough to libstub_to_exe.py. Runtime not yet verified — see [[stevie-compact]]. Gate stays 59/59; SSA make check green; medium baseline unchanged.)
 **Status:** ~97% Complete
 
 ---

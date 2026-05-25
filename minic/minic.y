@@ -70,7 +70,18 @@ int memmodel = MSmall;
 	  (KIND(x) == PTR && KIND(DREF(x)) == FUN)) ? 0 : FAR))
 #define IDIR_FAR(x) ((((x) << 3) + PTR) | FAR)  /* Far pointer to type */
 #define FUNC(x) (((x) << 3) + FUN)
-#define DREF(x) ((x) >> 3)
+/* DREF strips the OUTER FAR flag before shifting so it doesn't pollute
+ * downstream type unpacking.  Example: under compact, `struct line *l`
+ * has ctyp = (struct_type << 3) | PTR | FAR.  After `*l`, downstream
+ * sites compute sidx = DREF(struct_type | FAR_metadata).  Without the
+ * mask, the FAR bit at position 24 shifts to bit 21, and the next DREF
+ * call (e.g. in `case '.'` looking up structh[sidx]) explodes into a
+ * wild array index → SIGSEGV.  Inner FAR bits encoded inside a nested
+ * pointer type sit at position 27 (one IDIR up) and shift correctly to
+ * position 24 after DREF, so nested far ptrs (e.g. `int **` in compact)
+ * still round-trip.  Reported via stevie alloc.c crashing minic under
+ * --model=compact. */
+#define DREF(x) (((x) & ~FAR) >> 3)
 #define KIND(x) ((x) & 7)
 #define ISUNSIGNED(x) ((x) & UNSIGNED)
 #define ISFLOAT(x) ((x) & FLOAT)
@@ -1922,20 +1933,30 @@ expr(Node *n)
 			if (!found)
 				die("struct member not found");
 
-			/* Compute member address: struct_addr + offset */
-			if (m->offset > 0) {
-				addr.t = Tmp;
-				addr.u.n = tmp++;
-				addr.ctyp = IDIR(m->ctyp);
-				fprintf(of, "\t");
-				psymb(addr);
-				fprintf(of, " =w add ");
-				psymb(s0);
-				fprintf(of, ", %d\n", m->offset);
-			} else {
-				/* Offset 0, just use struct address */
-				addr = s0;
-				addr.ctyp = IDIR(m->ctyp);
+			/* Compute member address: struct_addr + offset.  Under far-
+			 * data models (compact/large/huge), when s0 came through a
+			 * far-pointer deref it carries the FAR bit and the address
+			 * is Kl (4-byte seg:off).  The add must then be `=l add` so
+			 * we don't truncate to 16 bits.  Mirror s0's FAR-ness onto
+			 * addr so downstream load/store picks the right width. */
+			{
+				char klass = ISFAR(s0.ctyp) ? 'l' : 'w';
+				unsigned ptyp = ISFAR(s0.ctyp) ? IDIR_FAR(m->ctyp)
+				                              : (IDIR(m->ctyp) & ~FAR);
+				if (m->offset > 0) {
+					addr.t = Tmp;
+					addr.u.n = tmp++;
+					addr.ctyp = ptyp;
+					fprintf(of, "\t");
+					psymb(addr);
+					fprintf(of, " =%c add ", klass);
+					psymb(s0);
+					fprintf(of, ", %d\n", m->offset);
+				} else {
+					/* Offset 0, just use struct address */
+					addr = s0;
+					addr.ctyp = ptyp;
+				}
 			}
 
 			/* Array members decay to a pointer to their first element —
@@ -1949,7 +1970,10 @@ expr(Node *n)
 			sr.t = Tmp;
 			sr.u.n = tmp++;
 			sr.ctyp = m->ctyp;
-			load(sr, addr);
+			if (ISFAR(addr.ctyp))
+				loadfar(sr, addr);
+			else
+				load(sr, addr);
 
 			/* Handle bitfield extraction */
 			if (m->bitwidth > 0) {
@@ -2079,20 +2103,26 @@ expr(Node *n)
 					/* Bitfield assignment - read-modify-write */
 					Symb addr, oldval, newval, clearmask, shifted, merged;
 					unsigned long mask, invmask;
+					char klass = ISFAR(s_struct.ctyp) ? 'l' : 'w';
+					unsigned ptyp = ISFAR(s_struct.ctyp)
+					    ? IDIR_FAR(m->ctyp)
+					    : (IDIR(m->ctyp) & ~FAR);
 
-					/* Get the storage unit address */
+					/* Get the storage unit address.  Mirror s_struct's
+					 * FAR-ness onto addr so the add width matches and
+					 * downstream load/store picks the right op. */
 					if (m->offset > 0) {
 						addr.t = Tmp;
 						addr.u.n = tmp++;
-						addr.ctyp = IDIR(m->ctyp);
+						addr.ctyp = ptyp;
 						fprintf(of, "\t");
 						psymb(addr);
-						fprintf(of, " =w add ");
+						fprintf(of, " =%c add ", klass);
 						psymb(s_struct);
 						fprintf(of, ", %d\n", m->offset);
 					} else {
 						addr = s_struct;
-						addr.ctyp = IDIR(m->ctyp);
+						addr.ctyp = ptyp;
 					}
 
 					/* Evaluate RHS */
@@ -2686,6 +2716,8 @@ lval(Node *n)
 			char *mname = n->r->u.v;
 			int i, found = 0;
 			struct Member *m;
+			char klass;
+			unsigned far_flag;
 
 			/* Find member */
 			for (i = 0; i < structh[sidx].nmembers; i++) {
@@ -2698,20 +2730,26 @@ lval(Node *n)
 			if (!found)
 				die("struct member not found");
 
-			/* Compute member address: struct_addr + offset */
+			/* Compute member address: struct_addr + offset.  Under far-
+			 * data, when s0 came through a far-ptr deref it carries the
+			 * FAR bit and the address is Kl.  Propagate FAR onto sr so
+			 * the assignment site (which checks ISFAR(sl.ctyp)) routes
+			 * through storefar instead of plain store. */
+			klass = ISFAR(s0.ctyp) ? 'l' : 'w';
+			far_flag = ISFAR(s0.ctyp) ? FAR : 0;
 			if (m->offset > 0) {
 				sr.t = Tmp;
 				sr.u.n = tmp++;
-				sr.ctyp = m->ctyp;  /* lval returns the type, not IDIR */
+				sr.ctyp = m->ctyp | far_flag;
 				fprintf(of, "\t");
 				psymb(sr);
-				fprintf(of, " =w add ");
+				fprintf(of, " =%c add ", klass);
 				psymb(s0);
 				fprintf(of, ", %d\n", m->offset);
 			} else {
 				/* Offset 0, just use struct address */
 				sr = s0;
-				sr.ctyp = m->ctyp;  /* lval returns the type, not IDIR */
+				sr.ctyp = m->ctyp | far_flag;
 			}
 		}
 		break;
