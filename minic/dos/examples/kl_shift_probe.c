@@ -67,13 +67,34 @@ unsigned long var_shr(unsigned long x, unsigned int n)
 	return x >> n;
 }
 
-/* NOTE: Osar (signed `>>`) is NOT exercised here.  minic.y lowers
- * `>>` to Oshr regardless of operand signedness — see
- * [[minic-signed-shr-emits-unsigned]], same family as the existing
- * [[minic-unsigned-div-signed-op]] bug.  The Osar Kl backend handler
- * was nonetheless fixed in this session for the same AX/DX/CX clobber
- * and 8086-shift-imm issues; verified by inspection of the emitted
- * asm — and `cwd` replaces the prior 80186-only `sar dx, 15`. */
+/* Signed `>>` MUST be arithmetic (sar): the sign bit must be
+ * propagated into the vacated high bits.  Before the minic.y fix,
+ * `>>` was always lowered to Oshr (logical), so a negative `long`
+ * shifted right gave the wrong (zero-filled) result.  These cases
+ * pin the lowering at the C-language level and incidentally
+ * exercise the Osar Kl/Kw backend handlers from real C code. */
+
+long signed_shr4(long x)
+{
+	return x >> 4;
+}
+
+long signed_shr20(long x)
+{
+	return x >> 20;
+}
+
+long var_sshr(long x, int n)
+{
+	return x >> n;
+}
+
+/* Osar Kw — signed int (2 bytes) shift right.  Same lowering bug at
+ * the frontend; backend handler is separate from the Kl path. */
+int signed_int_shr(int x)
+{
+	return x >> 1;
+}
 
 int main(void)
 {
@@ -114,6 +135,37 @@ int main(void)
 	ua = 0xDEADBEEFUL;
 	n  = 4;
 	printf("var_shr4=%lx (want deadbee)\r\n", var_shr(ua, n));
+
+	/* Signed >> cases.  Stage hex literals through `long` locals — see
+	 * [[minic-long-literal-int-vararg]] — and inspect via %lx to see
+	 * the bit pattern (sign-fill vs zero-fill). */
+	{
+		long  sa;
+		int   si;
+
+		/* -16L >> 4 = -1L: arithmetic shift fills with sign bit. */
+		sa = 0xFFFFFFF0L;
+		printf("sshr4=%lx (want ffffffff)\r\n", signed_shr4(sa));
+
+		/* -8388608 >> 20 = -8 (= 0xFFFFFFF8). */
+		sa = 0xFF800000L;
+		printf("sshr20=%lx (want fffffff8)\r\n", signed_shr20(sa));
+
+		/* INT32_MIN >> 4 = 0xF8000000.  Variable shift, sign-fill. */
+		sa = 0x80000000L;
+		n  = 4;
+		printf("var_sshr4=%lx (want f8000000)\r\n", var_sshr(sa, n));
+
+		/* Positive operand: sar and shr agree.  Confirms the new
+		 * path doesn't break unsigned-shaped values. */
+		sa = 0x7FFFFFFFL;
+		n  = 8;
+		printf("var_sshr_pos=%lx (want 7fffff)\r\n", var_sshr(sa, n));
+
+		/* Osar Kw — signed int >>1: -8 → -4 = 0xFFFC on 16-bit int. */
+		si = -8;
+		printf("sint_shr=%x (want fffc)\r\n", signed_int_shr(si));
+	}
 
 	return 0;
 }

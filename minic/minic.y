@@ -2504,6 +2504,11 @@ expr(Node *n)
 		           && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp))) {
 			/* Unsigned integer divide / modulo. */
 			fprintf(of, " %s%s ", o == '/' ? "udiv" : "urem", ty);
+		} else if (o == 'R' && !ISUNSIGNED(s0.ctyp)) {
+			/* C11 6.5.7: a >> b takes the (promoted) type of a;
+			 * for signed a, the shift is arithmetic (sar), not logical.
+			 * otoa['R'] = "shr" handles the unsigned case in the else. */
+			fprintf(of, " sar%s ", ty);
 		} else {
 			/* Signed integer comparison or other operations */
 			fprintf(of, " %s%s ", otoa[o], ty);

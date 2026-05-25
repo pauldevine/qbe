@@ -2,8 +2,8 @@
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
 **Original Timeline:** 10-12 weeks to production release
-**Actual Progress:** ~92% Complete (as of 2026-05-23)
-**Last Updated:** 2026-05-23
+**Actual Progress:** ~96% Complete (as of 2026-05-25)
+**Last Updated:** 2026-05-25
 
 ---
 
@@ -13,7 +13,7 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 
 ---
 
-## Actual Current Status (Updated 2026-05-23)
+## Actual Current Status (Updated 2026-05-25)
 
 **Component Status:**
 
@@ -30,14 +30,14 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 | **Function Pointers** | ✅ Complete | Full support with typedef | i8086/README.md:321 |
 | **Struct Bitfields** | ✅ Complete | Packing and read/write | i8086/README.md:322 |
 | **DOS Runtime** | ✅ **COMPLETE** | crt0_exe.asm + real printf/sprintf, freelist malloc/free, file I/O | minic/dos/libstub.asm |
-| **Memory Models** | ✅ Tiny + Medium + Compact + Large + Huge (Small .EXE broken; huge >64K not yet) | Per-model runtime gate at 21/21 in tools/test-dos.sh: 1 tiny .COM probe (tinyprobe.c, inline-asm INT 21h since libstub printf is a .COM-stub), 3 medium probes (mediumprobe + mathprobe + dosapi_probe), 4 compact probes (cstrprobe + compactprobe_extra + fnptrprobe + farretprobe), 4 large probes (compact probes verbatim), 4 huge probes (compact probes verbatim).  Small .EXE hangs DOSBox at runtime (libstub_to_exe ret→retf rewrite mismatches small's near-call ABI).  Huge has no >64K data support (no pointer normalization + omf_link.py is 64K/segment). | tools/build-com-test.sh, tools/build-stevie.sh, tools/build-example.sh |
+| **Memory Models** | ✅ Tiny + Medium + Compact + Large + Huge incl. >64K arrays (Small .EXE still broken) | Per-model runtime gate at **38/38** in tools/test-dos.sh.  Tiny .COM (tinyprobe via inline-asm INT 21h); medium (mediumprobe + mathprobe + dosapi_probe); compact (cstrprobe + compactprobe_extra + fnptrprobe + farretprobe + stdio_far_probe + caddr_arith_probe + kl_shift_probe); large + huge run those compact probes verbatim plus dos_far_probe / stdio_far_probe / mediumprobe / mathprobe / dosapi_probe.  Huge >64K data covered by hugeprobe.c (`static char arr[80000]` across paragraph-aligned `_HUGE_<sym>` segments).  Small .EXE still hangs DOSBox (libstub_to_exe ret→retf rewrite mismatches small's near-call ABI). | tools/build-com-test.sh, tools/build-stevie.sh, tools/build-example.sh |
 | **DOS API Library** | ✅ **COMPLETE** | int86/int86x/intdos/intdosx/segread + video/keyboard/mouse wrappers | minic/dos/libstub.asm, minic/include/dos.h |
 
 **Phase Completion (vs original plan):**
 - Phase 0 (Validation): ✅ **100% COMPLETE**
 - Phase 1 (Integer DOS): ✅ **100% COMPLETE** (crt0_exe.asm + real runtime in libstub.asm)
 - Phase 2 (8087 FPU): ✅ **100% COMPLETE** (PR #11)
-- Phase 3 (DOS Integration): ✅ **~85% COMPLETE** (runtime, API wrappers, examples all done; tiny .COM memory model still pending)
+- Phase 3 (DOS Integration): ✅ **~95% COMPLETE** (runtime, API wrappers, examples, full memory-model matrix incl. far DOS-API + far stdio FILE* under large/huge all done; small .EXE ABI mismatch + tiny .COM stevie shrink still pending)
 - Phase 4 (C11 Features): ✅ **100% COMPLETE** (PR #12)
 
 **Completed Features NOT in Original Roadmap:**
@@ -49,10 +49,12 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 - ✅ Stevie editor (`stevie.exe`) ports cleanly as the flagship integration test
 
 **What's Actually Missing:**
-1. **Large/huge DOS-API + stdio surface** — large/huge build + run cleanly for the compact runtime-probe surface (strings, mem, fn-ptrs, %s/%p, far-ptr arith); but `_intdos`/`_int86`/`_intdosx`/`_int86x`/`_segread` and `_fputs`/`_fputc`/`_fgets`/`_puts` still consume near pointers off the stack.  Need `_far_X` variants in libstub.asm + add their names to `far_stdlib[]` in `minic.y:1252`.  See `[[large-huge-bringup]]`.
-2. **Compact far-variant inc/dec / Kl arith on CAddr** — far-ptr inc/dec (minic.y:2189, 2234) and the ~10 Kl Oadd/Osub/Ocopy/Oand/Oor/Oxor sites in i8086/emit.c that still consult `bits.i` directly without a CAddr check. Latent bugs for `p + offsetof_constant` style code; not exercised by cprobe/cstrprobe.
-3. **i8086 compact loadfb AX-aliasing** — `loadfb`'s implicit AX clobber isn't surfaced to the register allocator; two back-to-back loadfb's whose results both reach the same printf vararg call alias each other (second clobbers first). See `[[i8086-compact-loadfb-aliases-ax]]`.
-4. **Polish on the legacy examples** — 16 older `dos_putchar`-style files in `minic/dos/examples/` predate the `<dos.h>` API; modern dialect now demonstrated by `mouse_demo.c` / `vga_pixels.c` / `kbtest.c` / `cprobe.c` / `cstrprobe.c`
+1. **Small .EXE architecturally broken** — `tools/libstub_to_exe.py` rewrites every `ret` to `retf`, which mismatches small model's near-call ABI → DOSBox hangs.  Needs either near+far libstub variants or model-conditional `ret` rewrite.  See `[[per-model-gate]]`.
+2. **Tiny .COM stevie still over 64 KB** — stevie.com ~87 KB; Path A near-pointer narrowing already landed (commit 5125e70, 98KB→81KB).  Needs further shrink (dead-code elimination, library partitioning, or pointer ABI tweaks).  See `[[minic-pointer-bloat]]`.  Stevie is a medium-model program by design, so this is "nice to have" rather than blocking.
+3. **Latent Kl-CAddr arith sites** — `141f2e8` fixed 6 emit.c sites (Oloadf{b,h,w}/Ostoref{b,h,w}/Oadd Kl/Osub Kl) and pinned them with `caddr_arith_probe`.  Still ~4 Kl Oand/Oor/Oxor/Ocopy sites in `i8086/emit.c` plus far-ptr inc/dec at `minic.y:2189, 2234` consult `bits.i` directly without a CAddr check.  Not exercised by any in-tree probe; latent bug for `p + offsetof_constant` style code.
+4. **Huge Phase B storel-via-Kl-slot gap** — backend writes value→[bp+slot] directly even when slot holds a pointer VALUE (call result of a helper).  Safe for alloca slots; not yet exercised by any in-tree probe.  See `[[huge-phase-b-storel-gap]]`.
+5. **i8086 compact loadfb AX-aliasing** — `loadfb`'s implicit AX clobber isn't surfaced to the register allocator; two back-to-back loadfb's whose results both reach the same printf vararg call alias each other.  Worked around in probes by using coarse-grained validators (strcmp/strlen).  See `[[i8086-compact-loadfb-aliases-ax]]`.
+6. **Polish on the legacy examples** — 16 older `dos_putchar`-style files in `minic/dos/examples/` predate the `<dos.h>` API; modern dialect now demonstrated by `mouse_demo.c` / `vga_pixels.c` / `kbtest.c` / `cprobe.c` / `cstrprobe.c`.
 
 **Note on tiny model:** Stevie itself doesn't fit in .COM (currently ~87KB; see `[[minic-pointer-bloat]]` for history) and that's expected — stevie is a medium-model program by design. The tiny-model pipeline is gated end-to-end by `tools/test-dos.sh` against `minic/dos/tests/com_smoke.c` at a 4 KB ceiling, which catches regressions in libstub size, codegen bloat, or the memref-base rega hint without holding stevie hostage to the 64 KB cap.
 
@@ -561,10 +563,10 @@ Create comprehensive tests in `minic/test/dos_fpu/`:
 
 ---
 
-## Phase 3: DOS System Integration (Weeks 6-8) ✅ ~85% COMPLETE
+## Phase 3: DOS System Integration (Weeks 6-8) ✅ ~95% COMPLETE
 
 **Goal:** Production-quality DOS programs with full API access
-**Status:** ✅ Runtime, API wrappers, and examples shipped (commits fc8d2bc, 28941ae, d36f103); tiny .COM memory model still outstanding.
+**Status:** ✅ Runtime, API wrappers, examples, and the full memory-model matrix (tiny/medium/compact/large/huge incl. >64K data) all shipped (commits fc8d2bc, 28941ae, d36f103, 0d8ccba, 1fb83d7, 540e511, b22f92c); small .EXE ABI mismatch and tiny .COM stevie shrink still outstanding.
 
 ### Week 6: Complete DOS Runtime
 
@@ -715,7 +717,7 @@ Currently only small model (code + data < 64K each). Add:
 - [x] DOS interrupt interface (int86 / int86x / intdos / intdosx / segread; commit 28941ae)
 - [x] Video functions (VGA mode 13h via `set_video_mode` + `putpixel`; commit 28941ae)
 - [x] Keyboard/mouse support (`kbhit`/`getche` in commit 28941ae; INT 33h mouse in d36f103)
-- [x] Multiple memory models — tiny (.COM, gated by tools/test-dos.sh), small, and medium done; large + huge pending
+- [x] Multiple memory models — tiny (.COM, gated by tools/test-dos.sh), medium, compact, large, huge (incl. >64K arrays via per-symbol `_HUGE_<sym>` segments) all done; small .EXE still broken by libstub `ret→retf` rewrite
 - [x] 10+ DOS example programs (16 legacy + 3 modern `<dos.h>` demos = 19 total)
 
 **Success Criteria:**
@@ -1074,8 +1076,8 @@ The following features were implemented but were not part of the original roadma
 
 ---
 
-**Roadmap Version:** 3.2 (Compact far-helpers + _far_sprintf)
-**Last Updated:** 2026-05-23
+**Roadmap Version:** 3.3 (Full memory-model matrix + far stdio + Kl shift portable)
+**Last Updated:** 2026-05-25
 **Original Date:** 2025-11-21
-**Actual Status:** ~93% Complete (Phases 0, 1, 2, 4 done; Phase 3 ~92%; compact memmodel runtime-verified in DOSBox with `%s`/strlen/strcpy/strcmp/memcpy/memcmp/memset)
-**Next Priority:** Large/huge models; latent Kl-CAddr arith sites in i8086/emit.c (`p + offsetof_constant`); tiny .COM stevie shrink still parked (see `[[minic-pointer-bloat]]`)
+**Actual Status:** ~96% Complete (Phases 0, 1, 2, 4 done; Phase 3 ~95%; tiny/medium/compact/large/huge all runtime-verified in DOSBox via 38/38 per-model probe gate; huge >64K data via `_HUGE_<sym>` segments)
+**Next Priority:** (1) small .EXE ABI mismatch (libstub ret→retf rewrite); (2) latent Kl-CAddr sites in i8086/emit.c (Kl Oand/Oor/Oxor/Ocopy + far-ptr inc/dec at minic.y:2189, 2234); (3) tiny .COM stevie shrink still parked (`[[minic-pointer-bloat]]`).  ✅ Minic signed `>>` fixed 2026-05-25 (aa).

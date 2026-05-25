@@ -1,7 +1,7 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-25 (z — Oshl/Oshr/Osar Kl AX/DX/CX save bracket + 8086 shift-imm fix; gate 38/38)
+**Last Updated:** 2026-05-25 (aa — minic.y `>>` now lowers to Osar for signed left operand; pinned by 5 new kl_shift_probe cases; gate 38/38)
 **Status:** ~96% Complete
 
 ---
