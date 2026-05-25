@@ -569,16 +569,33 @@ static void
 emit_push_long(Ref r, Fn *fn, FILE *f)
 {
 	int64_t val;
+	Con *pc;
 	if (rtype(r) == RSlot) {
 		fprintf(f, "\tpush word [bp%+ld]\n", (long)slot(r, fn) + 2);
 		fprintf(f, "\tpush word [bp%+ld]\n", (long)slot(r, fn));
 	} else if (rtype(r) == RCon) {
-		val = fn->con[r.val].bits.i;
+		pc = &fn->con[r.val];
 		/* 8086 has no `push imm16` — route through CX. */
-		fprintf(f, "\tmov cx, %d\n", (int)((val >> 16) & 0xFFFF));
-		fprintf(f, "\tpush cx\n");
-		fprintf(f, "\tmov cx, %d\n", (int)(val & 0xFFFF));
-		fprintf(f, "\tpush cx\n");
+		if (pc->type == CAddr) {
+			/* CAddr: segment lives in the relocation, not in bits.i.
+			 * Push `seg sym` (high) then `sym+addend` (low); NASM emits
+			 * BASE-SEGMENT and OFFSET fixups that omf_link resolves. */
+			fprintf(f, "\tmov cx, seg ");
+			fputs(T.assym, f);
+			fputs(str(pc->sym.id), f);
+			fputc('\n', f);
+			fprintf(f, "\tpush cx\n");
+			fprintf(f, "\tmov cx, ");
+			emitaddr(pc, f);
+			fputc('\n', f);
+			fprintf(f, "\tpush cx\n");
+		} else {
+			val = pc->bits.i;
+			fprintf(f, "\tmov cx, %d\n", (int)((val >> 16) & 0xFFFF));
+			fprintf(f, "\tpush cx\n");
+			fprintf(f, "\tmov cx, %d\n", (int)(val & 0xFFFF));
+			fprintf(f, "\tpush cx\n");
+		}
 	} else if (rtype(r) == RTmp) {
 		/* Temp's register holds the low half (rega doesn't pair Kl);
 		 * high half is zero-extended.  Push 0 (via CX) for hi, then
