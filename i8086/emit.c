@@ -2999,8 +2999,20 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * costs a push/pop pair).  Surfaced by huge-mode loops where
 		 * `i` lived in BX across iterations.  See
 		 * [[i8086-farptr-bx-clobber]].
+		 *
+		 * AX clobber: the load lands in AX/AL before any move to dst,
+		 * and the RCon path's load_farptr_con also uses AX to stage the
+		 * segment immediate.  rega has no visibility into this; two
+		 * back-to-back narrow loads whose results both feed the same
+		 * call would alias each other via AX.  Wrap with kl_save_axdx
+		 * (same bracket used by Oloadfl) so any rega-placed live tmp in
+		 * AX survives.  DX save is a wasted push/pop for the b/h/w
+		 * widths (body doesn't touch DX) but keeps the helper signature
+		 * uniform.  See [[i8086-compact-loadfb-aliases-ax]].
 		 */
 		r0 = i->arg[0];
+		{
+		AxDxSave s_loadfb = kl_save_axdx(i->to, f);
 		fprintf(f, "\tpush es\n");
 		fprintf(f, "\tpush bx\n");
 		/* Load far pointer components into ES:BX */
@@ -3024,6 +3036,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		else if (rtype(i->to) == RSlot)
 			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+		kl_restore_axdx(s_loadfb, f);
+		}
 		return;
 
 	case Oloadfh:
@@ -3034,8 +3048,12 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * result = word value
 		 *
 		 * Push/pop ES + BX around the access — see Oloadfb for rationale.
+		 * AX clobber save bracket too — same shape as Oloadfb.  See
+		 * [[i8086-compact-loadfb-aliases-ax]].
 		 */
 		r0 = i->arg[0];
+		{
+		AxDxSave s_loadfw = kl_save_axdx(i->to, f);
 		fprintf(f, "\tpush es\n");
 		fprintf(f, "\tpush bx\n");
 		/* Load far pointer components into ES:BX */
@@ -3058,6 +3076,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		else if (rtype(i->to) == RSlot)
 			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+		kl_restore_axdx(s_loadfw, f);
+		}
 		return;
 
 	case Oloadfl:
