@@ -84,6 +84,9 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/stdio_far_probe.c:minic/dos/tests/stdio_far_probe.golden.txt:compact"
 	"minic/dos/examples/stdio_far_probe.c:minic/dos/tests/stdio_far_probe.golden.txt:large"
 	"minic/dos/examples/stdio_far_probe.c:minic/dos/tests/stdio_far_probe.golden.txt:huge"
+	"minic/dos/examples/caddr_arith_probe.c:minic/dos/tests/caddr_arith_probe.golden.txt:compact"
+	"minic/dos/examples/caddr_arith_probe.c:minic/dos/tests/caddr_arith_probe.golden.txt:large"
+	"minic/dos/examples/caddr_arith_probe.c:minic/dos/tests/caddr_arith_probe.golden.txt:huge"
 )
 
 # --- Stevie size budget ----------------------------------------------------

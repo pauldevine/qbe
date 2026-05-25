@@ -1,0 +1,5 @@
+arr_i=103 (want 103)
+arr_plus=105 (want 105)
+str_i=69 (want 69)
+peek_arr=106 (want 106)
+peek_str=67 (want 67)

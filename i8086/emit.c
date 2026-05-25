@@ -411,6 +411,34 @@ load32_axdx_con(Con *pc, FILE *f)
 	}
 }
 
+/* Load a far-pointer RCon into ES:BX (offset → BX, segment → ES via AX).
+ * For CAddr: emits `sym+addend` for BX and `seg sym` for AX→ES so NASM
+ * generates the relocations omf_link uses to fix up the MZ image.  For
+ * CBits: splits low/high 16 as offset/segment.  Used by the Oloadf*
+ * and Ostoref* handlers; an earlier inline `bits.i`-only path silently
+ * dropped the segment word for CAddr operands, which arose after QBE
+ * constant-folded e.g. `&arr[const_i]` into a single CAddr. */
+static void
+load_farptr_con(Con *pc, FILE *f)
+{
+	int64_t val;
+	if (pc->type == CAddr) {
+		fprintf(f, "\tmov bx, ");
+		emitaddr(pc, f);
+		fputc('\n', f);
+		fprintf(f, "\tmov ax, seg ");
+		fputs(T.assym, f);
+		fputs(str(pc->sym.id), f);
+		fputc('\n', f);
+		fprintf(f, "\tmov es, ax\n");
+	} else {
+		val = pc->bits.i;
+		fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));
+		fprintf(f, "\tmov ax, %d\n", (int)((val >> 16) & 0xFFFF));
+		fprintf(f, "\tmov es, ax\n");
+	}
+}
+
 /* Load a 32-bit operand into DX:AX.  The original 32-bit handlers only
  * handled RSlot/RCon; this also handles RTmp (treats the temp's register
  * as the low word and zero-extends DX, matching the convention in the
@@ -983,9 +1011,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
 				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
 			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
+				load32_axdx_con(&fn->con[r0.val], f);
 			} else if (rtype(r0) == RTmp) {
 				/* Register - assume it's actually a slot reference */
 				{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
@@ -997,9 +1023,23 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tadd ax, word [bp%+ld]\n", (long)slot(r1, fn));
 				fprintf(f, "\tadc dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
 			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tadd ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tadc dx, %d\n", (int)((val >> 16) & 0xFFFF));
+				Con *pc = &fn->con[r1.val];
+				if (pc->type == CAddr) {
+					/* `add ax, sym+addend` carries an OFFSET fixup;
+					 * `adc dx, seg sym` carries a BASE-SEGMENT fixup
+					 * — both resolved by omf_link at MZ assembly. */
+					fprintf(f, "\tadd ax, ");
+					emitaddr(pc, f);
+					fputc('\n', f);
+					fprintf(f, "\tadc dx, seg ");
+					fputs(T.assym, f);
+					fputs(str(pc->sym.id), f);
+					fputc('\n', f);
+				} else {
+					int64_t val = pc->bits.i;
+					fprintf(f, "\tadd ax, %d\n", (int)(val & 0xFFFF));
+					fprintf(f, "\tadc dx, %d\n", (int)((val >> 16) & 0xFFFF));
+				}
 			} else if (rtype(r1) == RTmp) {
 				const char *r1n = r1s.scratch_reg ? r1s.scratch_reg : rname[r1.val];
 				fprintf(f, "\tadd ax, %s\n", r1n);
@@ -1044,9 +1084,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
 				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
 			} else if (rtype(r0) == RCon) {
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tmov dx, %d\n", (int)((val >> 16) & 0xFFFF));
+				load32_axdx_con(&fn->con[r0.val], f);
 			} else if (rtype(r0) == RTmp) {
 				{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
 				fprintf(f, "\txor dx, dx\n");
@@ -1057,9 +1095,20 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tsub ax, word [bp%+ld]\n", (long)slot(r1, fn));
 				fprintf(f, "\tsbb dx, word [bp%+ld]\n", (long)slot(r1, fn) + 2);
 			} else if (rtype(r1) == RCon) {
-				int64_t val = fn->con[r1.val].bits.i;
-				fprintf(f, "\tsub ax, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\tsbb dx, %d\n", (int)((val >> 16) & 0xFFFF));
+				Con *pc = &fn->con[r1.val];
+				if (pc->type == CAddr) {
+					fprintf(f, "\tsub ax, ");
+					emitaddr(pc, f);
+					fputc('\n', f);
+					fprintf(f, "\tsbb dx, seg ");
+					fputs(T.assym, f);
+					fputs(str(pc->sym.id), f);
+					fputc('\n', f);
+				} else {
+					int64_t val = pc->bits.i;
+					fprintf(f, "\tsub ax, %d\n", (int)(val & 0xFFFF));
+					fprintf(f, "\tsbb dx, %d\n", (int)((val >> 16) & 0xFFFF));
+				}
 			} else if (rtype(r1) == RTmp) {
 				const char *r1n = r1s.scratch_reg ? r1s.scratch_reg : rname[r1.val];
 				fprintf(f, "\tsub ax, %s\n", r1n);
@@ -2650,10 +2699,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r0, fn));      /* offset */
 			fprintf(f, "\tmov es, word [bp%+ld]\n", (long)slot(r0, fn) + 2);  /* segment */
 		} else if (rtype(r0) == RCon) {
-			int64_t val = fn->con[r0.val].bits.i;
-			fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));           /* offset */
-			fprintf(f, "\tmov ax, %d\n", (int)((val >> 16) & 0xFFFF));   /* segment */
-			fprintf(f, "\tmov es, ax\n");
+			load_farptr_con(&fn->con[r0.val], f);
 		} else if (rtype(r0) == RTmp) {
 			/* Far pointer in DX:AX (segment:offset) */
 			fprintf(f, "\tmov bx, ax\n");  /* offset in AX -> BX */
@@ -2686,10 +2732,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r0, fn));      /* offset */
 			fprintf(f, "\tmov es, word [bp%+ld]\n", (long)slot(r0, fn) + 2);  /* segment */
 		} else if (rtype(r0) == RCon) {
-			int64_t val = fn->con[r0.val].bits.i;
-			fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));           /* offset */
-			fprintf(f, "\tmov ax, %d\n", (int)((val >> 16) & 0xFFFF));   /* segment */
-			fprintf(f, "\tmov es, ax\n");
+			load_farptr_con(&fn->con[r0.val], f);
 		} else if (rtype(r0) == RTmp) {
 			/* Far pointer in DX:AX (segment:offset) */
 			fprintf(f, "\tmov bx, ax\n");  /* offset in AX -> BX */
@@ -2728,10 +2771,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r1, fn));      /* offset */
 			fprintf(f, "\tmov es, word [bp%+ld]\n", (long)slot(r1, fn) + 2);  /* segment */
 		} else if (rtype(r1) == RCon) {
-			int64_t val = fn->con[r1.val].bits.i;
-			fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));
-			fprintf(f, "\tmov ax, %d\n", (int)((val >> 16) & 0xFFFF));
-			fprintf(f, "\tmov es, ax\n");
+			load_farptr_con(&fn->con[r1.val], f);
 		} else if (rtype(r1) == RTmp) {
 			/* Far pointer in DX:AX (segment:offset) */
 			fprintf(f, "\tmov bx, ax\n");  /* offset in AX -> BX */
@@ -2766,10 +2806,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r1, fn));      /* offset */
 			fprintf(f, "\tmov es, word [bp%+ld]\n", (long)slot(r1, fn) + 2);  /* segment */
 		} else if (rtype(r1) == RCon) {
-			int64_t val = fn->con[r1.val].bits.i;
-			fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));
-			fprintf(f, "\tmov ax, %d\n", (int)((val >> 16) & 0xFFFF));
-			fprintf(f, "\tmov es, ax\n");
+			load_farptr_con(&fn->con[r1.val], f);
 		} else if (rtype(r1) == RTmp) {
 			/* Far pointer in DX:AX (segment:offset) */
 			fprintf(f, "\tmov bx, ax\n");  /* offset in AX -> BX */
