@@ -41,7 +41,7 @@ The ROADMAP.md file contains:
 
 **In Progress ⚠️:**
 - Memory Models — runtime gate covers tiny/medium/compact/large/huge (34/34 ok in `tools/test-dos.sh`).  Huge Phase C landed 2026-05-24 (r): per-symbol `_HUGE_<sym>` segments let huge mode hold arrays > 64K.  Far DOS-API + puts landed 2026-05-24 (s).  Far stdio FILE* landed 2026-05-24 (t/u): full `_far_f{open,close,puts,putc,gets,read,write,flush}` in FAR_STDIO_EXE.  Session (v): `_malloc` now returns DX=SS so mediumprobe.c passes verbatim under large/huge.  Session (w): mathprobe (Kl mul/div/rem + sext + `%ld`/`%lu`/`%lx`) and dosapi_probe (segread + intdos + bdos) also pass verbatim under large/huge — no source or backend changes.  Session (x): stdio_far_probe (full 22-assertion far-stdio surface) now also passes under compact, closing the last carve-out in the far-stdio coverage matrix.
-- Tiny memory model (.COM) — stevie.com still over 64 KB ([[minic-pointer-bloat]])
+- Tiny memory model (.COM) — pipeline gated by com_smoke/long_math/fileio/tinyprobe.  Stevie shrink to .COM size is **PARKED** ([[minic-pointer-bloat]]): stevie ships as .EXE; the medium model is the design target.
 - Small .EXE — architecturally broken: libstub_to_exe.py rewrites every `ret` to `retf`, mismatches small's near-call ABI → DOSBox hangs.  Needs near+far libstub variants or model-conditional ret rewrite.  See [[per-model-gate]].
 - Latent Kl-CAddr arith — **CLOSED 2026-05-25 (aa/bb/cc/dd/ee)**: 141f2e8 fixed Oloadf*/Ostoref*/Oadd/Osub; (bb) fixed Oand/Oor/Oxor; (cc) fixed cmp32_high/cmp32_low (all 10 Kl Oc*l handlers); (dd) fixed emit_push_long (Odiv/Orem Kl signed + unsigned); (ee) Omul Kl + CAddr now die()s defensively — pointer multiplication is C-illegal, unreachable from realistic frontend output but bug-loud if ever hit.  Ocopy was already CAddr-safe.  Matrix closed.
 - Kl shift AX clobber ([[i8086-kl-shift-clobbers-ax]]) — Oshl/Oshr/Osar Kl handlers clobber AX/DX without telling rega; latent.  Fix mirror of [[i8086-kl-add-sub-mul-r1-alias]].
@@ -147,16 +147,26 @@ The ROADMAP.md file contains:
 
 ## Next Priorities
 
-1. **Large / huge memory models** — only tiny / small / medium / compact implemented
+No specific high-priority follow-on.  The Kl-CAddr matrix is fully
+sealed (sessions aa/bb/cc/dd/ee); large/huge memory models are
+runtime-gated (47/47); stevie ships as .EXE.  Remaining tracks are
+independent and lower-priority — pick whichever a real consumer needs.
 
-2. **Latent Kl-CAddr arith** — ~10 sites in `i8086/emit.c` (lines 986/1000/1047/1060/1105/1115/1150/1173/1196/...) and far-ptr inc/dec in `minic.y:2189, 2234` still use `bits.i` directly without a CAddr check.  Not exercised by cprobe/cstrprobe but a latent bug for `p + offsetof_constant` style code.
+1. **Phase B' storel-via-Kl-slot gap** — backend writes value→[bp+slot]
+   directly even when slot holds a pointer VALUE.  Safe for alloca slots;
+   not exercised by any in-tree probe.  See `[[huge-phase-b-storel-gap]]`.
 
-3. **Tiny memory model (.COM) stevie shrink** — orthogonal to compact work
-   - Path A (near-pointer narrowing) is partially landed (commit 5125e70, 98K→81K)
-   - Need further shrink: dead-code elimination, library partitioning, or pointer ABI tweaks
-   - See `[[minic-pointer-bloat]]` and NEXT_SESSION_PROMPT.md
+2. **Small .EXE architectural break** — `tools/libstub_to_exe.py`
+   unconditionally rewrites `ret`→`retf`, mismatching small's near-call
+   ABI → DOSBox hangs.  Needs near+far libstub variants or
+   model-conditional ret rewriting.  See `[[per-model-gate]]`.
 
-4. **211-commit upstream-qbe rebase** — pure plumbing; deferred until i8086 backend stabilises
+3. **211-commit upstream-qbe rebase** — pure plumbing; deferred until
+   i8086 backend stabilises.
+
+Parked: tiny .COM stevie shrink.  Stevie is a medium-model program by
+design and ships as .EXE; further shrink isn't worth chasing.  See
+`[[minic-pointer-bloat]]` for history.
 
 ---
 
