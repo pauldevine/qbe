@@ -90,6 +90,9 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/caddr_logop_probe.c:minic/dos/tests/caddr_logop_probe.golden.txt:compact"
 	"minic/dos/examples/caddr_logop_probe.c:minic/dos/tests/caddr_logop_probe.golden.txt:large"
 	"minic/dos/examples/caddr_logop_probe.c:minic/dos/tests/caddr_logop_probe.golden.txt:huge"
+	"minic/dos/examples/caddr_cmp_probe.c:minic/dos/tests/caddr_cmp_probe.golden.txt:compact"
+	"minic/dos/examples/caddr_cmp_probe.c:minic/dos/tests/caddr_cmp_probe.golden.txt:large"
+	"minic/dos/examples/caddr_cmp_probe.c:minic/dos/tests/caddr_cmp_probe.golden.txt:huge"
 	"minic/dos/examples/kl_shift_probe.c:minic/dos/tests/kl_shift_probe.golden.txt:compact"
 )
 

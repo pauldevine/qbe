@@ -506,16 +506,32 @@ load32_dxax(Ref r, Fn *fn, FILE *f)
  *   cmp dx, <high(r)>
  *   cmp ax, <low(r)>
  * The caller decides what jcc to insert between them.  For RTmp, treats
- * the high word as 0 (matching load32_dxax's zero-extension). */
+ * the high word as 0 (matching load32_dxax's zero-extension).
+ *
+ * CAddr handling: NASM accepts `seg sym` and `sym+addend` as relocatable
+ * immediates for cmp; omf_link supplies both fixups.  Without this, an
+ * earlier `bits.i`-only path silently dropped the segment word — `if
+ * (kl_var == (long)&g)` would compare against `addend | 0` and either
+ * always-true or always-false depending on whether DGROUP happened to be
+ * zero. */
 static void
 cmp32_high(Ref r, Fn *fn, FILE *f)
 {
+	Con *pc;
 	int64_t val;
 	if (rtype(r) == RSlot)
 		fprintf(f, "\tcmp dx, word [bp%+ld]\n", (long)slot(r, fn) + 2);
 	else if (rtype(r) == RCon) {
-		val = fn->con[r.val].bits.i;
-		fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
+		pc = &fn->con[r.val];
+		if (pc->type == CAddr) {
+			fprintf(f, "\tcmp dx, seg ");
+			fputs(T.assym, f);
+			fputs(str(pc->sym.id), f);
+			fputc('\n', f);
+		} else {
+			val = pc->bits.i;
+			fprintf(f, "\tcmp dx, %d\n", (int)((val >> 16) & 0xFFFF));
+		}
 	} else if (rtype(r) == RTmp)
 		fprintf(f, "\tcmp dx, 0\n");
 }
@@ -523,12 +539,20 @@ cmp32_high(Ref r, Fn *fn, FILE *f)
 static void
 cmp32_low(Ref r, Fn *fn, FILE *f)
 {
+	Con *pc;
 	int64_t val;
 	if (rtype(r) == RSlot)
 		fprintf(f, "\tcmp ax, word [bp%+ld]\n", (long)slot(r, fn));
 	else if (rtype(r) == RCon) {
-		val = fn->con[r.val].bits.i;
-		fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
+		pc = &fn->con[r.val];
+		if (pc->type == CAddr) {
+			fprintf(f, "\tcmp ax, ");
+			emitaddr(pc, f);
+			fputc('\n', f);
+		} else {
+			val = pc->bits.i;
+			fprintf(f, "\tcmp ax, %d\n", (int)(val & 0xFFFF));
+		}
 	} else if (rtype(r) == RTmp)
 		fprintf(f, "\tcmp ax, %s\n", rname[r.val]);
 }
