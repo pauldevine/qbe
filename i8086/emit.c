@@ -1233,10 +1233,19 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			ArgStage r1s = kl_stage_arg(r1, r0, i->to, f);
 			AxDxSave s_mul = kl_save_axdx(i->to, f);
 
-			/* Load src0 low word to AX */
+			/* Load src0 low word to AX.  CAddr is rejected: multiplying
+			 * a pointer is C-illegal, so this path is unreachable from
+			 * realistic frontend output.  bits.i for a CAddr is just the
+			 * addend (segment lives in the relocation), so silently
+			 * accepting it would drop the seg word and produce wrong
+			 * results — die() makes the bug loud instead.  Same family
+			 * of CAddr-portability fixes as Oadd/Osub/Oand/Oor/Oxor/cmp/
+			 * push: see [[caddr-arith-portable]] and siblings. */
 			if (rtype(r0) == RSlot) {
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
 			} else if (rtype(r0) == RCon) {
+				if (fn->con[r0.val].type == CAddr)
+					die("i8086: Omul Kl with CAddr arg0 — pointer multiplication is not a valid C operation");
 				int64_t val = fn->con[r0.val].bits.i;
 				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
 			} else if (rtype(r0) == RTmp) {
@@ -1247,6 +1256,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			if (rtype(r1) == RSlot) {
 				fprintf(f, "\timul word [bp%+ld]\n", (long)slot(r1, fn));
 			} else if (rtype(r1) == RCon) {
+				if (fn->con[r1.val].type == CAddr)
+					die("i8086: Omul Kl with CAddr arg1 — pointer multiplication is not a valid C operation");
 				int64_t val = fn->con[r1.val].bits.i;
 				fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));
 				fprintf(f, "\timul bx\n");
