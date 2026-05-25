@@ -1,0 +1,11 @@
+stk_direct ok
+stk_opaque ok
+stk_opaque_read ok
+stk_eq_heap ok
+heap_opaque ok
+stk[0]=5
+stk[31]=346
+stk[63]=698
+heap[0]=1
+heap[31]=404
+heap[63]=820

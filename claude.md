@@ -1,7 +1,7 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-25 (ff — Phase B' lands; Ostorel/Oload Kl with RSlot pointer arg now derefs through ES:BX for spilled-Kl-ptr slots, while ABI direct-slot writes (call args / incoming params) preserved via fn->arg_slot_top threshold; closes [[huge-phase-b-storel-gap]]; gate 50/50)
+**Last Updated:** 2026-05-25 (gg — Phase B Var-operand carveout in `huge_ptr_binop` REMOVED; stack pointer arith under huge now normalises through `_qbe_huge_add` identically to global arith. Lifted carveout surfaced + closed two latent BX-clobber bugs in i8086/emit.c — Omul Kl r1=RCon and Ostoref/Oloadf{b,h,w}; gate 53/53)
 **Status:** ~97% Complete
 
 ---
@@ -40,12 +40,13 @@ The ROADMAP.md file contains:
 - **Examples** — 16 legacy + 3 modern `<dos.h>` demos (mouse_demo, vga_pixels, kbtest)
 
 **In Progress ⚠️:**
-- Memory Models — runtime gate covers tiny/medium/compact/large/huge (34/34 ok in `tools/test-dos.sh`).  Huge Phase C landed 2026-05-24 (r): per-symbol `_HUGE_<sym>` segments let huge mode hold arrays > 64K.  Far DOS-API + puts landed 2026-05-24 (s).  Far stdio FILE* landed 2026-05-24 (t/u): full `_far_f{open,close,puts,putc,gets,read,write,flush}` in FAR_STDIO_EXE.  Session (v): `_malloc` now returns DX=SS so mediumprobe.c passes verbatim under large/huge.  Session (w): mathprobe (Kl mul/div/rem + sext + `%ld`/`%lu`/`%lx`) and dosapi_probe (segread + intdos + bdos) also pass verbatim under large/huge — no source or backend changes.  Session (x): stdio_far_probe (full 22-assertion far-stdio surface) now also passes under compact, closing the last carve-out in the far-stdio coverage matrix.
+- Memory Models — runtime gate covers tiny/medium/compact/large/huge (**53/53 ok** in `tools/test-dos.sh`).  Huge Phase C landed 2026-05-24 (r): per-symbol `_HUGE_<sym>` segments let huge mode hold arrays > 64K.  Far DOS-API + puts landed 2026-05-24 (s).  Far stdio FILE* landed 2026-05-24 (t/u): full `_far_f{open,close,puts,putc,gets,read,write,flush}` in FAR_STDIO_EXE.  Session (v): `_malloc` now returns DX=SS so mediumprobe.c passes verbatim under large/huge.  Session (w): mathprobe (Kl mul/div/rem + sext + `%ld`/`%lu`/`%lx`) and dosapi_probe (segread + intdos + bdos) also pass verbatim under large/huge — no source or backend changes.  Session (x): stdio_far_probe (full 22-assertion far-stdio surface) now also passes under compact, closing the last carve-out in the far-stdio coverage matrix.  Session (gg): Phase B Var-operand carveout removed; stack ptr arith under huge now normalises like global arith.
 - Tiny memory model (.COM) — pipeline gated by com_smoke/long_math/fileio/tinyprobe.  Stevie shrink to .COM size is **PARKED** ([[minic-pointer-bloat]]): stevie ships as .EXE; the medium model is the design target.
 - Small .EXE — architecturally broken: libstub_to_exe.py rewrites every `ret` to `retf`, mismatches small's near-call ABI → DOSBox hangs.  Needs near+far libstub variants or model-conditional ret rewrite.  See [[per-model-gate]].
 - Latent Kl-CAddr arith — **CLOSED 2026-05-25 (aa/bb/cc/dd/ee)**: 141f2e8 fixed Oloadf*/Ostoref*/Oadd/Osub; (bb) fixed Oand/Oor/Oxor; (cc) fixed cmp32_high/cmp32_low (all 10 Kl Oc*l handlers); (dd) fixed emit_push_long (Odiv/Orem Kl signed + unsigned); (ee) Omul Kl + CAddr now die()s defensively — pointer multiplication is C-illegal, unreachable from realistic frontend output but bug-loud if ever hit.  Ocopy was already CAddr-safe.  Matrix closed.
 - Kl shift AX clobber ([[i8086-kl-shift-clobbers-ax]]) — Oshl/Oshr/Osar Kl handlers clobber AX/DX without telling rega; latent.  Fix mirror of [[i8086-kl-add-sub-mul-r1-alias]].
 - Phase B' storel-via-Kl-slot gap ([[huge-phase-b-storel-gap]]) — **CLOSED 2026-05-25 (ff)**: `fn->arg_slot_top` threshold lets emit distinguish ABI direct-slot writes (call args / params) from spilled-Kl-ptr slots; latter now derefs through ES:BX (far-data) or [BX] (near-data).  Probe `phase_bprime_probe.c` pins all 3 far-data models.
+- Phase B Var-operand carveout ([[huge-stack-arith]]) — **REMOVED 2026-05-25 (gg)**: stack pointer arith under huge now routes through `_qbe_huge_add` identically to global arith.  Pinned by `huge_stack_arith_probe.c` (compact/large/huge).  Lifted carveout surfaced two latent BX-clobber bugs in i8086/emit.c ([[i8086-kl-mul-bx-clobber]] Omul Kl r1=RCon, [[i8086-farptr-bx-clobber]] Ostoref/Oloadf{b,h,w}) — both fixed in the same session.  Gate **53/53**.
 
 ---
 
@@ -61,6 +62,13 @@ The ROADMAP.md file contains:
 ---
 
 ## Recent Major Accomplishments
+
+### Phase B Var-operand carveout removal + BX-clobber fixes (2026-05-25, session gg)
+- ✅ `minic/minic.y::huge_ptr_binop` — the `if (lhs.t == Var || rhs.t == Var) return 0;` carveout (plus the surrounding paragraph of comments referencing [[huge-phase-b-storel-gap]]) is removed.  Stack pointer arith under `--model=huge` now routes through `_qbe_huge_add` / `_qbe_huge_sub` identically to global pointer arith.
+- ✅ `i8086/emit.c::Omul Kl` r1=RCon branch — wrapped `mov bx, val; imul bx` with `push bx ... pop bx` to mirror the Kw `Omul` const path at line 3488.  Closes [[i8086-kl-mul-bx-clobber]] surfaced by the new probe's `*(stk+i) = i*7+3` stride mul (`mul 2, %t_i` Kl, with `i` live in BX).
+- ✅ `i8086/emit.c::Ostoref{b,h,w}` and `Oloadf{b,h,w}` — wrapped each handler body with `push bx ... pop bx`, parallel to the existing `push es ... pop es` from [[i8086-farptr-es-clobber]].  Closes [[i8086-farptr-bx-clobber]].
+- ✅ `minic/dos/examples/huge_stack_arith_probe.c` — 5 `ok` reductions (stk_direct / stk_opaque / stk_opaque_read / stk_eq_heap / heap_opaque) + 6 boundary-sample prints + golden.  3 new RUNTIME_TESTS entries (`...:compact`, `:large`, `:huge`).  Gate **53/53 ok**.  SSA `make check` green.
+- Notes: probe element type is `int` not `long` because `minic.y::storefar()` only handles b/h/w widths — `long` through a far pointer truncates ([[storefar-lacks-storefl]]).  Orthogonal gap; doesn't affect this track.
 
 ### Phase B' — storel/loadl Kl with spilled-ptr slot (2026-05-25, session ff)
 - ✅ `all.h` — added `int arg_slot_top` to `struct Fn` (call-arg slot count, set by i8086 ABI).
@@ -154,21 +162,27 @@ The ROADMAP.md file contains:
 
 ## Next Priorities
 
-No specific high-priority follow-on.  The Kl-CAddr matrix is fully
-sealed (sessions aa/bb/cc/dd/ee); large/huge memory models are
-runtime-gated (47/47); stevie ships as .EXE.  Remaining tracks are
-independent and lower-priority — pick whichever a real consumer needs.
+No specific high-priority follow-on.  Kl-CAddr matrix sealed
+(aa-ee); Phase B' (ff) and Phase B carveout lift (gg) make huge-mode
+ptr arith first-class on global + stack operands; gate **53/53**;
+stevie ships as .EXE.  Remaining tracks are independent and
+lower-priority — pick whichever a real consumer needs.
 
-1. **Phase B' storel-via-Kl-slot gap** — backend writes value→[bp+slot]
-   directly even when slot holds a pointer VALUE.  Safe for alloca slots;
-   not exercised by any in-tree probe.  See `[[huge-phase-b-storel-gap]]`.
+1. **`storefar` lacks 32-bit width** — `minic.y::storefar()`/`loadfar()`
+   handle b/h/w only; `long` through a far pointer truncates.  Not
+   exercised by any in-tree consumer.  See `[[storefar-lacks-storefl]]`.
 
-2. **Small .EXE architectural break** — `tools/libstub_to_exe.py`
+2. **Phase B'' — Ostorew/Ostores/Ostoreb same-shape gap** — symmetric
+   to Phase B' but for narrower stores.  Latent under both far-data
+   (storef* path used instead) and near-data (rega rarely spills Kw
+   ptrs).  Defer until a real consumer surfaces.
+
+3. **Small .EXE architectural break** — `tools/libstub_to_exe.py`
    unconditionally rewrites `ret`→`retf`, mismatching small's near-call
    ABI → DOSBox hangs.  Needs near+far libstub variants or
    model-conditional ret rewriting.  See `[[per-model-gate]]`.
 
-3. **211-commit upstream-qbe rebase** — pure plumbing; deferred until
+4. **211-commit upstream-qbe rebase** — pure plumbing; deferred until
    i8086 backend stabilises.
 
 Parked: tiny .COM stevie shrink.  Stevie is a medium-model program by

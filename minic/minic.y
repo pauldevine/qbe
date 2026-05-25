@@ -1410,18 +1410,15 @@ huge_ptr_binop(int op, Symb dst, Symb lhs, Symb rhs)
 	 * subject to segment normalisation.  Exclude direct fn-ptr type. */
 	if (KIND(DREF(dst.ctyp)) == FUN) return 0;
 	if (ISFLOAT(lhs.ctyp) || ISFLOAT(rhs.ctyp)) return 0;
-	/* When either operand is a direct local-variable Symb (Symb.t == Var),
-	 * the pointer is a stack address that the i8086 backend stores in
-	 * the variable's alloca SLOT — and Ostorel through a slot writes
-	 * value→[bp+slot] directly, NOT through the slot's contents.  A
-	 * normalised stack pointer would have a different (seg, off) but
-	 * the same linear address, so the direct-slot store would land in
-	 * the wrong place.  Keep stack arithmetic on the existing flat
-	 * `add ax, lo; adc dx, hi` path until backend storel/loadl learn
-	 * to honour seg on a non-alloca Kl pointer (see
-	 * [[huge-phase-b-storel-gap]]).  Globals (Glo/Ext) and loaded
-	 * temps (Tmp) still route through the helper. */
-	if (lhs.t == Var || rhs.t == Var) return 0;
+	/* Stack-pointer operands (Symb.t == Var) used to be gated out here
+	 * because the i8086 backend's Ostorel handler wrote value→[bp+slot]
+	 * directly, regardless of whether the slot held an alloca-slot
+	 * destination or a spilled pointer VALUE.  Phase B' (i8086/emit.c
+	 * Ostorel/Oload Kl via fn->arg_slot_top) closed that gap: spilled
+	 * Kl-ptr slots now deref through ES:BX, so a normalised stack
+	 * pointer returned by _qbe_huge_add behaves the same as a
+	 * normalised global pointer.  See [[phase-bprime]] /
+	 * [[huge-phase-b-storel-gap]]. */
 	/* Under MHuge, default data pointers are 32-bit (l) regardless of
 	 * the FAR flag's presence — prefix ++/-- strips FAR before calling
 	 * prom() ([[minic.y:2353]]), so we can't rely on ISFAR here. */

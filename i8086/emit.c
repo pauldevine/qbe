@@ -1259,8 +1259,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				if (fn->con[r1.val].type == CAddr)
 					die("i8086: Omul Kl with CAddr arg1 — pointer multiplication is not a valid C operation");
 				int64_t val = fn->con[r1.val].bits.i;
+				/* Hoist the constant through BX with save/restore: BX may
+				 * hold a live SSA temp that rega doesn't expect us to
+				 * clobber.  Mirrors the Kw Omul const path (emit.c:3488)
+				 * and the same pattern used by Oadd/Osub Kl. */
+				fprintf(f, "\tpush bx\n");
 				fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));
 				fprintf(f, "\timul bx\n");
+				fprintf(f, "\tpop bx\n");
 			} else if (rtype(r1) == RTmp) {
 				const char *r1n = r1s.scratch_reg ? r1s.scratch_reg : rname[r1.val];
 				fprintf(f, "\timul %s\n", r1n);
@@ -2984,9 +2990,19 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * uses stosb against ES:DI; INT 21h handle writes don't, but ES
 		 * stays caller-visible).  Push/pop ES around the far access so
 		 * the caller's invariant survives.
+		 *
+		 * BX clobber: this handler uses BX as the address scratch; rega
+		 * does not know about that, so a live SSA temp rega placed in BX
+		 * would be silently overwritten.  Save/restore BX around the
+		 * access (the final `mov dst, ax` happens after pop, so a dst=BX
+		 * load still ends up with the loaded word in BX, the save just
+		 * costs a push/pop pair).  Surfaced by huge-mode loops where
+		 * `i` lived in BX across iterations.  See
+		 * [[i8086-farptr-bx-clobber]].
 		 */
 		r0 = i->arg[0];
 		fprintf(f, "\tpush es\n");
+		fprintf(f, "\tpush bx\n");
 		/* Load far pointer components into ES:BX */
 		if (rtype(r0) == RSlot) {
 			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r0, fn));      /* offset */
@@ -3001,6 +3017,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		/* Load byte through ES:BX */
 		fprintf(f, "\tmov al, byte ptr es:[bx]\n");
 		fprintf(f, "\txor ah, ah\n");  /* zero-extend to word */
+		fprintf(f, "\tpop bx\n");
 		fprintf(f, "\tpop es\n");
 		/* Store result */
 		if (rtype(i->to) == RTmp)
@@ -3016,10 +3033,11 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * arg[0] = far pointer (32-bit: segment:offset)
 		 * result = word value
 		 *
-		 * Push/pop ES around the access — see Oloadfb for rationale.
+		 * Push/pop ES + BX around the access — see Oloadfb for rationale.
 		 */
 		r0 = i->arg[0];
 		fprintf(f, "\tpush es\n");
+		fprintf(f, "\tpush bx\n");
 		/* Load far pointer components into ES:BX */
 		if (rtype(r0) == RSlot) {
 			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r0, fn));      /* offset */
@@ -3033,6 +3051,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		/* Load word through ES:BX */
 		fprintf(f, "\tmov ax, word ptr es:[bx]\n");
+		fprintf(f, "\tpop bx\n");
 		fprintf(f, "\tpop es\n");
 		/* Store result */
 		if (rtype(i->to) == RTmp)
@@ -3047,11 +3066,12 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * arg[0] = value to store (word, low byte used)
 		 * arg[1] = far pointer (32-bit: segment:offset)
 		 *
-		 * Push/pop ES around the access — see Oloadfb for rationale.
+		 * Push/pop ES + BX around the access — see Oloadfb for rationale.
 		 */
 		r0 = i->arg[0];  /* value */
 		r1 = i->arg[1];  /* far pointer */
 		fprintf(f, "\tpush es\n");
+		fprintf(f, "\tpush bx\n");
 		/* Load value to store into CL (to preserve AX for far pointer) */
 		if (rtype(r0) == RTmp)
 			fprintf(f, "\tmov cl, %s\n", rname8[r0.val]);
@@ -3072,6 +3092,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		/* Store byte through ES:BX */
 		fprintf(f, "\tmov byte ptr es:[bx], cl\n");
+		fprintf(f, "\tpop bx\n");
 		fprintf(f, "\tpop es\n");
 		return;
 
@@ -3082,11 +3103,12 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * arg[0] = value to store (word)
 		 * arg[1] = far pointer (32-bit: segment:offset)
 		 *
-		 * Push/pop ES around the access — see Oloadfb for rationale.
+		 * Push/pop ES + BX around the access — see Oloadfb for rationale.
 		 */
 		r0 = i->arg[0];  /* value */
 		r1 = i->arg[1];  /* far pointer */
 		fprintf(f, "\tpush es\n");
+		fprintf(f, "\tpush bx\n");
 		/* Load value to store into CX (preserve AX for segment load) */
 		if (rtype(r0) == RTmp)
 			fprintf(f, "\tmov cx, %s\n", rname[r0.val]);
@@ -3107,6 +3129,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		/* Store word through ES:BX */
 		fprintf(f, "\tmov word ptr es:[bx], cx\n");
+		fprintf(f, "\tpop bx\n");
 		fprintf(f, "\tpop es\n");
 		return;
 
