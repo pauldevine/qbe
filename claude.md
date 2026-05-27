@@ -1,8 +1,8 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-27 (ll — track (l') stevie under large/huge investigated. Original `(kk) close` claim was incorrect: stevie compact was never runtime-verified with a file actually present in the DOSBox mount (the "loads, edits, saves, quits" verification was done with `HELLO.TXT` missing from the mount, which exercises only the `[New File]` path and incidentally renders status-line garbage that hid the underlying breakage). With a file present, compact/large fail to render file content; huge hangs DOSBox. Investigation surfaced and fixed **5 real QBE/minic bugs** — see [[stevie-compact-real-bugs]] for the full list. Gate stays 59/59 across all fixes; medium baseline byte-identical for fixes 1–4, shifts +16B per fix 5. **One QBE rega/phi bug remains** preventing stevie compact/large from rendering: nextra lives in a stack slot, gets re-coalesced through phi-slot chains on loop back-edges, propagates wrong values across iters. See [[qbe-rega-phi-slot-leak]] and NEXT_SESSION_PROMPT.md for repro + investigation path.)
-**Status:** ~97% Complete (medium fully working; compact/large blocked on one rega bug; huge unevaluated until compact closes)
+**Last Updated:** 2026-05-27 (nn — track (mm) fixed Ostorefb/h/w CX-clobber that broke stevie compact/large rendering; track (nn) fixed `_far_fprintf` arg layout: it treated FILE* as 2B instead of 4B under far-data, so fmt + varargs were shifted by 1 word.  Stevie's `:w` consequently wrote code-segment bytes to disk (we observed function-prologue patterns in the saved file).  Both fixes verified at runtime: stevie compact/large now render AND save correctly.  Huge model still hangs DOSBox after screen clear — separate symptom, open track (oo).  Probes: storefb_cx_probe.c (mm) + fprintf_far_probe.c (nn), 3 entries each × compact/large/huge.  Gate now **65/65**.  See [[i8086-storefb-cx-clobber]] + [[far-fprintf-off-by-2]].)
+**Status:** ~98% Complete (medium + compact + large fully runtime-clean for render AND save; huge still hangs at boot in DOSBox — open track (oo))
 
 ---
 

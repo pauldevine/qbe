@@ -1,0 +1,4 @@
+plain=hello
+mixed=42 world
+trio=alpha beta gamma
+done

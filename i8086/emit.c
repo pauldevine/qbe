@@ -3136,11 +3136,17 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * arg[1] = far pointer (32-bit: segment:offset)
 		 *
 		 * Push/pop ES + BX around the access — see Oloadfb for rationale.
+		 * CX is also used as the byte-staging scratch (mov cl, ...); save
+		 * it too or any live SSA temp rega placed in CX is silently
+		 * clobbered.  Surfaced by stevie's filetonext: nextra.35 lived
+		 * in CX across the `*screenp = c` storefb, every loop iteration
+		 * corrupted it via the `mov cl, bl` low-byte write.
 		 */
 		r0 = i->arg[0];  /* value */
 		r1 = i->arg[1];  /* far pointer */
 		fprintf(f, "\tpush es\n");
 		fprintf(f, "\tpush bx\n");
+		fprintf(f, "\tpush cx\n");
 		/* Load value to store into CL (to preserve AX for far pointer).
 		 * Only AX/CX/DX/BX have 8-bit subregister names; for SI/DI/BP/SP
 		 * the rega-placed value lives in a register without a byte form,
@@ -3169,6 +3175,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		/* Store byte through ES:BX */
 		fprintf(f, "\tmov byte ptr es:[bx], cl\n");
+		fprintf(f, "\tpop cx\n");
 		fprintf(f, "\tpop bx\n");
 		fprintf(f, "\tpop es\n");
 		return;
@@ -3181,11 +3188,15 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * arg[1] = far pointer (32-bit: segment:offset)
 		 *
 		 * Push/pop ES + BX around the access — see Oloadfb for rationale.
+		 * CX is the value-staging scratch (mov cx, ...); save it too or
+		 * any live SSA temp rega placed in CX is silently clobbered.
+		 * Mirror of the Ostorefb fix.
 		 */
 		r0 = i->arg[0];  /* value */
 		r1 = i->arg[1];  /* far pointer */
 		fprintf(f, "\tpush es\n");
 		fprintf(f, "\tpush bx\n");
+		fprintf(f, "\tpush cx\n");
 		/* Load value to store into CX (preserve AX for segment load) */
 		if (rtype(r0) == RTmp)
 			fprintf(f, "\tmov cx, %s\n", rname[r0.val]);
@@ -3206,6 +3217,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		/* Store word through ES:BX */
 		fprintf(f, "\tmov word ptr es:[bx], cx\n");
+		fprintf(f, "\tpop cx\n");
 		fprintf(f, "\tpop bx\n");
 		fprintf(f, "\tpop es\n");
 		return;

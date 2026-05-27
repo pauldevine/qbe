@@ -109,6 +109,12 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/loadfb_alias_probe.c:minic/dos/tests/loadfb_alias_probe.golden.txt:compact"
 	"minic/dos/examples/loadfb_alias_probe.c:minic/dos/tests/loadfb_alias_probe.golden.txt:large"
 	"minic/dos/examples/loadfb_alias_probe.c:minic/dos/tests/loadfb_alias_probe.golden.txt:huge"
+	"minic/dos/examples/storefb_cx_probe.c:minic/dos/tests/storefb_cx_probe.golden.txt:compact"
+	"minic/dos/examples/storefb_cx_probe.c:minic/dos/tests/storefb_cx_probe.golden.txt:large"
+	"minic/dos/examples/storefb_cx_probe.c:minic/dos/tests/storefb_cx_probe.golden.txt:huge"
+	"minic/dos/examples/fprintf_far_probe.c:minic/dos/tests/fprintf_far_probe.golden.txt:compact"
+	"minic/dos/examples/fprintf_far_probe.c:minic/dos/tests/fprintf_far_probe.golden.txt:large"
+	"minic/dos/examples/fprintf_far_probe.c:minic/dos/tests/fprintf_far_probe.golden.txt:huge"
 )
 
 # --- Stevie size budget ----------------------------------------------------

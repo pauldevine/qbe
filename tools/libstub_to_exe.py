@@ -824,23 +824,26 @@ _far_fprintf:
     push bx
     push es
 
-    ; FILE* at [bp+6], far fmt at [bp+8]:[bp+10], first vararg at [bp+12].
-    ; Push 16 words of varargs (right-to-left), then call _far_sprintf
-    ; with the original far fmt (it does its own DGROUP scratch copy)
-    ; and a DGROUP-local far dest (seg=SS, off=local output buffer).
+    ; FILE* at [bp+6]:[bp+8] (4 bytes — caller pushes 4 bytes for a
+    ; FILE* under far-data even though only the .off is meaningful, since
+    ; FILE.seg is always SS=DGROUP).  Far fmt at [bp+10]:[bp+12], first
+    ; vararg at [bp+14].  Push 16 words of varargs (right-to-left), then
+    ; call _far_sprintf with the original far fmt (it does its own DGROUP
+    ; scratch copy) and a DGROUP-local far dest (seg=SS, off=local
+    ; output buffer).
     mov cx, 16
 .ffpr_pusharg:
     mov si, bp
     mov ax, cx
     shl ax, 1
     add si, ax
-    add si, 10                    ; first vararg at bp+12 = bp + 1*2 + 10
+    add si, 12                    ; first vararg at bp+14 = bp + 1*2 + 12
     push word [si]
     loop .ffpr_pusharg
 
     ; Push fmt (far, as-is from caller)
-    push word [bp+10]             ; fmt.seg
-    push word [bp+8]              ; fmt.off
+    push word [bp+12]             ; fmt.seg
+    push word [bp+10]             ; fmt.off
     ; Push dest as far ptr: seg=SS (=DGROUP), off=local output buffer
     mov ax, ss
     push ax                       ; dest.seg
@@ -862,7 +865,7 @@ _far_fprintf:
     test cx, cx
     jz .ffpr_ok
 
-    mov si, [bp+6]                ; FILE*
+    mov si, [bp+6]                ; FILE*.off (seg always SS=DGROUP)
     mov bx, [si]                  ; handle
     mov ah, 0x40
     int 0x21
