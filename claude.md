@@ -1,8 +1,8 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-27 (nn — track (mm) fixed Ostorefb/h/w CX-clobber that broke stevie compact/large rendering; track (nn) fixed `_far_fprintf` arg layout: it treated FILE* as 2B instead of 4B under far-data, so fmt + varargs were shifted by 1 word.  Stevie's `:w` consequently wrote code-segment bytes to disk (we observed function-prologue patterns in the saved file).  Both fixes verified at runtime: stevie compact/large now render AND save correctly.  Huge model still hangs DOSBox after screen clear — separate symptom, open track (oo).  Probes: storefb_cx_probe.c (mm) + fprintf_far_probe.c (nn), 3 entries each × compact/large/huge.  Gate now **65/65**.  See [[i8086-storefb-cx-clobber]] + [[far-fprintf-off-by-2]].)
-**Status:** ~98% Complete (medium + compact + large fully runtime-clean for render AND save; huge still hangs at boot in DOSBox — open track (oo))
+**Last Updated:** 2026-05-27 (oo — closed huge boot hang.  Under `--model=huge`, stevie cleared the screen then wedged DOSBox.  Bisected via INT 21h markers in main.c + crt0_exe.asm: hang was inside the `getenv("EXINIT")` if-body.  Root cause: `_getenv` stub in libstub.asm only set AX=0 and left DX undefined; under huge, Phase B's `_qbe_huge_add` had previously dirtied DX with a real segment value, so unset DX leaked as a fake non-NULL pointer.  Stevie then entered the EXINIT block with `initstr` = (DGROUP:0) and `sprintf("%s lines=%s", initstr, lp)` chased an unterminated "string" through DGROUP until DOSBox wedged.  Fix: `xor ax, ax; xor dx, dx; ret` in `_getenv` and `_fgets` (same shape).  New probe getenv_null_probe.c pins compact/large/huge.  Gate now **68/68**.  See [[libstub-null-ptr-dx]] + [[huge-stub-null-fix]].)
+**Status:** ~99% Complete (medium + compact + large + huge all boot cleanly; huge stevie reaches `edit()` keyboard loop — interactive verification of subsequent paths pending)
 
 ---
 

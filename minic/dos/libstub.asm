@@ -1027,7 +1027,10 @@ _exit:
 
 global _fgets
 _fgets:
-    mov ax, 0
+    ; Returns char * — clear DX under far-data NULL convention.
+    ; See [[i8086-stub-null-ptr-dx]] / _getenv fix.
+    xor ax, ax
+    xor dx, dx
     ret
 
 global _isspace
@@ -1037,7 +1040,16 @@ _isspace:
 
 global _getenv
 _getenv:
-    mov ax, 0
+    ; Returns char *.  Under far-data models (compact/large/huge), a
+    ; char * is a 4-byte far pointer returned in DX:AX, so DX must be
+    ; cleared explicitly to indicate NULL.  Pre-huge this was masked:
+    ; under tiny/small/medium AX alone is the pointer, and under
+    ; compact/large nothing set DX between caller boot and the call.
+    ; Under huge, Phase B's _qbe_huge_add leaves DX with a real
+    ; segment value, so an unset DX yields a fake non-NULL pointer
+    ; and the caller treats the env var as present.
+    xor ax, ax
+    xor dx, dx
     ret
 
 global _system

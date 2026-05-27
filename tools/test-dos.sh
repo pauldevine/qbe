@@ -115,6 +115,9 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/fprintf_far_probe.c:minic/dos/tests/fprintf_far_probe.golden.txt:compact"
 	"minic/dos/examples/fprintf_far_probe.c:minic/dos/tests/fprintf_far_probe.golden.txt:large"
 	"minic/dos/examples/fprintf_far_probe.c:minic/dos/tests/fprintf_far_probe.golden.txt:huge"
+	"minic/dos/examples/getenv_null_probe.c:minic/dos/tests/getenv_null_probe.golden.txt:compact"
+	"minic/dos/examples/getenv_null_probe.c:minic/dos/tests/getenv_null_probe.golden.txt:large"
+	"minic/dos/examples/getenv_null_probe.c:minic/dos/tests/getenv_null_probe.golden.txt:huge"
 )
 
 # --- Stevie size budget ----------------------------------------------------
