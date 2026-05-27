@@ -70,6 +70,16 @@ emitdat(Dat *d, FILE *f)
 		[DW] = {"\t.int", 0xffffffffL},
 		[DL] = {"\t.quad", -1L},
 	};
+	/* On i8086, IR class `l` is 4 bytes (32-bit long / far pointer),
+	 * not 8 bytes.  Override the DL directive so global struct/array
+	 * initializers lay out at the same width as `sizeof()` reports.
+	 * Stevie's `chars[]` table caught this: each entry has a `char *`
+	 * field, sizeof returns 5, but global init was emitting 9 bytes
+	 * per entry (1 + 8), so `chars[c].ch_size` accessed wrong memory.
+	 * T.wordsz==2 is the i8086 marker; no other target sets word size
+	 * to 2 bytes. */
+	char *dl_dir = (T.wordsz == 2) ? "\t.long" : di[DL].decl;
+	int64_t dl_mask = (T.wordsz == 2) ? 0xffffffffL : di[DL].mask;
 	static int64_t zero;
 	char *p;
 
@@ -112,15 +122,18 @@ emitdat(Dat *d, FILE *f)
 			fprintf(f, "\t.ascii %s\n", d->u.str);
 		}
 		else if (d->isref) {
+			char *dir = (d->type == DL) ? dl_dir : di[d->type].decl;
 			p = d->u.ref.name[0] == '"' ? "" : T.assym;
 			fprintf(f, "%s %s%s%+"PRId64"\n",
-				di[d->type].decl, p, d->u.ref.name,
+				dir, p, d->u.ref.name,
 				d->u.ref.off);
 		}
 		else {
+			char *dir = (d->type == DL) ? dl_dir : di[d->type].decl;
+			int64_t mask = (d->type == DL) ? dl_mask : di[d->type].mask;
 			fprintf(f, "%s %"PRId64"\n",
-				di[d->type].decl,
-				d->u.num & di[d->type].mask);
+				dir,
+				d->u.num & mask);
 		}
 		break;
 	}

@@ -290,8 +290,14 @@ if [ $EXE -eq 1 ]; then
 			-o "$OUT_DIR/$base.obj" 2>>"$OUT_DIR/link.err" || {
 			echo "  FAIL nasm-obj: $base"; cat "$OUT_DIR/link.err"; exit 1; }
 	done
-	# 2. crt0_exe.obj
-	nasm -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" \
+	# 2. crt0_exe.obj — far-data models need crt0_exe to build argv as
+	#    4-byte far ptrs (offset+segment) to match main()'s
+	#    `char *argv[]` ABI.
+	CRT0_FLAGS=""
+	case "$MODEL" in
+		compact|large|huge) CRT0_FLAGS="-DFAR_DATA=1" ;;
+	esac
+	nasm $CRT0_FLAGS -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" \
 		2>>"$OUT_DIR/link.err" || {
 		echo "  FAIL nasm-obj: crt0_exe"; cat "$OUT_DIR/link.err"; exit 1; }
 	# 3. libstub_exe.obj (auto-converted from libstub.asm).  Thread

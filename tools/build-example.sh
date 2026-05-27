@@ -147,7 +147,13 @@ nasm -w-label-redef-late -f obj "$OUT_DIR/$base.omf.asm" \
 	-o "$OUT_DIR/$base.obj" 2>>"$ERR"
 
 # Stage 5: crt0_exe.obj and libstub_exe.obj
-nasm -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" 2>>"$ERR"
+# Far-data models need crt0_exe to build argv as 4-byte far ptrs to
+# match main()'s `char *argv[]` parameter ABI.
+CRT0_FLAGS=""
+case "$MODEL" in
+	compact|large|huge) CRT0_FLAGS="-DFAR_DATA=1" ;;
+esac
+nasm $CRT0_FLAGS -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" 2>>"$ERR"
 "$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" \
 	"$DOS_DIR/libstub.asm" "$OUT_DIR/libstub_exe.asm" 2>>"$ERR"
 nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR"

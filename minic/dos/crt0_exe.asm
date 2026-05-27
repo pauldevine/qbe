@@ -1,4 +1,4 @@
-; DOS .EXE startup (medium memory model)
+; DOS .EXE startup (medium / compact / large / huge memory models)
 ;
 ; On entry from DOS:
 ;   DS = ES = PSP segment
@@ -17,11 +17,27 @@
 ;
 ; The MZ header's SS:SP and CS:IP are filled in by tools/omf_link.py
 ; from the linker map; we don't need to set them here.
+;
+; Define FAR_DATA on the nasm command line (-DFAR_DATA) when building
+; for compact/large/huge memory models.  In those models C `char *` is a
+; 4-byte far pointer, so argv[i] slots must be 4 bytes (offset+segment)
+; and the argv array address passed to main() is itself a 4-byte far
+; pointer.  Without FAR_DATA, argv is the medium-model 2-byte near form.
 
 bits 16
 cpu 8086
 
-%define MAX_ARGV     16
+; argv slot size doubles under FAR_DATA (4-byte far ptrs vs 2-byte near).
+; Cap MAX_ARGV at 8 under FAR_DATA so total argv_arr size stays at 32
+; bytes (same DGROUP footprint as the medium build) — DGROUP+stack is
+; right at the 64KB ceiling for stevie under far-data.
+%ifdef FAR_DATA
+  %define MAX_ARGV  8
+  %define ARGV_SLOT 4
+%else
+  %define MAX_ARGV  16
+  %define ARGV_SLOT 2
+%endif
 %define CMDBUF_SIZE  130   ; PSP tail max 127 + slack + NUL
 
 group DGROUP _DATA _BSS
@@ -69,12 +85,16 @@ _start:
 
     ; argv[0] = program name, argc = 1.
     mov word [_argv_arr], _progname
+%ifdef FAR_DATA
+    mov ax, ds
+    mov word [_argv_arr + 2], ax   ; argv[0] segment = DGROUP
+%endif
     mov word [_argc], 1
 
     ; Tokenize _cmdbuf in place; fill argv[1..MAX_ARGV-1].
     ; Treat space, tab, and CR (0x0D) as separators.
     mov si, _cmdbuf
-    mov di, _argv_arr + 2          ; &argv[1]
+    mov di, _argv_arr + ARGV_SLOT  ; &argv[1]
     mov bx, MAX_ARGV - 1           ; remaining slots
 
 .tok_loop:
@@ -97,7 +117,11 @@ _start:
     test bx, bx
     jz .tok_end_trunc              ; out of argv slots
     mov [di], si
-    add di, 2
+%ifdef FAR_DATA
+    mov ax, ds
+    mov [di + 2], ax               ; argv[i] segment = DGROUP (_cmdbuf lives in DGROUP)
+%endif
+    add di, ARGV_SLOT
     inc word [_argc]
     dec bx
 
@@ -122,14 +146,28 @@ _start:
 .tok_end_trunc:
     mov byte [si], 0
 .tok_end:
-    mov word [di], 0               ; argv[argc] = NULL
+    mov word [di], 0               ; argv[argc] = NULL (offset)
+%ifdef FAR_DATA
+    mov word [di + 2], 0           ; argv[argc] = NULL (segment)
+%endif
 
     ; Call main(argc, argv).  cdecl: push argv (right) then argc (left).
+%ifdef FAR_DATA
+    mov ax, ds                     ; argv segment (DGROUP — argv_arr is here)
+    push ax
+    mov ax, _argv_arr              ; argv offset
+    push ax
+%else
     mov ax, _argv_arr
     push ax
+%endif
     push word [_argc]
     call far _main
+%ifdef FAR_DATA
+    add sp, 6
+%else
     add sp, 4
+%endif
 
     ; Exit to DOS with AL = main's return code.
     mov ah, 0x4C
@@ -145,5 +183,5 @@ _progname: db "program", 0
 segment _BSS  class=BSS  align=2 use16
 
 _cmdbuf:   resb CMDBUF_SIZE
-_argv_arr: resw MAX_ARGV
+_argv_arr: resb MAX_ARGV * ARGV_SLOT
 _argc:     resw 1

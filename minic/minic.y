@@ -1533,6 +1533,20 @@ expr(Node *n)
 		lbl += 5;  /* l = entry-true, l+1 = entry-false, l+2 = trailer-true,
 		            * l+3 = trailer-false, l+4 = merge */
 		s0 = expr(n->l);
+		/* QBE's jnz is typed `w` — truncate Kl conditions to a Kw
+		 * boolean first.  Same shape as the fix in branch(). */
+		if (irtyp(s0.ctyp) == 'l') {
+			Symb cmp;
+			cmp.t = Tmp;
+			cmp.u.n = tmp++;
+			cmp.ctyp = INT;
+			fprintf(of, "\t");
+			psymb(cmp);
+			fprintf(of, " =w cnel ");
+			psymb(s0);
+			fprintf(of, ", 0\n");
+			s0 = cmp;
+		}
 		fprintf(of, "\tjnz ");
 		psymb(s0);
 		fprintf(of, ", @l%d, @l%d\n", l, l+1);
@@ -2233,88 +2247,109 @@ expr(Node *n)
 			 * Keep the IR strictly Kw so QBE's loadopt doesn't try
 			 * to fuse adjacent stores into a wider Kl op (which on
 			 * i8086 triggers a chain of shl/xor scratch that
-			 * surprised us in earlier attempts). */
-			off = 0;
-			while (off + 1 < sz) {
-				if (off > 0) {
-					off_addr.t = Tmp;
-					off_addr.u.n = tmp++;
-					off_addr.ctyp = IDIR(INT);
-					fprintf(of, "\t");
-					psymb(off_addr);
-					fprintf(of, " =w add ");
-					psymb(src_addr);
-					fprintf(of, ", %d\n", off);
-				} else {
-					off_addr = src_addr;
-				}
-				val.t = Tmp;
-				val.u.n = tmp++;
-				val.ctyp = INT;
-				fprintf(of, "\t");
-				psymb(val);
-				fprintf(of, " =w loadw ");
-				psymb(off_addr);
-				fprintf(of, "\n");
+			 * surprised us in earlier attempts).
+			 *
+			 * Under far-data models (compact/large/huge), the source
+			 * and destination struct addresses may themselves be far
+			 * pointers (when one or both sides was reached via `*ptr`
+			 * on a far ptr).  In that case the offset arith must be
+			 * `=l add` so we don't truncate to 16 bits, and loads/
+			 * stores must use the far-* variants so we deref through
+			 * ES:BX, not DS:BX.  Whether the side is far is
+			 * independent — `*near = *far` and the reverse must each
+			 * pick the right variant per side. */
+			{
+				int src_far = ISFAR(src_addr.ctyp);
+				int dst_far = ISFAR(s1.ctyp);
+				char src_klass = src_far ? 'l' : 'w';
+				char dst_klass = dst_far ? 'l' : 'w';
+				unsigned src_ptyp = src_far ? IDIR_FAR(INT) : IDIR(INT);
+				unsigned dst_ptyp = dst_far ? IDIR_FAR(INT) : IDIR(INT);
 
-				if (off > 0) {
-					off_addr.t = Tmp;
-					off_addr.u.n = tmp++;
-					off_addr.ctyp = IDIR(INT);
+				off = 0;
+				while (off + 1 < sz) {
+					if (off > 0) {
+						off_addr.t = Tmp;
+						off_addr.u.n = tmp++;
+						off_addr.ctyp = src_ptyp;
+						fprintf(of, "\t");
+						psymb(off_addr);
+						fprintf(of, " =%c add ", src_klass);
+						psymb(src_addr);
+						fprintf(of, ", %d\n", off);
+					} else {
+						off_addr = src_addr;
+					}
+					val.t = Tmp;
+					val.u.n = tmp++;
+					val.ctyp = INT;
 					fprintf(of, "\t");
+					psymb(val);
+					fprintf(of, src_far ? " =w loadfw " : " =w loadw ");
 					psymb(off_addr);
-					fprintf(of, " =w add ");
-					psymb(s1);
-					fprintf(of, ", %d\n", off);
-				} else {
-					off_addr = s1;
-				}
-				fprintf(of, "\tstorew ");
-				psymb(val);
-				fprintf(of, ", ");
-				psymb(off_addr);
-				fprintf(of, "\n");
-				off += 2;
-			}
-			if (off < sz) {
-				if (off > 0) {
-					off_addr.t = Tmp;
-					off_addr.u.n = tmp++;
-					off_addr.ctyp = IDIR(CHR);
-					fprintf(of, "\t");
-					psymb(off_addr);
-					fprintf(of, " =w add ");
-					psymb(src_addr);
-					fprintf(of, ", %d\n", off);
-				} else {
-					off_addr = src_addr;
-				}
-				val.t = Tmp;
-				val.u.n = tmp++;
-				val.ctyp = CHR;
-				fprintf(of, "\t");
-				psymb(val);
-				fprintf(of, " =w loadub ");
-				psymb(off_addr);
-				fprintf(of, "\n");
+					fprintf(of, "\n");
 
-				if (off > 0) {
-					off_addr.t = Tmp;
-					off_addr.u.n = tmp++;
-					off_addr.ctyp = IDIR(CHR);
-					fprintf(of, "\t");
+					if (off > 0) {
+						off_addr.t = Tmp;
+						off_addr.u.n = tmp++;
+						off_addr.ctyp = dst_ptyp;
+						fprintf(of, "\t");
+						psymb(off_addr);
+						fprintf(of, " =%c add ", dst_klass);
+						psymb(s1);
+						fprintf(of, ", %d\n", off);
+					} else {
+						off_addr = s1;
+					}
+					fprintf(of, dst_far ? "\tstorefw " : "\tstorew ");
+					psymb(val);
+					fprintf(of, ", ");
 					psymb(off_addr);
-					fprintf(of, " =w add ");
-					psymb(s1);
-					fprintf(of, ", %d\n", off);
-				} else {
-					off_addr = s1;
+					fprintf(of, "\n");
+					off += 2;
 				}
-				fprintf(of, "\tstoreb ");
-				psymb(val);
-				fprintf(of, ", ");
-				psymb(off_addr);
-				fprintf(of, "\n");
+				if (off < sz) {
+					unsigned src_bptyp = src_far ? IDIR_FAR(CHR) : IDIR(CHR);
+					unsigned dst_bptyp = dst_far ? IDIR_FAR(CHR) : IDIR(CHR);
+					if (off > 0) {
+						off_addr.t = Tmp;
+						off_addr.u.n = tmp++;
+						off_addr.ctyp = src_bptyp;
+						fprintf(of, "\t");
+						psymb(off_addr);
+						fprintf(of, " =%c add ", src_klass);
+						psymb(src_addr);
+						fprintf(of, ", %d\n", off);
+					} else {
+						off_addr = src_addr;
+					}
+					val.t = Tmp;
+					val.u.n = tmp++;
+					val.ctyp = CHR;
+					fprintf(of, "\t");
+					psymb(val);
+					fprintf(of, src_far ? " =w loadfb " : " =w loadub ");
+					psymb(off_addr);
+					fprintf(of, "\n");
+
+					if (off > 0) {
+						off_addr.t = Tmp;
+						off_addr.u.n = tmp++;
+						off_addr.ctyp = dst_bptyp;
+						fprintf(of, "\t");
+						psymb(off_addr);
+						fprintf(of, " =%c add ", dst_klass);
+						psymb(s1);
+						fprintf(of, ", %d\n", off);
+					} else {
+						off_addr = s1;
+					}
+					fprintf(of, dst_far ? "\tstorefb " : "\tstoreb ");
+					psymb(val);
+					fprintf(of, ", ");
+					psymb(off_addr);
+					fprintf(of, "\n");
+				}
 			}
 			sr = s1;
 			break;
@@ -2424,7 +2459,15 @@ expr(Node *n)
 		sl = lval(n->l);
 		s0.t = Tmp;
 		s0.u.n = tmp++;
-		s0.ctyp = sl.ctyp & ~FAR;  /* Remove FAR for value type */
+		/* Strip the lvalue-deref FAR marker (set when sl reached us
+		 * through a far-pointer dereference of a non-pointer scalar)
+		 * but KEEP FAR on PTR/FUN value types — there it's the
+		 * value-type bit "this is a 4-byte far pointer," and stripping
+		 * it makes a downstream `*p++` deref pick near load instead of
+		 * loadfar.  See [[minic-far-postinc-strips-far]]. */
+		s0.ctyp = (KIND(sl.ctyp) == PTR || KIND(sl.ctyp) == FUN)
+		        ? sl.ctyp
+		        : (sl.ctyp & ~FAR);
 		/* Load current value (handle far pointer).  Far load/store only
 		 * applies when the lvalue is itself a far scalar (i.e. reached
 		 * through a far-pointer dereference).  A far-pointer-typed
@@ -2478,7 +2521,11 @@ expr(Node *n)
 		sl = lval(n->l);
 		s0.t = Tmp;
 		s0.u.n = tmp++;
-		s0.ctyp = sl.ctyp & ~FAR;  /* Remove FAR for value type */
+		/* Strip FAR on non-PTR scalars but KEEP it on PTR/FUN values
+		 * — same reason as the prefix `case 'p'` above. */
+		s0.ctyp = (KIND(sl.ctyp) == PTR || KIND(sl.ctyp) == FUN)
+		        ? sl.ctyp
+		        : (sl.ctyp & ~FAR);
 		/* Load current value (see note above on PTR/FUN exclusion). */
 		if (ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) {
 			loadfar(s0, sl);
@@ -2765,7 +2812,28 @@ branch(Node *n, int lt, int lf)
 
 	switch (n->op) {
 	default:
-		s = expr(n); /* TODO: insert comparison to 0 with proper type */
+		s = expr(n);
+		/* QBE's `jnz` is typed `w` — it tests only 16 bits.  For a
+		 * Kl value (far pointer, `long`, `long long`) we MUST first
+		 * compare against 0 with the right width, otherwise a far
+		 * pointer like (segment=0x1234, offset=0x0000) reads as
+		 * NULL and we take the wrong branch.  Surfaced as stevie's
+		 * inc() returning -1 on the first byte under compact — the
+		 * `if (lp && lp->linep)` test truncated the far pointer to
+		 * its offset and called it zero when the offset happened
+		 * to land on a clean paragraph. */
+		if (irtyp(s.ctyp) == 'l') {
+			Symb cmp;
+			cmp.t = Tmp;
+			cmp.u.n = tmp++;
+			cmp.ctyp = INT;
+			fprintf(of, "\t");
+			psymb(cmp);
+			fprintf(of, " =w cnel ");
+			psymb(s);
+			fprintf(of, ", 0\n");
+			s = cmp;
+		}
 		fprintf(of, "\tjnz ");
 		psymb(s);
 		fprintf(of, ", @l%d, @l%d\n", lt, lf);

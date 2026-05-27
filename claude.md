@@ -1,8 +1,8 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-25 (kk — track (l) **closed**: stevie 24/24 modules compile + link under `--model=compact` (230KB EXE); user manually verified in DOSBox (loads, edits, saves, quits). Surfaced and fixed 4 latent bugs: minic DREF macro polluted by FAR bit; 3 hardcoded `=w add` for struct member offsets under far-data; i8086 Ostorefb SI/DI rname8 NULL deref; build-stevie.sh missing --model passthrough to libstub_to_exe.py. .EXE size trim via MZ min_alloc PARKED (would shave ~53KB; no runtime issue). Gate stays 59/59; SSA make check green; medium baseline unchanged. See [[stevie-compact]].)
-**Status:** ~97% Complete
+**Last Updated:** 2026-05-27 (ll — track (l') stevie under large/huge investigated. Original `(kk) close` claim was incorrect: stevie compact was never runtime-verified with a file actually present in the DOSBox mount (the "loads, edits, saves, quits" verification was done with `HELLO.TXT` missing from the mount, which exercises only the `[New File]` path and incidentally renders status-line garbage that hid the underlying breakage). With a file present, compact/large fail to render file content; huge hangs DOSBox. Investigation surfaced and fixed **5 real QBE/minic bugs** — see [[stevie-compact-real-bugs]] for the full list. Gate stays 59/59 across all fixes; medium baseline byte-identical for fixes 1–4, shifts +16B per fix 5. **One QBE rega/phi bug remains** preventing stevie compact/large from rendering: nextra lives in a stack slot, gets re-coalesced through phi-slot chains on loop back-edges, propagates wrong values across iters. See [[qbe-rega-phi-slot-leak]] and NEXT_SESSION_PROMPT.md for repro + investigation path.)
+**Status:** ~97% Complete (medium fully working; compact/large blocked on one rega bug; huge unevaluated until compact closes)
 
 ---
 
@@ -64,6 +64,26 @@ The ROADMAP.md file contains:
 ---
 
 ## Recent Major Accomplishments
+
+### Stevie compact 5-fix sprint + remaining QBE rega bug (2026-05-26/27, session ll)
+
+User reported stevie under `--model=compact` showing screen corruption with `HELLO.TXT` present in the DOSBox mount. The `(kk)` track-(l) close had verified compact with the file **missing** from the mount, which exercises the `[New File]` path and renders status-line garbage that hid the underlying breakage. With a file present, compact/large fail to render file content; huge hangs DOSBox.
+
+Investigation surfaced **5 real QBE/minic bugs**, all fixed:
+
+  1. **`crt0_exe.asm` argv ABI** — under medium, argv slots are 2-byte near ptrs.  Under compact/large/huge, `main(int argc, char *argv[])` expects 4-byte far ptrs.  Fix: gated on `-DFAR_DATA` define passed from `tools/build-stevie.sh` / `tools/build-example.sh` for far-data models; argv_arr emits 4-byte slots (offset + segment) and `main` is called with argv as 4-byte far ptr.  MAX_ARGV capped at 8 under FAR_DATA to keep DGROUP footprint identical (DGROUP+stack at 64KB ceiling for stevie).  Pinned by `argv_probe.c` + `argv_fopen_probe.c`.
+
+  2. **`minic/minic.y` postinc/preinc strips FAR off PTR** — `case 'p'/'P'/'m'/'M'` did `s0.ctyp = sl.ctyp & ~FAR` unconditionally.  For `*bptr++` where `bptr` is `char *` (far), the postinc result type lost FAR; the outer `case '@'` saw ISFAR(sr.ctyp)=false and emitted `loadsb` (near) instead of `loadfb` (far) — reading the OFFSET byte of the far ptr instead of derefing.  Surfaced as stevie's `flushbuf` writing the wrong byte to BIOS AH=0E.  Fix: keep FAR on PTR/FUN value types (it's the "this value IS a 4-byte far pointer" bit), strip only on non-pointer scalars.
+
+  3. **`minic/minic.y` struct-copy `=w add` truncates Kl ptrs** — the `*X = *Y` struct-copy block used hardcoded `=w add` + `loadw`/`storew` for word-by-word copy.  Under far-data, when either side's address was Kl (far pointer through a deref), the `=w add` truncated to 16 bits.  Fix: detect ISFAR(src_addr.ctyp) and ISFAR(s1.ctyp) **independently**; route to `=l add` + `loadfw`/`storefw` per side.  Same fix path for the byte tail of odd-sized struct copies.  Pinned by `stevie_lines_probe.c` exercising `*Topchar = *Filemem` under compact.
+
+  4. **`minic/minic.y::branch()` emits `jnz` on Kl without truncation** — QBE's `jnz` is typed `w` and the i8086 backend emits `test reg16, reg16`, testing only 16 bits.  For a far pointer with offset=0 but valid segment (e.g. `0x1234:0x0000`), the test reads as NULL and the `if (lp && lp->linep)` test in stevie's `inc()` returned -1 on the first byte read of every line.  Fix: `branch()` (and the ternary-operator path in `case '?'`) emits `=w cnel s, 0` first when `irtyp(s.ctyp) == 'l'`, then `jnz` on the resulting Kw.
+
+  5. **`emit.c` data emit `l` → `.quad` (8B) on i8086** — `dtoa[DL] = "\t.quad"` emits 8 bytes per `l` data item.  On i8086, Kl is 4 bytes (32-bit long / far pointer), so global struct/array initializers had each `char *` field consume 8 bytes while `sizeof()` reported 4.  Stevie's `chars[]` table accessed by `chars[c].ch_size` returned the WRONG byte (often non-zero, often "looks like a ch_size > 1") for any `c`, triggering the chars-expansion loop with bogus `n` and writing garbage to `extra[]`.  Fix: override DL directive to `.long` when `T.wordsz == 2` (the i8086 marker, no other target sets word size to 2 bytes).  Pinned by `chars_layout_probe.c` (sizeof=5, indexed reads of ch_size).
+
+Gate stays **59/59** across all fixes; medium baseline byte-identical for fixes 1–4 (medium doesn't exercise FAR_DATA / postinc on far / struct copy on far / Kl jnz), shifts +16B per fix 5 (medium's long globals now correctly emit 4B).
+
+**One QBE bug remains.** With all 5 fixes applied, stevie compact still mis-renders the file: `R0:L`, `R1:`, `R2:`, `R3:L` pattern in Nextscreen — one `L` per "line" then blank rows.  Instrumentation pins the failure at filetonext's `if (nextra > 0)` check: `nextra` lives in a stack slot (bp-26 in the inspected build) but rega coalesces its value through phi-slot chains on loop back-edges, and one of the chains propagates a stale value (most likely from a sibling local with overlapping live range — `n` from `(n = chars[c].ch_size) > 1` or similar).  The chars[c].ch_size load returns 1 correctly per `chars_layout_probe.c`, the inc/gchar walk works correctly per `inc_gchar_probe.c`, the struct copy works correctly per `stevie_lines_probe.c` — only stevie's actual filetonext loop fails.  See `[[qbe-rega-phi-slot-leak]]` for the repro and the QBE pipeline phases to investigate (load.c phi insertion, spill.c slot reuse, rega.c phi resolution at loop back-edges).
 
 ### Phase B Var-operand carveout removal + BX-clobber fixes (2026-05-25, session gg)
 - ✅ `minic/minic.y::huge_ptr_binop` — the `if (lhs.t == Var || rhs.t == Var) return 0;` carveout (plus the surrounding paragraph of comments referencing [[huge-phase-b-storel-gap]]) is removed.  Stack pointer arith under `--model=huge` now routes through `_qbe_huge_add` / `_qbe_huge_sub` identically to global pointer arith.
