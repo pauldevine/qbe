@@ -1,7 +1,7 @@
 # Claude Session Status: QBE C11 8086 Compiler
 
 **Project:** C11 Compiler for 8086 DOS using QBE Backend
-**Last Updated:** 2026-05-27 (oo — closed huge boot hang.  Under `--model=huge`, stevie cleared the screen then wedged DOSBox.  Bisected via INT 21h markers in main.c + crt0_exe.asm: hang was inside the `getenv("EXINIT")` if-body.  Root cause: `_getenv` stub in libstub.asm only set AX=0 and left DX undefined; under huge, Phase B's `_qbe_huge_add` had previously dirtied DX with a real segment value, so unset DX leaked as a fake non-NULL pointer.  Stevie then entered the EXINIT block with `initstr` = (DGROUP:0) and `sprintf("%s lines=%s", initstr, lp)` chased an unterminated "string" through DGROUP until DOSBox wedged.  Fix: `xor ax, ax; xor dx, dx; ret` in `_getenv` and `_fgets` (same shape).  New probe getenv_null_probe.c pins compact/large/huge.  Gate now **68/68**.  See [[libstub-null-ptr-dx]] + [[huge-stub-null-fix]].)
+**Last Updated:** 2026-05-28 (qq — libstub 4-byte-return DX-leak audit (follow-on to oo).  Swept every libstub.asm stub returning a 4-byte type.  **`_ftell` fixed** — declared `long ftell()`, and `long` is 4 bytes (DX:AX) in EVERY model, so `mov ax,0; ret` leaked a garbage high word in ALL models (masked when DX chanced to be 0; bug-loud under huge where `_qbe_huge_add` dirties DX).  Now `xor ax,ax; xor dx,dx; ret`.  **`_signal` cleared DX defensively** — in-tree `<signal.h>` declares `int signal()` (2-byte, AX-only) so its dirty DX is currently harmless, but the standard prototype is a 4-byte fn-ptr.  **`_mktemp` deferred** — it *echoes its arg pointer* (not a NULL return), so clearing DX is wrong; proper fix is a `_far_mktemp` far_stdlib entry, and stevie ignores its return so it doesn't bite today.  All other pointer-returning stubs are in `far_stdlib` (reached only as near `_X` under near-data, FILE*/char*=2B) or already clear DX (`_malloc`).  New probe `ftell_null_probe.c` (compact/large/huge) verified bug-loud against the reverted stub.  No qbe/minic changes.  Gate **71/71**.  See [[libstub-null-ptr-dx]].  Prior: (pp — Phase B'' (track g) closed as **PROVEN UNREACHABLE**, no code shipped.  Investigated the symmetric Phase B' gap for narrow stores (`Ostorew`/`Ostoreh`/`Ostoreb` whose dest address is a spilled pointer-value slot).  Wrote a mirror-of-Phase-B' fix in i8086/emit.c (SSA `make check` green, verified it does NOT fire on alloca or call-arg slot stores), then proved no C source or authorable SSA can produce the shape: `spill.c::force_kl_slot` is **Kl-only** so near (Kw) pointers are never slot-resident — rega always materialises a narrow store's address into a register (no 8086 memory-indirect store); far-data narrow stores route through `storef*`/`storel`; isel's Oaddr rewrite turns address-taken locals into `lea reg; mov [reg]`.  **Reverted** the fix rather than ship untested-because-unreachable code; upgraded the docs from "latent, defer" to "proven unreachable, revisit only if Kw temps ever become slot-resident".  emit.c byte-identical to (oo).  Gate stays **68/68**.  Prior: (oo — closed huge boot hang.  Root cause: `_getenv` stub in libstub.asm only set AX=0, left DX undefined; under huge, Phase B's `_qbe_huge_add` dirtied DX with a real segment, so unset DX leaked as a fake non-NULL pointer; stevie chased an unterminated EXINIT "string" through DGROUP until DOSBox wedged.  Fix: `xor ax,ax; xor dx,dx; ret` in `_getenv`+`_fgets`.  Probe getenv_null_probe.c.  See [[libstub-null-ptr-dx]] + [[huge-stub-null-fix]].)))
 **Status:** ~99% Complete (medium + compact + large + huge all boot cleanly; huge stevie reaches `edit()` keyboard loop — interactive verification of subsequent paths pending)
 
 ---
@@ -194,10 +194,23 @@ lower-priority — pick whichever a real consumer needs.
    handle b/h/w only; `long` through a far pointer truncates.  Not
    exercised by any in-tree consumer.  See `[[storefar-lacks-storefl]]`.
 
-2. **Phase B'' — Ostorew/Ostores/Ostoreb same-shape gap** — symmetric
-   to Phase B' but for narrower stores.  Latent under both far-data
-   (storef* path used instead) and near-data (rega rarely spills Kw
-   ptrs).  Defer until a real consumer surfaces.
+2. **Phase B'' — Ostorew/Ostoreh/Ostoreb same-shape gap** — symmetric
+   to Phase B' but for narrower stores.  **PROVEN UNREACHABLE
+   2026-05-28** under the current rega/isel — the gap (a narrow store
+   whose dest address is a spilled pointer-value slot) cannot be
+   produced: (a) `spill.c`'s `force_kl_slot` is **Kl-only**, so a near
+   (Kw) pointer is never forced slot-resident — rega always materialises
+   a narrow store's address into a register (8086 has no memory-indirect
+   store), giving an RTmp/RMem dest, never RSlot; (b) under far-data,
+   far scalars go through `storef*` and far pointers/fn-ptrs through
+   `storel` (Phase B'), so plain `Ostorew` never carries a far address —
+   minic even types a near-code fn-ptr as `l` under compact; (c)
+   address-taken locals are rewritten by isel's Oaddr pass to
+   `lea reg; mov [reg]`, never a direct RSlot dest.  A symmetric fix was
+   written + verified SSA-green but **reverted** (2026-05-28) rather than
+   ship untested-because-unreachable code.  Revisit only if a future
+   rega/isel change ever makes Kw pointer temps slot-resident.  See
+   `[[huge-phase-b-storel-gap]]`.
 
 3. **Small .EXE architectural break** — `tools/libstub_to_exe.py`
    unconditionally rewrites `ret`→`retf`, mismatching small's near-call

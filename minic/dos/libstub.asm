@@ -936,7 +936,13 @@ _fseek:
 
 global _ftell
 _ftell:
-    mov ax, 0
+    ; Returns `long` — ALWAYS 4 bytes (DX:AX) on i8086, in every memory
+    ; model.  The high word lives in DX, so a 0 return needs DX cleared
+    ; too; otherwise callers reading the full long see a garbage high
+    ; word.  Bug-loud under huge, where Phase B's `_qbe_huge_add` leaves
+    ; DX holding a real segment before the call.  See [[libstub-null-ptr-dx]].
+    xor ax, ax
+    xor dx, dx
     ret
 
 global _fflush
@@ -1028,7 +1034,7 @@ _exit:
 global _fgets
 _fgets:
     ; Returns char * — clear DX under far-data NULL convention.
-    ; See [[i8086-stub-null-ptr-dx]] / _getenv fix.
+    ; See [[libstub-null-ptr-dx]] / _getenv fix.
     xor ax, ax
     xor dx, dx
     ret
@@ -1247,7 +1253,14 @@ _intdos:
     ret
 global _signal
 _signal:
-    mov ax, 0
+    ; Returns the previous handler.  The in-tree <signal.h> declares
+    ; `int signal()` (2-byte, AX-only) so a dirty DX is currently
+    ; harmless — but the STANDARD prototype is a 4-byte function
+    ; pointer (DX:AX under far-code).  Clear DX defensively so a
+    ; consumer using the real prototype sees a proper NULL handler
+    ; rather than a phantom DX:0 segment.  See [[libstub-null-ptr-dx]].
+    xor ax, ax
+    xor dx, dx
     ret
 global _sleep
 _sleep:
