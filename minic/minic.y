@@ -228,7 +228,18 @@ enum { NTyp = 128 };
 struct {
 	char v[NString];
 	unsigned ctyp;
+	int arraydim;        /* >0 => array typedef (`typedef int jmp_buf[8]`) */
+	unsigned arrayelem;  /* element ctyp, valid only when arraydim > 0 */
 } typh[NTyp];
+
+/* Set by typhget() (i.e. whenever the lexer resolves a TNAME) to the
+ * array dimension/element of an array typedef, so storage-allocating
+ * declaration rules (local var, struct member) can size them as arrays
+ * rather than as the bare pointer-to-element their ctyp encodes.  Reset
+ * to 0 by the lexer on every type keyword and by the `type '*'` pointer
+ * rules, so a stale dim never leaks into a following plain declaration. */
+int g_td_arraydim = 0;
+unsigned g_td_arrayelem = 0;
 
 /* Struct/union member */
 enum { NMember = 256 };
@@ -726,6 +737,34 @@ typhadd(char *v, unsigned ctyp)
 		if (typh[h].v[0] == 0) {
 			strcpy(typh[h].v, v);
 			typh[h].ctyp = ctyp;
+			typh[h].arraydim = 0;
+			typh[h].arrayelem = 0;
+			return;
+		}
+		if (strcmp(typh[h].v, v) == 0)
+			die("typedef already defined");
+		h = (h+1) % NTyp;
+	} while(h != h0);
+	die("too many typedefs");
+}
+
+/* Register an array typedef `typedef ELEM NAME[DIM];`.  The stored ctyp
+ * is pointer-to-element so the name decays correctly when used as a
+ * function parameter or dereferenced; arraydim/arrayelem let storage
+ * sites allocate DIM*sizeof(ELEM) bytes and flag the var as an array. */
+void
+typhadd_array(char *v, unsigned elemctyp, int dim)
+{
+	unsigned h0, h;
+
+	h0 = hash(v) % NTyp;
+	h = h0;
+	do {
+		if (typh[h].v[0] == 0) {
+			strcpy(typh[h].v, v);
+			typh[h].ctyp = IDIR(elemctyp);
+			typh[h].arraydim = dim;
+			typh[h].arrayelem = elemctyp;
 			return;
 		}
 		if (strcmp(typh[h].v, v) == 0)
@@ -745,6 +784,8 @@ typhget(char *v, unsigned *ctyp)
 	do {
 		if (strcmp(typh[h].v, v) == 0) {
 			*ctyp = typh[h].ctyp;
+			g_td_arraydim = typh[h].arraydim;
+			g_td_arrayelem = typh[h].arrayelem;
 			return 1;
 		}
 		if (typh[h].v[0] == 0)
@@ -3907,7 +3948,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %%
 
-prog: kfunc prog | attr_kfunc prog | typed_decl prog | attr_typed_decl prog | edcl prog | tdcl prog | sdcl prog | static_assert_dcl prog | externdcl prog | ;
+prog: | prog kfunc | prog attr_kfunc | prog typed_decl | prog attr_typed_decl | prog edcl | prog tdcl | prog sdcl | prog static_assert_dcl | prog externdcl ;
 
 attr_kfunc: attrspec storageopt inlineopt init_attr prot_knr '{' dcls stmts '}'
 {
@@ -4117,6 +4158,15 @@ tdcl: TYPEDEF type IDENT ';'
 {
 	typhadd($3->u.v, $2);
 }
+    | TYPEDEF type IDENT '[' expr ']' ';'
+{
+	/* Array typedef: `typedef int jmp_buf[8];`.  Kept as a real array
+	 * type (decays to a pointer when passed to setjmp) — the dimension
+	 * is folded by const_eval, the element type is $2. */
+	if ($2 == NIL)
+		die("invalid void array typedef");
+	typhadd_array($3->u.v, $2, const_eval($5));
+}
     | TYPEDEF ENUM IDENT IDENT ';' { typhadd($4->u.v, INT); }
     | TYPEDEF STRUCT IDENT IDENT ';' { typedef_struct_tag($3->u.v, $4->u.v); }
     | TYPEDEF typedefenum    {}
@@ -4236,7 +4286,12 @@ structstart: STRUCT IDENT '{'  { curstruct = structadd($2->u.v, 0); }
 smembers:
         | smembers type IDENT ';'
 {
-	structaddmember(curstruct, $3->u.v, $2);
+	/* An array-typedef member (`jmp_buf jmpbuf;`) must allocate the
+	 * full array, not a bare pointer. */
+	if (g_td_arraydim > 0)
+		structaddarrmember(curstruct, $3->u.v, g_td_arrayelem, g_td_arraydim);
+	else
+		structaddmember(curstruct, $3->u.v, $2);
 }
         | smembers type IDENT '[' expr ']' ';'
 {
@@ -4851,6 +4906,15 @@ dcls:
 	if ($2 == NIL)
 		die("invalid void declaration");
 	v = $3->u.v;
+	if (g_td_arraydim > 0) {
+		/* Array-typedef local (`jmp_buf env;`): allocate the whole
+		 * array and register it as an array so it decays to a
+		 * pointer-to-element on use. */
+		int total = SIZE(g_td_arrayelem) * g_td_arraydim;
+		varadd(v, 0, IDIR(g_td_arrayelem), 1);
+		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(),
+			iralign(g_td_arrayelem), total);
+	} else {
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), s);
@@ -4865,6 +4929,7 @@ dcls:
 				fprintf(of, "\t%%_zinit%d =w add %%%s, %d\n\tstorew 0, %%_zinit%d\n", tmp, v, i, tmp);
 			tmp++;
 		}
+	}
 	}
 }
     | dcls type IDENT '=' expr ';'
@@ -5175,9 +5240,11 @@ initlist: inititem                    { $$ = mknode(0, $1, 0); }
         | inititem ',' initlist       { $$ = mknode(0, $1, $3); }
         ;
 
-type: type TFAR '*'                  { $$ = IDIR_FAR($1); }
-        | type '*' TFAR              { $$ = IDIR_FAR($1); }
-        | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1 & ~FAR) : IDIR($1); }
+type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; }
+        | type '*' TFAR              { $$ = IDIR_FAR($1); g_td_arraydim = 0; }
+        | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1 & ~FAR) : IDIR($1); g_td_arraydim = 0; }
+        | type '*' CONST             { $$ = ($1 & FAR) ? IDIR_FAR($1 & ~FAR) : IDIR($1); g_td_arraydim = 0; }
+        | type '*' VOLATILE          { $$ = ($1 & FAR) ? IDIR_FAR($1 & ~FAR) : IDIR($1); g_td_arraydim = 0; }
         | TFAR type                  { $$ = $2 | FAR; }
         | TCHAR                      { $$ = CHR; }
     | TSHORT                     { $$ = INT | SHORT; }
@@ -5858,7 +5925,7 @@ post: NUM
         $$ = mknode('L', $5, 0);
         $$->u.n = (int)$2;  /* Store type */
     }
-    | '(' expr ')'        { $$ = $2; }
+    | '(' comma_expr ')'  { $$ = $2; }
     | post '(' arg0 ')'   {
         /* Function call. Direct when callee is a bare IDENT (V node);
          * otherwise indirect (e.g. (*fp)(...), arr[i](...), etc.). */
@@ -6306,8 +6373,14 @@ yylex_inner()
 			return yylex_inner();
 
 		for (i=0; kwds[i].s; i++)
-			if (strcmp(v, kwds[i].s) == 0)
+			if (strcmp(v, kwds[i].s) == 0) {
+				/* A type keyword (int/char/struct/...) starts a
+				 * non-array-typedef type; clear any array dim left
+				 * over from a previous TNAME so it can't leak into
+				 * this declaration. */
+				g_td_arraydim = 0;
 				return kwds[i].t;
+			}
 		yylval.n = mknode('V', 0, 0);
 		strcpy(yylval.n->u.v, v);
 		/* Check if it's a typedef name.  An identifier directly after
