@@ -6,7 +6,9 @@
 #include <string.h>
 
 enum {
-	NString = 32,
+	NString = 128,  /* max identifier length; MicroPython has 49-char names
+	                 * (e.g. MP_MAP_LOOKUP_ADD_IF_NOT_FOUND_OR_REMOVE_IF_FOUND)
+	                 * and longer generated qstr symbols. Host-only memory. */
 	NGlo = 256,
 	NVar = 512,
 	NStr = 256,
@@ -3850,11 +3852,11 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 %token <n> FNUM
 %token <n> STR
 %token <n> IDENT
-%token PP MM LE GE SIZEOF SHL SHR ARROW
+%token PP MM LE GE SIZEOF SHL SHR ARROW ELLIPSIS
 %token ADDEQ SUBEQ MULEQ DIVEQ MODEQ
 %token ANDEQ OREQ XOREQ SHLEQ SHREQ
 
-%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TFLOAT TDOUBLE CONST VOLATILE TBOOL TFAR INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF ALIGNAS GENERIC ASM ATTRIBUTE
+%token TVOID TCHAR TSHORT TINT TLNG TLNGLNG TUNSIGNED TSIGNED TFLOAT TDOUBLE CONST VOLATILE TBOOL TFAR INLINE STATIC EXTERN STATIC_ASSERT ALIGNOF ALIGNAS GENERIC ASM ATTRIBUTE
 %token IF ELSE WHILE DO FOR BREAK CONTINUE RETURN GOTO
 %token ENUM SWITCH CASE DEFAULT TYPEDEF TNAME STRUCT UNION
 
@@ -3919,6 +3921,7 @@ enumstart: ENUM IDENT '{'  { enumval = 0; }
 
 enums: enum
      | enums ',' enum
+     | enums ','
      ;
 
 enum: IDENT
@@ -3936,9 +3939,14 @@ enum: IDENT
 	}
 	enumval++;
 }
-    | IDENT '=' NUM
+    | IDENT '=' expr
 {
-	enumval = $3->u.n;
+	/* Enumerator with an explicit constant-expression initializer.
+	 * const_eval folds it at parse time and resolves references to
+	 * prior enum constants (e.g. `B = A - 1`), so the enums grammar
+	 * stays a left-to-right list with each name registered as it
+	 * reduces. */
+	enumval = const_eval($3);
 	varadd($1->u.v, enumval, INT, 0);
 	{
 		unsigned eh0 = hash($1->u.v), eh = eh0;
@@ -4205,11 +4213,13 @@ smembers:
 {
 	structaddmember(curstruct, $3->u.v, $2);
 }
-        | smembers type IDENT '[' NUM ']' ';'
+        | smembers type IDENT '[' expr ']' ';'
 {
+	/* Array dimension is a constant-expression (e.g.
+	 * `void *regs[((13))]`); const_eval folds it. */
 	if ($2 == NIL)
 		die("invalid void array member");
-	structaddarrmember(curstruct, $3->u.v, $2, $5->u.n);
+	structaddarrmember(curstruct, $3->u.v, $2, const_eval($5));
 }
         | smembers type IDENT '[' ']' ';'
 {
@@ -4219,9 +4229,12 @@ smembers:
 		die("invalid void array member");
 	structaddarrmember(curstruct, $3->u.v, $2, 0);
 }
-        | smembers type IDENT ':' NUM ';'
+        | smembers type IDENT ':' expr ';'
 {
-	structaddbitfield(curstruct, $3->u.v, $2, $5->u.n);
+	/* Bitfield width is a constant-expression (e.g.
+	 * `size_t total_prev_len : (8 * sizeof(size_t) - 1)`).  sizeof
+	 * already folds to an 'N' node, so const_eval handles it. */
+	structaddbitfield(curstruct, $3->u.v, $2, const_eval($5));
 }
         | smembers type IDENT ',' sm_more_names ';'
 {
@@ -4318,15 +4331,15 @@ anonmembers:
 {
 	structaddmember(curstruct, $3->u.v, $2);
 }
-        | anonmembers type IDENT '[' NUM ']' ';'
+        | anonmembers type IDENT '[' expr ']' ';'
 {
 	if ($2 == NIL)
 		die("invalid void array member");
-	structaddarrmember(curstruct, $3->u.v, $2, $5->u.n);
+	structaddarrmember(curstruct, $3->u.v, $2, const_eval($5));
 }
-        | anonmembers type IDENT ':' NUM ';'
+        | anonmembers type IDENT ':' expr ';'
 {
-	structaddbitfield(curstruct, $3->u.v, $2, $5->u.n);
+	structaddbitfield(curstruct, $3->u.v, $2, const_eval($5));
 }
         ;
 
@@ -4785,6 +4798,7 @@ par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
     | type IDENT          { $$ = param($2->u.v, $1, 0); }
     | type ',' par1       { $$ = abstract_param($1, $3); }
     | type                { $$ = abstract_param($1, 0); }
+    | ELLIPSIS            { $$ = 0; /* variadic marker: ... proto only, no IR */ }
     | type '(' '*' IDENT ')' '(' fptpar0 ')' ',' par1 {
         /* Function pointer parameter: int (*callback)(int, int), ... */
         unsigned fptr_type = IDIR(FUNC($1));
@@ -4804,6 +4818,7 @@ fptpar1: type ',' fptpar1        { $$ = 0; }
        | type                    { $$ = 0; }
        | type IDENT ',' fptpar1  { $$ = 0; }
        | type IDENT              { $$ = 0; }
+       | ELLIPSIS                { $$ = 0; }
        ;
 
 dcls:
@@ -5161,6 +5176,22 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); }
     | TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
     | TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
     | TUNSIGNED          { $$ = INT | UNSIGNED; }
+    | TSHORT TINT            { $$ = INT | SHORT; }
+    | TLNG TINT              { $$ = LNG; /* long int */ }
+    | TLNGLNG TINT           { $$ = LNG; /* long long int */ }
+    | TUNSIGNED TSHORT TINT  { $$ = INT | SHORT | UNSIGNED; }
+    | TUNSIGNED TLNG TINT    { $$ = LNG | UNSIGNED; }
+    | TUNSIGNED TLNGLNG TINT { $$ = LNG | UNSIGNED; /* unsigned long long int */ }
+    | TSIGNED                { $$ = INT; /* signed == default signedness */ }
+    | TSIGNED TCHAR          { $$ = CHR; }
+    | TSIGNED TSHORT         { $$ = INT | SHORT; }
+    | TSIGNED TINT           { $$ = INT; }
+    | TSIGNED TLNG           { $$ = LNG; }
+    | TSIGNED TLNGLNG        { $$ = LNG; }
+    | TSIGNED TSHORT TINT    { $$ = INT | SHORT; }
+    | TSIGNED TLNG TINT      { $$ = LNG; }
+    | TSIGNED TLNGLNG TINT   { $$ = LNG; }
+    | CONST TVOID        { $$ = NIL; /* const void (e.g. const void *) */ }
     | CONST TCHAR        { $$ = CHR; }
     | CONST TSHORT       { $$ = INT | SHORT; }
     | CONST TINT         { $$ = INT; }
@@ -5172,6 +5203,7 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); }
     | CONST TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
     | CONST TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
     | CONST TUNSIGNED          { $$ = INT | UNSIGNED; }
+    | VOLATILE TVOID        { $$ = NIL; /* volatile void (e.g. volatile void *) */ }
     | VOLATILE TCHAR        { $$ = CHR; }
     | VOLATILE TSHORT       { $$ = INT | SHORT; }
     | VOLATILE TINT         { $$ = INT; }
@@ -5186,17 +5218,48 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); }
     | CONST TNAME    { $$ = $2; }
     | VOLATILE TNAME { $$ = $2; }
     | STRUCT IDENT {
+        /* An undefined tag here is an incomplete type — legal when only
+         * referenced through a pointer or extern decl (e.g.
+         * `extern const struct _mp_obj_str_t foo;`).  Forward-declare it
+         * rather than die; structadd completes it if a body arrives. */
         int idx = structfind($2->u.v);
         if (idx < 0)
-            die("undefined struct");
+            idx = structadd_forward($2->u.v, 0);
         $$ = (idx << 3) + STRUCT_T;
     }
     | UNION IDENT {
         int idx = structfind($2->u.v);
         if (idx < 0)
-            die("undefined union");
+            idx = structadd_forward($2->u.v, 1);
         $$ = (idx << 3) + UNION_T;
     }
+    | CONST STRUCT IDENT {
+        int idx = structfind($3->u.v);
+        if (idx < 0)
+            idx = structadd_forward($3->u.v, 0);
+        $$ = (idx << 3) + STRUCT_T;
+    }
+    | VOLATILE STRUCT IDENT {
+        int idx = structfind($3->u.v);
+        if (idx < 0)
+            idx = structadd_forward($3->u.v, 0);
+        $$ = (idx << 3) + STRUCT_T;
+    }
+    | CONST UNION IDENT {
+        int idx = structfind($3->u.v);
+        if (idx < 0)
+            idx = structadd_forward($3->u.v, 1);
+        $$ = (idx << 3) + UNION_T;
+    }
+    | VOLATILE UNION IDENT {
+        int idx = structfind($3->u.v);
+        if (idx < 0)
+            idx = structadd_forward($3->u.v, 1);
+        $$ = (idx << 3) + UNION_T;
+    }
+    | ENUM IDENT           { $$ = INT; /* enum Tag: an enumeration value is an int */ }
+    | CONST ENUM IDENT     { $$ = INT; }
+    | VOLATILE ENUM IDENT  { $$ = INT; }
     | TNAME    { $$ = $1; }
     ;
 
@@ -5858,6 +5921,7 @@ yylex_inner()
 		{ "int", TINT },
 		{ "long", TLNG },
 		{ "unsigned", TUNSIGNED },
+		{ "signed", TSIGNED },
 		{ "float", TFLOAT },
 		{ "double", TDOUBLE },
 		{ "const", CONST },
@@ -5944,13 +6008,21 @@ yylex_inner()
 
 		/* Handle leading dot for numbers like .5 */
 		if (c == '.') {
-			*p++ = c;
 			c = getchar();
+			if (c == '.') {
+				/* `...` ellipsis (variadic prototype). */
+				c = getchar();
+				if (c == '.')
+					return ELLIPSIS;
+				die("unexpected '..' (incomplete ellipsis)");
+			}
 			if (!isdigit(c)) {
 				/* Not a float, just a dot operator */
 				ungetc(c, stdin);
 				return '.';
 			}
+			/* Float with a leading dot, e.g. .5 */
+			*p++ = '.';
 			isfloat = 1;
 		}
 

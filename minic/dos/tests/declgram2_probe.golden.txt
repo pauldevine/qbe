@@ -1,0 +1,6 @@
+enum=1,2,3,12 (want 1,2,3,12)
+tag=3 (want 3)
+bf=15,1 (want 15,1)
+regs=60 (want 60)
+sc=-5 (want -5)
+ll=10000 (want 10000)
