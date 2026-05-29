@@ -10,7 +10,14 @@ enum {
 	                 * (e.g. MP_MAP_LOOKUP_ADD_IF_NOT_FOUND_OR_REMOVE_IF_FOUND)
 	                 * and longer generated qstr symbols. Host-only memory. */
 	NGlo = 256,
-	NVar = 512,
+	/* varh[] is an open-addressing table holding all globals + enum
+	 * constants (never cleared) plus the current function's locals.
+	 * MicroPython pulls ~214 MP_QSTR_* enum constants from genhdr alone,
+	 * plus hundreds of `extern const mp_obj_type_t` globals, so 512
+	 * overflowed ("too many variables") on 62/132 spike files.  Keep the
+	 * load factor low for the linear-probe chain repair; host-only memory
+	 * (~140 B/slot).  A full REPL build generates still more qstrs. */
+	NVar = 4096,
 	NStr = 256,
 };
 

@@ -1,84 +1,64 @@
-# Next session — MicroPython port: stand up a working preprocessing environment (Phase 2/3 config)
+# Next session — MicroPython port: clear the next minic grammar layers (array typedef → comma-expr)
 
 > Master tracker: `MICROPYTHON_PORT.md`. Spike findings: `MICROPYTHON_SPIKE_REPORT.md`.
-> **The frontend declaration grammar is cleared as far as the spike can measure.** Nested
-> named members, flexible-array decay, and void-returning function pointers all landed
-> 2026-05-29 (gate **76/76**). This document is the re-scoped plan for the *next* layer.
+> **The preprocessing wall is down.** As of 2026-05-29, cpp passes on all 132 `py/*.c`
+> (CPP_FAIL 132→0) and the spike harness reports honestly (`clang -E`, not `cpp`; pipefail).
+> The MINIC tally is now real grammar signal: **26/132 OK, 106 pure `parse error`** — zero
+> remaining limit caps. Gate **77/77**.
 
-## The pivot: the spike is now cpp-bound, not grammar-bound
+## What changed last session (so you don't redo it)
 
-Re-running the spike after the 2026-05-29 grammar work, the headline number barely moved
-(16 → 23/132 OK) — but the *reason* changed completely. **All 132 `py/*.c` files now fail
-`cpp` itself** (exit 1), on shared-config errors in two headers:
+- **Harness:** `build/mp-spike/run-spike.sh` uses `clang -E` (macOS `cpp` doesn't strip `//`
+  before `#if`) and checks cpp's real exit status before the `tr|sed` pipe. CPP_FAIL is honest now.
+- **Config landed:** `~/projects/micropython/ports/dos8086/mpconfigport.h` (locked target config +
+  `MP_ENDIANNESS_LITTLE`), `ports/dos8086/mphalport.h` (stub). Spike `-I` points at `ports/dos8086`.
+- **Headers:** shipped `minic/include/stdint.h` fixed (`int32_t`=`long`; `intptr_t`/`SIZE_MAX`/etc.,
+  FAR_DATA-conditional; pinned by `stdint_probe.c`). Spike `stubinc/unistd.h` added; `stdint.h`
+  shadow deleted.
+- **`NVar` 512→4096** (`minic/minic.y`): was the #1 blocker (62 files) once cpp was clean.
 
-- `py/mpconfig.h`: `invalid token at start of a preprocessor expression`, `Unexpected
-  MP_INT_MAX value`, `Unexpected SIZE_MAX value`, `endianness not defined and cannot detect it`.
-- `py/misc.h`: `__has_builtin` unsupported by host `cpp` in this mode, `#elif after #else`.
+## Scope for next session — grammar, in convergence order
 
-The spike harness pipeline is `cpp … | tr … | sed … > pp`, so the pipeline's exit status is
-**`sed`'s (0), not `cpp`'s (1)** — cpp failures are silently mislabeled `MINIC_FAIL "parse
-error"` (94 of them), because minic then chokes on the raw `#if`/`//` lines cpp left behind
-when it bailed. The "23 OK" are merely files whose *garbled* cpp output stayed parseable.
+Re-run the spike first (`build/mp-spike/run-spike.sh ~/projects/micropython/py/*.c`) to confirm the
+baseline, then peel layers. The two universal blockers are already pinned in isolation against minic:
 
-**Conclusion:** there is no point doing more minic grammar work (including the §1b
-aggregate/designated-initializer emitter) until a clean translation unit can actually be
-preprocessed. **Build the config/header layer first**, then re-measure.
+### Layer 1 (do first) — **array typedefs**: `typedef int jmp_buf[8];`
+The single biggest convergence point: `jmp_buf` comes through `setjmp.h` → `nlr.h` → `obj.h`, so it
+hits essentially every file. minic's `typedef` grammar accepts `typedef BASE NAME;` and pointer/
+function forms but **not** the array form `typedef BASE NAME '[' expr ']'`. Add the array-declarator
+case to the typedef rule (the existing struct-member array-dim path + `const_eval` for the dim is the
+model). `jmp_buf` must stay a real array typedef (C requires it so `jmp_buf` decays to a pointer when
+passed to `setjmp`) — do **not** paper over it in the header. Add a runtime probe (`sizeof` of an
+array-typedef'd local, pass-by-decay to a function).
 
-## Scope for next session
+### Layer 2 — **comma-operator expression statements**: `((void)(n), m_free(p));`
+The `m_malloc`/`m_free`/`m_del` family expands to parenthesized comma expressions used as statements.
+minic's `expr` has no binary `,` operator. Add it (lowest precedence; evaluate left for side effects,
+value is the right operand). Cast-to-void `(void)x` already parses; the gap is purely the `,` operator.
 
-### Step 0 — fix the harness exit-code masking (5 min, do this first)
-
-In `build/mp-spike/run-spike.sh`, the `if ! cpp … | tr … | sed … > "$pp"` line hides cpp
-failures. Use `set -o pipefail` (bash) for that pipeline, or capture cpp to a temp file and
-check its status, so CPP_FAIL is reported honestly. Without this you cannot tell config
-progress from grammar progress.
-
-### Step 1 — a real `mpconfigport.h` + stub headers so cpp succeeds
-
-This is Phase 2 (headers) + Phase 3 (port glue) bleeding together — the config header is what
-makes the limits/endianness/`__has_builtin` errors go away. Concretely, the cpp errors trace to:
-
-- **endianness** (`mpconfig.h:2320`): define `MP_ENDIANNESS_LITTLE`/`MP_ENDIANNESS_BIG`
-  (8086 is little-endian) so the auto-detect `#error` path isn't taken.
-- **`MP_INT_MAX` / `SIZE_MAX`** (`mpconfig.h:225,240`): the spike's stub `limits.h`/`stdint.h`
-  must define `INT_MAX`/`UINT_MAX`/`LONG_MAX`/`SIZE_MAX` with the *target's* widths
-  (`int`=16-bit, `long`=32-bit on this 8086 target — NOT the host's). Note the shipped
-  `minic/include/stdint.h` still lacks `intptr_t`/`uintptr_t` (model-dependent width — wants a
-  `FAR_DATA` `#ifdef`); the spike's `stubinc/stdint.h` shadow papered over this.
-- **`__has_builtin`** (`misc.h:469`): host `cpp -nostdinc` may not provide it; define
-  `__has_builtin(x) 0` (and check `__has_feature`/`__has_attribute` similarly) in the config
-  header or a forced-include, OR pass it on the cpp line.
-- **`#elif after #else`** (`misc.h:457`): usually a *downstream* symptom of an earlier `#if`
-  whose macro was undefined — re-check once the above are defined; it may evaporate.
-
-The cleanest home for this is the actual port: start `ports/dos8086/mpconfigport.h` (the
-locked target config is in `MICROPYTHON_PORT.md` §"Target configuration") and point the spike
-at it (`-I…/ports/dos8086`) instead of the ad-hoc `build/mp-spike/stubinc/` shims. Re-run the
-spike after each header lands and watch CPP_FAIL → 0.
-
-### Step 2 — re-measure minic grammar; THEN re-scope §1b
-
-Once files preprocess cleanly, the spike's MINIC_FAIL tally will *finally* reflect real
-grammar gaps. Two are already visible through the noise:
-
-- **`NVar` "too many variables"** (15 files, Phase 1c): raise minic's local-variable cap.
-- **§1b aggregate/designated initializers** (`{ … }`, `.field =`, `[i] =`) — the approved
-  plan's `dataitem()` emitter. This is still expected to be the dominant *grammar* blocker,
-  but **re-scope it from the post-config tally**, not from today's cpp-polluted one.
+### Layer 3 — re-measure, THEN re-scope §1b (the standing pause point)
+With Layers 1–2 cleared, re-run the spike and read the fresh tally. The **§1b aggregate/designated-
+initializer emitter** (`{ … }`, `.field =`, `[i] =`; approved plan's `dataitem()`) is still expected
+to be the dominant *remaining* grammar blocker, but scope it from the post-Layer-2 numbers, not from
+guesswork. `NGlo` (256) has not been hit yet but may surface after the initializer work (MicroPython
+emits many static globals) — raise it if/when "too many globals" appears.
 
 ## Guardrails (unchanged)
 
 - Rebuild with `cd minic && make minic`; the local `yacc` prints conflict counts (currently
-  **126 s/r, 0 r/r** — no new reduce/reduce, justify any new shift/reduce). The local miniyacc
-  is picky: **no `/* … */` comment between a production's head and its `:`, and none trailing a
-  rule's action**; per-rule RHS length limit (~5 symbols, like the existing 5-symbol rules).
-- Run `tools/test-dos.sh` (must stay **76/76**). Add/extend a probe per runtime-bearing feature.
-- Spike: `build/mp-spike/run-spike.sh ~/projects/micropython/py/*.c`, then read `summary.tsv` /
-  `err/<file>.minic.err`. **minic's error line points just *past* the failing construct.** The
-  harness `NORMALIZE` sed is a **no-op under macOS BSD sed** (`\b` unsupported) — pp files carry
-  canonical un-normalized type names, so minic must accept them natively.
-- Orthogonal pre-existing limits (don't chase unless a real consumer needs them): `void *`
-  pointer comparison hits "void has no size"; `sizeof` only takes `( type | ident )`, not a
-  general expression; tagged nested aggregate definitions used as members (`struct Foo { … } x;`)
-  are not handled (only untagged `struct { … } x;`); only the struct-member array-dim sites take
-  const-exprs.
+  **126 s/r, 0 r/r**). Justify any new shift/reduce; **no new reduce/reduce**. The local miniyacc is
+  picky: **no `/* … */` between a production head and its `:`, none trailing a rule's action**; per-rule
+  RHS length limit (~5 symbols).
+- Run `tools/test-dos.sh` (must stay **77/77**). Add/extend a probe per runtime-bearing feature.
+- Spike harness now uses **`clang -E`** (not `cpp`) and reports CPP_FAIL honestly. **minic's error line
+  points just *past* the failing construct** — and worse, on a full file the reported line is the
+  parser's *lookahead* line, which can lag the real construct by many lines (binary-search-by-`head`
+  is unreliable because truncating mid-function gives spurious failures). Isolate suspect constructs by
+  feeding minimal snippets to `minic -m medium` directly. The harness `NORMALIZE` sed is a **no-op under
+  macOS BSD sed** (`\b` unsupported) — minic must accept canonical type names natively.
+
+## Orthogonal pre-existing limits (don't chase unless a real consumer needs them)
+
+`void *` pointer comparison hits "void has no size"; `sizeof` only takes `( type | ident )`, not a
+general expression; tagged nested aggregate definitions used as members (`struct Foo { … } x;`) are
+not handled (only untagged `struct { … } x;`); only struct-member array-dim sites take const-exprs.
