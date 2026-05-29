@@ -1,81 +1,77 @@
-# Next session — MicroPython port: §1b aggregate/designated initializers + struct return-by-value
+# Next session — MicroPython port: struct return-by-value (codegen/ABI)
 
 > Master tracker: `MICROPYTHON_PORT.md`. Spike findings: `MICROPYTHON_SPIKE_REPORT.md`.
-> **Spike now at 69/132 OK** (was 26 at the start of the last session). Re-run
+> **Spike now at 77/132 OK** (was 69 at the start of the last session). Re-run
 > `build/mp-spike/run-spike.sh ~/projects/micropython/py/*.c` to confirm before peeling more.
-> Gate **79/79**.
+> Gate **80/80**.
 
 ## What changed last session (so you don't redo it)
 
-Last session cleared Layers 1 & 2 from the old plan plus two larger blockers that the
-re-measure exposed, taking the spike 26 → 69:
+§1b — **file-scope aggregate / designated initializers** — is **done** (spike 69 → 77).
+`T NAME = { ... };` for struct/union/global variables now parses and emits a correct QBE
+`data` block: designated `.field =`, nested braces (`.base = { ... }`), partially-initialized
+array members (trailing zero-fill), `&global`/function/string-literal pointer fields, casts,
+and constant-folded values. New `gaggr`/`gilist`/`gitem`/`gival` grammar (0 new conflicts) +
+`cival_eval` constant folder + `emit_global_aggregate` layout-aware emitter, all in
+`minic/minic.y`. Pinned by `aggregate_init_probe.c` (medium, DOSBox-verified). Out-of-order
+designators and bitfield-member initializers `die()` (not used by MicroPython).
 
-- **Layer 1 — array typedefs** (`typedef int jmp_buf[8];`): new `tdcl` grammar rule +
-  `typhadd_array()` storing `ctyp = IDIR(elem)` with `arraydim`/`arrayelem`. A parser
-  global `g_td_arraydim` (set by `typhget`, reset on type keywords and `type '*'`) lets
-  the local-var and struct-member decl rules size them as real arrays that decay to a
-  pointer. Pinned by `arraytypedef_probe.c`. (NOTE: `sizeof()` of a *local* array — typedef'd
-  or plain `int buf[8]` — still returns pointer size; pre-existing orthogonal gap, the probe
-  pins the dimension through the struct-member path instead.)
-- **Layer 2 — comma operator**: the grouping-paren rule is now `'(' comma_expr ')'` (was
-  `'(' expr ')'`); the `,`-node codegen already existed. Handles
-  `((void)(n), m_free(p));`. Pinned by `comma_probe.c`.
-- **`prog` made left-recursive** (was right-recursive `externdcl prog | …`). This was the
-  *actual* dominant blocker: right recursion put the entire file on miniyacc's fixed
-  `stk[StackSize=500]`, so big headers overflowed and yyerror'd as a bare "parse error"
-  many lines past the real spot. Left recursion bounds the stack and **also dropped s/r
-  conflicts 126 → 108**. Biggest single win (+30 files). Conflicts now **108 s/r, 0 r/r**.
-- **`const`/`volatile` after `*`** (`int *const *p`, `struct X *const *child_table`): added
-  `type '*' CONST` / `type '*' VOLATILE` rules (no-op qualifier on the pointer). Common in
-  MicroPython prototypes.
+## Scope for next session — struct return-by-value (the dominant remaining blocker, ~20 files)
 
-## Scope for next session — the two dominant remaining blockers (both re-measured & confirmed)
-
-### §1b — aggregate / designated initializers (the standing pause point; START HERE)
-The object files (`objbool`, `objnone`, `objdict`, …; the `}`-cluster, 13+ files) end with a
-file-scope `mp_obj_type_t` definition:
+This is the `return source_line;` failure cluster (minic's error line is the parser's
+*lookahead*, which lags the real construct by many lines — the true site is a struct-returning
+function). `py/bc.h`:
 ```c
-const mp_obj_type_t mp_type_bool = {
-    .base = { &mp_type_type }, .flags = (0x0008), .name = MP_QSTR_bool,
-    .slot_index_make_new = 1, …,
-    .slots = { (const void *)(…) bool_make_new, … }
-};
+mp_code_lineinfo_t mp_bytecode_decode_lineinfo(const byte **ip);   // returns a struct BY VALUE
+...
+mp_code_lineinfo_t decoded = mp_bytecode_decode_lineinfo(&ip);     // struct-typed init from call
 ```
-minic has **no** struct/global aggregate-initializer support today — even a *local*
-`struct P g = { .a = 1, .b = 2 };` parse-errors (PR#12's "designated initializers" only
-covered arrays / compound literals, not struct-variable `= {…}`). Needs: brace-init for
-struct/global variables, designated `.field =`, nested braces (`.base = { … }`), array
-members (`.slots = { … }`), and casts inside initializers. This is the approved plan's
-`dataitem()` emitter. Add a runtime probe (read back several fields, incl. a nested struct
-member and an array-member slot). `NGlo` (256) may surface here (MicroPython emits many
-static globals) — raise it if "too many globals" appears.
+minic emits a word-typed return and chokes on the struct-typed initializer ("invalid lvalue"
+/ parse error). This is a **codegen/ABI feature, not grammar**:
 
-### Struct return-by-value (newly discovered, 27 files via the `source_line` cluster)
-`py/bc.h` defines `mp_code_lineinfo_t mp_bytecode_decode_lineinfo(…)` returning a struct by
-value, and callers do `mp_code_lineinfo_t decoded = decode(&p);`. minic emits a word-typed
-return and chokes on the struct-typed init ("invalid lvalue"). This is a codegen/ABI feature
-(hidden-pointer return arg, or small-struct-in-DX:AX), **not grammar** — likely its own
-session. Mirror the call/selret ABI work already done for Kl returns.
+- **Return path:** a function whose return type is a struct/union. Two standard lowerings:
+  (a) **hidden-pointer return arg** — caller allocates space, passes its address as an implicit
+  first arg, callee `memcpy`s the result there (works for any size); or (b) **small-struct in
+  registers** (≤4 bytes in DX:AX) like the Kl return path. Mirror the call/selret ABI work
+  already done for Kl returns (see `[[i8086-selret-kl-rtmp-lowdup]]`, `[[kl-slot-resident-invariant]]`,
+  and `minic.y`'s `selret`/`selcall`). The hidden-pointer approach is the safer general fix;
+  consider it first.
+- **Call path:** `selcall` must allocate the return temp, pass its address, and yield the
+  struct value (really its address) so `struct X y = f();` becomes a struct copy from the
+  return slot (reuse the existing `*X = *Y` struct-copy machinery in `minic.y`).
+- **Far-data models:** the hidden return pointer is a far pointer under compact/large/huge
+  (4-byte), near (2-byte) under medium — gate it like the other `uses_far_code()`/`NEAR_DATA()`
+  sites. The probe should cross-check at least medium + one far-data model.
+- **Probe:** a function returning a multi-field struct by value; caller does both
+  `S y = f();` and `f().field` (member-of-call-result) and passes the result to another fn.
+  Verify each field round-trips in DOSBox.
+
+After it lands, re-run the spike and re-scope from the fresh tally.
 
 ## Guardrails (unchanged)
 
 - Rebuild with `cd minic && make minic`; local `yacc` prints conflict counts (now **108 s/r,
   0 r/r**). Justify any new shift/reduce; **no new reduce/reduce**. Local miniyacc is picky:
-  **no `/* … */` between a production head and its `:`, none trailing a rule's action**;
-  per-rule RHS length limit (~5 symbols, though longer rules exist).
-- Run `tools/test-dos.sh` (must stay **79/79**). Add/extend a probe per runtime-bearing feature.
+  **no `/* … */` between a production head and its `:`, none trailing a rule's action, and no
+  comment block immediately preceding a production head** (burned last session — "colon expected
+  after production's head"); per-rule RHS length limit (~5 symbols).
+- Run `tools/test-dos.sh` (must stay **80/80**). Add/extend a probe per runtime-bearing feature.
 - Spike harness uses **`clang -E`** (not `cpp`) and reports CPP_FAIL honestly. **minic's error
   line is the parser's *lookahead* line, which lags the real construct by many lines.**
-  Binary-search-by-`head` is **unreliable** — truncating mid-function/mid-struct/mid-enum
-  gives *spurious* failures AND the OK/FAIL signal is **non-monotonic** (a later cut can pass
-  where an earlier one failed). Bisect only at top-level statement boundaries, and confirm any
-  suspected construct by feeding a **minimal isolated snippet** to `minic -m medium` directly.
-  The `NORMALIZE` sed is a no-op under macOS BSD sed (`\b`) — minic must accept canonical names.
+  Binary-search-by-`head` is **unreliable** (non-monotonic; truncation gives spurious failures).
+  Bisect only at top-level statement boundaries, and confirm any suspected construct by feeding a
+  **minimal isolated snippet** to `minic -m medium` directly. The `NORMALIZE` sed is a no-op
+  under macOS BSD sed (`\b`) — minic must accept canonical names.
 
 ## Orthogonal pre-existing limits (don't chase unless a real consumer needs them)
 
-`sizeof` of a *local* array returns pointer size (dims aren't tracked for locals); `void *`
-pointer comparison hits "void has no size"; `sizeof` only takes `( type | ident )`, not a
-general expression; tagged nested aggregate definitions used as members (`struct Foo { … } x;`)
-are not handled (only untagged `struct { … } x;`); only struct-member array-dim sites take
-const-exprs.
+- **Scalar array initializers** (`static const uint8_t rule_act_table[] = { ... };`) — the
+  `T NAME[] = {...}` rule only dispatches struct / pointer element types; a scalar element type
+  `die`s ("array initializer requires struct or pointer type"). Surfaced as a spike blocker
+  (`compile.c`, the grammar/op tables). Small extension to `emit_struct_array_data`'s sibling.
+- **Inline tagged-aggregate definition + var + initializer** (`union ival { int i; long l; } U = {…};`)
+  parse-errors — define the type first, then declare the variable (the probe does this).
+- `sizeof` of a *local* array returns pointer size; `void *` pointer comparison hits "void has
+  no size"; `sizeof` only takes `( type | ident )`, not a general expression; tagged nested
+  aggregate definitions used as members (`struct Foo { … } x;`) are not handled (only untagged);
+  out-of-order / bitfield-member designated initializers `die()` (see §1b notes).

@@ -81,6 +81,7 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/arraytypedef_probe.c:minic/dos/tests/arraytypedef_probe.golden.txt:medium"
 	"minic/dos/examples/comma_probe.c:minic/dos/tests/comma_probe.golden.txt:medium"
 	"minic/dos/examples/stdint_probe.c:minic/dos/tests/stdint_probe.golden.txt:medium"
+	"minic/dos/examples/aggregate_init_probe.c:minic/dos/tests/aggregate_init_probe.golden.txt:medium"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:medium"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:large"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:huge"

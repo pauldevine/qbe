@@ -3537,6 +3537,314 @@ emit_struct_array_data(int sidx, char *name)
 	sai_clear();
 }
 
+/* ===== file-scope aggregate / designated initializers (§1b) =====
+ *
+ * Handles `T NAME = { ... };` for struct/union variables, including
+ * designated `.field = value`, nested braces (`.base = { ... }`),
+ * array members (`.slots = { a, b, c }`), and casts inside values.
+ *
+ * The initializer is parsed into a generic Node tree (gaggr/gilist/
+ * gitem grammar): a brace becomes a '{' node whose `l` is a chain of
+ * list nodes (op 0, l=item, r=next); a sequential item is the value
+ * node itself; a designated item is a 'D' node (l=value, r=IDENT) or
+ * a 'd' node (l=value, r=index-expr).  We walk that tree against the
+ * target type, constant-folding each scalar to an integer or a
+ * symbol+addend, and emit a QBE `data` block whose byte layout matches
+ * the struct's member offsets (inserting `z N` zero-fill for any gap a
+ * designator skips and a trailing `z` to the full type size). */
+
+struct CIVal {
+	int  issym;          /* 1 = symbol-relative (address), 0 = integer */
+	char sym[NString];   /* symbol name (no leading $) when issym */
+	long off;            /* integer value, or addend when issym */
+};
+
+void cival_eval(Node *, struct CIVal *);
+
+/* Evaluate &lvalue → symbol [+ byte offset]. */
+void
+cival_addr(Node *n, struct CIVal *o)
+{
+	o->issym = 1;
+	o->sym[0] = 0;
+	o->off = 0;
+	if (n->op == 'V') {
+		strcpy(o->sym, n->u.v);
+		return;
+	}
+	if (n->op == '@' && n->l && n->l->op == '+') {
+		/* &arr[i]  ==  arr + i  (i counted in elements) */
+		Node *base = n->l->l;
+		Symb *bs;
+		struct CIVal idx;
+		if (base->op != 'V')
+			die("unsupported address-of base in initializer");
+		strcpy(o->sym, base->u.v);
+		cival_eval(n->l->r, &idx);
+		if (idx.issym)
+			die("non-constant index in static initializer");
+		bs = varget(base->u.v);
+		o->off = idx.off * (long)(bs ? SIZE(DREF(bs->ctyp)) : 1);
+		return;
+	}
+	die("unsupported address-of in static initializer");
+}
+
+/* Constant-fold an initializer value to an integer or symbol+addend. */
+void
+cival_eval(Node *n, struct CIVal *o)
+{
+	struct CIVal a, b;
+	Symb *sv;
+
+	if (!n)
+		die("null initializer expression");
+	o->issym = 0;
+	o->sym[0] = 0;
+	o->off = 0;
+	switch (n->op) {
+	case 'N':
+		o->off = n->u.n;
+		return;
+	case 'S':
+		o->issym = 1;
+		sprintf(o->sym, "glo%d", n->u.n);
+		return;
+	case 'V':
+		sv = varget(n->u.v);
+		if (!sv)
+			die("undefined identifier in static initializer");
+		if (sv->t == Con) {            /* enum constant */
+			o->off = sv->u.n;
+			return;
+		}
+		if (sv->t == Var)
+			die("non-constant local in static initializer");
+		/* global / extern / function name: decays to its address */
+		o->issym = 1;
+		strcpy(o->sym, n->u.v);
+		return;
+	case 'A':                              /* &lvalue */
+		cival_addr(n->l, o);
+		return;
+	case 'K':                              /* (type)expr cast: value-preserving */
+		cival_eval(n->l, o);
+		return;
+	case '+':
+		cival_eval(n->l, &a);
+		cival_eval(n->r, &b);
+		if (a.issym && b.issym)
+			die("two symbols added in static initializer");
+		o->issym = a.issym || b.issym;
+		strcpy(o->sym, a.issym ? a.sym : b.sym);
+		o->off = a.off + b.off;
+		return;
+	case '-':
+		if (!n->r) {                   /* unary minus */
+			cival_eval(n->l, &a);
+			if (a.issym)
+				die("negate symbol in static initializer");
+			o->off = -a.off;
+			return;
+		}
+		cival_eval(n->l, &a);
+		cival_eval(n->r, &b);
+		if (b.issym)
+			die("subtract symbol in static initializer");
+		o->issym = a.issym;
+		strcpy(o->sym, a.sym);
+		o->off = a.off - b.off;
+		return;
+	default:
+		/* *, /, %, &, |, ^, <<, >>, ~ : pure integer fold */
+		o->off = const_eval(n);
+		return;
+	}
+}
+
+/* Item-separator helper: a `,` between QBE data items (none before the
+ * first).  Every leaf (scalar or zero-fill) calls this first. */
+void
+agg_sep(char *buf, int *bl, int *first)
+{
+	if (*first)
+		*first = 0;
+	else
+		*bl += sprintf(buf + *bl, ",");
+}
+
+void
+agg_zfill(int bytes, char *buf, int *bl, int *first)
+{
+	if (bytes <= 0)
+		return;
+	agg_sep(buf, bl, first);
+	*bl += sprintf(buf + *bl, " z %d", bytes);
+}
+
+/* Peel redundant braces around a scalar value: `.x = { 5 }`. */
+Node *
+agg_unwrap_scalar(Node *init)
+{
+	while (init && init->op == '{') {
+		Node *list = init->l;
+		init = list ? list->l : 0;     /* first list item */
+		if (init && (init->op == 'D' || init->op == 'd'))
+			init = init->l;        /* its value */
+	}
+	return init;
+}
+
+void
+agg_emit_scalar(unsigned ctyp, Node *init, char *buf, int *bl, int *first)
+{
+	struct CIVal v;
+	char ir = irtyp(ctyp);
+
+	agg_sep(buf, bl, first);
+	init = agg_unwrap_scalar(init);
+	if (!init) {
+		*bl += sprintf(buf + *bl, " %c 0", ir);
+		return;
+	}
+	cival_eval(init, &v);
+	if (v.issym) {
+		if (v.off)
+			*bl += sprintf(buf + *bl, " %c $%s+%ld", ir, v.sym, v.off);
+		else
+			*bl += sprintf(buf + *bl, " %c $%s", ir, v.sym);
+	} else {
+		*bl += sprintf(buf + *bl, " %c %ld", ir, v.off);
+	}
+}
+
+void agg_emit_value(unsigned, int, Node *, char *, int *, int *);
+
+/* Emit an array member: `cnt` elements of element-type `elemty`. */
+void
+agg_emit_array(unsigned elemty, int cnt, Node *init, char *buf, int *bl, int *first)
+{
+	int elemsz = SIZE(elemty);
+	int n = 0;
+	Node *ln;
+
+	if (!init || init->op != '{')
+		die("array member requires a braced initializer");
+	for (ln = init->l; ln; ln = ln->r) {
+		Node *item = ln->l;
+		Node *val = item;
+		if (item->op == 'd') {         /* [k] = v */
+			int k = const_eval(item->r);
+			if (k < n)
+				die("out-of-order array designator unsupported");
+			agg_zfill((k - n) * elemsz, buf, bl, first);
+			n = k;
+			val = item->l;
+		} else if (item->op == 'D') {
+			die("field designator in array initializer");
+		}
+		if (n >= cnt)
+			die("too many initializers for array member");
+		agg_emit_value(elemty, 0, val, buf, bl, first);
+		n++;
+	}
+	if (n < cnt)
+		agg_zfill((cnt - n) * elemsz, buf, bl, first);
+}
+
+void
+agg_emit_struct(int sidx, int isunion, Node *agg, char *buf, int *bl, int *first)
+{
+	int cursor = 0, memidx = 0;
+	int structsize = structh[sidx].size;
+	Node *ln;
+
+	if (!agg || agg->op != '{')
+		die("struct/union initializer must be braced");
+	for (ln = agg->l; ln; ln = ln->r) {
+		Node *item = ln->l;
+		Node *val;
+		struct Member *m;
+		int msize;
+
+		if (item->op == 'D') {         /* .field = val */
+			int k, found = -1;
+			for (k = 0; k < structh[sidx].nmembers; k++)
+				if (strcmp(structh[sidx].members[k].name,
+				           item->r->u.v) == 0) {
+					found = k;
+					break;
+				}
+			if (found < 0)
+				die("unknown member in designated initializer");
+			memidx = found;
+			val = item->l;
+		} else if (item->op == 'd') {
+			die("array designator in struct initializer");
+		} else {
+			val = item;
+		}
+		if (memidx >= structh[sidx].nmembers)
+			die("too many initializers for struct");
+		m = &structh[sidx].members[memidx];
+		if (m->bitwidth)
+			die("bitfield initializer unsupported");
+		if (!isunion) {
+			if (m->offset < cursor)
+				die("out-of-order designated initializer unsupported");
+			agg_zfill(m->offset - cursor, buf, bl, first);
+			cursor = m->offset;
+		}
+		agg_emit_value(m->ctyp, m->count, val, buf, bl, first);
+		msize = m->count ? SIZE(m->ctyp) * m->count : SIZE(m->ctyp);
+		cursor += msize;
+		memidx++;
+		if (isunion)
+			break;                 /* one initialized member */
+	}
+	if (cursor < structsize)
+		agg_zfill(structsize - cursor, buf, bl, first);
+}
+
+/* Emit `init` as a value occupying the footprint of (ctyp, count). */
+void
+agg_emit_value(unsigned ctyp, int cnt, Node *init, char *buf, int *bl, int *first)
+{
+	if (cnt > 0)
+		agg_emit_array(ctyp, cnt, init, buf, bl, first);
+	else if (KIND(ctyp) == STRUCT_T || KIND(ctyp) == UNION_T)
+		agg_emit_struct(DREF(ctyp), KIND(ctyp) == UNION_T,
+		                init, buf, bl, first);
+	else
+		agg_emit_scalar(ctyp, init, buf, bl, first);
+}
+
+/* `T NAME = { ... };` at file scope.  Emits one `data $NAME = ...`. */
+void
+emit_global_aggregate(unsigned ctyp, char *name, Node *agg)
+{
+	static char buf[65536];
+	int bl = 0, first = 1;
+
+	if (ctyp == NIL)
+		die("invalid void declaration");
+	if (nglo == NGlo)
+		die("too many globals");
+	bl = sprintf(buf, "align %d {", iralign(ctyp));
+	if (KIND(ctyp) == STRUCT_T || KIND(ctyp) == UNION_T)
+		agg_emit_struct(DREF(ctyp), KIND(ctyp) == UNION_T,
+		                agg, buf, &bl, &first);
+	else
+		agg_emit_scalar(ctyp, agg, buf, &bl, &first);
+	if (first)                             /* nothing emitted: keep block legal */
+		bl += sprintf(buf + bl, " z 1");
+	bl += sprintf(buf + bl, " }");
+	ini[nglo] = alloc(bl + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], name);
+	varadd(name, nglo++, ctyp, 0);
+}
+
 /* Apply the K&R parameter base type to every name in kr_namelist.
  * node->op encodes the declarator shape:
  *   0   plain IDENT
@@ -3942,7 +4250,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %type <u> type
 %type <s> stmt stmts asmstmt
-%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc idlist kr_idlist kr_namelist kr_name sm_more_names ext_decllist ext_decl comma_expr comma_exp0 init_decllist init_decl
+%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc idlist kr_idlist kr_namelist kr_name sm_more_names ext_decllist ext_decl comma_expr comma_exp0 init_decllist init_decl gaggr gilist gitem gival
 %type <n> asmoutputs asmoutputlist asmoutput asminputs asminputlist asminput asmclobbers asmclobberlist
 %token <u> TNAME
 
@@ -4510,6 +4818,7 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
                | '=' '(' NUM ')' ';'             { emit_global_int_init($3->u.n); }
                | '=' '-' NUM ';'                 { emit_global_int_init(-$3->u.n); }
                | '=' '(' '-' NUM ')' ';'         { emit_global_int_init(-$4->u.n); }
+               | '=' gaggr ';'                   { emit_global_aggregate(parsed_type, parsed_ident, $2); }
                | '[' NUM ']' ';'
 {
 	/* Global array of basic type: emit a zero-filled data block.
@@ -5239,6 +5548,22 @@ inititem: pref                        { $$ = $1; }
 initlist: inititem                    { $$ = mknode(0, $1, 0); }
         | inititem ',' initlist       { $$ = mknode(0, $1, $3); }
         ;
+
+gaggr: '{' gilist opt_trailing_comma '}'   { $$ = mknode('{', $2, 0); }
+     ;
+
+gilist: gitem                 { $$ = mknode(0, $1, 0); }
+      | gilist ',' gitem      { Node *p = $1; while (p->r) p = p->r; p->r = mknode(0, $3, 0); $$ = $1; }
+      ;
+
+gitem: gival                  { $$ = $1; }
+     | '.' IDENT '=' gival    { $$ = mknode('D', $4, $2); }
+     | '[' expr ']' '=' gival { $$ = mknode('d', $5, $2); }
+     ;
+
+gival: expr                   { $$ = $1; }
+     | gaggr                  { $$ = $1; }
+     ;
 
 type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; }
         | type '*' TFAR              { $$ = IDIR_FAR($1); g_td_arraydim = 0; }
