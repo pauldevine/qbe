@@ -1,0 +1,4 @@
+var=2 (want 2)
+rb=40,41 (want 40,41)
+close=99 (want 99)
+size=10 (want 10)

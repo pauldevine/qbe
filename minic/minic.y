@@ -105,6 +105,7 @@ int memmodel = MSmall;
 	 KIND(x) == INT ? 2 : \
 	 KIND(x) == LNG ? 4 : \
 	 (KIND(x) == STRUCT_T || KIND(x) == UNION_T) ? structh[DREF(x)].size : \
+	 (KIND(x) == PTR && KIND(DREF(x)) == FUN) ? CODEPTR_SZ() : \
 	 (KIND(x) == PTR && ISFAR(x)) ? 4 : DATAPTR_SZ())
 
 typedef struct Node Node;
@@ -230,7 +231,8 @@ struct Member {
 	int offset;      /* Byte offset within struct */
 	int bitwidth;    /* Bit width (0 = not a bitfield) */
 	int bitoffset;   /* Bit offset within the storage unit */
-	int count;       /* Array element count (0 = not an array) */
+	int count;       /* Array element count (0 = not an array OR flexible) */
+	int isflex;      /* 1 = flexible array member `T x[];` (count 0 but decays) */
 };
 
 /* Struct/union definition table */
@@ -247,7 +249,11 @@ struct {
 } structh[NStruct];
 int nstruct = 0;
 int curstruct = -1;  /* Index of struct currently being defined */
-int parentstruct = -1;  /* Parent struct for anonymous members */
+int parentstruct = -1;  /* Parent struct for anonymous members (legacy, unused) */
+#define NStructNest 32
+int structstk[NStructNest];  /* Saved curstruct for nested aggregate members */
+int structstksp = 0;         /* Stack pointer into structstk */
+int nestedanoncount = 0;     /* Counter for unique nested-aggregate tag names */
 int typedefanoncount = 0;  /* Counter for anonymous typedef structs/unions */
 int clit = 0;  /* Counter for compound literal temporaries */
 unsigned curfntyp = INT;  /* Current function return type (defaults to INT for K&R style) */
@@ -524,6 +530,7 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 	m->bitwidth = 0;    /* Not a bitfield */
 	m->bitoffset = 0;
 	m->count = 0;       /* Scalar member */
+	m->isflex = 0;
 
 	if (structh[sidx].isunion) {
 		/* Union: all members at offset 0 */
@@ -562,6 +569,7 @@ structaddarrmember(int sidx, char *name, unsigned ctyp, int count)
 	m->bitwidth = 0;
 	m->bitoffset = 0;
 	m->count = count;
+	m->isflex = (count == 0);  /* `T x[];` flexible array: 0 bytes but decays */
 	total = SIZE(ctyp) * count;
 	if (structh[sidx].isunion) {
 		m->offset = 0;
@@ -617,6 +625,7 @@ structaddbitfield(int sidx, char *name, unsigned ctyp, int width)
 	m->bitwidth = width;
 	m->bitoffset = structh[sidx].curbfoffset;
 	m->count = 0;
+	m->isflex = 0;
 
 	/* Advance bit offset for next bitfield */
 	structh[sidx].curbfoffset += width;
@@ -660,6 +669,7 @@ hoistanonymous(int parent_sidx, int anon_sidx)
 		parent_mem->bitwidth = anon_mem->bitwidth;
 		parent_mem->bitoffset = anon_mem->bitoffset;
 		parent_mem->count = anon_mem->count;
+		parent_mem->isflex = anon_mem->isflex;
 
 		if (structh[parent_sidx].isunion) {
 			/* Parent is union - all members at offset 0 */
@@ -1874,11 +1884,18 @@ expr(Node *n)
 				a->u.s = expr(a->l);
 
 			/* Generate indirect call */
-			fprintf(of, "\t");
-			psymb(sr);
-			fprintf(of, " =%c call ", irtyp_ret(sr.ctyp));
-			psymb(fptr);
-			fprintf(of, "(");
+			if (sr.ctyp == NIL) {
+				/* Void-returning function pointer - no result. */
+				fprintf(of, "\tcall ");
+				psymb(fptr);
+				fprintf(of, "(");
+			} else {
+				fprintf(of, "\t");
+				psymb(sr);
+				fprintf(of, " =%c call ", irtyp_ret(sr.ctyp));
+				psymb(fptr);
+				fprintf(of, "(");
+			}
 			for (a=n->r; a; a=a->r) {
 				fprintf(of, "%c ", irtyp_ret(a->u.s.ctyp));
 				psymb(a->u.s);
@@ -2018,8 +2035,9 @@ expr(Node *n)
 			}
 
 			/* Array members decay to a pointer to their first element —
-			 * don't load through the address, return it as the value. */
-			if (m->count > 0) {
+			 * don't load through the address, return it as the value.
+			 * Flexible array members (`T x[];`, count 0) decay too. */
+			if (m->count > 0 || m->isflex) {
 				sr = addr;
 				break;
 			}
@@ -4252,12 +4270,11 @@ smembers:
         | smembers type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
 {
 	/* Function-pointer member literal: `int (*fn)(int, int);` */
-	if ($2 == NIL)
-		die("invalid void function pointer member");
+	/* A void-returning function pointer member (`void (*close)(void *);`)
+	 * is legal; FUNC(NIL) encodes the void return type. */
 	structaddmember(curstruct, $5->u.v, IDIR(FUNC($2)));
 }
-        | smembers anonstruct
-        | smembers anonunion
+        | smembers nestedagg
         ;
 
 sm_more_names: IDENT
@@ -4288,60 +4305,57 @@ sm_more_names: IDENT
 }
              ;
 
-anonstruct: anon_s_begin anonmembers anon_s_end
-          ;
-
-anonunion: anon_u_begin anonmembers anon_u_end
+nestedagg: nested_s_begin smembers '}' ';'
+{
+	/* Anonymous nested struct: hoist its members into the parent. */
+	int idx = curstruct;
+	curstruct = structstk[--structstksp];
+	hoistanonymous(curstruct, idx);
+}
+         | nested_s_begin smembers '}' IDENT ';'
+{
+	/* Named nested struct member: `struct { ... } name;`. */
+	int idx = curstruct;
+	curstruct = structstk[--structstksp];
+	structaddmember(curstruct, $4->u.v, (idx << 3) + STRUCT_T);
+}
+         | nested_u_begin smembers '}' ';'
+{
+	/* Anonymous nested union: hoist its members into the parent. */
+	int idx = curstruct;
+	curstruct = structstk[--structstksp];
+	hoistanonymous(curstruct, idx);
+}
+         | nested_u_begin smembers '}' IDENT ';'
+{
+	/* Named nested union member: `union { ... } name;`. */
+	int idx = curstruct;
+	curstruct = structstk[--structstksp];
+	structaddmember(curstruct, $4->u.v, (idx << 3) + UNION_T);
+}
          ;
 
-anon_s_begin: STRUCT '{'
+nested_s_begin: STRUCT '{'
 {
-	parentstruct = curstruct;
-	curstruct = structadd("__anon_s", 0);
+	char nm[NString];
+	if (structstksp >= NStructNest)
+		die("struct nesting too deep");
+	sprintf(nm, "__nested_%d", nestedanoncount++);
+	structstk[structstksp++] = curstruct;
+	curstruct = structadd(nm, 0);
 }
-            ;
+              ;
 
-anon_u_begin: UNION '{'
+nested_u_begin: UNION '{'
 {
-	parentstruct = curstruct;
-	curstruct = structadd("__anon_u", 1);
+	char nm[NString];
+	if (structstksp >= NStructNest)
+		die("struct nesting too deep");
+	sprintf(nm, "__nested_%d", nestedanoncount++);
+	structstk[structstksp++] = curstruct;
+	curstruct = structadd(nm, 1);
 }
-            ;
-
-anon_s_end: '}' ';'
-{
-	int idx = curstruct;
-	curstruct = parentstruct;
-	parentstruct = -1;
-	hoistanonymous(curstruct, idx);
-}
-          ;
-
-anon_u_end: '}' ';'
-{
-	int idx = curstruct;
-	curstruct = parentstruct;
-	parentstruct = -1;
-	hoistanonymous(curstruct, idx);
-}
-          ;
-
-anonmembers:
-        | anonmembers type IDENT ';'
-{
-	structaddmember(curstruct, $3->u.v, $2);
-}
-        | anonmembers type IDENT '[' expr ']' ';'
-{
-	if ($2 == NIL)
-		die("invalid void array member");
-	structaddarrmember(curstruct, $3->u.v, $2, const_eval($5));
-}
-        | anonmembers type IDENT ':' expr ';'
-{
-	structaddbitfield(curstruct, $3->u.v, $2, const_eval($5));
-}
-        ;
+              ;
 
 typed_decl: type_and_ident typed_decl_rest
 {
@@ -5092,8 +5106,7 @@ dcls:
 	char *v;
 	unsigned fptr_type;
 
-	if ($2 == NIL)
-		die("invalid void function pointer");
+	/* void-returning function pointer (`void (*fp)(...)`) is legal. */
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
 	varadd(v, 0, fptr_type, 0);  /* Not an array */
@@ -5107,8 +5120,7 @@ dcls:
 	unsigned fptr_type;
 	Node *init_node;
 
-	if ($2 == NIL)
-		die("invalid void function pointer");
+	/* void-returning function pointer is legal. */
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));
 	varadd(v, 0, fptr_type, 0);
@@ -5126,8 +5138,7 @@ dcls:
 	unsigned fptr_type;
 	Node *first;
 
-	if ($2 == NIL)
-		die("invalid void function pointer");
+	/* void-returning function pointer is legal. */
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));
 	varadd(v, 0, fptr_type, 0);
@@ -5326,8 +5337,7 @@ stmt: ';'                            { $$ = 0; }
         /* Block-scoped function pointer: `int (*fp)(int, int);` */
         char *v;
         unsigned fptr_type;
-        if ($1 == NIL)
-            die("invalid void function pointer");
+        /* void-returning function pointer is legal. */
         v = $4->u.v;
         fptr_type = IDIR(FUNC($1));
         varadd(v, 0, fptr_type, 0);
@@ -5340,8 +5350,7 @@ stmt: ';'                            { $$ = 0; }
         char *v;
         unsigned fptr_type;
         Node *init_node;
-        if ($1 == NIL)
-            die("invalid void function pointer");
+        /* void-returning function pointer is legal. */
         v = $4->u.v;
         fptr_type = IDIR(FUNC($1));
         varadd(v, 0, fptr_type, 0);

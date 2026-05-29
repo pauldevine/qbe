@@ -1,86 +1,84 @@
-# Next session — MicroPython port, Phase 1 continued (nested named aggregate members)
+# Next session — MicroPython port: stand up a working preprocessing environment (Phase 2/3 config)
 
 > Master tracker: `MICROPYTHON_PORT.md`. Spike findings: `MICROPYTHON_SPIKE_REPORT.md`.
-> **Tier 1 + layer 2 are DONE** (2026-05-29). The entire `py/obj.h` type/enum/struct
-> declaration grammar is cleared. This document is the work plan for the *next* layer.
+> **The frontend declaration grammar is cleared as far as the spike can measure.** Nested
+> named members, flexible-array decay, and void-returning function pointers all landed
+> 2026-05-29 (gate **76/76**). This document is the re-scoped plan for the *next* layer.
 
-## Where we are
+## The pivot: the spike is now cpp-bound, not grammar-bound
 
-Layer 2 landed nine localized `minic.y` features (see `MICROPYTHON_PORT.md` running log):
-`...` ellipsis protos, canonical trailing-`int` specifiers + `signed`, enum const-expr
-initializers + trailing comma, `const/volatile struct/union/enum` + bare `enum Tag` types,
-const-expr bitfield widths, const-expr array-member dims, `const/volatile void`,
-incomplete-struct forward decls, and `NString` 32→128. Conflicts **117 → 126 s/r, 0 r/r**
-(all benign). Gate **74/74** (`ellipsis_probe.c` + `declgram2_probe.c` pin the runtime-bearing
-features). Spike **12 → 16/132 fully parse**; the convergence point marched ~1000 lines deep
-into `obj.h`.
+Re-running the spike after the 2026-05-29 grammar work, the headline number barely moved
+(16 → 23/132 OK) — but the *reason* changed completely. **All 132 `py/*.c` files now fail
+`cpp` itself** (exit 1), on shared-config errors in two headers:
 
-**The current universal blocker (114/132 files): nested NAMED struct/union members.**
+- `py/mpconfig.h`: `invalid token at start of a preprocessor expression`, `Unexpected
+  MP_INT_MAX value`, `Unexpected SIZE_MAX value`, `endianness not defined and cannot detect it`.
+- `py/misc.h`: `__has_builtin` unsupported by host `cpp` in this mode, `#elif after #else`.
 
-```c
-typedef struct _mp_obj_fun_builtin_fixed_t {
-    mp_obj_base_t base;
-    union {                 // <-- a nested union DEFINITION used as a member,
-        mp_fun_0_t _0;      //     WITH a member name `fun`
-        mp_fun_1_t _1;
-        mp_fun_2_t _2;
-        mp_fun_3_t _3;
-    } fun;
-} mp_obj_fun_builtin_fixed_t;
-```
+The spike harness pipeline is `cpp … | tr … | sed … > pp`, so the pipeline's exit status is
+**`sed`'s (0), not `cpp`'s (1)** — cpp failures are silently mislabeled `MINIC_FAIL "parse
+error"` (94 of them), because minic then chokes on the raw `#if`/`//` lines cpp left behind
+when it bailed. The "23 OK" are merely files whose *garbled* cpp output stayed parseable.
 
-Truly-*anonymous* C11 members (`union { … };` with no trailing name — members promote into
-the enclosing struct) **already work**. The gap is a nested struct/union *definition* that is
-then given a member name (`} fun;`). `struct { … } pt;` fails the same way.
+**Conclusion:** there is no point doing more minic grammar work (including the §1b
+aggregate/designated-initializer emitter) until a clean translation unit can actually be
+preprocessed. **Build the config/header layer first**, then re-measure.
 
-## Scope (same discipline as before)
+## Scope for next session
 
-All edits in `minic/minic.y`. After each: `cd minic && make minic`, **watch yacc conflict
-counts (no new reduce/reduce; justify any new shift/reduce against the existing same-state
-token family)**, run `tools/test-dos.sh` (must stay **74/74**), re-run the spike to peel the
-next layer. Add/extend a probe per runtime-bearing feature.
+### Step 0 — fix the harness exit-code masking (5 min, do this first)
 
-### Step 1 — nested named struct/union member definitions
+In `build/mp-spike/run-spike.sh`, the `if ! cpp … | tr … | sed … > "$pp"` line hides cpp
+failures. Use `set -o pipefail` (bash) for that pipeline, or capture cpp to a temp file and
+check its status, so CPP_FAIL is reported honestly. Without this you cannot tell config
+progress from grammar progress.
 
-The member grammar lives in `smembers` (named structs, `minic.y` ~4206) and `anonmembers`
-(the anonymous-aggregate path that handles the C11 promote-into-parent case). You need a
-`smembers` alternative that:
-- opens a nested struct/union body (reuse the existing `structstart`/`typedefstructstart`
-  machinery, or a fresh nested-struct start that pushes/pops `curstruct`),
-- parses its `smembers` body recursively,
-- then on `} IDENT ;` registers a **named** member of that nested aggregate type in the
-  *outer* struct (via `structaddmember(outer, name, nested_struct_ctyp)`).
+### Step 1 — a real `mpconfigport.h` + stub headers so cpp succeeds
 
-Watch out for the `curstruct` global — nested definitions need a save/restore stack (the
-inner body must not clobber the outer struct's member-accumulation state). Check how
-`typedefstruct`/`sdcl` set and use `curstruct` before designing the recursion.
+This is Phase 2 (headers) + Phase 3 (port glue) bleeding together — the config header is what
+makes the limits/endianness/`__has_builtin` errors go away. Concretely, the cpp errors trace to:
 
-- **Probe:** a struct with both a named nested `union { … } u;` and a named nested
-  `struct { … } s;`; write/read members through `outer.u.field` and `outer.s.field`; verify
-  `sizeof(outer)` and that the union members alias. Runtime probe (layout + aliasing are
-  codegen, not just parse).
+- **endianness** (`mpconfig.h:2320`): define `MP_ENDIANNESS_LITTLE`/`MP_ENDIANNESS_BIG`
+  (8086 is little-endian) so the auto-detect `#error` path isn't taken.
+- **`MP_INT_MAX` / `SIZE_MAX`** (`mpconfig.h:225,240`): the spike's stub `limits.h`/`stdint.h`
+  must define `INT_MAX`/`UINT_MAX`/`LONG_MAX`/`SIZE_MAX` with the *target's* widths
+  (`int`=16-bit, `long`=32-bit on this 8086 target — NOT the host's). Note the shipped
+  `minic/include/stdint.h` still lacks `intptr_t`/`uintptr_t` (model-dependent width — wants a
+  `FAR_DATA` `#ifdef`); the spike's `stubinc/stdint.h` shadow papered over this.
+- **`__has_builtin`** (`misc.h:469`): host `cpp -nostdinc` may not provide it; define
+  `__has_builtin(x) 0` (and check `__has_feature`/`__has_attribute` similarly) in the config
+  header or a forced-include, OR pass it on the cpp line.
+- **`#elif after #else`** (`misc.h:457`): usually a *downstream* symptom of an earlier `#if`
+  whose macro was undefined — re-check once the above are defined; it may evaporate.
 
-### Step 2 — re-run spike, re-scope §1b (the standing pause point)
+The cleanest home for this is the actual port: start `ports/dos8086/mpconfigport.h` (the
+locked target config is in `MICROPYTHON_PORT.md` §"Target configuration") and point the spike
+at it (`-I…/ports/dos8086`) instead of the ad-hoc `build/mp-spike/stubinc/` shims. Re-run the
+spike after each header lands and watch CPP_FAIL → 0.
 
-**Do NOT start the aggregate/designated-initializer emitter (approved plan §1b, the
-`dataitem()` design) without re-running the spike first.** After nested members parse, the
-spike will almost certainly surface initializers (`{ … }` for structs/arrays, designated
-`.field =` / `[i] =`) as the dominant remaining blocker — that is the substantial piece.
-**Pause and re-scope §1b from the fresh tally** before writing the emitter.
+### Step 2 — re-measure minic grammar; THEN re-scope §1b
 
-## Guardrails
+Once files preprocess cleanly, the spike's MINIC_FAIL tally will *finally* reflect real
+grammar gaps. Two are already visible through the noise:
 
-- Rebuild with `cd minic && make minic`; the local `yacc` prints conflict counts. The local
-  miniyacc is picky: **no trailing `/* … */` comment after a rule's action `{ … }`** (put
-  comments on their own line or inside the action), and it has a per-rule RHS length limit.
-- Flow is system `cpp -P -nostdinc` + `minic/include` → `minic`. Spike harness:
-  `build/mp-spike/run-spike.sh ~/projects/micropython/py/*.c` then read `summary.tsv` /
-  `err/<file>.minic.err`. **minic's reported error line points just *past* the failing
-  construct** — read a few lines back, and isolate a minimal repro through `minic -m medium`.
-  Also: the harness `NORMALIZE` sed is a **no-op under macOS BSD sed** (`\b` unsupported), so
-  treat the pp files as carrying canonical un-normalized type names.
-- Keep edits localized to declarator / type-specifier / struct-member / param rules.
+- **`NVar` "too many variables"** (15 files, Phase 1c): raise minic's local-variable cap.
+- **§1b aggregate/designated initializers** (`{ … }`, `.field =`, `[i] =`) — the approved
+  plan's `dataitem()` emitter. This is still expected to be the dominant *grammar* blocker,
+  but **re-scope it from the post-config tally**, not from today's cpp-polluted one.
+
+## Guardrails (unchanged)
+
+- Rebuild with `cd minic && make minic`; the local `yacc` prints conflict counts (currently
+  **126 s/r, 0 r/r** — no new reduce/reduce, justify any new shift/reduce). The local miniyacc
+  is picky: **no `/* … */` comment between a production's head and its `:`, and none trailing a
+  rule's action**; per-rule RHS length limit (~5 symbols, like the existing 5-symbol rules).
+- Run `tools/test-dos.sh` (must stay **76/76**). Add/extend a probe per runtime-bearing feature.
+- Spike: `build/mp-spike/run-spike.sh ~/projects/micropython/py/*.c`, then read `summary.tsv` /
+  `err/<file>.minic.err`. **minic's error line points just *past* the failing construct.** The
+  harness `NORMALIZE` sed is a **no-op under macOS BSD sed** (`\b` unsupported) — pp files carry
+  canonical un-normalized type names, so minic must accept them natively.
 - Orthogonal pre-existing limits (don't chase unless a real consumer needs them): `void *`
   pointer comparison hits "void has no size"; `sizeof` only takes `( type | ident )`, not a
-  general expression; only the struct-member array-dim sites take const-exprs (the other 13
-  `[NUM]` sites still want a plain NUM).
+  general expression; tagged nested aggregate definitions used as members (`struct Foo { … } x;`)
+  are not handled (only untagged `struct { … } x;`); only the struct-member array-dim sites take
+  const-exprs.
