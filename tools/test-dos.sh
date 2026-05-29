@@ -73,6 +73,7 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/mediumprobe.c:minic/dos/tests/mediumprobe.golden.txt:medium"
 	"minic/dos/examples/mediumprobe.c:minic/dos/tests/mediumprobe.golden.txt:large"
 	"minic/dos/examples/mediumprobe.c:minic/dos/tests/mediumprobe.golden.txt:huge"
+	"minic/dos/examples/declgram_probe.c:minic/dos/tests/declgram_probe.golden.txt:medium"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:medium"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:large"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:huge"

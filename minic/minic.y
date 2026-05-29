@@ -175,7 +175,8 @@ struct AsmStmt {
 	int isvolatile;            /* 1 if volatile */
 };
 
-int yylex(void), yyerror(char *);
+int yylex(void), yylex_inner(void), yyerror(char *);
+int prevtok = 0;  /* last token yylex returned; tag-namespace disambiguation */
 Symb expr(Node *), lval(Node *);
 void branch(Node *, int, int);
 int stmt(Stmt *, int, int);
@@ -236,10 +237,11 @@ struct {
 	char name[NString];
 	int isunion;  /* 1 for union, 0 for struct */
 	int nmembers;
-	struct Member members[16];  /* Max 16 members per struct */
+	struct Member members[64];  /* Max 64 members per struct */
 	int size;
 	int curbfoffset;  /* Current bit offset for bitfield packing */
 	int curbfbase;    /* Byte offset of current bitfield storage unit */
+	int forward;      /* 1 = forward/incomplete (tag known, body not yet defined) */
 } structh[NStruct];
 int nstruct = 0;
 int curstruct = -1;  /* Index of struct currently being defined */
@@ -439,12 +441,24 @@ structadd(char *name, int isunion)
 {
 	int idx;
 
+	idx = structfind(name);
+	if (idx >= 0) {
+		if (!structh[idx].forward)
+			die("struct/union already defined");
+		/* Reuse the forward-declared slot; fill in the real body so
+		 * that pre-existing typedefs/pointers keep pointing at it and
+		 * SIZE() becomes correct once members are added. */
+		structh[idx].isunion = isunion;
+		structh[idx].nmembers = 0;
+		structh[idx].size = 0;
+		structh[idx].curbfoffset = 0;
+		structh[idx].curbfbase = 0;
+		structh[idx].forward = 0;
+		return idx;
+	}
+
 	if (nstruct >= NStruct)
 		die("too many struct/union definitions");
-
-	idx = structfind(name);
-	if (idx >= 0)
-		die("struct/union already defined");
 
 	idx = nstruct++;
 	strcpy(structh[idx].name, name);
@@ -453,6 +467,34 @@ structadd(char *name, int isunion)
 	structh[idx].size = 0;
 	structh[idx].curbfoffset = 0;  /* No bitfield in progress */
 	structh[idx].curbfbase = 0;
+	structh[idx].forward = 0;
+	return idx;
+}
+
+/* Create a forward/incomplete struct entry (tag known, body not yet
+ * defined).  Used for `typedef struct Foo Foo;` and pointer-to-incomplete
+ * references before the struct body appears.  Reuses an existing slot if
+ * the tag is already known. */
+int
+structadd_forward(char *name, int isunion)
+{
+	int idx;
+
+	idx = structfind(name);
+	if (idx >= 0)
+		return idx;
+
+	if (nstruct >= NStruct)
+		die("too many struct/union definitions");
+
+	idx = nstruct++;
+	strcpy(structh[idx].name, name);
+	structh[idx].isunion = isunion;
+	structh[idx].nmembers = 0;
+	structh[idx].size = 0;
+	structh[idx].curbfoffset = 0;
+	structh[idx].curbfbase = 0;
+	structh[idx].forward = 1;
 	return idx;
 }
 
@@ -462,7 +504,7 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 	int i;
 	struct Member *m;
 
-	if (structh[sidx].nmembers >= 16)
+	if (structh[sidx].nmembers >= 64)
 		die("too many members in struct/union");
 
 	/* Check for duplicate member names */
@@ -503,7 +545,7 @@ structaddarrmember(int sidx, char *name, unsigned ctyp, int count)
 	int i, total;
 	struct Member *m;
 
-	if (structh[sidx].nmembers >= 16)
+	if (structh[sidx].nmembers >= 64)
 		die("too many members in struct/union");
 	for (i = 0; i < structh[sidx].nmembers; i++)
 		if (strcmp(structh[sidx].members[i].name, name) == 0)
@@ -539,7 +581,7 @@ structaddbitfield(int sidx, char *name, unsigned ctyp, int width)
 	int unitsize;      /* Size of storage unit in bits */
 	int unitbytes;     /* Size of storage unit in bytes */
 
-	if (structh[sidx].nmembers >= 16)
+	if (structh[sidx].nmembers >= 64)
 		die("too many members in struct/union");
 
 	/* Check for duplicate member names */
@@ -3226,6 +3268,23 @@ param(char *v, unsigned ctyp, Node *pl)
 	return n;
 }
 
+/* Abstract (unnamed) parameter in a prototype: `int f(const char *, int)`.
+ * Synthesize a unique dummy name so the existing proto path (which
+ * iterates n->u.v and calls varget) keeps working. */
+Node *
+abstract_param(unsigned ctyp, Node *pl)
+{
+	static int n;
+	char buf[NString];
+
+	/* `(void)` flows here as a single abstract param of type void;
+	 * treat it as an empty parameter list rather than a real param. */
+	if (ctyp == NIL)
+		return pl;
+	sprintf(buf, "__arg%d", n++);
+	return param(buf, ctyp, pl);
+}
+
 /* `typedef struct tag alias;` — register the alias as a typedef of
  * the existing struct tag (looked up by name). */
 void
@@ -3233,7 +3292,7 @@ typedef_struct_tag(char *tag, char *alias)
 {
 	int idx = structfind(tag);
 	if (idx < 0)
-		die("typedef of unknown struct tag");
+		idx = structadd_forward(tag, 0);  /* forward typedef: body comes later */
 	typhadd(alias, (idx << 3) + STRUCT_T);
 }
 
@@ -4117,6 +4176,16 @@ sdcl: structstart smembers '}' ';'
 {
 	curstruct = -1;  /* Done defining this struct */
 }
+    | STRUCT IDENT ';'
+{
+	/* Forward struct declaration: `struct _mp_print_t;` — register an
+	 * incomplete tag so later `struct _mp_print_t *` / definition work. */
+	structadd_forward($2->u.v, 0);
+}
+    | UNION IDENT ';'
+{
+	structadd_forward($2->u.v, 1);
+}
     | structstart smembers '}' IDENT '[' NUM ']' ';'
 {
 	emit_struct_global_array($4->u.v, $6->u.n);
@@ -4141,6 +4210,14 @@ smembers:
 	if ($2 == NIL)
 		die("invalid void array member");
 	structaddarrmember(curstruct, $3->u.v, $2, $5->u.n);
+}
+        | smembers type IDENT '[' ']' ';'
+{
+	/* Flexible array member: `char data[];` — contributes 0 bytes,
+	 * sits at the current offset. */
+	if ($2 == NIL)
+		die("invalid void array member");
+	structaddarrmember(curstruct, $3->u.v, $2, 0);
 }
         | smembers type IDENT ':' NUM ';'
 {
@@ -4702,11 +4779,12 @@ kr_name: IDENT                 { $$ = kr_name_node($1->u.v, 0); }
        ;
 
 par0: par1
-    | TVOID               { $$ = 0; }
     |                     { $$ = 0; }
     ;
 par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
     | type IDENT          { $$ = param($2->u.v, $1, 0); }
+    | type ',' par1       { $$ = abstract_param($1, $3); }
+    | type                { $$ = abstract_param($1, 0); }
     | type '(' '*' IDENT ')' '(' fptpar0 ')' ',' par1 {
         /* Function pointer parameter: int (*callback)(int, int), ... */
         unsigned fptr_type = IDIR(FUNC($1));
@@ -5069,10 +5147,10 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); }
         | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1 & ~FAR) : IDIR($1); }
         | TFAR type                  { $$ = $2 | FAR; }
         | TCHAR                      { $$ = CHR; }
-        | TSHORT                     { $$ = INT | SHORT; }
+    | TSHORT                     { $$ = INT | SHORT; }
     | TINT     { $$ = INT; }
     | TLNG     { $$ = LNG; }
-    | TLNGLNG  { $$ = LNG; }
+    | TLNGLNG  { $$ = LNG; /* long long aliases to 32-bit long on i8086 */ }
     | TBOOL    { $$ = CHR | UNSIGNED; }
     | TFLOAT   { $$ = INT | FLOAT; }
     | TDOUBLE  { $$ = LNG | FLOAT; }
@@ -5105,6 +5183,8 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); }
     | VOLATILE TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
     | VOLATILE TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
     | VOLATILE TUNSIGNED          { $$ = INT | UNSIGNED; }
+    | CONST TNAME    { $$ = $2; }
+    | VOLATILE TNAME { $$ = $2; }
     | STRUCT IDENT {
         int idx = structfind($2->u.v);
         if (idx < 0)
@@ -5754,8 +5834,19 @@ arg1: expr          { $$ = mknode(0, $1, 0); }
 
 %%
 
+/* Public lexer entry: tracks the previously returned token so the
+ * identifier directly after struct/union/enum can be resolved in the
+ * tag namespace (C keeps tags separate from typedef names). */
 int
 yylex()
+{
+	int t = yylex_inner();
+	prevtok = t;
+	return t;
+}
+
+int
+yylex_inner()
 {
 	struct {
 		char *s;
@@ -6124,15 +6215,19 @@ yylex()
 		if (strcmp(v, "register") == 0 || strcmp(v, "auto") == 0 ||
 		    strcmp(v, "restrict") == 0 || strcmp(v, "__restrict") == 0 ||
 		    strcmp(v, "__restrict__") == 0)
-			return yylex();
+			return yylex_inner();
 
 		for (i=0; kwds[i].s; i++)
 			if (strcmp(v, kwds[i].s) == 0)
 				return kwds[i].t;
 		yylval.n = mknode('V', 0, 0);
 		strcpy(yylval.n->u.v, v);
-		/* Check if it's a typedef name */
-		if (typhget(v, &yylval.u))
+		/* Check if it's a typedef name.  An identifier directly after
+		 * struct/union/enum is a tag (separate C namespace) and must
+		 * stay IDENT even when a same-named typedef exists, e.g.
+		 * `typedef struct Foo Foo; struct Foo { ... };`. */
+		if (prevtok != STRUCT && prevtok != UNION && prevtok != ENUM
+		    && typhget(v, &yylval.u))
 			return TNAME;
 		return IDENT;
 	}
