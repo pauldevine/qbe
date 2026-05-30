@@ -30,7 +30,7 @@ and tracks phase progress. Update the status table + running log as work lands.
 | Phase | Status | Notes |
 |---|---|---|
 | **0 — Feasibility spike** | ✅ **Done** (2026-05-29) | Host `ports/minimal` builds (114 KB); 132/132 core files fail in `minic` at `py/obj.h` on declaration grammar. See spike report. |
-| **1 — minic frontend** | ⏳ **In progress** | Tier 1 + layer-2 + nested members + aggregate initializers + **struct return-by-value** + **typedef-name shadowing** + **capacity bumps** + **scalar array initializers / offsetof / member-attr / const-expr folding** done (2026-05-29).  Spike on honest grammar signal (cpp clean on all 132): **97/132 OK**.  Remaining 35: ~22 `parse error` (each a distinct deeper construct — anonymous-struct-in-cast, `sizeof(char[expr])` static-assert idiom, designated array initializers `[i]=v`, switch label edge cases), 3 `double definition`, 3 `bitfield initializer unsupported`, 3 `invalid assignment`, + singletons (`void has no size`, static address-of).  See running log + `NEXT_SESSION.md`. |
+| **1 — minic frontend** | ⏳ **In progress** | Tier 1 + layer-2 + nested members + aggregate initializers + **struct return-by-value** + **typedef-name shadowing** + **capacity bumps** + **scalar array initializers / offsetof / member-attr / const-expr folding** + **bitfield static init / static address-of / `sizeof(T[expr])` / `alloca` builtin / `long<-char` widening** done (2026-05-29).  Spike on honest grammar signal (cpp clean on all 132): **100/132 OK**.  Remaining 32: 27 `parse error` (each a distinct deeper construct — anonymous-struct-in-cast, designated array initializers `[i]=v`, switch label edge cases), 3 `double definition` (need inner-block scope), 1 `void has no size`, 1 `unknown struct type`.  See running log + `NEXT_SESSION.md`. |
 | 1b — Aggregate/designated initializers | ✅ **Done** (2026-05-29) | File-scope `T NAME = { ... };` for struct/union/global vars: designated `.field =`, nested braces, partially-initialized array members (trailing zero-fill), string-literal + `&global` pointer fields, casts and constant-folded values.  New `gaggr`/`gilist`/`gitem`/`gival` grammar (0 new conflicts) + a constant-initializer folder (`cival_eval`) + a layout-aware data emitter (`emit_global_aggregate`, inserts `z N` for designator gaps).  Pinned by `aggregate_init_probe.c`.  **Spike 69→77/132.** |
 | 1d — Struct/union return-by-value (ABI) | ✅ **Done** (2026-05-29) | Hidden-pointer lowering (caller-allocated result storage; callee copies through it and returns the pointer), all in the minic frontend as scalar QBE IR — no backend changes.  Function header + `ret` + call site + `lval(call)`; `emit_struct_copy` helper.  Pinned by `sret_probe.c` (medium + large).  Closes the `return source_line;` cluster.  **Spike 77→82/132.**  Orthogonal: `long` struct members read from an opaque (call-result) source lose their high word — pre-existing `[[qbe-loadc-wordsize-i8086]]` bug; MicroPython's returned structs are word/`size_t`-sized so it doesn't gate. |
 | 1e — Typedef-name shadowing + capacity | ✅ **Done** (2026-05-29) | (a) **Lexer disambiguation:** a declarator / parameter / member / member-access identifier that collides with a typedef name now lexes as `IDENT`, not `TNAME` — the real `py/scope.h` shape `scope_find_or_add_id(scope_t *scope, qstr qstr, …)`.  Three rules in the `yylex()`/`yylex_inner()` wrapper: (1) after a complete type-specifier token (type keyword or `TNAME`) → `IDENT`; (2) in-scope local/param (`var_islocal()`) → `IDENT`, with the previous function's locals dropped on its body's closing `}` (deferred one token via `pending_varclr`/`brace_depth` so the body's last statement still resolves, and so the next function's typedef-named param type isn't shadowed by a stale local); (3) after `.`/`->` (member namespace) → `IDENT`.  0 new conflicts.  Pinned by `typedef_shadow_probe.c` (medium + large).  (b) **Capacity:** `NStruct` 64→256, `NTyp` 128→512 — preprocessed MicroPython TUs define >64 aggregates / >128 typedefs; minic is host-compiled so this is cheap.  This (not the shadow fix) was what gated the 8 `scope_kind_t` files (their real error was *"too many struct/union definitions"*, masked behind the lookahead-lagged `} scope_kind_t;` source line).  **Spike 82→87/132.** |
@@ -47,6 +47,39 @@ and tracks phase progress. Update the status table + running log as work lands.
 - **Generated MP headers:** `~/projects/micropython/ports/minimal/build/genhdr/` (host build output).
 
 ## Running log
+
+- **2026-05-29 — §1g bitfield static init + static address-of + `sizeof(T[expr])` + `alloca` builtin + `long<-char` widening; spike 97 → 100/132; gate 86→87/87.**
+  Five independent minic frontend wins (all in `minic/minic.y`), `make check` green, 0 new
+  grammar conflicts (108 s/r, 0 r/r). objfun + objboundmeth + one obj* flipped to OK.
+  1. **Bitfield static initializers** — `agg_emit_struct` packs a run of bitfield members
+     sharing one storage unit (same `m->offset`) into one scalar data item; handles
+     sequential and `.field =` designated items. Was `die("bitfield initializer
+     unsupported")`. (mp_obj_exception_t / mp_map_t static instances.)
+  2. **`alloca` builtin** — undeclared-call path returns `void *` for `alloca` /
+     `__builtin_alloca` (was `int`, breaking `T *p = alloca(...)`). **Parse/typecheck only**
+     — emits `call $alloca`; no runtime alloca yet (a real DOS build needs one).
+  3. **Widening assignment `long <- char`** — converter extends `INT` *or* `CHR` RHS to
+     `LNG` via `sext` (was `INT` only). `uint32_t = uint8_t` type-checks.
+  4. **`sizeof(T[expr])`** — new grammar rule folds to `SIZE(T)*dim`; dummy dim 1 when not
+     const-foldable (MP_STATIC_ASSERT's address-comparison dim, voided). New non-dying
+     `constfoldable(Node*)`.
+  5. **Static address-of in aggregate initializers** — `cival_lval` resolves `&global`,
+     `&agg.member` (offset chains), `&arr[i]` to `$sym+off`; `sai_*` machinery gains `'A'`
+     address-symbol item kind + `sai_emit_sym`. Unblocks
+     `mp_rom_map_elem_t table[] = { { k, &g }, … }`.
+  - Pinned by `minic/dos/examples/mp_aggregate_probe.c` (medium; golden in
+    `minic/dos/tests/`).
+  - **Reverted mid-session:** allowing different-typed sibling-block local re-declaration —
+    minic has no inner-block scope, so adopting the latest decl's type miscompiles the
+    earlier block. The 3 `double definition` files (compile/sequence/vm) genuinely need
+    inner-block scope (push/pop on `{`/`}`); highest-value next structural change.
+  - **Orthogonal gap surfaced:** static address-of emits canonical `data $P = { l $sym, … }`.
+    Correct under near-data (medium); under far-data (large/huge) a 4-byte `$sym` data item
+    must become a far seg:off pointer and `asm_to_omf.py`/`omf_link.py` don't yet emit that
+    segment relocation. minic output is correct; backend/linker task. `mp_aggregate_probe`
+    is medium-only.
+  - Remaining 32: 27 `parse error`, 3 `double definition`, 1 `void has no size` (`malloc`),
+    1 `unknown struct type` (`modsys`). See `NEXT_SESSION.md`.
 
 - **2026-05-29 — §1f scalar array inits + offsetof + member-attr + const-expr folding; spike 87 → 97/132; gate 84→86/86.**
   Five independent grammar/header wins (all in `minic/minic.y` unless noted), `make check` green,

@@ -400,7 +400,12 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 			 *   for (...) { LPTR *pos; ... }
 			 *   for (...) { LPTR *pos; ... }
 			 * QBE accepts the duplicate alloc (it isn't strict-SSA on
-			 * input); the second decl effectively rebinds %name. */
+			 * input); the second decl effectively rebinds %name.
+			 * Different-typed re-declaration across sibling blocks
+			 * (e.g. MicroPython's `{const byte *t;}` then `{size_t
+			 * t;}`) is NOT folded here — minic has no inner-block
+			 * scoping, so a single shared %name/type would miscompile
+			 * the earlier block's uses; that case still errors out. */
 			if (glo == 0 && varh[h].glo == 0 && !varh[h].isextern &&
 			    !varh[h].enumconst && varh[h].ctyp == ctyp) {
 				varh[h].isarray = isarray;
@@ -1018,6 +1023,45 @@ const_eval(Node *n)
 
 	default:
 		die("unsupported operation in constant expression");
+		return 0;
+	}
+}
+
+/* Non-dying companion to const_eval: returns 1 iff `n` is a pure
+ * integer constant expression that const_eval can fold (every leaf a
+ * numeric/enum constant and every operator in the supported set).
+ * Used to decide whether a `sizeof(type[dim])` dimension is foldable —
+ * MicroPython's MP_STATIC_ASSERT idiom puts a non-foldable address
+ * comparison in the dimension and voids the whole sizeof. */
+int
+constfoldable(Node *n)
+{
+	Symb *sv;
+
+	if (!n)
+		return 0;
+	switch (n->op) {
+	case 'N':
+		return 1;
+	case 'V':
+		sv = varget(n->u.v);
+		return sv && sv->t == Con;
+	case '~':
+	case '!':
+	case 'K':
+		return constfoldable(n->l);
+	case '-':
+		if (n->r == 0)
+			return constfoldable(n->l);
+		return constfoldable(n->l) && constfoldable(n->r);
+	case '?':
+		return constfoldable(n->l) &&
+		       constfoldable(n->r->l) && constfoldable(n->r->r);
+	case '+': case '*': case '/': case '%': case '&': case '|':
+	case '^': case 'L': case 'R': case 'e': case 'n': case '<':
+	case 'l': case 'a': case 'o':
+		return constfoldable(n->l) && constfoldable(n->r);
+	default:
 		return 0;
 	}
 }
@@ -1715,6 +1759,12 @@ call(Node *n, Symb *sr)
 		}
 		if (KIND(ft) != FUN)
 			die("invalid call");
+	} else if (strcmp(f, "alloca") == 0 ||
+	           strcmp(f, "__builtin_alloca") == 0) {
+		/* alloca is a compiler builtin in gcc/clang and MicroPython
+		 * calls it without a declaration; treat it as returning a
+		 * (data) void pointer so `T *p = alloca(...)` type-checks. */
+		ft = FUNC(IDIR(NIL));
 	} else
 		ft = FUNC(INT);
 	sr->ctyp = DREF(ft);
@@ -2672,7 +2722,12 @@ expr(Node *n)
 			s0.t = Tmp;
 			s0.ctyp = s1.ctyp;
 			s0.u.n = tmp++;
-		} else if (KIND(s1.ctyp) == LNG && KIND(s0.ctyp) == INT && !ISFLOAT(s1.ctyp)) {
+		} else if (KIND(s1.ctyp) == LNG &&
+		           (KIND(s0.ctyp) == INT || KIND(s0.ctyp) == CHR) &&
+		           !ISFLOAT(s1.ctyp)) {
+			/* Widen int/short/char RHS to long.  The narrow value
+			 * sits in a `w` temp (loaded zero/sign-extended to 16
+			 * bits); extsw widens it to the 32-bit long. */
 			sext(&s0);
 		} else if (KIND(s1.ctyp) != LNG && KIND(s0.ctyp) == LNG && !ISFLOAT(s0.ctyp)) {
 			/* Implicit narrowing from long to int/short/char.
@@ -3628,10 +3683,20 @@ emit_struct_global_array(char *name, int count)
  *
  * Items arrive in source order; we cycle through the struct's members
  * to assign per-item QBE types when emitting the data block. */
+struct CIVal {
+	int  issym;          /* 1 = symbol-relative (address), 0 = integer */
+	char sym[NString];   /* symbol name (no leading $) when issym */
+	long off;            /* integer value, or addend when issym */
+};
+
+void cival_eval(Node *, struct CIVal *);
+
 #define NSAI 4096
 int  nsai = 0;
-char sai_kind[NSAI];   /* 'N' = literal number, 'S' = string global idx */
+char sai_kind[NSAI];   /* 'N' = literal number, 'S' = string global idx,
+                        * 'A' = address symbol (sai_sym[i] + sai_val[i]) */
 long sai_val[NSAI];
+char sai_sym[NSAI][NString];  /* symbol name for kind 'A' (no leading $) */
 
 void
 sai_clear(void)
@@ -3657,17 +3722,47 @@ sai_add_str(int idx)
 	sai_val[nsai++] = idx;
 }
 
+void
+sai_add_sym(char *sym, long off)
+{
+	if (nsai >= NSAI)
+		die("too many struct-array init items");
+	sai_kind[nsai] = 'A';
+	strcpy(sai_sym[nsai], sym);
+	sai_val[nsai++] = off;
+}
+
+/* Emit a kind-'A' (address symbol) data item ` %c $sym[+off]` at `dst`,
+ * returning the number of characters written. */
+int
+sai_emit_sym(char *dst, char ir, int i)
+{
+	if (sai_val[i])
+		return sprintf(dst, " %c $%s+%ld", ir, sai_sym[i], sai_val[i]);
+	return sprintf(dst, " %c $%s", ir, sai_sym[i]);
+}
+
 /* Add one brace-list item from a parsed expression node.  A string
  * literal (op 'S') is recorded as a pointer item; anything else is a
- * compile-time constant expression folded by const_eval (handles
- * NUM / enum-const / +-*\/% & | ^ ~ << >> and parens). */
+ * static-initializer constant folded by cival_eval, which yields either
+ * a pure integer (NUM / enum-const / arithmetic) or a symbol+addend
+ * (`&global`, `&arr[i]`, function name, casts thereof) — the latter
+ * emitted as a relocatable `$sym+off` data item. */
+void cival_eval(Node *, struct CIVal *);
 void
 sai_add_expr(Node *n)
 {
-	if (n && n->op == 'S')
+	struct CIVal v;
+
+	if (n && n->op == 'S') {
 		sai_add_str(n->u.n);
+		return;
+	}
+	cival_eval(n, &v);
+	if (v.issym)
+		sai_add_sym(v.sym, v.off);
 	else
-		sai_add_num(const_eval(n));
+		sai_add_num(v.off);
 }
 
 /* Emit a global data block holding an array of string-literal /
@@ -3688,6 +3783,8 @@ emit_pointer_array_data(unsigned elemtyp, char *name)
 		if (sai_kind[i] == 'S' && sai_val[i] != 0)
 			buflen += sprintf(buf + buflen, " %c $glo%ld",
 			                  ir, sai_val[i]);
+		else if (sai_kind[i] == 'A')
+			buflen += sai_emit_sym(buf + buflen, ir, i);
 		else
 			buflen += sprintf(buf + buflen, " %c %ld",
 			                  ir, sai_val[i]);
@@ -3726,7 +3823,10 @@ emit_scalar_array_data(unsigned elemtyp, char *name)
 			buflen += sprintf(buf + buflen, ",");
 		if (sai_kind[i] == 'S')
 			die("scalar array initializer cannot hold a string");
-		buflen += sprintf(buf + buflen, " %c %ld", ir, sai_val[i]);
+		if (sai_kind[i] == 'A')
+			buflen += sai_emit_sym(buf + buflen, ir, i);
+		else
+			buflen += sprintf(buf + buflen, " %c %ld", ir, sai_val[i]);
 	}
 	buflen += sprintf(buf + buflen, " }");
 
@@ -3784,6 +3884,8 @@ emit_struct_array_data(int sidx, char *name)
 			else
 				buflen += sprintf(buf + buflen, " %c $glo%ld",
 				                  ir, sai_val[i]);
+		} else if (sai_kind[i] == 'A') {
+			buflen += sai_emit_sym(buf + buflen, ir, i);
 		} else {
 			buflen += sprintf(buf + buflen, " %c %ld", ir, sai_val[i]);
 		}
@@ -3821,41 +3923,57 @@ emit_struct_array_data(int sidx, char *name)
  * the struct's member offsets (inserting `z N` zero-fill for any gap a
  * designator skips and a trailing `z` to the full type size). */
 
-struct CIVal {
-	int  issym;          /* 1 = symbol-relative (address), 0 = integer */
-	char sym[NString];   /* symbol name (no leading $) when issym */
-	long off;            /* integer value, or addend when issym */
-};
 
-void cival_eval(Node *, struct CIVal *);
+/* Resolve a static lvalue (global var, `.`/`->` member access, or array
+ * index) to a symbol + byte offset, returning its C type.  Sets *o to
+ * the symbol-relative address.  Used by cival_addr for `&lvalue`. */
+unsigned
+cival_lval(Node *n, struct CIVal *o)
+{
+	if (n->op == 'V') {
+		Symb *sv = varget(n->u.v);
+		if (!sv || sv->t == Con)
+			die("unsupported address-of base in initializer");
+		o->issym = 1;
+		o->sym[0] = 0;
+		o->off = 0;
+		strcpy(o->sym, n->u.v);
+		return sv->ctyp;
+	}
+	if (n->op == '.') {
+		/* &agg.member [.member...] → $base + Σ member offsets.  `->`
+		 * desugars to `(*p).m`; that involves a pointer deref which
+		 * isn't a static address, so it falls through to die below. */
+		unsigned bt = cival_lval(n->l, o);
+		int sidx, mi;
+		if (KIND(bt) != STRUCT_T && KIND(bt) != UNION_T)
+			die("member access on non-struct in initializer");
+		sidx = DREF(bt);
+		mi = structfindmember(sidx, n->r->u.v);
+		if (mi < 0)
+			die("unknown member in static address-of");
+		o->off += structh[sidx].members[mi].offset;
+		return structh[sidx].members[mi].ctyp;
+	}
+	if (n->op == '@' && n->l && n->l->op == '+') {
+		/* &arr[i]  ==  arr + i  (i counted in elements) */
+		unsigned bt = cival_lval(n->l->l, o);
+		struct CIVal idx;
+		cival_eval(n->l->r, &idx);
+		if (idx.issym)
+			die("non-constant index in static initializer");
+		o->off += idx.off * (long)SIZE(DREF(bt));
+		return DREF(bt);
+	}
+	die("unsupported address-of in static initializer");
+	return NIL;
+}
 
 /* Evaluate &lvalue → symbol [+ byte offset]. */
 void
 cival_addr(Node *n, struct CIVal *o)
 {
-	o->issym = 1;
-	o->sym[0] = 0;
-	o->off = 0;
-	if (n->op == 'V') {
-		strcpy(o->sym, n->u.v);
-		return;
-	}
-	if (n->op == '@' && n->l && n->l->op == '+') {
-		/* &arr[i]  ==  arr + i  (i counted in elements) */
-		Node *base = n->l->l;
-		Symb *bs;
-		struct CIVal idx;
-		if (base->op != 'V')
-			die("unsupported address-of base in initializer");
-		strcpy(o->sym, base->u.v);
-		cival_eval(n->l->r, &idx);
-		if (idx.issym)
-			die("non-constant index in static initializer");
-		bs = varget(base->u.v);
-		o->off = idx.off * (long)(bs ? SIZE(DREF(bs->ctyp)) : 1);
-		return;
-	}
-	die("unsupported address-of in static initializer");
+	cival_lval(n, o);
 }
 
 /* Constant-fold an initializer value to an integer or symbol+addend. */
@@ -4055,8 +4173,76 @@ agg_emit_struct(int sidx, int isunion, Node *agg, char *buf, int *bl, int *first
 		if (memidx >= structh[sidx].nmembers)
 			die("too many initializers for struct");
 		m = &structh[sidx].members[memidx];
-		if (m->bitwidth)
-			die("bitfield initializer unsupported");
+		if (m->bitwidth) {
+			/* Pack a run of bitfield members that share one storage
+			 * unit (same m->offset) into a single scalar data item.
+			 * Each loop iteration consumes one initializer item
+			 * (sequential or `.field =` designated); accumulate and
+			 * flush when the next member leaves the unit (different
+			 * offset / not a bitfield / end). */
+			unsigned bfctyp = m->ctyp;
+			int bfunit = SIZE(bfctyp);
+			int bfbase = m->offset;
+			unsigned long accum = 0;
+			unsigned long unitmask =
+			    bfunit >= 8 ? ~0UL : ((1UL << (bfunit * 8)) - 1);
+
+			if (!isunion) {
+				if (bfbase < cursor)
+					die("out-of-order designated initializer unsupported");
+				agg_zfill(bfbase - cursor, buf, bl, first);
+				cursor = bfbase;
+			}
+			for (;;) {
+				unsigned long fv, fmask;
+				Node *fval = agg_unwrap_scalar(val);
+				Node *nitem;
+				struct Member *nm;
+				int nidx;
+
+				fv = fval ? (unsigned long)const_eval(fval) : 0;
+				fmask = m->bitwidth >= 64 ? ~0UL
+				    : ((1UL << m->bitwidth) - 1);
+				accum |= (fv & fmask) << m->bitoffset;
+				memidx++;
+				if (isunion || !ln->r)
+					break;
+				/* peek the next initializer item */
+				nitem = ln->r->l;
+				if (nitem->op == 'D') {
+					int k;
+					nidx = -1;
+					for (k = 0; k < structh[sidx].nmembers; k++)
+						if (strcmp(structh[sidx].members[k].name,
+						           nitem->r->u.v) == 0) {
+							nidx = k;
+							break;
+						}
+					if (nidx < 0)
+						die("unknown member in designated initializer");
+				} else if (nitem->op == 'd') {
+					break;
+				} else {
+					nidx = memidx;
+					if (nidx >= structh[sidx].nmembers)
+						break;
+				}
+				nm = &structh[sidx].members[nidx];
+				if (!nm->bitwidth || nm->offset != bfbase)
+					break;
+				ln = ln->r;
+				m = nm;
+				memidx = nidx;
+				val = nitem->op == 'D' ? nitem->l : nitem;
+			}
+			agg_sep(buf, bl, first);
+			*bl += sprintf(buf + *bl, " %c %lu",
+			    irtyp(bfctyp), accum & unitmask);
+			cursor += bfunit;
+			if (isunion)
+				break;
+			continue;
+		}
 		if (!isunion) {
 			if (m->offset < cursor)
 				die("out-of-order designated initializer unsupported");
@@ -6526,6 +6712,15 @@ post: NUM
     | STR
     | IDENT
     | SIZEOF '(' type ')' { $$ = mknode('N', 0, 0); $$->u.n = SIZE($3); }
+    | SIZEOF '(' type '[' expr ']' ')' {
+        /* sizeof(T[dim]) == SIZE(T)*dim.  When dim isn't a foldable
+         * constant (MicroPython's MP_STATIC_ASSERT puts an address
+         * comparison there and discards the result via (void)), use a
+         * dummy dimension of 1 so the expression still type-checks. */
+        int dim = constfoldable($5) ? const_eval($5) : 1;
+        $$ = mknode('N', 0, 0);
+        $$->u.n = SIZE($3) * dim;
+    }
     | SIZEOF '(' IDENT ')' {
         Symb *vs = varget($3->u.v);
         $$ = mknode('N', 0, 0);

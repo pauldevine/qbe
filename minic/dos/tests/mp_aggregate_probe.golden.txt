@@ -1,0 +1,8 @@
+bseq a=5 b=9 c=200 after=12345
+bdes a=5 b=9 c=200 after=999
+p_target=77 (want 77)
+p_y=4 (want 4)
+p_leaf=42 (want 42)
+table0=11 table1=22 (want 11 22)
+widen ul=200 (want 200)
+szc=5 szi=8 (want 5 8)
