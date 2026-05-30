@@ -4469,6 +4469,98 @@ emit_global_aggregate(unsigned ctyp, char *name, Node *agg)
 	varadd(name, nglo++, ctyp, 0);
 }
 
+/* `T NAME[] = { ... };` / `T NAME[N] = { ... };` at file scope, routed
+ * through the generic aggregate machinery (agg_emit_array) so each
+ * element may itself be a designated struct, a nested array, or a
+ * scalar/pointer.  `count` is the declared element count, or -1 for an
+ * unsized `[]` (inferred from the brace list, honouring `[k]=`
+ * designators).  Output is byte-identical to the older sai_* round-robin
+ * path for the plain fully-specified cases (minic never pads structs),
+ * but additionally supports `{ {.f=v}, {.f=v} }` per-element designators.
+ * The var-type registration matches the legacy per-kind rules: pointer
+ * element arrays register the element (pointer) type itself; scalar and
+ * struct element arrays register IDIR(elemtyp). */
+/* Build the `align N { ... }` QBE data-block text for an array
+ * initializer into `buf`; returns the total array byte size.  `count`
+ * is the declared element count, or -1 to infer it from the brace list
+ * (honouring `[k]=` designators). */
+long
+build_array_init(unsigned elemtyp, long count, Node *agg, char *buf)
+{
+	int bl, first = 1;
+	int align;
+
+	if (elemtyp == NIL)
+		die("invalid void array");
+	if (!agg || agg->op != '{')
+		die("array initializer must be braced");
+	if (count < 0) {
+		long pos = 0, maxpos = 0;
+		Node *ln;
+		for (ln = agg->l; ln; ln = ln->r) {
+			Node *item = ln->l;
+			if (item->op == 'd')
+				pos = const_eval(item->r);
+			pos++;
+			if (pos > maxpos)
+				maxpos = pos;
+		}
+		count = maxpos;
+	}
+	if (KIND(elemtyp) == PTR || KIND(elemtyp) == STRUCT_T
+	    || KIND(elemtyp) == UNION_T)
+		align = 8;
+	else
+		align = iralign(elemtyp);
+	bl = sprintf(buf, "align %d {", align);
+	agg_emit_array(elemtyp, count, agg, buf, &bl, &first);
+	if (first)
+		bl += sprintf(buf + bl, " z 1");
+	bl += sprintf(buf + bl, " }");
+	return (long)SIZE(elemtyp) * count;
+}
+
+/* Var-type to register for an array of `elemtyp`: pointer-element arrays
+ * register the element (pointer) type itself; scalar and struct element
+ * arrays register IDIR(elemtyp).  Matches the legacy per-kind rules. */
+unsigned
+array_vartyp(unsigned elemtyp)
+{
+	return (KIND(elemtyp) == PTR) ? elemtyp : IDIR(elemtyp);
+}
+
+void
+emit_global_array(unsigned elemtyp, char *name, long count, Node *agg)
+{
+	static char buf[65536];
+	long total;
+
+	if (nglo == NGlo)
+		die("too many globals");
+	total = build_array_init(elemtyp, count, agg, buf);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], name);
+	maybe_mark_huge_global(nglo, name, total);
+	varadd(name, nglo++, array_vartyp(elemtyp), 1);
+	var_set_arraybytes(name, total);
+}
+
+/* Function-local `static T NAME[...] = { ... };` — same aggregate
+ * machinery as emit_global_array, but the data lands in a mangled
+ * file-scope global (persistent across calls) via emit_static_local. */
+void
+emit_static_array(unsigned elemtyp, char *name, long count, Node *agg)
+{
+	static char buf[65536];
+	long total;
+
+	total = build_array_init(elemtyp, count, agg, buf);
+	emit_static_local(name, array_vartyp(elemtyp), 1, buf);
+	var_set_arraybytes(name, total);
+	maybe_mark_huge_global(nglo - 1, gloname[nglo - 1], total);
+}
+
 /* Apply the K&R parameter base type to every name in kr_namelist.
  * node->op encodes the declarator shape:
  *   0   plain IDENT
@@ -5596,35 +5688,21 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 		}
 	}
 }
-               | '[' ']' '=' '{' sai_init_clear sai_list opt_trailing_comma '}' ';'
+               | '[' ']' '=' gaggr ';'
 {
-	/* TYP NAME[] = { ... };  For struct types, walk the struct
-	 * members.  For pointer types, emit one `l $gloN`/`l 0` per
-	 * item.  Used for `struct charinfo chars[] = {...}` and for
-	 * `static char *msgs[] = {"a","b","c"}` (handled by the static
-	 * block-scope rule below). */
-	if (KIND(parsed_type) == STRUCT_T)
-		emit_struct_array_data(DREF(parsed_type), parsed_ident);
-	else if (KIND(parsed_type) == PTR)
-		emit_pointer_array_data(parsed_type, parsed_ident);
-	else
-		emit_scalar_array_data(parsed_type, parsed_ident);
+	/* TYP NAME[] = { ... };  Routed through the generic aggregate
+	 * machinery: each element may be a scalar, a pointer, or a
+	 * (possibly designated) struct.  Element count inferred from the
+	 * brace list.  Used for `struct charinfo chars[] = {...}`,
+	 * `struct P arr[] = { {.a=1}, {.a=2} }`, scalar tables, and
+	 * `char *msgs[] = {"a","b","c"}`. */
+	emit_global_array(parsed_type, parsed_ident, -1, $4);
 }
-               | '[' expr ']' '=' '{' sai_init_clear sai_list opt_trailing_comma '}' ';'
+               | '[' expr ']' '=' gaggr ';'
 {
-	/* TYP NAME[N] = { … };  Explicit size — zero-fill missing trailing
-	 * elements (scalar/pointer element types).  Struct-typed sized
-	 * arrays keep their item count as-is (per-member padding would be
-	 * needed and no in-tree consumer uses that form yet). */
-	if (KIND(parsed_type) == STRUCT_T) {
-		emit_struct_array_data(DREF(parsed_type), parsed_ident);
-	} else if (KIND(parsed_type) == PTR) {
-		sai_pad_to_count(const_eval($2));
-		emit_pointer_array_data(parsed_type, parsed_ident);
-	} else {
-		sai_pad_to_count(const_eval($2));
-		emit_scalar_array_data(parsed_type, parsed_ident);
-	}
+	/* TYP NAME[N] = { … };  Explicit size — agg_emit_array zero-fills
+	 * any missing trailing elements. */
+	emit_global_array(parsed_type, parsed_ident, const_eval($2), $5);
 }
                ;
 
@@ -6067,9 +6145,18 @@ dcls:
 	emit_static_local($4->u.v, $3, 0, buf);
 }
     | dcls STATIC type IDENT '=' expr ';' { emit_static_local_init($3, $4, $6); }
-    | dcls STATIC type IDENT '[' ']' '=' '{' sai_init_clear sai_list opt_trailing_comma '}' ';'
+    | dcls STATIC type IDENT '[' ']' '=' gaggr ';'
 {
-	emit_static_pointer_array($3, $4->u.v);
+	/* Function-local static array with initializer, routed through the
+	 * generic aggregate machinery so each element may be a scalar,
+	 * pointer, or (possibly designated) struct/union.  Element count
+	 * inferred from the brace list. */
+	emit_static_array($3, $4->u.v, -1, $8);
+}
+    | dcls STATIC type IDENT '[' expr ']' '=' gaggr ';'
+{
+	/* Sized function-local static array with initializer. */
+	emit_static_array($3, $4->u.v, const_eval($6), $9);
 }
     | dcls STATIC type IDENT '[' expr ']' ';'
 {
