@@ -30,8 +30,9 @@ and tracks phase progress. Update the status table + running log as work lands.
 | Phase | Status | Notes |
 |---|---|---|
 | **0 — Feasibility spike** | ✅ **Done** (2026-05-29) | Host `ports/minimal` builds (114 KB); 132/132 core files fail in `minic` at `py/obj.h` on declaration grammar. See spike report. |
-| **1 — minic frontend** | ⏳ **In progress** | **Tier 1 + layer-2 + nested members done** (2026-05-29).  The `py/obj.h` declaration + nested-aggregate grammar is fully cleared.  **Spike re-measured cleanly 2026-05-29 (post-config):** cpp now passes on all 132 files (see Phase 2/3), so the MINIC tally is finally honest grammar signal — **26/132 OK, 106 pure `parse error`** (no remaining limit caps).  The new universal convergence blocker is **array typedefs** (`typedef int jmp_buf[8];` from setjmp/nlr), then **comma-operator expression statements** (`(a, b);` from the `m_malloc`/`m_free` macros).  See running log + `NEXT_SESSION.md`. |
+| **1 — minic frontend** | ⏳ **In progress** | Tier 1 + layer-2 + nested members + aggregate initializers + **struct return-by-value** done (2026-05-29).  Spike climbing on honest grammar signal (cpp clean on all 132): **82/132 OK**.  New dominant blocker (8 files, `py/scope.h`): a **declarator named the same as a typedef** (`qstr qstr` — param name shadows the `qstr` typedef); minic lexes the param identifier as `TNAME`.  See running log + `NEXT_SESSION.md`. |
 | 1b — Aggregate/designated initializers | ✅ **Done** (2026-05-29) | File-scope `T NAME = { ... };` for struct/union/global vars: designated `.field =`, nested braces, partially-initialized array members (trailing zero-fill), string-literal + `&global` pointer fields, casts and constant-folded values.  New `gaggr`/`gilist`/`gitem`/`gival` grammar (0 new conflicts) + a constant-initializer folder (`cival_eval`) + a layout-aware data emitter (`emit_global_aggregate`, inserts `z N` for designator gaps).  Pinned by `aggregate_init_probe.c`.  **Spike 69→77/132.** |
+| 1d — Struct/union return-by-value (ABI) | ✅ **Done** (2026-05-29) | Hidden-pointer lowering (caller-allocated result storage; callee copies through it and returns the pointer), all in the minic frontend as scalar QBE IR — no backend changes.  Function header + `ret` + call site + `lval(call)`; `emit_struct_copy` helper.  Pinned by `sret_probe.c` (medium + large).  Closes the `return source_line;` cluster.  **Spike 77→82/132.**  Orthogonal: `long` struct members read from an opaque (call-result) source lose their high word — pre-existing `[[qbe-loadc-wordsize-i8086]]` bug; MicroPython's returned structs are word/`size_t`-sized so it doesn't gate. |
 | 1c — `long long`, limits, `_Bool` | 🟡 **Partial** | `long long` ✅. Member cap 16→64 ✅. **`NVar` 512→4096 ✅ (2026-05-29)** — was the #1 blocker once cpp was clean (62/132 files); raising it flipped 17→26 OK and eliminated *all* limit-cap failures (remaining 106 are pure grammar).  `_Bool` + `NGlo` raise still pending (not yet hit). |
 | **2 — Runtime / libc** | 🟡 **cpp-clean** | `stdint.h` fixed + shipped (2026-05-29): `int32_t`/`uint32_t`=`long` (were wrongly 16-bit `int`), added `intptr_t`/`uintptr_t` (FAR_DATA-conditional) + `INTPTR_MAX`/`SIZE_MAX`/`INTPTR_UMAX`; pinned by `stdint_probe.c`.  Spike stub `unistd.h` added.  `limits.h` stub already had target widths.  **All 132 files preprocess cleanly (CPP_FAIL 132→0).**  Still pending: real `setjmp`/`longjmp` (medium model — note `jmp_buf` is an array typedef, blocked on Phase-1 grammar), `realloc`/`calloc`. |
 | **3 — Port glue + build** | 🟡 **config landed** | `ports/dos8086/mpconfigport.h` created (2026-05-29) — locked target config + explicit `MP_ENDIANNESS_LITTLE`; this is what unblocked cpp.  Minimal `mphalport.h` stub added.  Spike now points `-I` at `ports/dos8086` (replacing the ad-hoc `stubinc` shims).  Still pending: `mphalport.c`, `main.c`, `tools/build-micropython.sh`. |
@@ -46,6 +47,40 @@ and tracks phase progress. Update the status table + running log as work lands.
 
 ## Running log
 
+- **2026-05-29 — struct/union return-by-value (codegen/ABI); spike 77 → 82/132; gate 80→82/82.**
+  Closed the dominant post-§1b blocker — a function whose return type is a struct/union
+  (`mp_code_lineinfo_t mp_bytecode_decode_lineinfo(...)`; callers `mp_code_lineinfo_t x = decode(&p);`).
+  Lowered System-V style with a **hidden first pointer parameter** (caller-allocated result storage),
+  entirely in the minic frontend as scalar QBE IR — **no i8086 backend / QBE changes**.
+  - **Function header** (`ansi_func_proto`, `emit_knr_func_typed`): a struct/union return type emits
+    `function <ptrclass> $f(<ptrclass> %t0, …)` (ptrclass = `DATAPTR_T()`: `w` near / `l` far),
+    spills the hidden pointer to a fixed `%__sret` slot, and sets `cur_fn_sret`/`cur_fn_sret_ctyp`
+    (reset in every `init*` action).
+  - **`ret`** (`stmt` case Ret): copies the returned aggregate into `*%__sret` via the new
+    `emit_struct_copy(dst, src)` helper (factored out of the existing struct-assignment word/byte
+    copy loop) and `ret`s the hidden pointer.
+  - **Call site** (`call()` direct + fn-ptr branches, `expr` case `'I'`): allocates the result slot
+    (`alloc_sret_slot`), passes its address as the hidden first arg, and yields the slot address as
+    the aggregate rvalue.  `lval()` now treats a struct-returning call as an lvalue (so `f().field`
+    works); the struct-assignment path reuses its own `s0` for `'C'/'I'` sources to avoid emitting
+    the call twice.  Far/near-ness of the slot tracks `!NEAR_DATA()`.
+  - **No new yacc conflicts** (stays 108 s/r, 0 r/r — pure C-action change).  Pinned by
+    **`sret_probe.c`** (medium + large, DOSBox-verified): assignment-from-call, decl-init-from-call,
+    member-of-call-result, nested struct-returning calls, an odd-sized `{int;char}` (byte-tail copy),
+    the exact `{size_t;size_t}` MicroPython shape, a union return, and `&result` passed on.
+  - **Orthogonal limitation found, not chased:** a struct member of type `long` (4 bytes, read back
+    via `loadl`) loses its high word **when the source words are opaque to QBE** (a call result):
+    QBE forwards the `loadl` through the word-by-word copy and reconstructs `lo | (hi<<16)`, but the
+    i8086 backend lowers the final `or` 16-bit-wide — the pre-existing `[[qbe-loadc-wordsize-i8086]]`
+    family bug, independent of this ABI.  **All MicroPython structs returned by value are
+    word/`size_t`-sized** (`size_t` = 2 bytes here), so this does not gate the port; `sret_probe.c`
+    documents and avoids it.
+  - **Spike re-run:** **82/132 OK** (was 77).  New dominant blocker (8 files, `py/scope.h`): a
+    **declarator named the same as a typedef** — `id_info_t *scope_find_or_add_id(scope_t *scope,
+    qstr qstr, id_info_kind_t kind)` where `qstr` is both a type and the parameter name.  minic's
+    lexer returns `TNAME` for the param identifier, so `qstr qstr` parses as two type-names → parse
+    error.  Lexer/parser disambiguation (an identifier in declarator position after a type-specifier
+    should lex as `IDENT`).  See `NEXT_SESSION.md`.
 - **2026-05-29 — Phase 1 §1b: file-scope aggregate / designated initializers; spike 69 → 77/132; gate 79→80/80.**
   Closed the standing §1b pause point.  `T NAME = { ... };` for struct/union/global variables now parses and emits a correct QBE `data` block.  All edits in `minic/minic.y` (rebuilt via local `yacc`; **shift/reduce stays 108, reduce/reduce 0** — no new conflicts).
   - **Grammar:** new `gaggr: '{' gilist opt_trailing_comma '}'` (mirrors the `sai_list` trailing-comma pattern) → `gilist` (left-recursive chain of `gitem`) → `gitem` (`gival` | `'.' IDENT '=' gival` 'D'-node | `'[' expr ']' '=' gival` 'd'-node) → `gival` (`expr` | nested `gaggr`).  Wired into `typed_decl_rest` as `'=' gaggr ';'` (covers `const`/`static` prefixes since both route through `type_and_ident typed_decl_rest`).  The initializer is a generic, type-agnostic Node tree; the type context is applied at emit time.

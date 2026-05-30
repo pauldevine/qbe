@@ -1,77 +1,97 @@
-# Next session — MicroPython port: struct return-by-value (codegen/ABI)
+# Next session — MicroPython port: declarator name shadowing a typedef
 
 > Master tracker: `MICROPYTHON_PORT.md`. Spike findings: `MICROPYTHON_SPIKE_REPORT.md`.
-> **Spike now at 77/132 OK** (was 69 at the start of the last session). Re-run
+> **Spike now at 82/132 OK** (was 77 at the start of the last session). Re-run
 > `build/mp-spike/run-spike.sh ~/projects/micropython/py/*.c` to confirm before peeling more.
-> Gate **80/80**.
+> Gate **82/82**.
 
 ## What changed last session (so you don't redo it)
 
-§1b — **file-scope aggregate / designated initializers** — is **done** (spike 69 → 77).
-`T NAME = { ... };` for struct/union/global variables now parses and emits a correct QBE
-`data` block: designated `.field =`, nested braces (`.base = { ... }`), partially-initialized
-array members (trailing zero-fill), `&global`/function/string-literal pointer fields, casts,
-and constant-folded values. New `gaggr`/`gilist`/`gitem`/`gival` grammar (0 new conflicts) +
-`cival_eval` constant folder + `emit_global_aggregate` layout-aware emitter, all in
-`minic/minic.y`. Pinned by `aggregate_init_probe.c` (medium, DOSBox-verified). Out-of-order
-designators and bitfield-member initializers `die()` (not used by MicroPython).
+§1d — **struct/union return-by-value** — is **done** (spike 77 → 82). A function whose return
+type is a struct/union is now lowered System-V style with a hidden first pointer parameter
+(caller-allocated result storage); the callee copies the returned aggregate through it and
+returns the pointer; the caller allocates the slot, passes its address, and treats the call
+result as the aggregate's address. All in the minic frontend as scalar QBE IR — **no i8086
+backend / QBE changes**. New `emit_struct_copy(dst,src)` helper (factored from the struct-assignment
+copy loop) + `alloc_sret_slot()`; `cur_fn_sret`/`cur_fn_sret_ctyp` state; `lval()` accepts a
+struct-returning call so `f().field` works. Pinned by `sret_probe.c` (medium + large).
 
-## Scope for next session — struct return-by-value (the dominant remaining blocker, ~20 files)
+**Known orthogonal limitation (don't chase):** a struct member of type `long` (4 bytes) loses its
+high word when the source words are opaque to QBE (a call result) — QBE forwards the `loadl`
+through the word copy and reconstructs `lo | (hi<<16)`, but the i8086 backend lowers the final
+`or` 16-bit-wide. This is the pre-existing `[[qbe-loadc-wordsize-i8086]]` family bug, independent
+of the struct-return ABI. MicroPython's returned structs are all word/`size_t`-sized (`size_t` = 2
+bytes on this target), so it doesn't gate the port.
 
-This is the `return source_line;` failure cluster (minic's error line is the parser's
-*lookahead*, which lags the real construct by many lines — the true site is a struct-returning
-function). `py/bc.h`:
+## Scope for next session — declarator name shadowing a typedef (8 files, `py/scope.h`)
+
+The new dominant spike blocker. Minimal repro (feed to `minic -m medium` directly):
 ```c
-mp_code_lineinfo_t mp_bytecode_decode_lineinfo(const byte **ip);   // returns a struct BY VALUE
-...
-mp_code_lineinfo_t decoded = mp_bytecode_decode_lineinfo(&ip);     // struct-typed init from call
+typedef unsigned short qstr;
+int foo(qstr qstr, int x);     /* param named the same as the typedef */
 ```
-minic emits a word-typed return and chokes on the struct-typed initializer ("invalid lvalue"
-/ parse error). This is a **codegen/ABI feature, not grammar**:
+→ `error:1: parse error`. The real MicroPython site (`py/scope.h`):
+```c
+id_info_t *scope_find_or_add_id(scope_t *scope, qstr qstr, id_info_kind_t kind);
+```
+`qstr` is both a typedef name and the parameter's name. C allows this: once the type-specifier
+`qstr` has been consumed, the next identifier is in the *declarator* (ordinary-identifier)
+namespace, so it's a parameter name, not a type. minic's lexer unconditionally returns `TNAME`
+for any identifier that matches a typedef, so it sees `qstr qstr` as two type-names and the
+grammar has no production for it.
 
-- **Return path:** a function whose return type is a struct/union. Two standard lowerings:
-  (a) **hidden-pointer return arg** — caller allocates space, passes its address as an implicit
-  first arg, callee `memcpy`s the result there (works for any size); or (b) **small-struct in
-  registers** (≤4 bytes in DX:AX) like the Kl return path. Mirror the call/selret ABI work
-  already done for Kl returns (see `[[i8086-selret-kl-rtmp-lowdup]]`, `[[kl-slot-resident-invariant]]`,
-  and `minic.y`'s `selret`/`selcall`). The hidden-pointer approach is the safer general fix;
-  consider it first.
-- **Call path:** `selcall` must allocate the return temp, pass its address, and yield the
-  struct value (really its address) so `struct X y = f();` becomes a struct copy from the
-  return slot (reuse the existing `*X = *Y` struct-copy machinery in `minic.y`).
-- **Far-data models:** the hidden return pointer is a far pointer under compact/large/huge
-  (4-byte), near (2-byte) under medium — gate it like the other `uses_far_code()`/`NEAR_DATA()`
-  sites. The probe should cross-check at least medium + one far-data model.
-- **Probe:** a function returning a multi-field struct by value; caller does both
-  `S y = f();` and `f().field` (member-of-call-result) and passes the result to another fn.
-  Verify each field round-trips in DOSBox.
+This is a **lexer/parser disambiguation** problem, the same class as the existing `prevtok`
+tag-namespace hack (an identifier right after `struct`/`union`/`enum` must lex as `IDENT` even if
+a same-named typedef exists — see the `yylex()` wrapper around `yylex_inner()` and the
+`typedef struct Foo Foo;` note in the running log). The fix is analogous but for declarator
+position rather than tag position:
 
-After it lands, re-run the spike and re-scope from the fresh tally.
+- After a type-specifier has been parsed, an identifier that begins a *declarator* (or names a
+  parameter / variable / member) should lex as `IDENT`, not `TNAME`, even when it collides with a
+  typedef. The tricky part is that the lexer can't always tell "declarator position" from
+  "another type-specifier" with one token of lookahead (e.g. `unsigned int` vs `qstr qstr`).
+- Practical heuristic that likely suffices for MicroPython: once a *complete* type-specifier has
+  been seen in the current declaration, the **next** identifier is a declarator name → return
+  `IDENT`. A typedef name can only appear as the *first* type token of a declaration (or after
+  `struct`/`union`/`enum`/qualifiers), never immediately after another full type-specifier. Track
+  this with a small "saw a type token, expecting declarator" flag in the `yylex()` wrapper,
+  parallel to `prevtok`. Confirm it doesn't break `const qstr x` / `qstr *p` / `qstr (*fp)()` and
+  the existing prototype/param grammar.
+- Alternative (more surgical, less risk): allow `TNAME` in the parameter/declarator-name grammar
+  positions and register it as an ordinary identifier there. This avoids lexer state but adds
+  grammar productions (watch for new conflicts).
+
+Prefer the lexer-state heuristic if it stays conflict-neutral; it generalizes to locals/members
+(`int qstr;`), which MicroPython also has. Pin with a probe that declares a variable, a parameter,
+and a struct member all named after a typedef, then uses each. Re-run the spike and re-scope.
 
 ## Guardrails (unchanged)
 
 - Rebuild with `cd minic && make minic`; local `yacc` prints conflict counts (now **108 s/r,
   0 r/r**). Justify any new shift/reduce; **no new reduce/reduce**. Local miniyacc is picky:
   **no `/* … */` between a production head and its `:`, none trailing a rule's action, and no
-  comment block immediately preceding a production head** (burned last session — "colon expected
-  after production's head"); per-rule RHS length limit (~5 symbols).
-- Run `tools/test-dos.sh` (must stay **80/80**). Add/extend a probe per runtime-bearing feature.
+  comment block immediately preceding a production head**; per-rule RHS length limit (~5 symbols).
+- Run `tools/test-dos.sh` (must stay **82/82**). Add/extend a probe per runtime-bearing feature.
 - Spike harness uses **`clang -E`** (not `cpp`) and reports CPP_FAIL honestly. **minic's error
-  line is the parser's *lookahead* line, which lags the real construct by many lines.**
-  Binary-search-by-`head` is **unreliable** (non-monotonic; truncation gives spurious failures).
-  Bisect only at top-level statement boundaries, and confirm any suspected construct by feeding a
-  **minimal isolated snippet** to `minic -m medium` directly. The `NORMALIZE` sed is a no-op
-  under macOS BSD sed (`\b`) — minic must accept canonical names.
+  line is the parser's *lookahead* line, which lags the real construct by many lines** — e.g. the
+  struct-return cluster reported `return source_line;` and this one reports `} scope_kind_t;`, both
+  many lines before the true site. Confirm any suspected construct by feeding a **minimal isolated
+  snippet** to `minic -m medium` directly. The `NORMALIZE` sed is a no-op under macOS BSD sed
+  (`\b`) — minic must accept canonical names.
 
 ## Orthogonal pre-existing limits (don't chase unless a real consumer needs them)
 
+- **`long` struct member from an opaque source** — see the §1d limitation above
+  (`[[qbe-loadc-wordsize-i8086]]`).
+- **Inline `100000L` literal** — the lexer drops the `L` bit and the int→long conversion sign-
+  extends a 16-bit-truncated immediate (`[[minic-long-literal-int-vararg]]`); build large longs
+  from small-literal arithmetic or stage through a long local.
 - **Scalar array initializers** (`static const uint8_t rule_act_table[] = { ... };`) — the
   `T NAME[] = {...}` rule only dispatches struct / pointer element types; a scalar element type
   `die`s ("array initializer requires struct or pointer type"). Surfaced as a spike blocker
-  (`compile.c`, the grammar/op tables). Small extension to `emit_struct_array_data`'s sibling.
+  (`compile.c`). Small extension to `emit_struct_array_data`'s sibling.
 - **Inline tagged-aggregate definition + var + initializer** (`union ival { int i; long l; } U = {…};`)
-  parse-errors — define the type first, then declare the variable (the probe does this).
+  parse-errors — define the type first, then declare the variable.
 - `sizeof` of a *local* array returns pointer size; `void *` pointer comparison hits "void has
-  no size"; `sizeof` only takes `( type | ident )`, not a general expression; tagged nested
-  aggregate definitions used as members (`struct Foo { … } x;`) are not handled (only untagged);
-  out-of-order / bitfield-member designated initializers `die()` (see §1b notes).
+  no size"; `sizeof` only takes `( type | ident )`, not a general expression; out-of-order /
+  bitfield-member designated initializers `die()`.

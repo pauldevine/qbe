@@ -190,6 +190,7 @@ int prevtok = 0;  /* last token yylex returned; tag-namespace disambiguation */
 Symb expr(Node *), lval(Node *);
 void branch(Node *, int, int);
 int stmt(Stmt *, int, int);
+void emit_struct_copy(Symb, Symb);
 
 FILE *of;
 int line;
@@ -197,6 +198,17 @@ int lbl, tmp, nglo;
 int enumval; /* Current enum value */
 int cur_fn_interrupt; /* 1 if current function has __attribute__((interrupt)) */
 int cur_fn_weak;      /* 1 if current function has __attribute__((weak)) */
+/* Struct/union return-by-value: when the current function's return type
+ * is an aggregate, it is lowered (System-V style) with a hidden first
+ * parameter — a caller-allocated pointer to result storage.  The callee
+ * copies the returned value through it and returns the pointer; the
+ * caller treats the call result as the address of the filled slot.  The
+ * hidden pointer is spilled to a fixed-name local slot (%__sret) so the
+ * `ret` statement can reload it regardless of which basic block it sits
+ * in.  cur_fn_sret marks that the in-progress function uses this ABI;
+ * cur_fn_sret_ctyp carries the aggregate ctyp (for the copy size). */
+int cur_fn_sret;            /* 1 if current fn returns struct/union by value */
+unsigned cur_fn_sret_ctyp;  /* the aggregate ctyp returned by value */
 char cur_fn_name[NString];  /* Name of function currently being emitted — used
                              * to mangle function-local statics into file-scope
                              * data globals (`static int x;` in foo() →
@@ -1386,6 +1398,121 @@ storefar(Symb d, Symb s)
 }
 
 /*
+ * Copy a struct/union value from one address to another.  `dst` and
+ * `src` are address-bearing Symbs (their psymb output IS the address);
+ * the copy size comes from `dst`'s aggregate type.  The copy is emitted
+ * word-by-word with a trailing byte for odd sizes.  Each side
+ * independently selects far (loadfw/storefw + `=l add`) or near
+ * (loadw/storew + `=w add`) addressing from its own FAR flag, so
+ * `*near = *far` and the reverse each pick the right variant per side.
+ *
+ * The IR is kept strictly Kw/Kb per element so QBE's loadopt won't fuse
+ * adjacent stores into a wider Kl op (which on i8086 triggers a chain of
+ * shl/xor scratch).  Used by the struct-assignment path, by `return
+ * aggr;` (copy into the hidden return pointer), and by `x = f();` where
+ * f returns a struct (copy out of the result slot).
+ */
+void
+emit_struct_copy(Symb dst, Symb src)
+{
+	Symb off_addr, val;
+	int sidx = DREF(dst.ctyp);
+	int sz = structh[sidx].size;
+	int off;
+	int src_far = ISFAR(src.ctyp);
+	int dst_far = ISFAR(dst.ctyp);
+	char src_klass = src_far ? 'l' : 'w';
+	char dst_klass = dst_far ? 'l' : 'w';
+	unsigned src_ptyp = src_far ? IDIR_FAR(INT) : IDIR(INT);
+	unsigned dst_ptyp = dst_far ? IDIR_FAR(INT) : IDIR(INT);
+
+	off = 0;
+	while (off + 1 < sz) {
+		if (off > 0) {
+			off_addr.t = Tmp;
+			off_addr.u.n = tmp++;
+			off_addr.ctyp = src_ptyp;
+			fprintf(of, "\t");
+			psymb(off_addr);
+			fprintf(of, " =%c add ", src_klass);
+			psymb(src);
+			fprintf(of, ", %d\n", off);
+		} else {
+			off_addr = src;
+		}
+		val.t = Tmp;
+		val.u.n = tmp++;
+		val.ctyp = INT;
+		fprintf(of, "\t");
+		psymb(val);
+		fprintf(of, src_far ? " =w loadfw " : " =w loadw ");
+		psymb(off_addr);
+		fprintf(of, "\n");
+
+		if (off > 0) {
+			off_addr.t = Tmp;
+			off_addr.u.n = tmp++;
+			off_addr.ctyp = dst_ptyp;
+			fprintf(of, "\t");
+			psymb(off_addr);
+			fprintf(of, " =%c add ", dst_klass);
+			psymb(dst);
+			fprintf(of, ", %d\n", off);
+		} else {
+			off_addr = dst;
+		}
+		fprintf(of, dst_far ? "\tstorefw " : "\tstorew ");
+		psymb(val);
+		fprintf(of, ", ");
+		psymb(off_addr);
+		fprintf(of, "\n");
+		off += 2;
+	}
+	if (off < sz) {
+		unsigned src_bptyp = src_far ? IDIR_FAR(CHR) : IDIR(CHR);
+		unsigned dst_bptyp = dst_far ? IDIR_FAR(CHR) : IDIR(CHR);
+		if (off > 0) {
+			off_addr.t = Tmp;
+			off_addr.u.n = tmp++;
+			off_addr.ctyp = src_bptyp;
+			fprintf(of, "\t");
+			psymb(off_addr);
+			fprintf(of, " =%c add ", src_klass);
+			psymb(src);
+			fprintf(of, ", %d\n", off);
+		} else {
+			off_addr = src;
+		}
+		val.t = Tmp;
+		val.u.n = tmp++;
+		val.ctyp = CHR;
+		fprintf(of, "\t");
+		psymb(val);
+		fprintf(of, src_far ? " =w loadfb " : " =w loadub ");
+		psymb(off_addr);
+		fprintf(of, "\n");
+
+		if (off > 0) {
+			off_addr.t = Tmp;
+			off_addr.u.n = tmp++;
+			off_addr.ctyp = dst_bptyp;
+			fprintf(of, "\t");
+			psymb(off_addr);
+			fprintf(of, " =%c add ", dst_klass);
+			psymb(dst);
+			fprintf(of, ", %d\n", off);
+		} else {
+			off_addr = dst;
+		}
+		fprintf(of, dst_far ? "\tstorefb " : "\tstoreb ");
+		psymb(val);
+		fprintf(of, ", ");
+		psymb(off_addr);
+		fprintf(of, "\n");
+	}
+}
+
+/*
  * In far-data memory models (compact/large/huge) default `char *` and
  * other data pointers are 32-bit segment:offset. The stock libstub
  * routines (_printf, _strlen, _strcpy, ...) all read 16-bit near
@@ -1431,6 +1558,21 @@ call_target_name(char *f)
 	return f;
 }
 
+/* Struct/union return-by-value (caller side): allocate storage for the
+ * returned aggregate and emit its alloc.  The returned temp number holds
+ * the slot address; the caller passes it as the hidden first argument
+ * and then treats it as the call's result (the address of the filled
+ * aggregate).  Must be called before evaluating the real arguments so
+ * the slot temp number is stable. */
+static int
+alloc_sret_slot(unsigned aggr_ctyp)
+{
+	int slot = tmp++;
+	fprintf(of, "\t%%t%d =%c alloc%d %d\n", slot, ALLOC_T(),
+		iralign(aggr_ctyp), SIZE(aggr_ctyp));
+	return slot;
+}
+
 void
 call(Node *n, Symb *sr)
 {
@@ -1448,7 +1590,12 @@ call(Node *n, Symb *sr)
 			/* Function pointer: generate indirect call */
 			Symb fptr;
 			unsigned fptr_type = DREF(ft);  /* FUN(return_type) */
+			int sret;
+			unsigned aggr;
+			int sret_slot = 0;
 			sr->ctyp = DREF(fptr_type);     /* return_type */
+			sret = (KIND(sr->ctyp) == STRUCT_T || KIND(sr->ctyp) == UNION_T);
+			aggr = sr->ctyp;
 
 			/* Load the function pointer value */
 			fptr.t = Tmp;
@@ -1456,12 +1603,21 @@ call(Node *n, Symb *sr)
 			fptr.ctyp = ft;
 			load(fptr, *sv);
 
+			/* Struct/union return-by-value: alloc result storage and
+			 * pass its address as the hidden first argument. */
+			if (sret)
+				sret_slot = alloc_sret_slot(aggr);
+
 			/* Evaluate all arguments */
 			for (a=n->r; a; a=a->r)
 				a->u.s = expr(a->l);
 
 			/* Generate indirect call */
-			if (sr->ctyp == NIL) {
+			if (sret) {
+				fprintf(of, "\tcall ");
+				psymb(fptr);
+				fprintf(of, "(%c %%t%d, ", DATAPTR_T(), sret_slot);
+			} else if (sr->ctyp == NIL) {
 				/* Void function pointer - no return value */
 				fprintf(of, "\tcall ");
 				psymb(fptr);
@@ -1479,6 +1635,11 @@ call(Node *n, Symb *sr)
 				fprintf(of, ", ");
 			}
 			fprintf(of, "...)\n");
+			if (sret) {
+				sr->t = Tmp;
+				sr->u.n = sret_slot;
+				sr->ctyp = aggr | (NEAR_DATA() ? 0 : FAR);
+			}
 			return;
 		}
 		if (KIND(ft) != FUN)
@@ -1486,11 +1647,24 @@ call(Node *n, Symb *sr)
 	} else
 		ft = FUNC(INT);
 	sr->ctyp = DREF(ft);
+	{
+	/* Struct/union return-by-value: alloc the result slot and pass its
+	 * address as the hidden first argument.  The slot alloc must precede
+	 * argument evaluation so its temp number stays stable. */
+	int sret = (KIND(sr->ctyp) == STRUCT_T || KIND(sr->ctyp) == UNION_T);
+	unsigned aggr = sr->ctyp;
+	int sret_slot = 0;
+	if (sret)
+		sret_slot = alloc_sret_slot(aggr);
 	for (a=n->r; a; a=a->r)
 		a->u.s = expr(a->l);
 	{
 	char *cf = call_target_name(f);
-	if (sr->ctyp == NIL) {
+	if (sret) {
+		/* Hidden return pointer first; the returned pointer is
+		 * discarded since we already hold the slot address. */
+		fprintf(of, "\tcall $%s(%c %%t%d, ", cf, DATAPTR_T(), sret_slot);
+	} else if (sr->ctyp == NIL) {
 		/* Void function - no return value */
 		fprintf(of, "\tcall $%s(", cf);
 	} else {
@@ -1505,6 +1679,15 @@ call(Node *n, Symb *sr)
 		fprintf(of, ", ");
 	}
 	fprintf(of, "...)\n");
+	if (sret) {
+		/* The call result IS the result slot's address (an aggregate
+		 * lvalue).  Mark it far under far-data so downstream copies
+		 * use the far load/store variants and 4-byte address arith. */
+		sr->t = Tmp;
+		sr->u.n = sret_slot;
+		sr->ctyp = aggr | (NEAR_DATA() ? 0 : FAR);
+	}
+	}
 }
 
 /*
@@ -1915,6 +2098,9 @@ expr(Node *n)
 			Node *a;
 			Symb fptr;
 			unsigned fptr_type;
+			int sret;
+			unsigned aggr;
+			int sret_slot = 0;
 
 			/* Evaluate function pointer expression */
 			fptr = expr(n->l);
@@ -1926,13 +2112,24 @@ expr(Node *n)
 			/* Get return type */
 			fptr_type = DREF(fptr.ctyp);  /* FUN(return_type) */
 			sr.ctyp = DREF(fptr_type);     /* return_type */
+			sret = (KIND(sr.ctyp) == STRUCT_T || KIND(sr.ctyp) == UNION_T);
+			aggr = sr.ctyp;
+
+			/* Struct/union return-by-value: alloc result storage and
+			 * pass its address as the hidden first argument. */
+			if (sret)
+				sret_slot = alloc_sret_slot(aggr);
 
 			/* Evaluate all arguments */
 			for (a=n->r; a; a=a->r)
 				a->u.s = expr(a->l);
 
 			/* Generate indirect call */
-			if (sr.ctyp == NIL) {
+			if (sret) {
+				fprintf(of, "\tcall ");
+				psymb(fptr);
+				fprintf(of, "(%c %%t%d, ", DATAPTR_T(), sret_slot);
+			} else if (sr.ctyp == NIL) {
 				/* Void-returning function pointer - no result. */
 				fprintf(of, "\tcall ");
 				psymb(fptr);
@@ -1950,6 +2147,11 @@ expr(Node *n)
 				fprintf(of, ", ");
 			}
 			fprintf(of, "...)\n");
+			if (sret) {
+				sr.t = Tmp;
+				sr.u.n = sret_slot;
+				sr.ctyp = aggr | (NEAR_DATA() ? 0 : FAR);
+			}
 		}
 		break;
 
@@ -2339,128 +2541,24 @@ expr(Node *n)
 		 * `*Curschar = *Filemem;` and `save = memp = *Topchar;`
 		 * leave the index field as malloc-garbage. */
 		if (KIND(s1.ctyp) == STRUCT_T || KIND(s1.ctyp) == UNION_T) {
-			Symb src_addr, val, off_addr;
-			int sidx = DREF(s1.ctyp);
-			int sz = structh[sidx].size;
-			int off;
+			Symb src_addr;
 
 			/* Get RHS address.  For most cases the RHS is `*ptr` or
 			 * an identifier — lval is idempotent there.  For chained
 			 * assignment `a = b = c`, the inner `b = c` already
-			 * ran during expr(n->r); use b's address as source. */
+			 * ran during expr(n->r); use b's address as source.  For
+			 * a struct-returning call (`x = f();`), expr(n->r) above
+			 * already allocated the result slot and left its address
+			 * in s0 — re-running lval would emit the call a second
+			 * time, so reuse s0 directly. */
 			if (n->r->op == '=')
 				src_addr = lval(n->r->l);
+			else if (n->r->op == 'C' || n->r->op == 'I')
+				src_addr = s0;
 			else
 				src_addr = lval(n->r);
 
-			/* Word-by-word copy: load to a fresh Kw temp, store it.
-			 * Keep the IR strictly Kw so QBE's loadopt doesn't try
-			 * to fuse adjacent stores into a wider Kl op (which on
-			 * i8086 triggers a chain of shl/xor scratch that
-			 * surprised us in earlier attempts).
-			 *
-			 * Under far-data models (compact/large/huge), the source
-			 * and destination struct addresses may themselves be far
-			 * pointers (when one or both sides was reached via `*ptr`
-			 * on a far ptr).  In that case the offset arith must be
-			 * `=l add` so we don't truncate to 16 bits, and loads/
-			 * stores must use the far-* variants so we deref through
-			 * ES:BX, not DS:BX.  Whether the side is far is
-			 * independent — `*near = *far` and the reverse must each
-			 * pick the right variant per side. */
-			{
-				int src_far = ISFAR(src_addr.ctyp);
-				int dst_far = ISFAR(s1.ctyp);
-				char src_klass = src_far ? 'l' : 'w';
-				char dst_klass = dst_far ? 'l' : 'w';
-				unsigned src_ptyp = src_far ? IDIR_FAR(INT) : IDIR(INT);
-				unsigned dst_ptyp = dst_far ? IDIR_FAR(INT) : IDIR(INT);
-
-				off = 0;
-				while (off + 1 < sz) {
-					if (off > 0) {
-						off_addr.t = Tmp;
-						off_addr.u.n = tmp++;
-						off_addr.ctyp = src_ptyp;
-						fprintf(of, "\t");
-						psymb(off_addr);
-						fprintf(of, " =%c add ", src_klass);
-						psymb(src_addr);
-						fprintf(of, ", %d\n", off);
-					} else {
-						off_addr = src_addr;
-					}
-					val.t = Tmp;
-					val.u.n = tmp++;
-					val.ctyp = INT;
-					fprintf(of, "\t");
-					psymb(val);
-					fprintf(of, src_far ? " =w loadfw " : " =w loadw ");
-					psymb(off_addr);
-					fprintf(of, "\n");
-
-					if (off > 0) {
-						off_addr.t = Tmp;
-						off_addr.u.n = tmp++;
-						off_addr.ctyp = dst_ptyp;
-						fprintf(of, "\t");
-						psymb(off_addr);
-						fprintf(of, " =%c add ", dst_klass);
-						psymb(s1);
-						fprintf(of, ", %d\n", off);
-					} else {
-						off_addr = s1;
-					}
-					fprintf(of, dst_far ? "\tstorefw " : "\tstorew ");
-					psymb(val);
-					fprintf(of, ", ");
-					psymb(off_addr);
-					fprintf(of, "\n");
-					off += 2;
-				}
-				if (off < sz) {
-					unsigned src_bptyp = src_far ? IDIR_FAR(CHR) : IDIR(CHR);
-					unsigned dst_bptyp = dst_far ? IDIR_FAR(CHR) : IDIR(CHR);
-					if (off > 0) {
-						off_addr.t = Tmp;
-						off_addr.u.n = tmp++;
-						off_addr.ctyp = src_bptyp;
-						fprintf(of, "\t");
-						psymb(off_addr);
-						fprintf(of, " =%c add ", src_klass);
-						psymb(src_addr);
-						fprintf(of, ", %d\n", off);
-					} else {
-						off_addr = src_addr;
-					}
-					val.t = Tmp;
-					val.u.n = tmp++;
-					val.ctyp = CHR;
-					fprintf(of, "\t");
-					psymb(val);
-					fprintf(of, src_far ? " =w loadfb " : " =w loadub ");
-					psymb(off_addr);
-					fprintf(of, "\n");
-
-					if (off > 0) {
-						off_addr.t = Tmp;
-						off_addr.u.n = tmp++;
-						off_addr.ctyp = dst_bptyp;
-						fprintf(of, "\t");
-						psymb(off_addr);
-						fprintf(of, " =%c add ", dst_klass);
-						psymb(s1);
-						fprintf(of, ", %d\n", off);
-					} else {
-						off_addr = s1;
-					}
-					fprintf(of, dst_far ? "\tstorefb " : "\tstoreb ");
-					psymb(val);
-					fprintf(of, ", ");
-					psymb(off_addr);
-					fprintf(of, "\n");
-				}
-			}
+			emit_struct_copy(s1, src_addr);
 			sr = s1;
 			break;
 		}
@@ -2760,6 +2858,18 @@ lval(Node *n)
 	switch (n->op) {
 	default:
 		die("invalid lvalue");
+	case 'C':
+	case 'I':
+		/* A call is an lvalue only when it returns a struct/union by
+		 * value: expr() allocates the result slot, emits the call, and
+		 * yields the slot's address (so `f().field` derefs it).  This
+		 * path runs only where expr() wasn't already called on the
+		 * node — the struct-assignment path reuses its own s0 instead
+		 * to avoid emitting the call twice. */
+		sr = expr(n);
+		if (KIND(sr.ctyp) != STRUCT_T && KIND(sr.ctyp) != UNION_T)
+			die("invalid lvalue");
+		break;
 	case 'V':
 		if (!varget(n->u.v))
 			die("undefined variable");
@@ -3092,6 +3202,40 @@ stmt(Stmt *s, int b, int c)
 
 	switch (s->t) {
 	case Ret:
+		if (cur_fn_sret) {
+			/* Struct/union return-by-value: copy the returned
+			 * aggregate into the caller's storage (the hidden
+			 * pointer, reloaded from %__sret) and return that
+			 * pointer.  The source is an aggregate lvalue, so take
+			 * its address — except a struct-returning call, whose
+			 * expr() already yields the result-slot address. */
+			Symb src, dst;
+			Node *rv = (Node *)s->p1;
+			if (!rv)
+				die("return; in struct-returning function");
+			if (rv->op == 'C' || rv->op == 'I')
+				src = expr(rv);
+			else
+				src = lval(rv);
+			/* The hidden pointer is far under far-data models (it
+			 * addresses caller storage as a 4-byte seg:off), near
+			 * under medium.  Reload it and copy the aggregate. */
+			dst.t = Tmp;
+			dst.u.n = tmp++;
+			dst.ctyp = cur_fn_sret_ctyp | (NEAR_DATA() ? 0 : FAR);
+			fprintf(of, "\t");
+			psymb(dst);
+			fprintf(of, " =%c load%c %%__sret\n", DATAPTR_T(), DATAPTR_T());
+			/* Mirror the dst's far-ness onto the source aggregate
+			 * address: under far-data every data address is a far
+			 * (seg:off) pointer, so the copy must use the far load/
+			 * store variants on both sides. */
+			if (!NEAR_DATA())
+				src.ctyp |= FAR;
+			emit_struct_copy(dst, src);
+			fprintf(of, "\tret %%t%d\n", dst.u.n);
+			return 1;
+		}
 		if (s->p1) {
 			x = expr(s->p1);
 			fprintf(of, "\tret ");
@@ -4161,10 +4305,23 @@ emit_knr_func_typed(char *fname, Node *params)
 	strncpy(cur_fn_name, fname, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(fname, 1, FUNC(curfntyp), 0);
-	if (curfntyp == NIL)
+
+	/* Struct/union return-by-value: hidden first pointer parameter +
+	 * pointer return (see cur_fn_sret notes near the top of the file). */
+	cur_fn_sret = (KIND(curfntyp) == STRUCT_T || KIND(curfntyp) == UNION_T);
+	cur_fn_sret_ctyp = curfntyp;
+
+	if (cur_fn_sret)
+		fprintf(of, "export function %c $%s(", DATAPTR_T(), fname);
+	else if (curfntyp == NIL)
 		fprintf(of, "export function $%s(", fname);
 	else
 		fprintf(of, "export function %c $%s(", irtyp_ret(curfntyp), fname);
+	if (cur_fn_sret) {
+		fprintf(of, "%c %%t%d", DATAPTR_T(), tmp++);
+		if (params)
+			fprintf(of, ", ");
+	}
 	n = params;
 	if (n)
 		for (;;) {
@@ -4179,7 +4336,11 @@ emit_knr_func_typed(char *fname, Node *params)
 		}
 	fprintf(of, ") {\n");
 	fprintf(of, "@l%d\n", lbl++);
-	for (t = 0, n = params; n; t++, n = n->r) {
+	if (cur_fn_sret) {
+		fprintf(of, "\t%%__sret =%c alloc4 %d\n", ALLOC_T(), DATAPTR_SZ());
+		fprintf(of, "\tstore%c %%t0, %%__sret\n", DATAPTR_T());
+	}
+	for (t = (cur_fn_sret ? 1 : 0), n = params; n; t++, n = n->r) {
 		s = varget(n->u.v);
 		m = SIZE(s->ctyp);
 		fprintf(of, "\t%%%s =%c alloc%d %d\n", n->u.v, ALLOC_T(), iralign(s->ctyp), m);
@@ -5000,10 +5161,25 @@ ansi_func_proto: '(' init_ansi par0 ')'
 	strncpy(cur_fn_name, parsed_ident, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
-	if (curfntyp == NIL)
+
+	/* Struct/union return-by-value: lower to a hidden first pointer
+	 * parameter (caller-allocated result storage) plus a pointer
+	 * return.  See the cur_fn_sret notes near the top of the file. */
+	cur_fn_sret = (KIND(curfntyp) == STRUCT_T || KIND(curfntyp) == UNION_T);
+	cur_fn_sret_ctyp = curfntyp;
+
+	if (cur_fn_sret)
+		fprintf(of, "export function %c $%s(", DATAPTR_T(), parsed_ident);
+	else if (curfntyp == NIL)
 		fprintf(of, "export function $%s(", parsed_ident);
 	else
 		fprintf(of, "export function %c $%s(", irtyp_ret(curfntyp), parsed_ident);
+	if (cur_fn_sret) {
+		/* Hidden return pointer occupies %t0; real params follow. */
+		fprintf(of, "%c %%t%d", DATAPTR_T(), tmp++);
+		if ($3)
+			fprintf(of, ", ");
+	}
 	n = $3;
 	if (n)
 		for (;;) {
@@ -5018,7 +5194,13 @@ ansi_func_proto: '(' init_ansi par0 ')'
 		}
 	fprintf(of, ") {\n");
 	fprintf(of, "@l%d\n", lbl++);
-	for (t=0, n=$3; n; t++, n=n->r) {
+	if (cur_fn_sret) {
+		/* Spill the hidden pointer to a fixed-name slot so `ret` can
+		 * reload it from whichever basic block it lands in. */
+		fprintf(of, "\t%%__sret =%c alloc4 %d\n", ALLOC_T(), DATAPTR_SZ());
+		fprintf(of, "\tstore%c %%t0, %%__sret\n", DATAPTR_T());
+	}
+	for (t = (cur_fn_sret ? 1 : 0), n=$3; n; t++, n=n->r) {
 		s = varget(n->u.v);
 		m = SIZE(s->ctyp);
 		fprintf(of, "\t%%%s =%c alloc%d %d\n", n->u.v, ALLOC_T(), iralign(s->ctyp), m);
@@ -5032,6 +5214,7 @@ init_ansi:
 	varclr();
 	tmp = 0;
 	clit = 0;
+	cur_fn_sret = 0;
 };
 
 init_kr:
@@ -5043,6 +5226,7 @@ init_kr:
 	clit = 0;
 	cur_fn_interrupt = 0;
 	cur_fn_weak = 0;
+	cur_fn_sret = 0;
 };
 
 init:
@@ -5052,9 +5236,10 @@ init:
 	clit = 0;
 	cur_fn_interrupt = 0;
 	cur_fn_weak = 0;
+	cur_fn_sret = 0;
 };
 
-init_attr: { varclr(); tmp = 0; clit = 0; };
+init_attr: { varclr(); tmp = 0; clit = 0; cur_fn_sret = 0; };
 
 inlineopt: INLINE
          |
