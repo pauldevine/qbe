@@ -114,6 +114,7 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/for_multiscalar_probe.c:minic/dos/tests/for_multiscalar_probe.golden.txt:large"
 	"minic/dos/examples/local_typedef_probe.c:minic/dos/tests/local_typedef_probe.golden.txt:medium"
 	"minic/dos/examples/local_typedef_probe.c:minic/dos/tests/local_typedef_probe.golden.txt:large"
+	"minic/dos/examples/array_designate_probe.c:minic/dos/tests/array_designate_probe.golden.txt:medium"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:medium"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:large"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:huge"

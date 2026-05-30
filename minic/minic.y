@@ -4434,28 +4434,49 @@ agg_emit_array(unsigned elemty, int cnt, Node *init, char *buf, int *bl, int *fi
 	int n = 0;
 	Node *ln;
 
+	Node **slots;
+	int pos;
+
 	if (!init || init->op != '{')
 		die("array member requires a braced initializer");
+	/* Buffer values into index-addressed slots so designated items may
+	 * appear in any order (e.g. MicroPython's `[OP_ADD]=...` jump tables,
+	 * whose enum indices aren't ascending).  A positional item lands at
+	 * the running cursor; a `[k]=v` designator sets the cursor to k
+	 * (C99 6.7.8) — both then advance it.  Unfilled slots emit as zero. */
+	slots = alloc(cnt * sizeof *slots);
+	for (n = 0; n < cnt; n++)
+		slots[n] = 0;
+	pos = 0;
 	for (ln = init->l; ln; ln = ln->r) {
 		Node *item = ln->l;
 		Node *val = item;
 		if (item->op == 'd') {         /* [k] = v */
-			int k = const_eval(item->r);
-			if (k < n)
-				die("out-of-order array designator unsupported");
-			agg_zfill((k - n) * elemsz, buf, bl, first);
-			n = k;
+			pos = const_eval(item->r);
 			val = item->l;
 		} else if (item->op == 'D') {
 			die("field designator in array initializer");
 		}
-		if (n >= cnt)
-			die("too many initializers for array member");
-		agg_emit_value(elemty, 0, val, buf, bl, first);
-		n++;
+		if (pos < 0 || pos >= cnt)
+			die("array designator out of bounds");
+		slots[pos++] = val;
 	}
-	if (n < cnt)
-		agg_zfill((cnt - n) * elemsz, buf, bl, first);
+	for (n = 0; n < cnt; ) {
+		if (slots[n]) {
+			agg_emit_value(elemty, 0, slots[n], buf, bl, first);
+			n++;
+		} else {
+			/* Coalesce a run of unfilled slots into one zero-fill, so
+			 * fully- or in-order-initialized arrays emit byte-for-byte
+			 * as before. */
+			int run = 0;
+			while (n < cnt && !slots[n]) {
+				run++;
+				n++;
+			}
+			agg_zfill(run * elemsz, buf, bl, first);
+		}
+	}
 }
 
 void
@@ -6673,6 +6694,7 @@ inititem: expr                        { $$ = $1; }
         ;
 
 initlist: inititem                    { $$ = mknode(0, $1, 0); }
+        | inititem ','                { $$ = mknode(0, $1, 0); }
         | inititem ',' initlist       { $$ = mknode(0, $1, $3); }
         ;
 
