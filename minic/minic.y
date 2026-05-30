@@ -238,6 +238,10 @@ struct {
 	int arraybytes;    /* total byte size of an array declarator (isarray==1);
 	                    * 0 when unknown.  Lets sizeof(arrayvar) return the real
 	                    * array size instead of the pointer-to-element size. */
+	int istentative;   /* 1 if this global is an uninitialized (tentative) file-
+	                    * scope definition: `static const T x;` with no init.  A
+	                    * later initialized definition of the same name reuses the
+	                    * buffered ini[]/gloname[] slot instead of erroring. */
 } varh[NVar];
 
 /* Typedef table.  Sized for real preprocessed TUs (MicroPython headers
@@ -385,6 +389,7 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 			varh[h].isextern = 0;
 			varh[h].isstaticlocal = 0;
 			varh[h].arraybytes = 0;
+			varh[h].istentative = 0;
 			return;
 		}
 		if (strcmp(varh[h].v, v) == 0) {
@@ -900,6 +905,51 @@ var_islocal(char *v)
 		h = (h+1) % NVar;
 	} while (h != h0);
 	return 0;
+}
+
+/* Mark the just-added global `name` as a tentative (uninitialized) file-
+ * scope definition.  A later initialized definition of the same name will
+ * reuse its buffered ini[]/gloname[] slot instead of erroring. */
+void
+mark_tentative(char *name)
+{
+	unsigned h0, h;
+	h0 = hash(name);
+	h = h0;
+	do {
+		if (varh[h].v[0] == 0)
+			return;
+		if (strcmp(varh[h].v, name) == 0) {
+			varh[h].istentative = 1;
+			return;
+		}
+		h = (h+1) % NVar;
+	} while (h != h0);
+}
+
+/* If `name` already exists as a tentative global, return its buffered glo
+ * index (and clear the tentative flag so the real definition can overwrite
+ * ini[idx]); otherwise return -1.  Lets an initialized file-scope
+ * definition supersede an earlier `static const T name;` declaration. */
+int
+glo_redef_index(char *name)
+{
+	unsigned h0, h;
+	h0 = hash(name);
+	h = h0;
+	do {
+		if (varh[h].v[0] == 0)
+			return -1;
+		if (strcmp(varh[h].v, name) == 0) {
+			if (varh[h].istentative) {
+				varh[h].istentative = 0;
+				return varh[h].glo;
+			}
+			return -1;
+		}
+		h = (h+1) % NVar;
+	} while (h != h0);
+	return -1;
 }
 
 Symb *
@@ -4457,12 +4507,10 @@ void
 emit_global_aggregate(unsigned ctyp, char *name, Node *agg)
 {
 	static char buf[65536];
-	int bl = 0, first = 1;
+	int bl = 0, first = 1, idx;
 
 	if (ctyp == NIL)
 		die("invalid void declaration");
-	if (nglo == NGlo)
-		die("too many globals");
 	bl = sprintf(buf, "align %d {", iralign(ctyp));
 	if (KIND(ctyp) == STRUCT_T || KIND(ctyp) == UNION_T)
 		agg_emit_struct(DREF(ctyp), KIND(ctyp) == UNION_T,
@@ -4472,10 +4520,18 @@ emit_global_aggregate(unsigned ctyp, char *name, Node *agg)
 	if (first)                             /* nothing emitted: keep block legal */
 		bl += sprintf(buf + bl, " z 1");
 	bl += sprintf(buf + bl, " }");
-	ini[nglo] = alloc(bl + 1);
-	strcpy(ini[nglo], buf);
-	strcpy(gloname[nglo], name);
-	varadd(name, nglo++, ctyp, 0);
+	/* Reuse an earlier tentative slot if this supersedes a `static const
+	 * T name;` declaration; otherwise allocate a fresh global slot. */
+	idx = glo_redef_index(name);
+	if (idx < 0) {
+		if (nglo == NGlo)
+			die("too many globals");
+		idx = nglo++;
+		strcpy(gloname[idx], name);
+		varadd(name, idx, ctyp, 0);
+	}
+	ini[idx] = alloc(bl + 1);
+	strcpy(ini[idx], buf);
 }
 
 /* Decoded byte length (including the NUL terminator) of the string
@@ -5619,6 +5675,9 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	strcpy(ini[nglo], buf);
 	strcpy(gloname[nglo], parsed_ident);
 	varadd(parsed_ident, nglo++, parsed_type, 0);
+	/* Uninitialized file-scope definition: a later initialized definition
+	 * of the same name may supersede this (C tentative definition). */
+	mark_tentative(parsed_ident);
 }
                | '=' NUM ';'
 {
