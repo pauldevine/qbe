@@ -235,6 +235,9 @@ struct {
 	int isextern; /* 1 if this is an extern declaration */
 	int isstaticlocal; /* 1 if this is a function-local static (mangled global,
 	                    * but symtab entry should be cleared between functions) */
+	int arraybytes;    /* total byte size of an array declarator (isarray==1);
+	                    * 0 when unknown.  Lets sizeof(arrayvar) return the real
+	                    * array size instead of the pointer-to-element size. */
 } varh[NVar];
 
 /* Typedef table.  Sized for real preprocessed TUs (MicroPython headers
@@ -381,6 +384,7 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 			varh[h].isarray = isarray;
 			varh[h].isextern = 0;
 			varh[h].isstaticlocal = 0;
+			varh[h].arraybytes = 0;
 			return;
 		}
 		if (strcmp(varh[h].v, v) == 0) {
@@ -833,6 +837,43 @@ var_isarray(char *v)
 			return 0;
 		if (strcmp(varh[h].v, v) == 0)
 			return varh[h].isarray;
+		h = (h+1) % NVar;
+	} while (h != h0);
+	return 0;
+}
+
+/* Record the total byte size of an array declarator so sizeof(arrayvar)
+ * can report it.  Called by the array-declaration rules right after
+ * varadd.  Silently no-ops if the name isn't found. */
+void
+var_set_arraybytes(char *v, int bytes)
+{
+	unsigned h0, h;
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (varh[h].v[0] == 0)
+			return;
+		if (strcmp(varh[h].v, v) == 0) {
+			varh[h].arraybytes = bytes;
+			return;
+		}
+		h = (h+1) % NVar;
+	} while (h != h0);
+}
+
+/* Total byte size of an array variable, or 0 if unknown / not an array. */
+int
+var_arraybytes(char *v)
+{
+	unsigned h0, h;
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (varh[h].v[0] == 0)
+			return 0;
+		if (strcmp(varh[h].v, v) == 0)
+			return varh[h].isarray ? varh[h].arraybytes : 0;
 		h = (h+1) % NVar;
 	} while (h != h0);
 	return 0;
@@ -3674,6 +3715,7 @@ emit_struct_global_array(char *name, int count)
 	strcpy(ini[nglo], buf);
 	strcpy(gloname[nglo], name);
 	varadd(name, nglo++, IDIR(styp), 1);
+	var_set_arraybytes(name, total);
 }
 
 /* Struct-array initializer collection.
@@ -3836,6 +3878,7 @@ emit_scalar_array_data(unsigned elemtyp, char *name)
 	strcpy(ini[nglo], buf);
 	strcpy(gloname[nglo], name);
 	varadd(name, nglo++, IDIR(elemtyp), 1);
+	var_set_arraybytes(name, SIZE(elemtyp) * nsai);
 	sai_clear();
 }
 
@@ -3903,6 +3946,10 @@ emit_struct_array_data(int sidx, char *name)
 	{
 		unsigned styp = (sidx << 3) + STRUCT_T;
 		varadd(name, nglo++, IDIR(styp), 1);
+		/* Element count is nsai items / members-per-struct; record
+		 * the whole-array byte size for sizeof(table). */
+		if (nmem > 0)
+			var_set_arraybytes(name, SIZE(styp) * (nsai / nmem));
 	}
 	sai_clear();
 }
@@ -5023,14 +5070,15 @@ typedefunionstart: UNION '{'
 }
                  ;
 
-static_assert_dcl: STATIC_ASSERT '(' NUM ',' STR ')' ';'
+static_assert_dcl: STATIC_ASSERT '(' expr ',' STR ')' ';'
 {
-	/* _Static_assert(constant-expression, string-literal); */
-	if ($3->u.n == 0) {
-		/* Assertion failed */
+	/* _Static_assert(constant-expression, string-literal).  The
+	 * condition is a general constant expression; only evaluate it
+	 * when const_eval can fold it (MicroPython embeds offsetof()
+	 * address comparisons that are true at compile time but not
+	 * foldable here — accept and skip those). */
+	if (constfoldable($3) && const_eval($3) == 0)
 		die("static assertion failed");
-	}
-	/* Assertion passed - no code generated */
 }
     ;
 
@@ -5219,6 +5267,12 @@ typed_decl: type_and_ident typed_decl_rest
           | INLINE STATIC type_and_ident typed_decl_rest
 {
 	/* `inline static` — same treatment. */
+}
+          | STATIC attrspec type_and_ident_noattr typed_decl_rest
+{
+	/* `static __attribute__((xxx)) type ident ...` — MicroPython spells
+	 * `static __attribute__((noreturn)) void f(...)`.  attrspec set the
+	 * attribute flags; type_and_ident_noattr does NOT reset them. */
 };
 
 type_and_ident: type IDENT
@@ -5751,9 +5805,9 @@ dcls:
 	expr(init_node);
 }
     | dcls type IDENT ',' ext_decllist ';' { emit_local_multi_decl($2, $3->u.v, $5); }
-    | dcls type IDENT '[' NUM ']' ',' ext_decllist ';'
+    | dcls type IDENT '[' expr ']' ',' ext_decllist ';'
 {
-	Node *first = kr_array_node($3->u.v, $5->u.n);
+	Node *first = kr_array_node($3->u.v, const_eval($5));
 	first->r = $8;
 	emit_local_multi_decl_full($2, first);
 }
@@ -5851,17 +5905,19 @@ dcls:
 {
 	emit_static_pointer_array($3, $4->u.v);
 }
-    | dcls STATIC type IDENT '[' NUM ']' ';'
+    | dcls STATIC type IDENT '[' expr ']' ';'
 {
 	/* Function-local static array (uninitialized) — emit as a
-	 * zero-filled file-scope data global with mangled name. */
+	 * zero-filled file-scope data global with mangled name.
+	 * Dimension is a constant-expression (const_eval folds sizeof). */
 	char buf[64];
 	int total;
 	if ($3 == NIL)
 		die("invalid void array");
-	total = SIZE($3) * $6->u.n;
+	total = SIZE($3) * const_eval($6);
 	sprintf(buf, "align %d { z %d }", iralign($3), total);
 	emit_static_local($4->u.v, IDIR($3), 1, buf);
+	var_set_arraybytes($4->u.v, total);
 	maybe_mark_huge_global(nglo - 1, gloname[nglo - 1], total);
 }
     | dcls EXTERN type IDENT ';'
@@ -5894,34 +5950,38 @@ dcls:
 		varaddextern(n->u.v, t, n->op == 'A' ? 1 : 0);
 	}
 }
-    | dcls type IDENT '[' NUM ']' ';'
+    | dcls type IDENT '[' expr ']' ';'
 {
-	/* Array declaration without initialization */
+	/* Array declaration without initialization.  Dimension is a
+	 * constant-expression (const_eval folds sizeof / arithmetic). */
 	int s, n, total;
 	char *v;
 
 	if ($2 == NIL)
 		die("invalid void array");
 	v = $3->u.v;
-	n = $5->u.n;  /* array size */
+	n = const_eval($5);  /* array size */
 	s = SIZE($2);  /* element size */
 	total = s * n;
 	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
+	var_set_arraybytes(v, total);
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), total);
 }
-    | dcls type IDENT '[' NUM ']' '=' '{' initlist '}' ';'
+    | dcls type IDENT '[' expr ']' '=' '{' initlist '}' ';'
 {
-	/* Array declaration with initialization */
+	/* Array declaration with initialization.  Dimension is a
+	 * constant-expression (const_eval folds sizeof / arithmetic). */
 	int s, n, total;
 	char *v;
 
 	if ($2 == NIL)
 		die("invalid void array");
 	v = $3->u.v;
-	n = $5->u.n;  /* array size */
+	n = const_eval($5);  /* array size */
 	s = SIZE($2);  /* element size */
 	total = s * n;
 	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
+	var_set_arraybytes(v, total);
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), total);
 
 	/* Zero-initialize the array first */
@@ -6019,12 +6079,11 @@ dcls:
 	(void)first;
 	emit_local_multi_decl_full($2, $11);
 }
-    | dcls STATIC_ASSERT '(' NUM ',' STR ')' ';'
+    | dcls STATIC_ASSERT '(' expr ',' STR ')' ';'
 {
-	/* _Static_assert in local scope */
-	if ($4->u.n == 0) {
+	/* _Static_assert in local scope (general const-expr condition). */
+	if (constfoldable($4) && const_eval($4) == 0)
 		die("static assertion failed");
-	}
 }
     ;
 
@@ -6203,17 +6262,21 @@ stmt: ';'                            { $$ = 0; }
         init_node = mknode('=', $2, $4);
         $$ = mkstmt(Expr, init_node, 0, 0);
     }
-    | type IDENT '[' NUM ']' ';'     {
-        /* Block-scoped fixed-size array. */
+    | type IDENT '[' expr ']' ';'     {
+        /* Block-scoped fixed-size array.  Dimension is a
+         * constant-expression (const_eval folds sizeof / arithmetic).
+         * Must mirror the dcls-context rule's use of expr so a bare
+         * NUM dim doesn't shift/reduce-conflict between the two. */
         int s, n, total;
         char *v;
         if ($1 == NIL)
             die("invalid void array");
         v = $2->u.v;
-        n = $4->u.n;
+        n = const_eval($4);
         s = SIZE($1);
         total = s * n;
         varadd(v, 0, IDIR($1), 1);
+        var_set_arraybytes(v, total);
         fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), total);
         $$ = 0;
     }
@@ -6266,11 +6329,10 @@ stmt: ';'                            { $$ = 0; }
         varaddextern($3->u.v, $2, 0);
         $$ = 0;
     }
-    | STATIC_ASSERT '(' NUM ',' STR ')' ';' {
-        /* _Static_assert in statement scope */
-        if ($3->u.n == 0) {
+    | STATIC_ASSERT '(' expr ',' STR ')' ';' {
+        /* _Static_assert in statement scope (general const-expr). */
+        if (constfoldable($3) && const_eval($3) == 0)
             die("static assertion failed");
-        }
         $$ = 0;
     }
     | expr ';'                       { $$ = mkstmt(Expr, $1, 0, 0); }
@@ -6723,10 +6785,14 @@ post: NUM
     }
     | SIZEOF '(' IDENT ')' {
         Symb *vs = varget($3->u.v);
+        int ab = var_arraybytes($3->u.v);
         $$ = mknode('N', 0, 0);
         if (!vs)
             die("sizeof on undeclared identifier");
-        $$->u.n = SIZE(vs->ctyp);
+        /* For an array variable, report the whole-array byte size
+         * (varh stores arrays as pointer-to-element, so SIZE(ctyp)
+         * would otherwise give the pointer size). */
+        $$->u.n = ab > 0 ? ab : SIZE(vs->ctyp);
     }
     | ALIGNOF '(' type ')' {
         /* _Alignof returns alignment requirement for type */
@@ -7295,6 +7361,23 @@ yylex_inner()
 			} else if (c == '\\') {
 				esc = 1;
 			} else if (c == '"') {
+				/* Adjacent string-literal concatenation (C89):
+				 * peek past whitespace/newlines for another opening
+				 * quote; if found, keep appending into the same
+				 * buffer (the closing quote slot at p[i] gets
+				 * overwritten by the next string's first char). */
+				int d;
+				do {
+					d = getchar();
+					if (d == '\n')
+						line++;
+				} while (d == ' ' || d == '\t' || d == '\n'
+				    || d == '\r' || d == '\f' || d == '\v');
+				if (d == '"') {
+					i--;  /* for-loop i++ re-targets the quote slot */
+					continue;
+				}
+				ungetc(d, stdin);
 				break;
 			}
 		}

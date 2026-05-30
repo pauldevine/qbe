@@ -1,0 +1,9 @@
+dim_buf=5 (want 5)
+dim_wide=8 (want 8)
+dim_sq=12 (want 12)
+sz_tbl=10 (want 10)
+sz_et=12 (want 12)
+sq5=25 (want 25)
+buf0=65 buf4=69 (want 65 69)
+concat=[1,2]
+range(10, 20)
