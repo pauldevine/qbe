@@ -189,6 +189,7 @@ int yylex(void), yylex_inner(void), yyerror(char *);
 int prevtok = 0;  /* last token yylex returned; tag-namespace disambiguation */
 int brace_depth = 0;     /* { } nesting the lexer has returned so far */
 int pending_varclr = 0;  /* function body just closed; drop locals before next token */
+unsigned forinit_basetyp = 0;  /* base type of the current C99 for-init declarator(s) */
 
 /* Inner-block scope via alpha-renaming.  minic has a single flat local
  * symbol table and emits function bodies lazily (uses are resolved by
@@ -5226,7 +5227,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %type <u> type
 %type <s> stmt stmts asmstmt
-%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc idlist kr_idlist kr_namelist kr_name sm_more_names ext_decllist ext_decl comma_expr comma_exp0 init_decllist init_decl gaggr gilist gitem gival
+%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc idlist kr_idlist kr_namelist kr_name sm_more_names ext_decllist ext_decl comma_expr comma_exp0 init_decllist init_decl gaggr gilist gitem gival forinit_var
 %type <n> asmoutputs asmoutputlist asmoutput asminputs asminputlist asminput asmclobbers asmclobberlist
 %token <u> TNAME
 
@@ -7032,46 +7033,37 @@ stmt: ';'                            { $$ = 0; }
     | IF '(' expr ')' stmt           { $$ = mkstmt(If, $3, $5, 0); }
     | FOR '(' comma_exp0 ';' comma_exp0 ';' comma_exp0 ')' stmt
                                      { $$ = mkfor($3, $5, $7, $9); }
-    | FOR '(' type IDENT '=' expr ';' comma_exp0 ';' comma_exp0 ')' stmt
+    | FOR '(' forinit_var expr ';' comma_exp0 ';' comma_exp0 ')' stmt
                                      {
         /* C99 for-init.  Test and increment use comma_exp0 (matching the
          * plain `for`) so a comma increment works, e.g.
          *   for (size_t i = n; i > 0; i--, ptrs++)
-         * in py/gc.c and py/bc.c. */
-        int s;
-        char *v;
+         * in py/gc.c and py/bc.c.  forinit_var did the rename, varadd and
+         * alloc for the first declarator (reducing at type IDENT =,
+         * before the test clause is lexed, so a sibling-for collision
+         * such as compile.c with for int i then for size_t i gets its
+         * uses stamped to the renamed slot). */
         Node *init_expr;
-        if ($3 == NIL)
-            die("invalid void declaration");
-        v = $4->u.v;
-        s = SIZE($3);
-        varadd(v, 0, $3, 0);
-        fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($3), s);
-        init_expr = mknode('=', $4, $6);
-        $$ = mkfor(init_expr, $8, $10, $12);
+        init_expr = mknode('=', $3, $4);
+        $$ = mkfor(init_expr, $6, $8, $10);
     }
-    | FOR '(' type IDENT '=' expr ',' '*' IDENT '=' expr ';' comma_exp0 ';' comma_exp0 ')' stmt
+    | FOR '(' forinit_var expr ',' '*' IDENT '=' expr ';' comma_exp0 ';' comma_exp0 ')' stmt
                                      {
         /* Two-pointer-declarator C99 for-init: the symmetric
          * `for (T *a = e1, *b = e2; ...)` form.  The first star is
-         * folded into type by the type rule, so both vars share type
-         * $3.  Inits run left-to-right via a comma node.  Covers the
+         * folded into the base type, so both vars share forinit_basetyp.
+         * Inits run left-to-right via a comma node.  Covers the
          * MicroPython spelling in py objstr.c and py qstr.c. */
         int s;
-        Node *i1, *i2, *ini;
-        if ($3 == NIL)
-            die("invalid void declaration");
-        s = SIZE($3);
-        varadd($4->u.v, 0, $3, 0);
-        fprintf(of, "\t%%%s =%c alloc%d %d\n", $4->u.v, ALLOC_T(), iralign($3), s);
-        varadd($9->u.v, 0, $3, 0);
-        fprintf(of, "\t%%%s =%c alloc%d %d\n", $9->u.v, ALLOC_T(), iralign($3), s);
-        i1 = mknode('=', $4, $6);
-        i2 = mknode('=', $9, $11);
-        ini = mknode(',', i1, i2);
-        $$ = mkfor(ini, $13, $15, $17);
+        Node *i2, *ini;
+        s = SIZE(forinit_basetyp);
+        varadd($7->u.v, 0, forinit_basetyp, 0);
+        fprintf(of, "\t%%%s =%c alloc%d %d\n", $7->u.v, ALLOC_T(), iralign(forinit_basetyp), s);
+        i2 = mknode('=', $7, $9);
+        ini = mknode(',', mknode('=', $3, $4), i2);
+        $$ = mkfor(ini, $11, $13, $15);
     }
-    | FOR '(' type IDENT '=' expr ',' init_decllist ';' comma_exp0 ';' comma_exp0 ')' stmt
+    | FOR '(' forinit_var expr ',' init_decllist ';' comma_exp0 ';' comma_exp0 ')' stmt
                                      {
         /* Multi-scalar-declarator C99 for-init sharing one base type:
          *   for (size_t block = 0, len = 0, len_free = 0; !finish;)
@@ -7081,22 +7073,18 @@ stmt: ';'                            { $$ = 0; }
          * by the token after the comma (IDENT here vs a star there). */
         int s;
         Node *ini, *id, *n;
-        if ($3 == NIL)
-            die("invalid void declaration");
-        s = SIZE($3);
-        varadd($4->u.v, 0, $3, 0);
-        fprintf(of, "\t%%%s =%c alloc%d %d\n", $4->u.v, ALLOC_T(), iralign($3), s);
-        ini = mknode('=', $4, $6);
-        for (n = $8; n; n = n->r) {
-            varadd(n->u.v, 0, $3, 0);
-            fprintf(of, "\t%%%s =%c alloc%d %d\n", n->u.v, ALLOC_T(), iralign($3), s);
+        s = SIZE(forinit_basetyp);
+        ini = mknode('=', $3, $4);
+        for (n = $6; n; n = n->r) {
+            varadd(n->u.v, 0, forinit_basetyp, 0);
+            fprintf(of, "\t%%%s =%c alloc%d %d\n", n->u.v, ALLOC_T(), iralign(forinit_basetyp), s);
             if (n->l) {
                 id = mknode('V', 0, 0);
                 strcpy(id->u.v, n->u.v);
                 ini = mknode(',', ini, mknode('=', id, n->l));
             }
         }
-        $$ = mkfor(ini, $10, $12, $14);
+        $$ = mkfor(ini, $8, $10, $12);
     }
     | SWITCH '(' expr ')' stmt       { $$ = mkstmt(Switch, $3, $5, 0); }
     | CASE pref ':' stmt             { Stmt *s = mkstmt(Case, 0, $4, 0); s->val = const_eval($2); $$ = s; }
@@ -7109,6 +7097,32 @@ stmt: ';'                            { $$ = 0; }
     | CASE pref SHR pref ':' stmt    { Stmt *s = mkstmt(Case, 0, $6, 0); s->val = const_eval($2) >> const_eval($4); $$ = s; }
     | DEFAULT ':' stmt               { $$ = mkstmt(Default, 0, $3, 0); }
     | asmstmt                        { $$ = $1; }
+    ;
+
+forinit_var: type IDENT '='
+{
+    /* First declarator of a C99 for-init.  Factored out as its own
+     * reduction so the rename, varadd and alloc run at type IDENT =,
+     * which (since all three for-init rules share this prefix) is a
+     * single-action state miniyacc default-reduces WITHOUT lexing
+     * lookahead, so the rename binding is established before the test
+     * and increment clauses are lexed, letting the lexer stamp their
+     * uses to the renamed slot.  This is the for-init analogue of the
+     * stmt-level block_scope_decl wiring; it closes the sibling
+     * for-loop double-definition in compile.c.  The base type is
+     * stashed in forinit_basetyp for any later declarators in the
+     * two-pointer or multi-scalar forms. */
+    char *v;
+    int s;
+    if ($1 == NIL)
+        die("invalid void declaration");
+    forinit_basetyp = $1;
+    v = block_scope_decl($2, $1);
+    s = SIZE($1);
+    varadd(v, 0, $1, 0);
+    fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), s);
+    $$ = $2;
+}
     ;
 
 asmstmt: ASM '(' STR ')' ';' {

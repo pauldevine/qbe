@@ -1,10 +1,27 @@
-# Next session — MicroPython port: remaining grammar blockers (post §1k)
+# Next session — MicroPython port: remaining grammar blockers (post §1l)
 
 > Master tracker: `MICROPYTHON_PORT.md`. Spike findings: `MICROPYTHON_SPIKE_REPORT.md`.
-> **Spike now at 125/132 OK** (was 120 at the start of §1k). Re-run
+> **Spike now at 126/132 OK** (was 125 at the start of §1l). Re-run
 > `bash build/mp-spike/run-spike.sh ~/projects/micropython/py/*.c` then
 > `cut -f2 build/mp-spike/summary.tsv | sort | uniq -c` to confirm before peeling more.
-> Gate **113/113**. 111 s/r, 0 r/r. `make check` green.
+> Gate **115/115**. 111 s/r, 0 r/r. `make check` green.
+
+## What changed §1l (so you don't redo it)
+
+**for-init inner-block scope** — closed compile.c's sibling for-loop double
+definition (`for (int i …)` then `for (size_t i …)` in `c_del_stmt`). The three
+C99 for-init rules were refactored to share a new `forinit_var: type IDENT '='`
+nonterminal. Because all three for-init rules share that prefix, the state after
+`type IDENT =` is a single-action state miniyacc **default-reduces without lexing
+lookahead** — so `forinit_var`'s action (rename via `block_scope_decl` + varadd +
+alloc, base type stashed in new global `forinit_basetyp`) runs *before* the
+test/increment/body uses are lexed, letting the existing lexer-stamp rewrite them
+to the renamed slot. No new conflicts (still 111 s/r, 0 r/r). Probe
+`for_init_scope_probe.c` (medium + large; 5 cases incl. two-pointer/multi-scalar
+regression guards). **miniyacc gotcha reconfirmed:** an apostrophe in an
+action-body comment opens a char-literal scan in `cpycode` and eats past the
+closing brace — keep action comments free of `'` (and `/` `[` `]`). All in
+`minic/minic.y` + gate wiring; no i8086/QBE backend changes.
 
 ## What changed last session (§1k — so you don't redo it)
 
@@ -40,7 +57,7 @@ no new grammar conflicts (still 111 s/r, 0 r/r):
    two blockers. Probe `array_designate_probe.c` (medium; file-scope address-of is
    near-only).
 
-## Scope for next session — remaining 7 failures
+## Scope for next session — remaining 6 failures
 
 Per-file actual MESSAGES (the summary.tsv source line lags the lookahead — read the real one):
 ```sh
@@ -49,21 +66,9 @@ for base in $(awk -F'\t' '$2=="MINIC_FAIL"{print $1}' build/mp-spike/summary.tsv
   printf "%-12s %s\n" "$base" "$(grep -m1 error: /tmp/e.err)"
 done
 ```
-Current: **binary, compile, modbuiltins, objlist, objtype, parse, stream.** Several are
-multi-blocker; ordered roughly by tractability below.
-
-### compile — for-init scope (double definition), 1 file, MEDIUM risk
-Two sibling for-loops in one function: `for (size_t i …)` then `for (int i …)`. This is
-the inner-block-scope case but for a **for-init** declarator, which §1k did NOT cover:
-the for-init var's uses (test/incr/body) are all inside the single FOR production, so the
-`varadd` at the FOR's reduce happens *after* the uses are lexed — too late for the
-lexer-stamp scheme to catch them. **Fix:** rename the for-init declarator *before* the
-test clause is lexed. Either a mid-rule action or a marker nonterminal after
-`FOR '(' type IDENT '=' expr ';'` that calls `block_scope_decl($4,$3)` + emits the alloc;
-the existing rename machinery then stamps the uses. Watch the marker for new conflicts
-(miniyacc is picky — prefer the `structstart` marker idiom over mid-rule actions). The
-rename helper, pop, and lexer-stamp from §1k are all already in place — this is just
-wiring the for-init rules into them with correct timing.
+Current: **binary, modbuiltins, objlist, objtype, parse, stream.** Several are
+multi-blocker; ordered roughly by tractability below. (compile — for-init scope —
+was closed in §1l; see above.)
 
 ### binary / objlist / modbuiltins — anonymous struct/union as a type, RISKY (r/r)
 - **binary**: inline offsetof cast `((size_t)&((struct { char c; short t; } *)0)->t)`.
