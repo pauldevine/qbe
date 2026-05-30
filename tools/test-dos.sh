@@ -120,6 +120,8 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/nested_clit_probe.c:minic/dos/tests/nested_clit_probe.golden.txt:large"
 	"minic/dos/examples/fnptr_cast_probe.c:minic/dos/tests/fnptr_cast_probe.golden.txt:medium"
 	"minic/dos/examples/fnptr_cast_probe.c:minic/dos/tests/fnptr_cast_probe.golden.txt:large"
+	"minic/dos/examples/extern_array_expr_probe.c:minic/dos/tests/extern_array_expr_probe.golden.txt:medium"
+	"minic/dos/examples/extern_array_expr_probe.c:minic/dos/tests/extern_array_expr_probe.golden.txt:large"
 	"minic/dos/examples/local_typedef_probe.c:minic/dos/tests/local_typedef_probe.golden.txt:medium"
 	"minic/dos/examples/local_typedef_probe.c:minic/dos/tests/local_typedef_probe.golden.txt:large"
 	"minic/dos/examples/array_designate_probe.c:minic/dos/tests/array_designate_probe.golden.txt:medium"

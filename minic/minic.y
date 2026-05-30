@@ -5313,9 +5313,12 @@ externdcl: EXTERN type IDENT ';'
 		die("invalid void extern array");
 	varaddextern($3->u.v, IDIR($2), 1);
 }
-         | EXTERN type IDENT '[' NUM ']' ';'
+         | EXTERN type IDENT '[' expr ']' ';'
 {
-	/* Extern array with size - register as pointer */
+	/* Extern array with size - register as pointer.  The dimension may be
+	   any constant expression (e.g. `extern char buf[(32) + 1];`); the
+	   size is not needed for an extern (no storage is allocated here), so
+	   the folded value is discarded. */
 	if ($2 == NIL)
 		die("invalid void extern array");
 	varaddextern($3->u.v, IDIR($2), 1);

@@ -1,17 +1,47 @@
-# Next session — MicroPython port: py/*.c spike effectively complete (post §1m)
+# Next session — MicroPython port: py/*.c DONE (132/132); extmod/shared widened (post §1n)
 
 > Master tracker: `MICROPYTHON_PORT.md`. Spike findings: `MICROPYTHON_SPIKE_REPORT.md`.
-> **Spike now at 131/132 OK** (was 126 at the start of §1m). Re-run
-> `bash build/mp-spike/run-spike.sh ~/projects/micropython/py/*.c` then
-> `cut -f2 build/mp-spike/summary.tsv | sort | uniq -c` to confirm before peeling more.
-> Gate **121/121**. 111 s/r, 0 r/r. `make check` green.
+> **py/*.c spike now 132/132 OK** — the old `stream` fail was a harness gap
+> (`SEEK_SET` undefined) and was closed by adding `SEEK_SET` to
+> `build/mp-spike/stubinc/unistd.h`.  §1n then **widened the spike to
+> extmod/*.c + shared/**\*.c (96 files)**: 90 OK, 4 MINIC_FAIL, 2 CPP_FAIL.
+> Re-run with
+> `bash build/mp-spike/run-spike.sh ~/projects/micropython/extmod/*.c $(find ~/projects/micropython/shared -name '*.c')`
+> then `grep -E 'MINIC_FAIL|CPP_FAIL' build/mp-spike/summary.tsv`.
+> Gate **121→123/123** (+extern_array_expr_probe medium+large). 111 s/r, 0 r/r.
+> `make check` green.
 >
-> **The single remaining fail (`stream`) is NOT a minic bug** — it errors at
-> `int whence = SEEK_SET;` because `SEEK_SET` is never `#define`d in the
-> preprocessed TU (a spike `clang -E`/`cpp` include-path gap; real MicroPython
-> gets it from `<stdio.h>`).  minic correctly reports an undefined variable.
-> Fixing it means fixing the harness includes (out of scope), not minic.  For
-> the purpose of the py/*.c grammar surface, the spike is DONE.
+> **The 4 remaining extmod/shared MINIC_FAILs are NOT minic grammar bugs** (all
+> harness/arch artifacts — minic correctly rejects undefined symbols):
+> - `sys_stdio_mphal` — `MP_QSTR_readlines` is not in the spike's generated
+>   qstr enum (the qstrdefs only cover qstrs seen in py/*.c).  A real build's
+>   QSTR generation would emit it.  Same class as the old `stream`.
+> - `softtimer` — `MICROPY_PY_PENDSV_EXIT;` is an undefined port macro (left as
+>   a bare-identifier statement → "undefined variable").
+> - `import` — `mp_import_stat_t` is an undefined typedef (py/lexer.h not pulled
+>   in by the spike's minimal include set for this TU).
+> - `gchelper_generic` — `const register long x19 asm ("x19");` is the GCC
+>   named-register-variable extension on an ARM code path the spike's cpp defines
+>   wrongly selected; irrelevant to the i8086 port (which supplies its own
+>   gchelper).  (CPP_FAILs `semihosting_rv32`/`semihosting_arm` are missing
+>   `<stdnoreturn.h>` / unknown-arch — also not minic.)
+
+## What changed §1n (so you don't redo it)
+
+**One real grammar gap fixed — extern array with a constant-EXPRESSION
+dimension.**  `extern char buf[(32) + 1];` parse-errored while
+`extern char buf[2];` parsed.  The `EXTERN type IDENT '[' NUM ']' ';'` rule was
+the lone array-decl holdout still pinned to `NUM`; changed it to
+`'[' expr ']'` (line ~5313 in `minic/minic.y`).  An extern allocates no storage
+here, so the folded size is discarded.  0 new conflicts (still 111 s/r 0 r/r).
+Flipped extmod/network_ppp_lwip.c (its `mod_network_hostname_data[(…)+1]`).
+Probe `extern_array_expr_probe.c` (medium + large).
+
+**Pre-existing gap found, NOT fixed (didn't block any real consumer):**
+file-scope sized char array initialised from a string literal —
+`char g[5] = "abcd";` parse-errors even with a plain literal dim (brace init
+`char g[5] = {'a',…};` and unsized `char g[] = "abcd";` both work).  The probe
+sidesteps it with brace init.  Fix later only if a consumer needs it.
 
 ## What changed §1m (so you don't redo it)
 
@@ -125,6 +155,9 @@ session that pinned the fnptr-cast at line 2718 of parse.pp.c in seconds.
 - **Far-data static pointer relocation** (`l $sym` → far seg:off) — `&global`
   data items are near-only, so probes that take a static address are medium-only.
 - **Bare file-scope scalar pointer initializer** — `static int *p = &g;` parse-errors.
+- **File-scope sized char array from a string literal** — `char g[5] = "abcd";`
+  parse-errors (brace init `{'a',…}` and unsized `char g[] = "abcd";` work).
+  Found §1n; not fixed (no consumer blocked).
 - **Inline `100000L` literal** — lexer drops the `L`; build from small-literal arithmetic.
 - **Deep block-scope shadow of an already-renamed name** — §1k's alpha-renaming
   handles sibling blocks, single-level shadow, and inner-then-function-scope
