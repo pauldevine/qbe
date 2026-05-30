@@ -1456,6 +1456,15 @@ prom(int op, Symb *l, Symb *r)
 		return l->ctyp;
 	}
 
+	/* Comparisons (==, !=, <, <=) do not do pointer arithmetic.  When a
+	 * pointer is compared (typically against a null constant, or another
+	 * pointer), return the pointer operand's type directly.  The Scale
+	 * path below would otherwise compute SIZE(DREF(ptr)) -- fatal for
+	 * void* / incomplete pointees -- and would wrongly multiply a
+	 * comparison operand by the element size. */
+	if (strchr("ne<l", op) && (KIND(l->ctyp) == PTR || KIND(r->ctyp) == PTR))
+		return KIND(l->ctyp) == PTR ? l->ctyp : r->ctyp;
+
 	if (op == '+') {
 		if (KIND(r->ctyp) == PTR) {
 			t = l;

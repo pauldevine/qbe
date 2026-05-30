@@ -1,0 +1,4 @@
+null==0:1 null!=0:0
+real==0:0 real!=0:1
+real==same:1 real==null:0
+a<b:1 b<a:0 a<=b:1

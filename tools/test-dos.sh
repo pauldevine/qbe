@@ -93,6 +93,8 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/mp_grammar_probe.c:minic/dos/tests/mp_grammar_probe.golden.txt:large"
 	"minic/dos/examples/mp_designated_array_probe.c:minic/dos/tests/mp_designated_array_probe.golden.txt:medium"
 	"minic/dos/examples/mp_designated_array_probe.c:minic/dos/tests/mp_designated_array_probe.golden.txt:large"
+	"minic/dos/examples/void_ptr_cmp_probe.c:minic/dos/tests/void_ptr_cmp_probe.golden.txt:medium"
+	"minic/dos/examples/void_ptr_cmp_probe.c:minic/dos/tests/void_ptr_cmp_probe.golden.txt:large"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:medium"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:large"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:huge"
