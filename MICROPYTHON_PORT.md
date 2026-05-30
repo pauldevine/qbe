@@ -30,7 +30,7 @@ and tracks phase progress. Update the status table + running log as work lands.
 | Phase | Status | Notes |
 |---|---|---|
 | **0 — Feasibility spike** | ✅ **Done** (2026-05-29) | Host `ports/minimal` builds (114 KB); 132/132 core files fail in `minic` at `py/obj.h` on declaration grammar. See spike report. |
-| **1 — minic frontend** | ⏳ **In progress** | Tier 1 + layer-2 + nested members + aggregate initializers + **struct return-by-value** + **typedef-name shadowing** + **capacity bumps** + **scalar array initializers / offsetof / member-attr / const-expr folding** + **bitfield static init / static address-of / `sizeof(T[expr])` / `alloca` builtin / `long<-char` widening** done (2026-05-29).  Spike on honest grammar signal (cpp clean on all 132): **100/132 OK**.  Remaining 32: 27 `parse error` (each a distinct deeper construct — anonymous-struct-in-cast, designated array initializers `[i]=v`, switch label edge cases), 3 `double definition` (need inner-block scope), 1 `void has no size`, 1 `unknown struct type`.  See running log + `NEXT_SESSION.md`. |
+| **1 — minic frontend** | ✅ **Codegen-clean** (2026-05-30, §1o) — all 132 py/*.c go C→minic(SSA)→qbe(i8086 asm) cleanly. Earlier in-progress detail retained below. | Tier 1 + layer-2 + nested members + aggregate initializers + **struct return-by-value** + **typedef-name shadowing** + **capacity bumps** + **scalar array initializers / offsetof / member-attr / const-expr folding** + **bitfield static init / static address-of / `sizeof(T[expr])` / `alloca` builtin / `long<-char` widening** done (2026-05-29).  Spike on honest grammar signal (cpp clean on all 132): **100/132 OK**.  Remaining 32: 27 `parse error` (each a distinct deeper construct — anonymous-struct-in-cast, designated array initializers `[i]=v`, switch label edge cases), 3 `double definition` (need inner-block scope), 1 `void has no size`, 1 `unknown struct type`.  See running log + `NEXT_SESSION.md`. |
 | 1b — Aggregate/designated initializers | ✅ **Done** (2026-05-29) | File-scope `T NAME = { ... };` for struct/union/global vars: designated `.field =`, nested braces, partially-initialized array members (trailing zero-fill), string-literal + `&global` pointer fields, casts and constant-folded values.  New `gaggr`/`gilist`/`gitem`/`gival` grammar (0 new conflicts) + a constant-initializer folder (`cival_eval`) + a layout-aware data emitter (`emit_global_aggregate`, inserts `z N` for designator gaps).  Pinned by `aggregate_init_probe.c`.  **Spike 69→77/132.** |
 | 1d — Struct/union return-by-value (ABI) | ✅ **Done** (2026-05-29) | Hidden-pointer lowering (caller-allocated result storage; callee copies through it and returns the pointer), all in the minic frontend as scalar QBE IR — no backend changes.  Function header + `ret` + call site + `lval(call)`; `emit_struct_copy` helper.  Pinned by `sret_probe.c` (medium + large).  Closes the `return source_line;` cluster.  **Spike 77→82/132.**  Orthogonal: `long` struct members read from an opaque (call-result) source lose their high word — pre-existing `[[qbe-loadc-wordsize-i8086]]` bug; MicroPython's returned structs are word/`size_t`-sized so it doesn't gate. |
 | 1e — Typedef-name shadowing + capacity | ✅ **Done** (2026-05-29) | (a) **Lexer disambiguation:** a declarator / parameter / member / member-access identifier that collides with a typedef name now lexes as `IDENT`, not `TNAME` — the real `py/scope.h` shape `scope_find_or_add_id(scope_t *scope, qstr qstr, …)`.  Three rules in the `yylex()`/`yylex_inner()` wrapper: (1) after a complete type-specifier token (type keyword or `TNAME`) → `IDENT`; (2) in-scope local/param (`var_islocal()`) → `IDENT`, with the previous function's locals dropped on its body's closing `}` (deferred one token via `pending_varclr`/`brace_depth` so the body's last statement still resolves, and so the next function's typedef-named param type isn't shadowed by a stale local); (3) after `.`/`->` (member namespace) → `IDENT`.  0 new conflicts.  Pinned by `typedef_shadow_probe.c` (medium + large).  (b) **Capacity:** `NStruct` 64→256, `NTyp` 128→512 — preprocessed MicroPython TUs define >64 aggregates / >128 typedefs; minic is host-compiled so this is cheap.  This (not the shadow fix) was what gated the 8 `scope_kind_t` files (their real error was *"too many struct/union definitions"*, masked behind the lookahead-lagged `} scope_kind_t;` source line).  **Spike 82→87/132.** |
@@ -47,6 +47,33 @@ and tracks phase progress. Update the status table + running log as work lands.
 - **Generated MP headers:** `~/projects/micropython/ports/minimal/build/genhdr/` (host build output).
 
 ## Running log
+
+- **2026-05-30 — §1o build bring-up step 1: all 132 py/*.c clear the FULL minic→qbe(i8086) codegen pipeline; spike codegen 124 → 132/132; gate 123→125.**
+  New harness `build/mp-spike/run-codegen.sh` runs each preprocessed TU through
+  `minic | qbe -t i8086 -m medium` (SSA → i8086 asm) — the layer past the
+  parse-only spike.  First run: 124/132 OK, 8 QBE_FAIL, every one a **minic
+  SSA-emission bug the parse-only spike could not detect** (qbe validates SSA;
+  minic alone does not).  Three fixes in `minic/minic.y`, no backend changes,
+  no new conflicts (111 s/r 0 r/r), `make check` green:
+  1. **Sub-word arithmetic result class** (irtyp→irtyp_ret at the general binop
+     / inc-dec / float→int-cast emit sites) — `uint16_t+uint16_t` /
+     `uint8_t+uint8_t` with both operands the same narrow type made `prom()`
+     return the narrow type, emitting `=h add` / `=b add` (b/h are memory
+     suffixes, not valid QBE temp classes).  `irtyp_ret()` widens char/short→w
+     (also C-correct).  Flipped emitbc/gc/objringio/ringbuf.
+  2. **Seq fall-through termination with trailing goto-label** — `stmt(Seq)`
+     returned `r1||r2`, so an earlier `return` masked a textually-last labeled
+     fall-through block and minic skipped the synthetic `ret` → "last block
+     misses jump".  New `contains_label()`; a Seq whose tail holds a label now
+     reports the tail's termination alone.  Flipped compile/objstr/parsenum.
+  3. **goto Label dropped between switch cases** — `genswitchbody` short-circuited
+     past a tail with no *case* label when the prior case `break`'d, dropping a
+     plain goto target between cases → "block @user_X used undefined".  Keeps
+     goto labels too.  Flipped runtime (`power_overflow:` in mp_binary_op).
+  - Probe `codegen_term_probe.c` (medium + large).  These are codegen/ABI
+    semantic fixes — exactly the class the port plan predicted once TUs go past
+    parse.  Next: extend the spike to asm→obj per TU, then the first real link
+    of a curated core subset.  See `NEXT_SESSION.md`.
 
 - **2026-05-29 — §1g bitfield static init + static address-of + `sizeof(T[expr])` + `alloca` builtin + `long<-char` widening; spike 97 → 100/132; gate 86→87/87.**
   Five independent minic frontend wins (all in `minic/minic.y`), `make check` green, 0 new

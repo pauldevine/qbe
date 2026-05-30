@@ -2736,7 +2736,7 @@ expr(Node *n)
 			/* Float to int conversion */
 			fprintf(of, "\t");
 			psymb(sr);
-			fprintf(of, " =%c %s ", irtyp(sr.ctyp),
+			fprintf(of, " =%c %s ", irtyp_ret(sr.ctyp),
 				KIND(s0.ctyp) == LNG ? "dtosi" : "stosi");
 			psymb(s0);
 			fprintf(of, "\n");
@@ -3061,7 +3061,7 @@ expr(Node *n)
 		if (!huge_ptr_binop(o, sr, s0, s1)) {
 			fprintf(of, "\t");
 			psymb(sr);
-			fprintf(of, " =%c %s ", irtyp(sr.ctyp), o == '+' ? "add" : "sub");
+			fprintf(of, " =%c %s ", irtyp_ret(sr.ctyp), o == '+' ? "add" : "sub");
 			psymb(s0);
 			fprintf(of, ", ");
 			psymb(s1);
@@ -3146,7 +3146,14 @@ expr(Node *n)
 			strcpy(ty, "");
 		fprintf(of, "\t");
 		psymb(sr);
-		fprintf(of, " =%c", irtyp(sr.ctyp));
+		/* The result temp's class must be a valid QBE temp class
+		   (w/l/s/d) — never the b/h memory suffixes that irtyp() yields
+		   for char/short.  irtyp_ret() widens char/short to 'w', which is
+		   also C-correct: integer arithmetic promotes sub-int operands to
+		   int width and only truncates on store.  (e.g. uint16_t+uint16_t
+		   and uint8_t+uint8_t, where prom() returns the operand type for
+		   same-typed operands — see py/ringbuf.c, gc.c, emitbc.c.) */
+		fprintf(of, " =%c", irtyp_ret(sr.ctyp));
 		/* Handle comparisons based on type */
 		if (ISFLOAT(s0.ctyp)) {
 			/* Floating-point comparison: cXXt where XX is comparison and t is type */
@@ -3478,6 +3485,22 @@ contains_case_label(Stmt *s)
 	return 0;
 }
 
+/* Does this statement subtree contain a goto target (Label)?  A label is a
+   fresh re-entry point reachable by `goto`, so a Seq whose tail contains one
+   must report its termination as the tail's alone — an earlier statement's
+   terminator must not mask the labeled block falling through (the parallel of
+   contains_case_label for switch bodies). */
+int
+contains_label(Stmt *s)
+{
+	if (!s) return 0;
+	if (s->t == Label) return 1;
+	if (s->t == Seq)
+		return contains_label((Stmt*)s->p1)
+		    || contains_label((Stmt*)s->p2);
+	return 0;
+}
+
 int
 genswitchbody(Stmt *s, int brk, int cont, Stmt **cases, int *caselbl, int ncase)
 {
@@ -3492,17 +3515,22 @@ genswitchbody(Stmt *s, int brk, int cont, Stmt **cases, int *caselbl, int ncase)
 		 * block (ret/break/continue), skip p2 unless p2 contains a case
 		 * label — case labels in a switch body must be reachable even
 		 * if a previous case fell through to a terminator. */
-		if (r1 && !contains_case_label((Stmt*)s->p2))
+		/* A goto Label between cases (e.g. `break; power_overflow: …;
+		 * case …:` in py/runtime.c's mp_binary_op) is also a fresh
+		 * re-entry point, so it must not be skipped either. */
+		if (r1 && !contains_case_label((Stmt*)s->p2)
+		       && !contains_label((Stmt*)s->p2))
 			return r1;
 		int r2 = genswitchbody((Stmt*)s->p2, brk, cont, cases, caselbl, ncase);
-		/* When p2 contains a case label it provides a fresh re-entry
-		 * point: even if p1 terminated the prior basic block, control
-		 * can resume at the case label and fall through past p2.  The
-		 * combined termination state of this Seq is therefore r2 alone
-		 * — propagating r1 would let an earlier case body's `break`
+		/* When p2 contains a case label (or a goto label) it provides a
+		 * fresh re-entry point: even if p1 terminated the prior basic
+		 * block, control can resume at the label and fall through past
+		 * p2.  The combined termination state of this Seq is therefore r2
+		 * alone — propagating r1 would let an earlier case body's `break`
 		 * poison enclosing Seqs and suppress sibling stmts that
-		 * legitimately follow the case label. */
-		if (contains_case_label((Stmt*)s->p2))
+		 * legitimately follow the label. */
+		if (contains_case_label((Stmt*)s->p2)
+		 || contains_label((Stmt*)s->p2))
 			return r2;
 		return r1 || r2;
 	} else if (s->t == Case || s->t == Default) {
@@ -3597,6 +3625,17 @@ stmt(Stmt *s, int b, int c)
 		 * `goto` jumps from earlier blocks land somewhere. */
 		int r1 = stmt(s->p1, b, c);
 		int r2 = stmt(s->p2, b, c);
+		/* Fall-through termination of a sequence is its LAST statement's.
+		   When the tail (p2) contains a label it is a goto re-entry point
+		   that may fall through, so an earlier statement's terminator must
+		   not mask it — report r2 alone (mirrors genswitchbody's case-label
+		   handling).  This makes a function whose textual tail is a
+		   goto-reached non-returning block (e.g. `value_error:
+		   mp_raise_ValueError(...)` in py/parsenum.c, py/compile.c,
+		   py/objstr.c) still get its synthetic trailing `ret`, so the last
+		   block carries a terminator. */
+		if (contains_label((Stmt*)s->p2))
+			return r2;
 		return r1 || r2;
 	}
 	case If:

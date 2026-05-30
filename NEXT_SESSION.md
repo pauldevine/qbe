@@ -1,3 +1,40 @@
+# Next session — MicroPython port: py/*.c CODEGEN-clean (132/132 to i8086 asm) (post §1o)
+
+> **§1o (build bring-up step 1): all 132 py/*.c now survive the FULL codegen
+> pipeline** (`minic | qbe -t i8086 -m medium` → i8086 asm), not just the
+> parse+SSA step the old spike measured.  New harness
+> `build/mp-spike/run-codegen.sh` runs each preprocessed TU through minic→qbe
+> and tallies OK / MINIC_FAIL / QBE_FAIL / ASM_STUB.  First run: 124/132 OK, 8
+> QBE_FAIL — all 8 were **minic SSA-emission bugs the parse-only spike could not
+> see** (qbe validates the SSA; minic alone does not).  Three fixes flipped all
+> 8 → **132/132 OK**.  `make check` green, 111 s/r 0 r/r, gate 123→125.
+> Re-run: `bash build/mp-spike/run-codegen.sh $(ls -1 ~/projects/micropython/py/*.c | sed 's|.*/||;s|\.c$|.pp.c|;s|^|build/mp-spike/pp/|')`
+> (needs the .pp.c files from run-spike.sh first).
+>
+> **The three §1o minic fixes (so you don't redo them):**
+> 1. **Sub-word arithmetic result class** (`minic.y` irtyp→irtyp_ret at 3 emit
+>    sites: general binop ~3155, inc/dec ~3070, float→int cast ~2745).
+>    `uint16_t+uint16_t` / `uint8_t+uint8_t` where both operands share the
+>    narrow type made `prom()` return that type, so the add result temp was
+>    `=h`/`=b` — invalid QBE temp class (only w/l/s/d).  `irtyp_ret()` widens
+>    char/short→`w` (also C-correct: integer promotion).  Flipped
+>    emitbc/gc/objringio/ringbuf ("invalid class specifier").
+> 2. **Seq fall-through termination with a trailing goto-label** — `stmt(Seq)`
+>    returned `r1||r2`, so an earlier `return` masked a textually-last labeled
+>    block that falls through; minic skipped the synthetic trailing `ret` →
+>    qbe "last block misses jump".  New `contains_label()` helper; a Seq whose
+>    tail contains a label now reports the tail's termination alone (mirrors the
+>    existing `contains_case_label` logic in genswitchbody).  Flipped
+>    compile/objstr/parsenum.
+> 3. **goto Label dropped between switch cases** — `genswitchbody` short-circuited
+>    past a Seq tail when the prior case body terminated (`break`) and the tail
+>    held no *case* label, dropping a plain goto target sitting between cases →
+>    qbe "block @user_X is used undefined".  Now goto labels are kept too (the
+>    same `contains_label` check).  Flipped runtime (`power_overflow:` in
+>    `mp_binary_op`).
+>
+> Probe `codegen_term_probe.c` (medium + large) pins all three.
+
 # Next session — MicroPython port: py/*.c DONE (132/132); extmod/shared widened (post §1n)
 
 > Master tracker: `MICROPYTHON_PORT.md`. Spike findings: `MICROPYTHON_SPIKE_REPORT.md`.
@@ -104,27 +141,34 @@ established before the test/increment/body uses are lexed.  Probe
 fixed (commit `a4a1fe7`): `cpycode` in `minic/yacc.c` is comment-aware, so
 action comments can use `'`/`"`/braces freely.
 
-## Scope for next session — the py/*.c spike is done; what's next?
+## Scope for next session — build bring-up, the next layer down the pipeline
 
-The 12-file py/*.c grammar spike is effectively complete (131/132; the one
-remaining is the `stream` harness include gap above, not a minic bug).  Pick
-the next real consumer:
+All 132 py/*.c now go C→preprocess→minic(SSA)→qbe(i8086 asm) cleanly (§1o).
+The next layers toward a runnable REPL, in increasing cost:
 
-1. **Move past the spike to an actual MicroPython BUILD.**  The spike only
-   confirms each TU *parses + emits SSA* under `clang -E`.  The real port needs
-   (a) the MicroPython build system pointed at minic + the i8086 backend, (b)
-   the QSTR/genhdr codegen-generated headers, (c) a libc/runtime surface much
-   larger than the DOS stubs.  See `MICROPYTHON_PORT.md` for the staging plan.
-   Expect new *semantic* (not grammar) gaps once linking real TUs together.
+1. **Extend the codegen spike to asm→obj per TU** (cheapest next signal).
+   `run-codegen.sh` stops at `qbe → .asm`.  The real build then runs the
+   asm-clean sed/awk/perl pipeline + `asm_to_omf.py` + `nasm -f obj` per TU
+   (see `tools/build-example.sh` stages 3–4).  Add those stages to a
+   `run-asmobj.sh` (or extend run-codegen.sh) over the 132 .asm files to find
+   asm-syntax / OMF-wrap gaps before attempting a link.  Per-TU, no link.
 
-2. **Widen the spike beyond py/*.c** if you want more grammar coverage first —
-   `extmod/*.c`, `shared/*.c`, a port's `*.c`.  Same harness; new constructs
-   will surface.  Cheaper than a full build; good for de-risking grammar before
-   the build bring-up.
+2. **First real LINK of a curated core subset.**  The dos8086 port does NOT
+   need all 131 host objects — drop the other-arch `asm*`/`emitn*`/`nlr*`
+   (keep `nlrsetjmp`).  Needs: (a) genhdr headers (already generated at
+   `~/projects/micropython/ports/minimal/build/genhdr/` — point `-I` at it or
+   regenerate for dos8086), (b) `ports/dos8086/main.c` + `mphalport.c`, (c) a
+   `tools/build-micropython.sh` that compiles the subset + crt0 + libstub and
+   `omf_link`s them.  Expect: multi-segment far-code link limits (~50+ code
+   segments), and `setjmp`/`longjmp` (NLR) — `jmp_buf` is an array typedef;
+   real medium-model setjmp/longjmp is still a Phase-2 libc gap.  Milestone:
+   `print(1+2)` → `3` in DOSBox (Phase 4).
 
-3. **`stream` harness fix (optional)** — if you want a literal 132/132, add the
-   missing `<stdio.h>` SEEK_* defines to the spike stub-include dir
-   (`build/mp-spike/stubinc`).  Cosmetic; doesn't exercise minic.
+3. **Widen the codegen spike to extmod/shared** (optional de-risk) — the parse
+   spike already cleared them (90/96, rest harness/arch); running them through
+   qbe would surface any remaining backend gaps cheaply.
+
+Master staging plan + phase table: `MICROPYTHON_PORT.md`.
 
 ## How to find the true site (lag-proof technique, unchanged)
 minic's reported error line is the parser's *lookahead* line and lags the real
