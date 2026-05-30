@@ -5693,9 +5693,19 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	strcpy(gloname[nglo], parsed_ident);
 	varadd(parsed_ident, nglo++, parsed_type, 0);
 }
-               | '=' '(' NUM ')' ';'             { emit_global_int_init($3->u.n); }
-               | '=' '-' NUM ';'                 { emit_global_int_init(-$3->u.n); }
-               | '=' '(' '-' NUM ')' ';'         { emit_global_int_init(-$4->u.n); }
+               | '=' expr ';'
+{
+	/* File-scope scalar initializer that is a constant expression:
+	 * `static const size_t X = A >= 0x100 ? RULE_A : ... : 0;` (a long
+	 * nested ternary chain over enum constants in py/parse.c), and the
+	 * simpler arithmetic / bitwise / cast forms.  Folded via const_eval.
+	 * Subsumes the former bare-NUM, -NUM, (NUM), and (-NUM) rules
+	 * (byte-identical output: emit_global_int_init).  A bare STR still
+	 * reduces via the '=' STR rule below (its '.' shifts ';'); '=' gaggr
+	 * is distinguished by its leading brace.  Non-constant initializers
+	 * die in const_eval. */
+	emit_global_int_init(const_eval($2));
+}
                | '=' gaggr ';'                   { emit_global_aggregate(parsed_type, parsed_ident, $2); }
                | '[' expr ']' ';'
 {

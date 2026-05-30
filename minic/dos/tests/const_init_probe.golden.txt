@@ -1,0 +1,6 @@
+arith=9
+bits=5
+shift=32
+cmp=1
+cast=33
+tern=512

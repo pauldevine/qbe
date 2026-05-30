@@ -1318,7 +1318,7 @@ char *code0[] = {
 "yyparse()\n",
 "{\n",
 "	enum {\n",
-"		StackSize = 500,\n",
+"		StackSize = 4000,\n",
 "		ActSz = sizeof yyact / sizeof yyact[0],\n",
 "	};\n",
 "	struct {\n",
