@@ -1,0 +1,8 @@
+setjmp direct=0
+longjmp val=7
+longjmp zero-as=1
+guards 111 222 333
+nlr caught, ret_val=0
+guards still 111 222 333
+middle caught=42 depth_ok=1
+done

@@ -1,4 +1,69 @@
-# Next session — MicroPython port: implement medium-model setjmp/longjmp (the LAST link blocker) (post §1q)
+# Next session — MicroPython port: MicroPython LINKS but HANGS — DGROUP is too small; move static data to far segments (post §1r)
+
+> **§1r — medium-model `setjmp`/`longjmp` landed; MicroPython now LINKS to a
+> complete `mpython.exe`, but it HANGS at runtime.**  The setjmp/longjmp link
+> blocker is CLOSED and runtime-verified by a real NLR round-trip probe.  The
+> link advanced through it (and through the next wall) to produce — for the
+> first time — a complete MicroPython .EXE.  The new frontier is a RUNTIME hang
+> rooted in the medium model's single 64 KB DGROUP.
+>
+> **setjmp/longjmp (so you don't redo it):** new `SETJMP_EXE` in
+> `tools/libstub_to_exe.py` (added to `build_epilogue`, unconditional), written
+> directly in FAR form (4-byte CS:IP, `retf`; longjmp `mov sp,[bx+2]` + push
+> CS:IP + `retf` synthesizes the far jump).  `jmp_buf` is `int[8]`; 7 words used:
+> [0] caller BP, [2] resume SP (= setjmp's `bp+6`; the i8086 ABI passes args in
+> caller-reserved slots and does NOT clean them, so resume SP == caller SP just
+> before `call far`), [4] SI, [6] DI, [8] caller BX, [10] ret IP, [12] ret CS.
+> New `minic/include/setjmp.h`.  **The bug that bit:** the first cut clobbered
+> **BX** (used as the env pointer) without restoring it — BX is callee-saved
+> here (qbe puts locals in BX/SI/DI), so a 2nd setjmp whose env arg lived in BX
+> (`nlr_push(&middle)` right after `nlr_push(&outer)`) got a garbage pointer →
+> wild longjmp → nondeterministic hang/crash.  Fix: `mov bx, dx` restore before
+> `pop bp; retf`.  Probe `setjmp_probe.c` + golden (gate, **medium-only** — the
+> far helper reads a 2-byte near env ptr): real nlr_buf_t chain, nlr_push=setjmp,
+> nlr_jump=longjmp; covers direct=0, val, 0→1, deep 3-frame unwind, callee-saved
+> guard survival, chained-buffer pop.  Gate **130→131**, `make check` green, no
+> minic/qbe change (111 s/r 0 r/r unchanged).  See [[minic-setjmp-longjmp]].
+>
+> **THE new blocker — 64 KB DGROUP overflow (medium model).**  At the default
+> port config (`MICROPY_HEAP_SIZE`=24576, `--stack-size 8192`) the link fails:
+> `DGROUP + stack overflows 64KB (sp=87184)`.  MicroPython's static data (qstr
+> pools, ROM const tables, mp_state BSS) is ~55 KB, and in the medium model
+> _DATA + BSS + heap + stack ALL share one 64 KB DGROUP.  I confirmed shrinking
+> to `MICROPY_HEAP_SIZE`=7168 + `--stack-size 3072` DOES link →
+> `build/mp-link/mpython.exe` (452 KB; 108 modules; 370 KB far code across many
+> segments; 61.5 KB data) — but it then **HANGS at runtime** (only ~4 KB DGROUP
+> left for the stack ⇒ near-certain parser/compiler stack-starvation; could also
+> be a codegen bug only this large multi-segment binary exercises).  I reverted
+> both shrinks (they don't yield a working binary; the default config is the
+> honest signal).
+>
+> **The real fix is NOT shrinking — it's getting MicroPython's static data OUT
+> of DGROUP.**  Two paths:
+> 1. **Build the MicroPython subset under the far-data model (compact or
+>    large).**  Then _DATA pointers are 4-byte far and the linker can place
+>    const/ROM tables in their own far segments, freeing DGROUP for heap+stack.
+>    This is the architecturally-correct path and reuses the existing
+>    `_far_X` libstub family + `far_stdlib[]` mangling.  Cost: every TU
+>    recompiled `-m compact/large`; setjmp/longjmp needs a far-data variant
+>    (4-byte env ptr + ES) — write a `FAR_SETJMP_EXE` gated by
+>    `far_data_model(model)` (mirror how FAR_STDIO_EXE is gated).  qstr ROM
+>    tables and `MP_ROM_*` const pools are the bulk to relocate.
+> 2. **Aggressive data reduction** (smaller `MICROPY_CONFIG`: fewer builtins,
+>    smaller qstr set, `MICROPY_ENABLE_COMPILER` trimmed) to get static data
+>    well under ~50 KB so heap+stack fit in medium.  Cheaper to try first as a
+>    smoke test, but a dead end for any real program.
+>
+> Milestone unchanged: `print(1+2)` → `3` in DOSBox (Phase 4).  `main.c` already
+> does `do_str("print(1+2)", MP_PARSE_SINGLE_INPUT)`.  `gc_collect` is still a
+> no-scan STUB (needs a real stack scan, now that setjmp works it can spill
+> callee-saved regs) and `alloca` is routed to `m_malloc` via
+> `MICROPY_NO_ALLOCA` — fine for `print(1+2)` but replace before non-trivial
+> programs.  See `MICROPYTHON_PORT.md` and [[minic-setjmp-longjmp]].
+
+---
+
+# (DONE §1r) Next session — MicroPython port: implement medium-model setjmp/longjmp (the LAST link blocker) (post §1q)
 
 > **§1q (build bring-up step 3): FIRST REAL LINK of the curated core subset.**
 > The whole MicroPython core (104 curated py/*.c + 2 port glue TUs) now

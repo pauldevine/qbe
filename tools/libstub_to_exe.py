@@ -2180,6 +2180,81 @@ _far_fflush:
 """
 
 
+# ----------------------------------------------------------------------
+# setjmp / longjmp — the NLR keystone (py/nlrsetjmp.c: nlr_push uses
+# setjmp((buf)->jmpbuf); nlr_jump uses longjmp(top->jmpbuf, 1)).
+#
+# Medium model: near data, far code.  jmp_buf is `int[8]` (16 bytes) and
+# decays to a 2-byte near pointer (DGROUP/SS offset; DS==SS so a near
+# pointer reaches a stack-allocated nlr_buf via DS).  This is the FAR
+# call/return form (4-byte CS:IP return address, retf) and CANNOT be
+# produced by the [bp+N]->[bp+N+2] / ret->retf rewrite that converts the
+# near libstub.asm stubs — longjmp must restore the caller's stack and
+# `jmp far` (synthesized via retf) to the saved CS:IP.
+#
+# Far-call frame at setjmp entry (after `push bp; mov bp,sp`):
+#   [bp+0] saved BP   [bp+2] ret IP   [bp+4] ret CS   [bp+6] env
+# The i8086 ABI passes args in caller-reserved slots (not push/pop) and
+# does NOT clean them after the call, so the SP the caller resumes with
+# is exactly its SP just before the `call far` == [bp+6] inside setjmp.
+#
+# jmp_buf layout (7 words; jmp_buf[7] unused):
+#   [0] caller BP   [2] resume SP (=bp+6)   [4] SI   [6] DI
+#   [8] caller BX   [10] ret IP            [12] ret CS
+# BX/SI/DI/BP are the i8086 callee-saved regs (qbe allocates locals into
+# BX/SI/DI), so restoring them makes longjmp's resume look like a normal
+# return from the setjmp call site.
+# ----------------------------------------------------------------------
+SETJMP_EXE = """
+
+segment LIBSTUB_TEXT
+
+global _setjmp
+_setjmp:
+    push bp
+    mov bp, sp
+    mov dx, bx                   ; dx = caller's BX (scratch-save before clobber)
+    mov bx, [bp+6]               ; bx = env (near ptr)
+    mov ax, [bp+0]               ; caller BP
+    mov [bx+0], ax
+    lea ax, [bp+6]               ; resume SP (caller SP after the far ret)
+    mov [bx+2], ax
+    mov [bx+4], si
+    mov [bx+6], di
+    mov [bx+8], dx               ; caller BX
+    mov ax, [bp+2]               ; ret IP
+    mov [bx+10], ax
+    mov ax, [bp+4]               ; ret CS
+    mov [bx+12], ax
+    xor ax, ax                   ; setjmp returns 0 on the direct call
+    mov bx, dx                   ; restore caller's BX (callee-saved; we
+                                 ; clobbered it as the env pointer above)
+    pop bp
+    retf
+
+global _longjmp
+_longjmp:
+    push bp
+    mov bp, sp
+    mov bx, [bp+6]               ; bx = env (kept live until the final retf)
+    mov ax, [bp+8]               ; val
+    test ax, ax
+    jnz .nz
+    mov ax, 1                    ; longjmp(env,0) must surface as 1
+.nz:
+    mov si, [bx+4]               ; restore SI
+    mov di, [bx+6]               ; restore DI
+    mov cx, [bx+12]              ; ret CS
+    mov dx, [bx+10]              ; ret IP
+    mov sp, [bx+2]               ; restore caller SP (SS==DS; offset only)
+    push cx                      ; CS \\ pushed below restored SP, reclaimed
+    push dx                      ; IP / by the retf below
+    mov bp, [bx+0]               ; restore caller BP
+    mov bx, [bx+8]               ; restore caller BX (final use of env ptr)
+    retf                         ; far-jump to ret CS:IP with AX = val
+"""
+
+
 def far_data_model(model):
     """Compact/large/huge models use 4-byte data pointers; medium does not."""
     return model in ('compact', 'large', 'huge')
@@ -2188,7 +2263,7 @@ def far_data_model(model):
 def build_epilogue(model):
     """Assemble the EPILOGUE; the 4-byte stdio sentinels + _far_fX helpers
     are appended only under far-data models."""
-    parts = [MALLOC_EXE, FILEIO_EXE, FAR_SPRINTF_EXE, FAR_DOSIO_EXE]
+    parts = [MALLOC_EXE, FILEIO_EXE, FAR_SPRINTF_EXE, FAR_DOSIO_EXE, SETJMP_EXE]
     if far_data_model(model):
         parts.append(FAR_STDIO_EXE)
     return ''.join(parts)
