@@ -1,0 +1,6 @@
+flags=97 (want 97)
+shifts=323 (want 323)
+sums=2122 (want 2122)
+folded=129 (want 129)
+off_b=2 (want 2)
+off_items=6 (want 6)

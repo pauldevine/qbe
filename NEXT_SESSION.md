@@ -1,103 +1,86 @@
-# Next session — MicroPython port: next grammar blocker (post typedef-shadow)
+# Next session — MicroPython port: next grammar blockers (post §1f)
 
 > Master tracker: `MICROPYTHON_PORT.md`. Spike findings: `MICROPYTHON_SPIKE_REPORT.md`.
-> **Spike now at 87/132 OK** (was 82 at the start of the last session). Re-run
+> **Spike now at 97/132 OK** (was 87 at the start of the last session). Re-run
 > `build/mp-spike/run-spike.sh ~/projects/micropython/py/*.c` then
 > `cut -f2 build/mp-spike/summary.tsv | sort | uniq -c` to confirm before peeling more.
-> Gate **84/84**.
+> Gate **86/86**.
 
 ## What changed last session (so you don't redo it)
 
-§1e — **two independent wins**, both landed (spike 82 → 87):
+§1f — five independent wins, all landed (spike 87 → 97). See the MICROPYTHON_PORT.md running log
+for the full detail. Summary:
 
-1. **Typedef-name shadowing (lexer disambiguation).** C lets an ordinary identifier
-   (parameter / variable / struct member / member-access) share a typedef's spelling; once a
-   type-specifier is consumed the next identifier is in the declarator namespace. minic's lexer
-   used to return `TNAME` for any typedef-matching identifier, so `qstr qstr` (the real
-   `py/scope.h` shape: `id_info_t *scope_find_or_add_id(scope_t *scope, qstr qstr, …)`) was two
-   type-names → parse error. Fixed with three rules in the `yylex()`/`yylex_inner()` wrapper
-   (`minic/minic.y`):
-   - After a complete type-specifier token (a type keyword or a `TNAME`), a typedef-matching
-     identifier lexes as `IDENT` (it begins a declarator). typhget is probed into a scratch
-     ctyp (not `yylval`) so the `IDENT` node value survives; `g_td_array{dim,elem}` are cleared.
-   - A name already in scope as a local/parameter (`var_islocal()`, a new helper) lexes as
-     `IDENT` in body uses. The previous function's locals are dropped when its body's closing
-     `}` is consumed — but **deferred one token** (`pending_varclr` + `brace_depth` in the
-     wrapper), because `}` is the lookahead that reduces/emits the body's last statement (which
-     still reads locals via `varget`). Clearing at `}` rather than only at the next function's
-     `init` marker means a typedef-named parameter type in the *next* function isn't shadowed by
-     a stale local.
-   - After `.` / `->` (the member namespace), an identifier always lexes as `IDENT`.
-   0 new conflicts (still 108 s/r, 0 r/r). Pinned by `typedef_shadow_probe.c` (medium + large).
+1. **Scalar array initializers** — `emit_scalar_array_data` in `minic/minic.y`; `T NAME[] = {…}`
+   with a scalar element type now emits a real data block.
+2. **Const-expression brace items** — `sai_item: expr` + `sai_add_expr` fold each item via
+   `const_eval` (string literals still route to `sai_add_str`).
+3. **`offsetof`** — added to `minic/include/stddef.h` (`((size_t)&((type*)0)->member)`).
+4. **`__attribute__` struct-member prefix** (`smembers: smembers attrspec`) + **member cap 64→256**
+   (`members[NMember]` + three `>= NMember` checks). Flipped 5 of the 6 `mp_fun_table` files.
+5. **`const_eval` operators** — added `'K'` cast, `!` `==` `!=` `<` `<=` `&&` `||`, and `?:` ternary.
 
-2. **Capacity bumps.** `NStruct` 64→256, `NTyp` 128→512 (`minic/minic.y`). This — **not** the
-   shadow fix — is what actually flipped the 8 `scope_kind_t` files. Their reported source line
-   `} scope_kind_t;` was a red herring (lookahead lag); the real `die()` message was
-   *"too many struct/union definitions"* then *"too many typedefs"*. **Lesson reinforced: read
-   the actual error MESSAGE from `build/mp-spike/err/<file>.minic.err`, not just the source line
-   in `summary.tsv`.** minic is host-compiled so large tables are cheap.
+Pinned by `scalar_array_probe.c` (medium + large). 0 new conflicts (still 108 s/r, 0 r/r).
 
-## Scope for next session — the new dominant grammar blocker
+## Scope for next session — remaining 35 failures
 
-Run the spike, then per-file error messages:
+Run the spike, then per-file actual error MESSAGES (not the lagged source line — read
+`build/mp-spike/err/<file>.minic.err`):
 ```sh
-for e in build/mp-spike/err/*.minic.err; do
-  base=$(basename "$e" .minic.err)
-  grep -q 'parse error' "$e" && {
-    el=$(grep -m1 error: "$e" | sed 's/error:\([0-9]*\).*/\1/')
-    printf "%-16s L%-5s %s\n" "$base" "$el" "$(sed -n "${el}p" build/mp-spike/pp/$base.pp.c | sed 's/^ *//' | cut -c1-70)"
-  }
-done
+for base in $(awk -F'\t' '$2=="MINIC_FAIL"{print $1}' build/mp-spike/summary.tsv); do
+  msg=$(grep -m1 'error:' build/mp-spike/err/$base.minic.err | sed -E 's/.*error:[0-9]*:?//')
+  printf "%-16s %s\n" "$base" "$msg"
+done | sort -k2
 ```
-~31 files report a bare `parse error`. The largest reported cluster (~6 files: `compile`,
-`emitcommon`, `emitnative`, `emitnx86`, `nativeglue`, `persistentcode`) points at
-`int (*vprintf_)(const mp_print_t *print, const char *fmt, va_list args);` — **but that line is
-lookahead-lagged and the isolated snippet PARSES FINE**, so it is *not* the real site. Don't trust
-it; bisect.
 
-### How to find the true site (the lag-proof technique)
-A `head -N | minic` of a prefix that ends *inside* a struct/function fails by truncation, masking
-real errors. So only test prefixes that end at a **top-level (column-0) `}` or `;`** boundary, and
-treat a prefix as a real failure only when its reported error line is *well before* `N` (truncation
-reports a line ≈ `N`). Walk those boundaries upward; the first one whose reported error line stays
-fixed and small is just past the true construct. Then extract that construct into a standalone file
-(with the few typedefs it references stubbed) and confirm it reproduces under `minic -m medium`
-directly. (This is exactly how last session found the `scope_kind_t` files were a capacity limit,
-not the shadow.)
+Current clusters (after §1f): **22 parse error**, 3 double definition, 3 bitfield-initializer-unsupported,
+3 invalid-assignment, 1 void-has-no-size, 1 unsupported-operation-in-constant-expression (now
+`objmodule`, needs static address-of), 1 unsupported-address-of-in-static-initializer, 1
+unknown-struct-type.
 
-### Other known clusters still open (likely quicker wins)
-- **Scalar array initializers** — `static const uint8_t rule_act_table[] = { … };` (`parse`,
-  `scope`, `objmodule`, `unicode`). The `T NAME[] = {…}` rule only dispatches struct / pointer
-  element types; a scalar element type `die`s ("array initializer requires struct or pointer
-  type"). Small extension to `emit_struct_array_data`'s sibling. Several files, self-contained.
-- A handful of `unsupported operation in constant expression`, `bitfield initializer
-  unsupported`, `invalid assignment`, `void has no size`, `unknown struct type`,
-  `unsupported address-of in static initializer`, `double definition` — 1–3 files each. Triage
-  by the actual error message.
+### Known deeper constructs behind the parse errors (each distinct; confirm by isolating a snippet)
+- **`sizeof(char[expr])` MP_STATIC_ASSERT idiom** — `((void)sizeof(char[1 - 2 * !(&a != &b)]))`,
+  appears across many `obj*` files (`objlist`, `objtuple`, …) inside `mp_obj_is_type` checks. The
+  dimension contains an address comparison so it can't be const-folded; but the whole `sizeof(...)`
+  is always cast to `(void)` and discarded. Pragmatic option: parse `sizeof(type[expr])` and, when the
+  dimension isn't const-foldable, return a dummy (the value is voided here). Risky in general — gate
+  it carefully. Likely the single biggest remaining cluster.
+- **Anonymous struct type inside a cast** — `binary`: `(size_t)&((struct { char c; short t; } *)0)->t`
+  (an inline `offsetof` with an unnamed struct). minic can't parse a struct definition inside a cast.
+- **Designated array initializers** — `scope`: `static const uint8_t t[] = { [SCOPE_MODULE] = …, };`.
+  The `[index] = value` form. Bounded feature; extend the `sai_*` machinery to place by index.
+- **Static address-of pointer values** — `objmodule`: `mp_rom_map_elem_t table[] = { { key, &glob }, … }`
+  (`'A'` node in `const_eval`). Needs relocatable `&global` in a struct-array data block.
+- **switch label edge cases** — `objtuple` `case 1: default: {`, `objlist` `case MP_BINARY_OP_ADD: {`
+  (the body starts with the `sizeof(char[…])` idiom — overlaps the first bullet). Bisect to separate.
+- **`} else {` / `(void)kind;` reports** (`obj`, `objexcept`, `objint`) — lookahead-lagged; bisect.
+
+### How to find the true site (the lag-proof technique, unchanged)
+minic's reported error line is the parser's *lookahead* line and lags the real construct by many
+lines. Only test prefixes that end at a **top-level (column-0) `}` or `;`** boundary; a prefix is a
+real failure only when its reported error line is well *before* the truncation point. Walk those
+boundaries upward; the first one whose reported error line stays fixed and small is just past the
+true construct. Extract it into a standalone snippet (stub the few typedefs it references) and confirm
+it reproduces under `minic -m medium` directly.
 
 ## Guardrails (unchanged)
 
 - Rebuild with `cd minic && make minic`; local `yacc` prints conflict counts (now **108 s/r,
   0 r/r**). Justify any new shift/reduce; **no new reduce/reduce**. Local miniyacc is picky:
-  **no `/* … */` between a production head and its `:`, none trailing a rule's action, and no
-  comment block immediately preceding a production head**; per-rule RHS length limit (~5 symbols).
-- Run `tools/test-dos.sh` (must stay **84/84**) and `make check` (SSA, "All is fine!"). Add/extend
+  **no `/* … */` between a production head and its `:`, none trailing a rule's action, no
+  comment-only action body, and no comment block immediately preceding a production head**;
+  per-rule RHS length limit (~5 symbols).
+- Run `tools/test-dos.sh` (must stay **86/86**) and `make check` (SSA, "All is fine!"). Add/extend
   a probe per runtime-bearing feature.
-- Spike harness uses **`clang -E`** (not `cpp`) and reports CPP_FAIL honestly. **minic's error
-  line is the parser's *lookahead* line, which lags the real construct by many lines.** Confirm
-  any suspected construct by feeding a **minimal isolated snippet** to `minic -m medium` directly,
-  and read the real message from `build/mp-spike/err/<file>.minic.err`. The `NORMALIZE` sed is a
-  no-op under macOS BSD sed (`\b`) — minic must accept canonical names.
+- Spike harness uses **`clang -E`** (not `cpp`). Read the real message from
+  `build/mp-spike/err/<file>.minic.err`, not the lagged source line in `summary.tsv`.
 
 ## Orthogonal pre-existing limits (don't chase unless a real consumer needs them)
 
 - **`long` struct member from an opaque source** — `[[qbe-loadc-wordsize-i8086]]`; MicroPython
   structs are word/`size_t`-sized so it doesn't gate.
-- **Inline `100000L` literal** — lexer drops the `L` bit and the int→long conversion sign-extends
-  a 16-bit-truncated immediate (`[[minic-long-literal-int-vararg]]`); build large longs from
-  small-literal arithmetic or stage through a long local.
-- **Inline tagged-aggregate definition + var + initializer** (`union ival { int i; long l; } U = {…};`)
-  parse-errors — define the type first, then declare the variable.
-- `sizeof` of a *local* array returns pointer size; `void *` pointer comparison hits "void has
-  no size"; `sizeof` only takes `( type | ident )`, not a general expression; out-of-order /
-  bitfield-member designated initializers `die()`.
+- **Inline `100000L` literal** — lexer drops the `L` bit (`[[minic-long-literal-int-vararg]]`); build
+  large longs from small-literal arithmetic or stage through a long local.
+- **`sizeof(expr)`** (general expression, e.g. `sizeof((arr)[0])`) — `sizeof` only takes
+  `( type | ident )`. Blocks `map`. `void *` pointer comparison hits "void has no size".
+- **Inline tagged-aggregate definition + var + initializer** parse-errors — define the type first.

@@ -277,7 +277,7 @@ struct {
 	char name[NString];
 	int isunion;  /* 1 for union, 0 for struct */
 	int nmembers;
-	struct Member members[64];  /* Max 64 members per struct */
+	struct Member members[NMember];  /* Max NMember members per struct */
 	int size;
 	int curbfoffset;  /* Current bit offset for bitfield packing */
 	int curbfbase;    /* Byte offset of current bitfield storage unit */
@@ -548,7 +548,7 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 	int i;
 	struct Member *m;
 
-	if (structh[sidx].nmembers >= 64)
+	if (structh[sidx].nmembers >= NMember)
 		die("too many members in struct/union");
 
 	/* Check for duplicate member names */
@@ -590,7 +590,7 @@ structaddarrmember(int sidx, char *name, unsigned ctyp, int count)
 	int i, total;
 	struct Member *m;
 
-	if (structh[sidx].nmembers >= 64)
+	if (structh[sidx].nmembers >= NMember)
 		die("too many members in struct/union");
 	for (i = 0; i < structh[sidx].nmembers; i++)
 		if (strcmp(structh[sidx].members[i].name, name) == 0)
@@ -627,7 +627,7 @@ structaddbitfield(int sidx, char *name, unsigned ctyp, int width)
 	int unitsize;      /* Size of storage unit in bits */
 	int unitbytes;     /* Size of storage unit in bytes */
 
-	if (structh[sidx].nmembers >= 64)
+	if (structh[sidx].nmembers >= NMember)
 		die("too many members in struct/union");
 
 	/* Check for duplicate member names */
@@ -973,6 +973,48 @@ const_eval(Node *n)
 		l = const_eval(n->l);
 		r = const_eval(n->r);
 		return l >> r;
+
+	case 'K':
+		/* Cast `(type)expr`: fold to the inner value.  MicroPython's
+		 * small-int / qstr tagging idiom casts integer constants, e.g.
+		 * `(mp_obj_t)((qstr << 3) | 2)`. */
+		return const_eval(n->l);
+
+	case '!':
+		/* Logical NOT. */
+		return !const_eval(n->l);
+
+	case 'e':
+		/* Equality `==`. */
+		return const_eval(n->l) == const_eval(n->r);
+
+	case 'n':
+		/* Inequality `!=`. */
+		return const_eval(n->l) != const_eval(n->r);
+
+	case '<':
+		/* Less-than (the parser also lowers `>` to `<` with swapped
+		 * operands). */
+		return const_eval(n->l) < const_eval(n->r);
+
+	case 'l':
+		/* Less-or-equal (the parser lowers `>=` likewise). */
+		return const_eval(n->l) <= const_eval(n->r);
+
+	case 'a':
+		/* Logical AND `&&`. */
+		return const_eval(n->l) && const_eval(n->r);
+
+	case 'o':
+		/* Logical OR `||`. */
+		return const_eval(n->l) || const_eval(n->r);
+
+	case '?':
+		/* Ternary `cond ? a : b`.  The parser builds the node as
+		 * `'?'(cond, ':'(a, b))`. */
+		if (const_eval(n->l))
+			return const_eval(n->r->l);
+		return const_eval(n->r->r);
 
 	default:
 		die("unsupported operation in constant expression");
@@ -3615,6 +3657,19 @@ sai_add_str(int idx)
 	sai_val[nsai++] = idx;
 }
 
+/* Add one brace-list item from a parsed expression node.  A string
+ * literal (op 'S') is recorded as a pointer item; anything else is a
+ * compile-time constant expression folded by const_eval (handles
+ * NUM / enum-const / +-*\/% & | ^ ~ << >> and parens). */
+void
+sai_add_expr(Node *n)
+{
+	if (n && n->op == 'S')
+		sai_add_str(n->u.n);
+	else
+		sai_add_num(const_eval(n));
+}
+
 /* Emit a global data block holding an array of string-literal /
  * integer pointer values from sai_*.  Used for both file-scope and
  * block-scope-static `T *ARR[] = { "s1", "s2", ... };`. */
@@ -3648,13 +3703,53 @@ emit_pointer_array_data(unsigned elemtyp, char *name)
 	sai_clear();
 }
 
-/* Wrapper used by the dcls rule for `static T *NAME[] = {...};`. */
+/* Emit a global data block holding an array of scalar (non-pointer,
+ * non-struct) values from sai_*.  Used for `T NAME[] = { n, n, ... };`
+ * where T is an integer/char type, e.g.
+ *   static const uint8_t rule_act_table[] = { 0, 2, 4, ... };
+ * Each item is emitted with the QBE data width that matches the element
+ * type (b/h/w/l).  Registered as pointer-to-element with the array flag,
+ * matching the sized `T NAME[N];` rule. */
+void emit_struct_array_data(int sidx, char *name);
+
+void
+emit_scalar_array_data(unsigned elemtyp, char *name)
+{
+	static char buf[65536];
+	int buflen = 0;
+	int i;
+	char ir = irtyp(elemtyp);
+
+	buflen += sprintf(buf + buflen, "align %d {", iralign(elemtyp));
+	for (i = 0; i < nsai; i++) {
+		if (i)
+			buflen += sprintf(buf + buflen, ",");
+		if (sai_kind[i] == 'S')
+			die("scalar array initializer cannot hold a string");
+		buflen += sprintf(buf + buflen, " %c %ld", ir, sai_val[i]);
+	}
+	buflen += sprintf(buf + buflen, " }");
+
+	if (nglo == NGlo)
+		die("too many globals");
+	ini[nglo] = alloc(buflen + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], name);
+	varadd(name, nglo++, IDIR(elemtyp), 1);
+	sai_clear();
+}
+
+/* Wrapper used by the dcls rule for `static T *NAME[] = {...};` /
+ * `static T NAME[] = {...};`. */
 void
 emit_static_pointer_array(unsigned ptr_type, char *name)
 {
-	if (KIND(ptr_type) != PTR)
-		die("static array-of-pointer init requires pointer type");
-	emit_pointer_array_data(ptr_type, name);
+	if (KIND(ptr_type) == PTR)
+		emit_pointer_array_data(ptr_type, name);
+	else if (KIND(ptr_type) == STRUCT_T)
+		emit_struct_array_data(DREF(ptr_type), name);
+	else
+		emit_scalar_array_data(ptr_type, name);
 }
 
 /* Emit `data $NAME = align A { ... }` for a struct-array initializer.
@@ -4834,6 +4929,7 @@ smembers:
 	 * is legal; FUNC(NIL) encodes the void return type. */
 	structaddmember(curstruct, $5->u.v, IDIR(FUNC($2)));
 }
+        | smembers attrspec
         | smembers nestedagg
         ;
 
@@ -5145,7 +5241,7 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	else if (KIND(parsed_type) == PTR)
 		emit_pointer_array_data(parsed_type, parsed_ident);
 	else
-		die("array initializer requires struct or pointer type");
+		emit_scalar_array_data(parsed_type, parsed_ident);
 }
                ;
 
@@ -5157,11 +5253,7 @@ sai_list: sai_item
         | sai_list ',' sai_item
         ;
 
-sai_item: NUM                  { sai_add_num($1->u.n); }
-        | '-' NUM              { sai_add_num(-$2->u.n); }
-        | '(' NUM ')'          { sai_add_num($2->u.n); }
-        | '(' '-' NUM ')'      { sai_add_num(-$3->u.n); }
-        | STR                  { sai_add_str($1->u.n); }
+sai_item: expr                 { sai_add_expr($1); }
         | '{' sai_list opt_trailing_comma '}' { }
         ;
 

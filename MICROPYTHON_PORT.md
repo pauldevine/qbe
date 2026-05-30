@@ -30,7 +30,7 @@ and tracks phase progress. Update the status table + running log as work lands.
 | Phase | Status | Notes |
 |---|---|---|
 | **0 — Feasibility spike** | ✅ **Done** (2026-05-29) | Host `ports/minimal` builds (114 KB); 132/132 core files fail in `minic` at `py/obj.h` on declaration grammar. See spike report. |
-| **1 — minic frontend** | ⏳ **In progress** | Tier 1 + layer-2 + nested members + aggregate initializers + **struct return-by-value** + **typedef-name shadowing** + **capacity bumps** done (2026-05-29).  Spike on honest grammar signal (cpp clean on all 132): **87/132 OK**.  New dominant blocker (~6 files: compile/emitcommon/emitnative/emitnx86/nativeglue/persistentcode): reported at the `int (*vprintf_)(…, va_list args)` fn-ptr-member line, but that line is lookahead-lagged — the true site needs clean-boundary bisection (see `NEXT_SESSION.md`).  Other clusters: scalar array initializers (`static const uint8_t t[] = {…}`), macro-expanded calls.  See running log + `NEXT_SESSION.md`. |
+| **1 — minic frontend** | ⏳ **In progress** | Tier 1 + layer-2 + nested members + aggregate initializers + **struct return-by-value** + **typedef-name shadowing** + **capacity bumps** + **scalar array initializers / offsetof / member-attr / const-expr folding** done (2026-05-29).  Spike on honest grammar signal (cpp clean on all 132): **97/132 OK**.  Remaining 35: ~22 `parse error` (each a distinct deeper construct — anonymous-struct-in-cast, `sizeof(char[expr])` static-assert idiom, designated array initializers `[i]=v`, switch label edge cases), 3 `double definition`, 3 `bitfield initializer unsupported`, 3 `invalid assignment`, + singletons (`void has no size`, static address-of).  See running log + `NEXT_SESSION.md`. |
 | 1b — Aggregate/designated initializers | ✅ **Done** (2026-05-29) | File-scope `T NAME = { ... };` for struct/union/global vars: designated `.field =`, nested braces, partially-initialized array members (trailing zero-fill), string-literal + `&global` pointer fields, casts and constant-folded values.  New `gaggr`/`gilist`/`gitem`/`gival` grammar (0 new conflicts) + a constant-initializer folder (`cival_eval`) + a layout-aware data emitter (`emit_global_aggregate`, inserts `z N` for designator gaps).  Pinned by `aggregate_init_probe.c`.  **Spike 69→77/132.** |
 | 1d — Struct/union return-by-value (ABI) | ✅ **Done** (2026-05-29) | Hidden-pointer lowering (caller-allocated result storage; callee copies through it and returns the pointer), all in the minic frontend as scalar QBE IR — no backend changes.  Function header + `ret` + call site + `lval(call)`; `emit_struct_copy` helper.  Pinned by `sret_probe.c` (medium + large).  Closes the `return source_line;` cluster.  **Spike 77→82/132.**  Orthogonal: `long` struct members read from an opaque (call-result) source lose their high word — pre-existing `[[qbe-loadc-wordsize-i8086]]` bug; MicroPython's returned structs are word/`size_t`-sized so it doesn't gate. |
 | 1e — Typedef-name shadowing + capacity | ✅ **Done** (2026-05-29) | (a) **Lexer disambiguation:** a declarator / parameter / member / member-access identifier that collides with a typedef name now lexes as `IDENT`, not `TNAME` — the real `py/scope.h` shape `scope_find_or_add_id(scope_t *scope, qstr qstr, …)`.  Three rules in the `yylex()`/`yylex_inner()` wrapper: (1) after a complete type-specifier token (type keyword or `TNAME`) → `IDENT`; (2) in-scope local/param (`var_islocal()`) → `IDENT`, with the previous function's locals dropped on its body's closing `}` (deferred one token via `pending_varclr`/`brace_depth` so the body's last statement still resolves, and so the next function's typedef-named param type isn't shadowed by a stale local); (3) after `.`/`->` (member namespace) → `IDENT`.  0 new conflicts.  Pinned by `typedef_shadow_probe.c` (medium + large).  (b) **Capacity:** `NStruct` 64→256, `NTyp` 128→512 — preprocessed MicroPython TUs define >64 aggregates / >128 typedefs; minic is host-compiled so this is cheap.  This (not the shadow fix) was what gated the 8 `scope_kind_t` files (their real error was *"too many struct/union definitions"*, masked behind the lookahead-lagged `} scope_kind_t;` source line).  **Spike 82→87/132.** |
@@ -48,6 +48,28 @@ and tracks phase progress. Update the status table + running log as work lands.
 
 ## Running log
 
+- **2026-05-29 — §1f scalar array inits + offsetof + member-attr + const-expr folding; spike 87 → 97/132; gate 84→86/86.**
+  Five independent grammar/header wins (all in `minic/minic.y` unless noted), `make check` green,
+  no i8086 backend changes:
+  - **Scalar array initializers** — `T NAME[] = { … }` for a scalar (integer/char) element type now
+    emits a real data block (`emit_scalar_array_data`, element width from `irtyp`); the rule used to
+    `die("array initializer requires struct or pointer type")`.  Also wired the `static …[] = {…}`
+    block-scope path through struct/scalar dispatch.  Unblocked `unicode` (`static const uint8_t attr[]`).
+  - **Const-expression brace items** — `sai_item` now reduces a full `expr` and folds it with
+    `const_eval` (via the new `sai_add_expr`, which routes string literals to `sai_add_str`), so
+    OR-of-flags / shift / arithmetic items like `((0x02)|(0x01))` work, not just bare `NUM`/`STR`.
+  - **`offsetof`** — added to `minic/include/stddef.h` as the classic `((size_t)&((type*)0)->member)`
+    form (MiniC folds it to the member offset).  Unblocked the flexible-array `m_new_obj_var` idiom in
+    `objzip`/`objmap`/`objclosure`.
+  - **`__attribute__((…))` as a struct-member prefix** — new `smembers: smembers attrspec` no-op
+    alternative absorbs e.g. `__attribute__((noreturn)) void (*raise_msg)(…)`.  Plus **member cap
+    64→`NMember`(256)** (the `members[64]` array + three hardcoded `>= 64` checks).  Together these
+    flipped 5 of the 6-file `mp_fun_table` cluster (`emitnx86`/`emitcommon`/`emitnative`/`nativeglue`/
+    `persistentcode`).
+  - **`const_eval` operators** — added `'K'` (cast = identity fold), `'!'`/`==`/`!=`/`<`/`<=`/`&&`/`||`,
+    and `'?'` ternary.  Unblocked `builtinimport`.
+  - 0 new grammar conflicts (still **108 s/r, 0 r/r**).  Pinned by `scalar_array_probe.c`
+    (medium + large; 6 assertions incl. cast/ternary/comparison folding and two `offsetof` offsets).
 - **2026-05-29 — struct/union return-by-value (codegen/ABI); spike 77 → 82/132; gate 80→82/82.**
   Closed the dominant post-§1b blocker — a function whose return type is a struct/union
   (`mp_code_lineinfo_t mp_bytecode_decode_lineinfo(...)`; callers `mp_code_lineinfo_t x = decode(&p);`).

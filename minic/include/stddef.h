@@ -14,4 +14,9 @@ typedef int ptrdiff_t;
  * standard C, so use the simpler one. */
 #define NULL 0
 
+/* offsetof: byte offset of a member within a struct/union type.  The
+ * classic null-pointer form folds to the member's offset; MiniC computes
+ * member offsets, so `&((type *)0)->member` yields the offset directly. */
+#define offsetof(type, member) ((size_t)&((type *)0)->member)
+
 #endif /* _STDDEF_H */
