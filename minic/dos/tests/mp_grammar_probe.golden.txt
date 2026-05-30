@@ -7,3 +7,7 @@ sq5=25 (want 25)
 buf0=65 buf4=69 (want 65 69)
 concat=[1,2]
 range(10, 20)
+lp=100,200 (want 100 200)
+ld=8,9 (want 8 9)
+da=11,0,33 (want 11 0 33)
+sized=97,98,99,0,0 (want 97 98 99 0 0)

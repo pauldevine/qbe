@@ -28,6 +28,18 @@
  *      only, no runtime effect; included here so the file exercises the
  *      grammar path.
  *
+ *   5. Local aggregate initializer -- `struct P p = { 1, 2 };` (and the
+ *      `.field =` designated form) desugars to a compound-literal
+ *      assignment.  MicroPython spells `mp_print_t print = { vstr, fn };`.
+ *
+ *   6. File-scope designated array initializer -- `static const T t[] =
+ *      { [IDX] = v, … }` places by index (sai_designate zero-fills
+ *      gaps).  MicroPython spells `scope_simple_name_table[]` this way.
+ *
+ *   7. Sized file-scope array initializer -- `static const T t[N] =
+ *      { … }` with fewer items than N (trailing elements zero-filled).
+ *      MicroPython spells `static const char pad_spaces[16] = {…}`.
+ *
  * Build:  tools/build-example.sh --model=medium \
  *             minic/dos/examples/mp_grammar_probe.c
  * Verify: tools/run-dos-exe.sh build/examples/mp_grammar_probe/mp_grammar_probe.exe \
@@ -56,6 +68,14 @@ static __attribute__((noreturn)) void boom(void)
 static const int tbl[] = { 10, 20, 30, 40, 50 };  /* 5*2 = 10 bytes */
 struct e { int k; int v; };
 static const struct e et[] = { {1, 2}, {3, 4}, {5, 6} };  /* 3*4 = 12 */
+
+/* (6) file-scope designated array init, in source order with a gap at
+ * SL_B (zero-filled by sai_designate). */
+enum { SL_A, SL_B, SL_C, SL_D };
+static const int da[] = { [SL_A] = 11, [SL_C] = 33 };  /* {11,0,33} */
+
+/* (7) sized file-scope array, fewer items than the declared count. */
+static const char sized[8] = { 'a', 'b', 'c' };  /* {a,b,c,0,0,0,0,0} */
 
 int
 main(void)
@@ -87,6 +107,21 @@ main(void)
 	/* (2) adjacent string-literal concatenation. */
 	printf("concat=[" "%d" "," "%d" "]\r\n", 1, 2);
 	printf("range(" "%d" ", " "%d" ")\r\n", 10, 20);
+
+	/* (5) local aggregate initializer (positional + designated). */
+	{
+		struct e lp = { 100, 200 };
+		struct e ld = { .v = 9, .k = 8 };
+		printf("lp=%d,%d (want 100 200)\r\n", lp.k, lp.v);
+		printf("ld=%d,%d (want 8 9)\r\n", ld.k, ld.v);
+	}
+
+	/* (6) designated file-scope array, read back including the gap. */
+	printf("da=%d,%d,%d (want 11 0 33)\r\n", da[SL_A], da[SL_B], da[SL_C]);
+
+	/* (7) sized file-scope array, declared length 8 with 3 items. */
+	printf("sized=%d,%d,%d,%d,%d (want 97 98 99 0 0)\r\n",
+	       sized[0], sized[1], sized[2], sized[3], sized[7]);
 
 	return 0;
 }

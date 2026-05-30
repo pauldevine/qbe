@@ -3746,6 +3746,41 @@ sai_clear(void)
 	nsai = 0;
 }
 
+/* Designated array initializer `[index] = value`: zero-fill the scalar
+ * data list up to `idx` so the next sai_add_* lands at position idx.
+ * Supports the in-order contiguous form MicroPython uses for
+ * `static const uint8_t t[] = { [SCOPE_MODULE] = …, [SCOPE_LAMBDA] = …, }`. */
+void
+sai_designate(int idx)
+{
+	if (idx < 0)
+		die("negative designated array index");
+	if (idx < nsai)
+		die("out-of-order designated array initializer");
+	while (nsai < idx) {
+		if (nsai >= NSAI)
+			die("too many struct-array init items");
+		sai_kind[nsai] = 'N';
+		sai_val[nsai++] = 0;
+	}
+}
+
+/* Sized array initializer `T name[N] = { … }`: after the brace items are
+ * collected, zero-fill the tail so the data block is exactly `count`
+ * elements (C zero-fills missing trailing initializers). */
+void
+sai_pad_to_count(int count)
+{
+	if (nsai > count)
+		die("too many initializers for array");
+	while (nsai < count) {
+		if (nsai >= NSAI)
+			die("too many struct-array init items");
+		sai_kind[nsai] = 'N';
+		sai_val[nsai++] = 0;
+	}
+}
+
 void
 sai_add_num(long v)
 {
@@ -5345,10 +5380,13 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
                | '=' '-' NUM ';'                 { emit_global_int_init(-$3->u.n); }
                | '=' '(' '-' NUM ')' ';'         { emit_global_int_init(-$4->u.n); }
                | '=' gaggr ';'                   { emit_global_aggregate(parsed_type, parsed_ident, $2); }
-               | '[' NUM ']' ';'
+               | '[' expr ']' ';'
 {
 	/* Global array of basic type: emit a zero-filled data block.
-	 * QBE syntax: `data $name = align N { z TOTAL_BYTES }`. */
+	 * QBE syntax: `data $name = align N { z TOTAL_BYTES }`.  Dimension
+	 * is a constant-expression (uses expr, not a bare NUM, so it does
+	 * not shift/reduce-conflict with the sized `[expr] = {…}` init
+	 * rule). */
 	char buf[64];
 	int elemsz, total;
 	if (parsed_type == NIL)
@@ -5356,7 +5394,7 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	if (nglo == NGlo)
 		die("too many globals");
 	elemsz = SIZE(parsed_type);
-	total = elemsz * $2->u.n;
+	total = elemsz * const_eval($2);
 	sprintf(buf, "align %d { z %d }", iralign(parsed_type), total);
 	ini[nglo] = alloc(strlen(buf) + 1);
 	strcpy(ini[nglo], buf);
@@ -5364,6 +5402,7 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	maybe_mark_huge_global(nglo, parsed_ident, total);
 	/* Register as pointer to element type with array flag set. */
 	varadd(parsed_ident, nglo++, IDIR(parsed_type), 1);
+	var_set_arraybytes(parsed_ident, total);
 }
                | '=' STR ';'
 {
@@ -5483,6 +5522,22 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	else
 		emit_scalar_array_data(parsed_type, parsed_ident);
 }
+               | '[' expr ']' '=' '{' sai_init_clear sai_list opt_trailing_comma '}' ';'
+{
+	/* TYP NAME[N] = { … };  Explicit size — zero-fill missing trailing
+	 * elements (scalar/pointer element types).  Struct-typed sized
+	 * arrays keep their item count as-is (per-member padding would be
+	 * needed and no in-tree consumer uses that form yet). */
+	if (KIND(parsed_type) == STRUCT_T) {
+		emit_struct_array_data(DREF(parsed_type), parsed_ident);
+	} else if (KIND(parsed_type) == PTR) {
+		sai_pad_to_count(const_eval($2));
+		emit_pointer_array_data(parsed_type, parsed_ident);
+	} else {
+		sai_pad_to_count(const_eval($2));
+		emit_scalar_array_data(parsed_type, parsed_ident);
+	}
+}
                ;
 
 sai_init_clear: { sai_clear(); };
@@ -5494,6 +5549,7 @@ sai_list: sai_item
         ;
 
 sai_item: expr                 { sai_add_expr($1); }
+        | '[' expr ']' '=' expr { sai_designate(const_eval($2)); sai_add_expr($5); }
         | '{' sai_list opt_trailing_comma '}' { }
         ;
 
@@ -5802,6 +5858,28 @@ dcls:
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), s);
 	/* Evaluate initializer as `IDENT = expr` */
 	init_node = mknode('=', $3, $5);
+	expr(init_node);
+}
+    | dcls type IDENT '=' '{' initlist '}' ';'
+{
+	/* Local aggregate initializer: `struct P p = { 1, 2 };`.
+	 * Desugar to `p; p = (type){ 1, 2 };` — allocate the var, then
+	 * assign a compound literal of the same type (the 'L'
+	 * compound-literal path handles member/designator placement and
+	 * the struct-copy assignment). */
+	int s;
+	char *v;
+	Node *clit_node, *init_node;
+
+	if ($2 == NIL)
+		die("invalid void declaration");
+	v = $3->u.v;
+	s = SIZE($2);
+	varadd(v, 0, $2, 0);
+	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), s);
+	clit_node = mknode('L', $6, 0);
+	clit_node->u.n = (int)$2;
+	init_node = mknode('=', $3, clit_node);
 	expr(init_node);
 }
     | dcls type IDENT ',' ext_decllist ';' { emit_local_multi_decl($2, $3->u.v, $5); }
@@ -6260,6 +6338,26 @@ stmt: ';'                            { $$ = 0; }
         varadd(v, 0, $1, 0);
         fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), s);
         init_node = mknode('=', $2, $4);
+        $$ = mkstmt(Expr, init_node, 0, 0);
+    }
+    | type IDENT '=' '{' initlist '}' ';'  {
+        /* Block-scoped local aggregate initializer:
+         * `struct P p = { 1, 2 };` — same desugaring as the dcls-context
+         * rule (declare + compound-literal assignment), but the
+         * assignment is wrapped as an Expr stmt so it runs in lexical
+         * order rather than at function entry. */
+        int s;
+        char *v;
+        Node *clit_node, *init_node;
+        if ($1 == NIL)
+            die("invalid void declaration");
+        v = $2->u.v;
+        s = SIZE($1);
+        varadd(v, 0, $1, 0);
+        fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), s);
+        clit_node = mknode('L', $5, 0);
+        clit_node->u.n = (int)$1;
+        init_node = mknode('=', $2, clit_node);
         $$ = mkstmt(Expr, init_node, 0, 0);
     }
     | type IDENT '[' expr ']' ';'     {
