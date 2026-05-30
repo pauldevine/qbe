@@ -4478,6 +4478,72 @@ emit_global_aggregate(unsigned ctyp, char *name, Node *agg)
 	varadd(name, nglo++, ctyp, 0);
 }
 
+/* Decoded byte length (including the NUL terminator) of the string
+ * literal stored at global index `idx`.  ini[idx] holds the QBE data
+ * text `{ b "CONTENT", b 0 }`, where CONTENT carries C escape sequences
+ * verbatim; count each escape as one byte so sizeof(char_array) is
+ * correct.  Handles \xHH, \NNN octal, and single-char escapes. */
+int
+strlit_bytelen(int idx)
+{
+	char *s = ini[idx];
+	int len = 0;
+	int contentlen;
+
+	s += 5;                 /* skip the `{ b "` prefix */
+	contentlen = (int)strlen(s);
+	contentlen -= 8;        /* drop the `", b 0 }` suffix */
+	if (contentlen < 0)
+		contentlen = 0;
+	while (contentlen > 0) {
+		if (*s == '\\' && contentlen > 1) {
+			s++; contentlen--;          /* the escape char */
+			if (*s == 'x') {
+				s++; contentlen--;
+				while (contentlen > 0 &&
+				    ((*s >= '0' && *s <= '9') ||
+				     (*s >= 'a' && *s <= 'f') ||
+				     (*s >= 'A' && *s <= 'F'))) {
+					s++; contentlen--;
+				}
+			} else if (*s >= '0' && *s <= '7') {
+				int k = 1;
+				s++; contentlen--;
+				while (contentlen > 0 && k < 3 &&
+				    *s >= '0' && *s <= '7') {
+					s++; contentlen--; k++;
+				}
+			} else {
+				s++; contentlen--;      /* one-char escape */
+			}
+		} else {
+			s++; contentlen--;
+		}
+		len++;
+	}
+	return len + 1;         /* + NUL terminator */
+}
+
+/* `T NAME[] = "string";` — emit the literal's bytes as a char-array data
+ * block (not a pointer to the string).  `static_local` routes the data
+ * into a mangled file-scope global. */
+void
+emit_string_array(unsigned elemtyp, char *name, int str_idx, int static_local)
+{
+	int total = strlit_bytelen(str_idx);
+
+	if (static_local) {
+		emit_static_local(name, IDIR(elemtyp), 1, ini[str_idx]);
+	} else {
+		if (nglo == NGlo)
+			die("too many globals");
+		ini[nglo] = ini[str_idx];
+		strcpy(gloname[nglo], name);
+		varadd(name, nglo++, IDIR(elemtyp), 1);
+	}
+	var_set_arraybytes(name, total);
+}
+
 /* `T NAME[] = { ... };` / `T NAME[N] = { ... };` at file scope, routed
  * through the generic aggregate machinery (agg_emit_array) so each
  * element may itself be a designated struct, a nested array, or a
@@ -5716,6 +5782,14 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	 * any missing trailing elements. */
 	emit_global_array(parsed_type, parsed_ident, const_eval($2), $5);
 }
+               | '[' ']' '=' STR ';'
+{
+	/* char NAME[] = "string";  Emit the literal bytes as a char array
+	 * (NUL-terminated), not a pointer to the string. */
+	if (parsed_type == NIL)
+		die("invalid void array");
+	emit_string_array(parsed_type, parsed_ident, $4->u.n, 0);
+}
                ;
 
 sai_init_clear: { sai_clear(); };
@@ -6169,6 +6243,14 @@ dcls:
 {
 	/* Sized function-local static array with initializer. */
 	emit_static_array($3, $4->u.v, const_eval($6), $9);
+}
+    | dcls STATIC type IDENT '[' ']' '=' STR ';'
+{
+	/* Function-local static char array initialised from a string
+	 * literal: `static const byte whitespace[] = " ...";` */
+	if ($3 == NIL)
+		die("invalid void array");
+	emit_string_array($3, $4->u.v, $8->u.n, 1);
 }
     | dcls STATIC type IDENT '[' expr ']' ';'
 {
@@ -6718,6 +6800,13 @@ stmt: ';'                            { $$ = 0; }
     | STATIC type IDENT '[' expr ']' '=' gaggr ';' {
         /* Statement-scope sized static array with initializer. */
         emit_static_array($2, $3->u.v, const_eval($5), $8);
+        $$ = 0;
+    }
+    | STATIC type IDENT '[' ']' '=' STR ';' {
+        /* Statement-scope static char array from a string literal. */
+        if ($2 == NIL)
+            die("invalid void array");
+        emit_string_array($2, $3->u.v, $7->u.n, 1);
         $$ = 0;
     }
     | STATIC type IDENT '[' expr ']' ';' {
