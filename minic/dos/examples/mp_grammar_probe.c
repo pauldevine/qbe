@@ -45,6 +45,11 @@
  *      Unblocks the MicroPython count idiom
  *      `sizeof(arr) / sizeof(arr[0])` and `sizeof(*ptr)`.
  *
+ *   9. Local unsized array initializer -- `T a[] = { x, y };` (count
+ *      inferred), block-scoped sized/unsized array init with deferred
+ *      stores, and arithmetic initializer items (`{ x, x*2 }`; inititem
+ *      widened from unary to full expr).
+ *
  * Build:  tools/build-example.sh --model=medium \
  *             minic/dos/examples/mp_grammar_probe.c
  * Verify: tools/run-dos-exe.sh build/examples/mp_grammar_probe/mp_grammar_probe.exe \
@@ -140,6 +145,19 @@ main(void)
 		       (int)(sizeof(squares) / sizeof(squares[0])));
 		printf("elem=%d deref=%d (want 2 2)\r\n",
 		       (int)sizeof(squares[0]), (int)sizeof(*ip));
+	}
+
+	/* (9) local unsized array, block-scoped array init, arithmetic
+	 * initializer items. */
+	{
+		int seed = 5;
+		int un[] = { seed, seed * 2, seed * 3 };  /* inferred [3] */
+		printf("un=%d,%d,%d n=%d (5 10 15 6)\r\n",
+		       un[0], un[1], un[2], (int)sizeof(un));
+		if (seed > 0) {
+			int blk[4] = { seed };  /* block-scoped, zero tail */
+			printf("blk=%d,%d (5 0)\r\n", blk[0], blk[3]);
+		}
 	}
 
 	return 0;

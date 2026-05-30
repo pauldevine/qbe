@@ -3637,6 +3637,66 @@ mkidx(Node *a, Node *i)
 	return n;
 }
 
+/* Build a deferred initializer for a block-scoped local array
+ * `T a[] = { … }` / `T a[N] = { … }`: a comma-chain of `a[idx] = val`
+ * assignments (via mkidx, so expr() scales each index by the element
+ * size at emit time).  Returned as one Node to wrap in mkstmt(Expr,…)
+ * so the stores run in lexical/control-flow order rather than at
+ * function entry.  `*out_n` receives the inferred element count
+ * (max designated index + 1 / sequential count).  If `zerofill` is
+ * nonzero, `*out_n` elements are zeroed first (sized partial-init
+ * semantics). */
+Node *mkidx(Node *, Node *);
+Node *
+mk_local_array_init(char *v, Node *initlist, int zerofill, int known_n, int *out_n)
+{
+	Node *chain = 0, *it;
+	int i = 0, n = 0;
+
+	for (it = initlist; it; it = it->r) {
+		Node *item = it->l, *av, *iv, *lhs, *asgn;
+		int idx;
+
+		if (item->op == 'd') {
+			idx = item->r->u.n;
+			i = idx + 1;
+		} else {
+			idx = i++;
+		}
+		if (idx + 1 > n)
+			n = idx + 1;
+		av = mknode('V', 0, 0);
+		strcpy(av->u.v, v);
+		iv = mknode('N', 0, 0);
+		iv->u.n = idx;
+		lhs = mkidx(av, iv);
+		asgn = mknode('=', lhs, item->op == 'd' ? item->l : item);
+		chain = chain ? mknode(',', chain, asgn) : asgn;
+	}
+	if (known_n > n)
+		n = known_n;
+	*out_n = n;
+
+	if (zerofill) {
+		Node *zhead = 0;
+		int j;
+		for (j = 0; j < n; j++) {
+			Node *av = mknode('V', 0, 0), *iv = mknode('N', 0, 0);
+			Node *lhs, *zasgn, *zero;
+			strcpy(av->u.v, v);
+			iv->u.n = j;
+			lhs = mkidx(av, iv);
+			zero = mknode('N', 0, 0);
+			zero->u.n = 0;
+			zasgn = mknode('=', lhs, zero);
+			zhead = zhead ? mknode(',', zhead, zasgn) : zasgn;
+		}
+		if (zhead)
+			chain = chain ? mknode(',', zhead, chain) : zhead;
+	}
+	return chain;
+}
+
 Node *
 mkneg(Node *n)
 {
@@ -6139,6 +6199,67 @@ dcls:
 		}
 	}
 }
+    | dcls type IDENT '[' ']' '=' '{' initlist '}' ';'
+{
+	/* Local UNSIZED array with initializer: `T a[] = { x, y };`.
+	 * Element count is inferred from the initializer list (max
+	 * designated index + 1, or the sequential item count).  Runtime
+	 * values are allowed (each item goes through expr()), unlike the
+	 * file-scope `[]` form which folds to static data. */
+	int s, n, i;
+	char *v;
+	Node *it;
+
+	if ($2 == NIL)
+		die("invalid void array");
+	v = $3->u.v;
+	s = SIZE($2);
+
+	/* First pass: determine element count. */
+	n = 0;
+	i = 0;
+	for (it = $8; it; it = it->r) {
+		int idx;
+		if (it->l->op == 'd')
+			idx = it->l->r->u.n;
+		else
+			idx = i++;
+		if (idx + 1 > n)
+			n = idx + 1;
+		if (it->l->op == 'd')
+			i = idx + 1;
+	}
+
+	varadd(v, 0, IDIR($2), 1);
+	var_set_arraybytes(v, s * n);
+	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), s * n);
+
+	/* Second pass: store each initializer (no zero-fill needed — an
+	 * unsized array is exactly as long as its initializer list). */
+	{
+		Node *init = $8;
+		i = 0;
+		while (init) {
+			Node *item = init->l;
+			int idx;
+			Symb val;
+			if (item->op == 'd') {
+				idx = item->r->u.n;
+				val = expr(item->l);
+				i = idx + 1;
+			} else {
+				idx = i++;
+				val = expr(item);
+			}
+			fprintf(of, "\t%%t%d =w add %%%s, %d\n", tmp, v, idx * s);
+			fprintf(of, "\tstore%c ", irtyp($2));
+			psymb(val);
+			fprintf(of, ", %%t%d\n", tmp);
+			tmp++;
+			init = init->r;
+		}
+	}
+}
     | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
 {
 	/* Function pointer declaration: int (*fptr)(int, int); */
@@ -6197,9 +6318,9 @@ idlist: IDENT                  { $$ = $1; $$->r = 0; }
       | IDENT ',' idlist       { $$ = $1; $$->r = $3; }
       ;
 
-inititem: pref                        { $$ = $1; }
-        | '.' IDENT '=' pref          { $$ = mknode('D', $4, $2); }
-        | '[' NUM ']' '=' pref        { $$ = mknode('d', $5, $2); }
+inititem: expr                        { $$ = $1; }
+        | '.' IDENT '=' expr          { $$ = mknode('D', $4, $2); }
+        | '[' NUM ']' '=' expr        { $$ = mknode('d', $5, $2); }
         ;
 
 initlist: inititem                    { $$ = mknode(0, $1, 0); }
@@ -6405,6 +6526,40 @@ stmt: ';'                            { $$ = 0; }
         var_set_arraybytes(v, total);
         fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), total);
         $$ = 0;
+    }
+    | type IDENT '[' expr ']' '=' '{' initlist '}' ';' {
+        /* Block-scoped sized array with initializer.  Stores are
+         * deferred (mkstmt Expr) so they run in control-flow order;
+         * the array is zero-filled then initialized (partial-init
+         * semantics). */
+        int n, total;
+        char *v;
+        Node *chain;
+        if ($1 == NIL)
+            die("invalid void array");
+        v = $2->u.v;
+        n = const_eval($4);
+        total = SIZE($1) * n;
+        varadd(v, 0, IDIR($1), 1);
+        var_set_arraybytes(v, total);
+        fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), total);
+        chain = mk_local_array_init(v, $8, 1, n, &n);
+        $$ = mkstmt(Expr, chain, 0, 0);
+    }
+    | type IDENT '[' ']' '=' '{' initlist '}' ';' {
+        /* Block-scoped UNSIZED array with initializer: count inferred
+         * from the list (no zero-fill — length is exact). */
+        int n;
+        char *v;
+        Node *chain;
+        if ($1 == NIL)
+            die("invalid void array");
+        v = $2->u.v;
+        chain = mk_local_array_init(v, $7, 0, 0, &n);
+        varadd(v, 0, IDIR($1), 1);
+        var_set_arraybytes(v, SIZE($1) * n);
+        fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), SIZE($1) * n);
+        $$ = mkstmt(Expr, chain, 0, 0);
     }
     | type IDENT ',' ext_decllist ';' {
         /* Block-scoped multi-variable decl with full per-declarator
