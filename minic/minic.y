@@ -4998,7 +4998,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %%
 
-prog: | prog kfunc | prog attr_kfunc | prog typed_decl | prog attr_typed_decl | prog edcl | prog tdcl | prog sdcl | prog static_assert_dcl | prog externdcl ;
+prog: | prog kfunc | prog attr_kfunc | prog typed_decl | prog attr_typed_decl | prog edcl | prog tdcl | prog sdcl | prog static_assert_dcl | prog externdcl | prog ';' ;
 
 attr_kfunc: attrspec storageopt inlineopt init_attr prot_knr '{' dcls stmts '}'
 {
@@ -5101,10 +5101,13 @@ externdcl: EXTERN type IDENT ';'
 }
          | EXTERN STRUCT IDENT IDENT ';'
 {
-	/* Extern struct variable: extern struct foo bar; */
+	/* Extern struct variable: extern struct foo bar;  An undefined tag
+	 * is an incomplete type — legal for an extern decl (the definition
+	 * lives in another TU).  Forward-declare it rather than die, mirroring
+	 * the `type: STRUCT IDENT` rule. */
 	int idx = structfind($3->u.v);
 	if (idx < 0)
-		die("unknown struct type");
+		idx = structadd_forward($3->u.v, 0);
 	unsigned styp = (idx << 3) + STRUCT_T;
 	varaddextern($4->u.v, styp, 0);
 }
@@ -5113,7 +5116,7 @@ externdcl: EXTERN type IDENT ';'
 	/* Extern struct array without size: extern struct foo bar[]; */
 	int idx = structfind($3->u.v);
 	if (idx < 0)
-		die("unknown struct type");
+		idx = structadd_forward($3->u.v, 0);
 	unsigned styp = (idx << 3) + STRUCT_T;
 	varaddextern($4->u.v, IDIR(styp), 1);
 }
@@ -5122,7 +5125,7 @@ externdcl: EXTERN type IDENT ';'
 	/* Extern struct pointer: extern struct foo *bar; */
 	int idx = structfind($3->u.v);
 	if (idx < 0)
-		die("unknown struct type");
+		idx = structadd_forward($3->u.v, 0);
 	unsigned styp = (idx << 3) + STRUCT_T;
 	varaddextern($5->u.v, IDIR(styp), 0);
 }
