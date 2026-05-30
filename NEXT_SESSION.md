@@ -18,10 +18,13 @@ alloc, base type stashed in new global `forinit_basetyp`) runs *before* the
 test/increment/body uses are lexed, letting the existing lexer-stamp rewrite them
 to the renamed slot. No new conflicts (still 111 s/r, 0 r/r). Probe
 `for_init_scope_probe.c` (medium + large; 5 cases incl. two-pointer/multi-scalar
-regression guards). **miniyacc gotcha reconfirmed:** an apostrophe in an
-action-body comment opens a char-literal scan in `cpycode` and eats past the
-closing brace — keep action comments free of `'` (and `/` `[` `]`). All in
-`minic/minic.y` + gate wiring; no i8086/QBE backend changes.
+regression guards). All in `minic/minic.y` + gate wiring; no i8086/QBE backend
+changes. **The apostrophe-in-action-comment footgun this surfaced is now fixed**
+(commit `a4a1fe7`): `cpycode` in `minic/yacc.c` is comment-aware, so action
+comments can use `'`/`"`/braces freely — the old "avoid `'` `/` `[` `]`" rule no
+longer applies (and `/` `[` `]` were never real). Generated `y.tab.c` differs
+only in `#line` numbers (a latent off-by-one the old phantom-literal mode caused
+is also corrected); minic's emitted SSA is unaffected.
 
 ## What changed last session (§1k — so you don't redo it)
 
@@ -119,9 +122,10 @@ capture lex-time depth from the node if you need the true block depth).
 - Rebuild with `cd minic && make minic`; local `yacc` prints conflict counts (now **111
   s/r, 0 r/r**). Justify any new shift/reduce; **no new reduce/reduce**. miniyacc is
   picky: no `/* … */` between a production head and its `:`, none trailing a rule's
-  action, no comment-only action body; **comments inside an action body must avoid `/`,
-  `[`, `]`** (burned again in §1k — keep action-body comments plain prose).
-- Run `tools/test-dos.sh` (must stay **113/113**) and `make check` (SSA, "All is fine!")
+  action, no comment-only action body. (Action-body comments may now contain `'` `"`
+  `/` `[` `]` and braces freely — `cpycode` is comment-aware as of `a4a1fe7`; the old
+  restriction is lifted.)
+- Run `tools/test-dos.sh` (must stay **115/115**) and `make check` (SSA, "All is fine!")
   at the **repo root** (not minic/). Add or extend a probe per runtime-bearing feature;
   the gate runs ~5 min in DOSBox — run it in the background and wait.
 - Spike harness uses **`clang -E`**. Read the real message by running minic directly on
