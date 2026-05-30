@@ -6702,6 +6702,37 @@ stmt: ';'                            { $$ = 0; }
         emit_static_local($3->u.v, $2, 0, buf);
         $$ = 0;
     }
+    | STATIC type IDENT '=' expr ';' {
+        /* Statement-scope static scalar with initializer. */
+        emit_static_local_init($2, $3, $5);
+        $$ = 0;
+    }
+    | STATIC type IDENT '[' ']' '=' gaggr ';' {
+        /* Statement-scope unsized static array with initializer, via
+         * the aggregate machinery into a mangled file-scope data
+         * global.  Needed for in-block static lookup tables such as
+         * py obj.c const pointer-to-type tables. */
+        emit_static_array($2, $3->u.v, -1, $7);
+        $$ = 0;
+    }
+    | STATIC type IDENT '[' expr ']' '=' gaggr ';' {
+        /* Statement-scope sized static array with initializer. */
+        emit_static_array($2, $3->u.v, const_eval($5), $8);
+        $$ = 0;
+    }
+    | STATIC type IDENT '[' expr ']' ';' {
+        /* Statement-scope uninitialized sized static array. */
+        char buf[64];
+        int total;
+        if ($2 == NIL)
+            die("invalid void array");
+        total = SIZE($2) * const_eval($5);
+        sprintf(buf, "align %d { z %d }", iralign($2), total);
+        emit_static_local($3->u.v, IDIR($2), 1, buf);
+        var_set_arraybytes($3->u.v, total);
+        maybe_mark_huge_global(nglo - 1, gloname[nglo - 1], total);
+        $$ = 0;
+    }
     | EXTERN type IDENT ';'          {
         /* extern in statement scope: register as external symbol, no alloc. */
         if ($2 == NIL)

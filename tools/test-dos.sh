@@ -97,6 +97,7 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/void_ptr_cmp_probe.c:minic/dos/tests/void_ptr_cmp_probe.golden.txt:large"
 	"minic/dos/examples/extern_struct_probe.c:minic/dos/tests/extern_struct_probe.golden.txt:medium"
 	"minic/dos/examples/extern_struct_probe.c:minic/dos/tests/extern_struct_probe.golden.txt:large"
+	"minic/dos/examples/block_static_probe.c:minic/dos/tests/block_static_probe.golden.txt:medium"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:medium"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:large"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:huge"
