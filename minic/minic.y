@@ -2107,6 +2107,61 @@ huge_ptr_binop(int op, Symb dst, Symb lhs, Symb rhs)
 	return 1;
 }
 
+/* Fill a struct/union compound literal's members from an initlist into
+ * `%_clit<clitnum>` at byte offset `base_off`.  Sequential and `.field=`
+ * designated items are both handled; a nested-brace item (`{ … }`, op
+ * '{') recurses into a sub-struct/union member, so
+ * `(T){{a}, b, c}` (e.g. py/objtype.c's mp_obj_super_t) works.  The
+ * caller has already zero-initialised the storage. */
+static void
+emit_clit_aggr(int clitnum, int base_off, int sidx, Node *init)
+{
+	int i = 0;
+
+	while (init) {
+		Node *item = init->l;
+		int midx, off;
+		struct Member *m;
+		Symb val;
+
+		if (item->op == 'D') {
+			midx = structfindmember(sidx, item->r->u.v);
+			if (midx < 0)
+				die("unknown member in designated initializer");
+			item = item->l;  /* the value (expr or nested brace) */
+		} else {
+			if (i >= structh[sidx].nmembers)
+				die("too many initializers for struct");
+			midx = i;
+		}
+		m = &structh[sidx].members[midx];
+		off = base_off + m->offset;
+
+		if (item->op == '{') {
+			/* Nested aggregate initializer fills a sub-struct/union. */
+			if (KIND(m->ctyp) != STRUCT_T && KIND(m->ctyp) != UNION_T)
+				die("braced initializer for non-aggregate member");
+			emit_clit_aggr(clitnum, off, DREF(m->ctyp), item->l);
+		} else {
+			val = expr(item);
+			if (off > 0) {
+				fprintf(of, "\t%%t%d =w add %%_clit%d, %d\n", tmp, clitnum, off);
+				fprintf(of, "\tstore%c ", irtyp(m->ctyp));
+				psymb(val);
+				fprintf(of, ", %%t%d\n", tmp);
+				tmp++;
+			} else {
+				fprintf(of, "\tstore%c ", irtyp(m->ctyp));
+				psymb(val);
+				fprintf(of, ", %%_clit%d\n", clitnum);
+			}
+		}
+
+		i = midx + 1;
+		init = init->r;
+	}
+}
+
 Symb
 expr(Node *n)
 {
@@ -2321,45 +2376,10 @@ expr(Node *n)
 					}
 				}
 
-				/* Initialize members from initlist with designator support */
-				while (init) {
-					Node *item = init->l;
-					int midx;
-					struct Member *m;
-					Symb val;
-
-					if (item->op == 'D') {
-						/* Designated field initializer: .field = value */
-						midx = structfindmember(sidx, item->r->u.v);
-						if (midx < 0)
-							die("unknown member in designated initializer");
-						m = &structh[sidx].members[midx];
-						val = expr(item->l);
-						i = midx + 1;  /* Continue from after this member */
-					} else {
-						/* Sequential initializer */
-						if (i >= structh[sidx].nmembers)
-							die("too many initializers for struct");
-						m = &structh[sidx].members[i];
-						val = expr(item);
-						i++;
-					}
-
-					/* Compute member address and store */
-					if (m->offset > 0) {
-						fprintf(of, "\t%%t%d =w add %%_clit%d, %d\n", tmp, clitnum, m->offset);
-						fprintf(of, "\tstore%c ", irtyp(m->ctyp));
-						psymb(val);
-						fprintf(of, ", %%t%d\n", tmp);
-						tmp++;
-					} else {
-						fprintf(of, "\tstore%c ", irtyp(m->ctyp));
-						psymb(val);
-						fprintf(of, ", %%_clit%d\n", clitnum);
-					}
-
-					init = init->r;
-				}
+				/* Initialize members from initlist with designator
+				 * and nested-brace support (see emit_clit_aggr). */
+				(void)i;
+				emit_clit_aggr(clitnum, 0, sidx, init);
 
 				/* For structs, load the struct value (like struct variables) */
 				sr.t = Tmp;
@@ -3250,44 +3270,10 @@ lval(Node *n)
 					}
 				}
 
-				/* Initialize members from initlist with designator support */
-				while (init) {
-					Node *item = init->l;
-					int midx;
-					struct Member *m;
-					Symb val;
-
-					if (item->op == 'D') {
-						/* Designated field initializer: .field = value */
-						midx = structfindmember(sidx, item->r->u.v);
-						if (midx < 0)
-							die("unknown member in designated initializer");
-						m = &structh[sidx].members[midx];
-						val = expr(item->l);
-						i = midx + 1;
-					} else {
-						/* Sequential initializer */
-						if (i >= structh[sidx].nmembers)
-							die("too many initializers for struct");
-						m = &structh[sidx].members[i];
-						val = expr(item);
-						i++;
-					}
-
-					if (m->offset > 0) {
-						fprintf(of, "\t%%t%d =w add %%_clit%d, %d\n", tmp, clitnum, m->offset);
-						fprintf(of, "\tstore%c ", irtyp(m->ctyp));
-						psymb(val);
-						fprintf(of, ", %%t%d\n", tmp);
-						tmp++;
-					} else {
-						fprintf(of, "\tstore%c ", irtyp(m->ctyp));
-						psymb(val);
-						fprintf(of, ", %%_clit%d\n", clitnum);
-					}
-
-					init = init->r;
-				}
+				/* Initialize members from initlist with designator
+				 * and nested-brace support (see emit_clit_aggr). */
+				(void)i;
+				emit_clit_aggr(clitnum, 0, sidx, init);
 			} else {
 				/* Scalar initialization */
 				init = n->l;
@@ -5488,46 +5474,33 @@ typedefenumstart: ENUM '{'
 
 typedefstruct: typedefstructstart smembers '}' IDENT ';'
 {
-	/* Create typedef to the struct */
+	/* Create typedef to the (tagged) struct */
 	int idx = curstruct;
 	curstruct = -1;
 	typhadd($4->u.v, (idx << 3) + STRUCT_T);
 }
              ;
 
-typedefstructstart: STRUCT '{'
-{
-	/* Anonymous struct typedef */
-	char anonname[32];
-	sprintf(anonname, "__typedef_anon_s_%d", typedefanoncount++);
-	curstruct = structadd(anonname, 0);
-}
-                  | STRUCT IDENT '{'
-{
-	/* Tagged struct typedef */
-	curstruct = structadd($2->u.v, 0);
-}
-                  ;
-
 typedefunion: typedefunionstart smembers '}' IDENT ';'
 {
-	/* Create typedef to the union */
+	/* Create typedef to the (tagged) union */
 	int idx = curstruct;
 	curstruct = -1;
 	typhadd($4->u.v, (idx << 3) + UNION_T);
 }
             ;
 
-typedefunionstart: UNION '{'
+typedefstructstart: STRUCT IDENT '{'
 {
-	/* Anonymous union typedef */
-	char anonname[32];
-	sprintf(anonname, "__typedef_anon_u_%d", typedefanoncount++);
-	curstruct = structadd(anonname, 1);
+	/* Tagged-only typedef start.  The anonymous STRUCT { form is reached
+	 * through type: nested_s_begin smembers, so typedef struct {} T parses
+	 * via TYPEDEF type IDENT.  Tagged-only avoids a 2nd STRUCT { marker. */
+	curstruct = structadd($2->u.v, 0);
 }
-                 | UNION IDENT '{'
+                  ;
+
+typedefunionstart: UNION IDENT '{'
 {
-	/* Tagged union typedef */
 	curstruct = structadd($2->u.v, 1);
 }
                  ;
@@ -5664,26 +5637,12 @@ nestedagg: nested_s_begin smembers '}' ';'
 	curstruct = structstk[--structstksp];
 	hoistanonymous(curstruct, idx);
 }
-         | nested_s_begin smembers '}' IDENT ';'
-{
-	/* Named nested struct member: `struct { ... } name;`. */
-	int idx = curstruct;
-	curstruct = structstk[--structstksp];
-	structaddmember(curstruct, $4->u.v, (idx << 3) + STRUCT_T);
-}
          | nested_u_begin smembers '}' ';'
 {
 	/* Anonymous nested union: hoist its members into the parent. */
 	int idx = curstruct;
 	curstruct = structstk[--structstksp];
 	hoistanonymous(curstruct, idx);
-}
-         | nested_u_begin smembers '}' IDENT ';'
-{
-	/* Named nested union member: `union { ... } name;`. */
-	int idx = curstruct;
-	curstruct = structstk[--structstksp];
-	structaddmember(curstruct, $4->u.v, (idx << 3) + UNION_T);
 }
          ;
 
@@ -6243,6 +6202,13 @@ fptpar1: type ',' fptpar1        { $$ = 0; }
        ;
 
 dcls:
+    | dcls enumstart enums '}' ';'
+{
+	/* Function-local enum declaration: `enum { ARG_sep, ARG_end };`.
+	 * The enums rule already registered each constant via varadd; an
+	 * anonymous local enum introduces only the constants (no storage).
+	 * Mirrors the file-scope `edcl` rule. */
+}
     | dcls type IDENT ';'
 {
 	int s, i;
@@ -6692,6 +6658,8 @@ idlist: IDENT                  { $$ = $1; $$->r = 0; }
 inititem: expr                        { $$ = $1; }
         | '.' IDENT '=' expr          { $$ = mknode('D', $4, $2); }
         | '[' NUM ']' '=' expr        { $$ = mknode('d', $5, $2); }
+        | '{' initlist '}'            { $$ = mknode('{', $2, 0); }
+        | '.' IDENT '=' '{' initlist '}' { $$ = mknode('D', mknode('{', $5, 0), $2); }
         ;
 
 initlist: inititem                    { $$ = mknode(0, $1, 0); }
@@ -6817,6 +6785,23 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; }
             idx = structadd_forward($3->u.v, 1);
         $$ = (idx << 3) + UNION_T;
     }
+    | nested_s_begin smembers '}' {
+        /* Anonymous struct used directly as a type: `struct { ... }`
+         * (in a cast `(struct {…} *)`, a local decl `struct {…} v;`, a
+         * typedef `typedef struct {…} T;`, or a struct member `struct {…}
+         * name;`).  Shares the nested_s_begin marker (which pushes the
+         * enclosing curstruct, or -1 at top level) so there is exactly one
+         * reduce action for `STRUCT '{'` — no reduce/reduce conflict. */
+        int idx = curstruct;
+        curstruct = structstk[--structstksp];
+        $$ = (idx << 3) + STRUCT_T;
+    }
+    | nested_u_begin smembers '}' {
+        /* Anonymous union used directly as a type. */
+        int idx = curstruct;
+        curstruct = structstk[--structstksp];
+        $$ = (idx << 3) + UNION_T;
+    }
     | ENUM IDENT           { $$ = INT; /* enum Tag: an enumeration value is an int */ }
     | CONST ENUM IDENT     { $$ = INT; }
     | VOLATILE ENUM IDENT  { $$ = INT; }
@@ -6831,6 +6816,12 @@ stmt: ';'                            { $$ = 0; }
     | RETURN ';'                     { $$ = mkstmt(Ret, 0, 0, 0); }
     | GOTO IDENT ';'                 { Stmt *s = mkstmt(Goto, 0, 0, 0); strcpy(s->label, $2->u.v); $$ = s; }
     | IDENT ':' stmt                 { Stmt *s = mkstmt(Label, $3, 0, 0); strcpy(s->label, $1->u.v); $$ = s; }
+    | enumstart enums '}' ';'        {
+        /* Block-scoped (inner-block) anonymous/tagged enum declaration:
+         * introduces only the constants (registered by the enums rule),
+         * no storage.  Mirrors the dcls-level and file-scope edcl rules. */
+        $$ = 0;
+    }
     | type IDENT ';'                 {
         int s;
         char *v;
@@ -7523,6 +7514,14 @@ pref: post
     | PP pref           { $$ = mknode('p', $2, 0); }
     | MM pref           { $$ = mknode('m', $2, 0); }
     | '(' type ')' pref { $$ = mknode('K', $4, 0); $$->u.n = $2; }
+    | '(' type '(' '*' ')' '(' fptpar0 ')' ')' pref {
+        /* Cast to a function-pointer type: `(RET (*)(PARAMS)) expr`
+         * (py/parse.c: `(void (*)(void *))(mp_lexer_free)`).  minic models
+         * a function pointer as IDIR(FUNC(rettype)); the cast just
+         * reinterprets the operand's value with that type. */
+        $$ = mknode('K', $10, 0);
+        $$->u.n = IDIR(FUNC($2));
+    }
     ;
 
 post: NUM
