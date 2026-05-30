@@ -6911,8 +6911,12 @@ stmt: ';'                            { $$ = 0; }
     | IF '(' expr ')' stmt           { $$ = mkstmt(If, $3, $5, 0); }
     | FOR '(' comma_exp0 ';' comma_exp0 ';' comma_exp0 ')' stmt
                                      { $$ = mkfor($3, $5, $7, $9); }
-    | FOR '(' type IDENT '=' expr ';' exp0 ';' exp0 ')' stmt
+    | FOR '(' type IDENT '=' expr ';' comma_exp0 ';' comma_exp0 ')' stmt
                                      {
+        /* C99 for-init.  Test and increment use comma_exp0 (matching the
+         * plain `for`) so a comma increment works, e.g.
+         *   for (size_t i = n; i > 0; i--, ptrs++)
+         * in py/gc.c and py/bc.c. */
         int s;
         char *v;
         Node *init_expr;
@@ -6925,7 +6929,7 @@ stmt: ';'                            { $$ = 0; }
         init_expr = mknode('=', $4, $6);
         $$ = mkfor(init_expr, $8, $10, $12);
     }
-    | FOR '(' type IDENT '=' expr ',' '*' IDENT '=' expr ';' exp0 ';' exp0 ')' stmt
+    | FOR '(' type IDENT '=' expr ',' '*' IDENT '=' expr ';' comma_exp0 ';' comma_exp0 ')' stmt
                                      {
         /* Two-pointer-declarator C99 for-init: the symmetric
          * `for (T *a = e1, *b = e2; ...)` form.  The first star is
