@@ -108,6 +108,8 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/const_init_probe.c:minic/dos/tests/const_init_probe.golden.txt:large"
 	"minic/dos/examples/for_comma_inc_probe.c:minic/dos/tests/for_comma_inc_probe.golden.txt:medium"
 	"minic/dos/examples/for_comma_inc_probe.c:minic/dos/tests/for_comma_inc_probe.golden.txt:large"
+	"minic/dos/examples/block_scope_probe.c:minic/dos/tests/block_scope_probe.golden.txt:medium"
+	"minic/dos/examples/block_scope_probe.c:minic/dos/tests/block_scope_probe.golden.txt:large"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:medium"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:large"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:huge"

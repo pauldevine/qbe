@@ -189,6 +189,30 @@ int yylex(void), yylex_inner(void), yyerror(char *);
 int prevtok = 0;  /* last token yylex returned; tag-namespace disambiguation */
 int brace_depth = 0;     /* { } nesting the lexer has returned so far */
 int pending_varclr = 0;  /* function body just closed; drop locals before next token */
+
+/* Inner-block scope via alpha-renaming.  minic has a single flat local
+ * symbol table and emits function bodies lazily (uses are resolved by
+ * name at emit time via varget), so a name reused across distinct blocks
+ * with *different* types cannot share one symtab slot.  When a local
+ * declaration collides with a still-live local of a different type, the
+ * new declarator is given a unique mangled name (`name$N`) and a rename
+ * binding `name -> name$N` is pushed; the lexer then stamps that mangled
+ * name into every subsequent *use* of the source name (uses are lexed
+ * after the colliding decl reduces — verified: miniyacc default-reduces
+ * the `type IDENT [= expr] ;` rules before reading the next token).  On
+ * block exit the binding is popped (at the next yylex, by which point any
+ * last-statement decl in the block has already reduced).  Renaming only
+ * fires on a different-type collision — same-type re-declaration still
+ * folds in varadd (stevie's sibling for-bodies), and the files with no
+ * such collision are byte-for-byte unchanged. */
+enum { NRename = 256 };
+struct {
+	char canon[NString];   /* source name */
+	char mangled[NString]; /* unique replacement, e.g. t$3 */
+	int depth;             /* brace_depth at the colliding decl */
+} renamestk[NRename];
+int renamestksp = 0;
+int rename_serial = 0;   /* monotonic counter for unique mangled names */
 Symb expr(Node *), lval(Node *);
 void branch(Node *, int, int);
 int stmt(Stmt *, int, int);
@@ -338,6 +362,10 @@ varclr()
 {
 	unsigned h;
 
+	/* Drop any inner-block renames left over from the previous function
+	 * (defensive — a well-formed body pops them all at its closing }). */
+	renamestksp = 0;
+
 	for (h=0; h<NVar; h++)
 		if ((!varh[h].glo && !varh[h].enumconst) || varh[h].isstaticlocal)
 			varh[h].v[0] = 0;
@@ -412,9 +440,11 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 			 * input); the second decl effectively rebinds %name.
 			 * Different-typed re-declaration across sibling blocks
 			 * (e.g. MicroPython's `{const byte *t;}` then `{size_t
-			 * t;}`) is NOT folded here — minic has no inner-block
-			 * scoping, so a single shared %name/type would miscompile
-			 * the earlier block's uses; that case still errors out. */
+			 * t;}`) is handled *before* reaching varadd, by
+			 * block_scope_decl() — it alpha-renames the new declarator
+			 * so the two bindings stay distinct.  By the time a
+			 * different-typed name reaches varadd unrenamed, it is a
+			 * genuine redefinition. */
 			if (glo == 0 && varh[h].glo == 0 && !varh[h].isextern &&
 			    !varh[h].enumconst && varh[h].ctyp == ctyp) {
 				varh[h].isarray = isarray;
@@ -425,6 +455,67 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 		h = (h+1) % NVar;
 	} while(h != h0);
 	die("too many variables");
+}
+
+/* Return the active mangled name for a source identifier, or NULL.  The
+ * most recently pushed binding (innermost scope) wins. */
+char *
+rename_lookup(char *v)
+{
+	int i;
+	for (i = renamestksp - 1; i >= 0; i--)
+		if (strcmp(renamestk[i].canon, v) == 0)
+			return renamestk[i].mangled;
+	return NULL;
+}
+
+/* Pop all rename bindings introduced in a block deeper than the current
+ * lexer brace_depth (i.e. blocks the lexer has since closed).  Run at the
+ * start of every yylex() so a block-scoped rename stops stamping uses the
+ * moment its block ends. */
+void
+rename_pop_closed(void)
+{
+	while (renamestksp > 0 && renamestk[renamestksp-1].depth > brace_depth)
+		renamestksp--;
+}
+
+/* Inner-block scope hook for a local declaration.  If `node`'s name
+ * collides with a still-live local of a *different* type, give the
+ * declarator a unique mangled name, register a rename so subsequent uses
+ * resolve to it, and return the mangled name; otherwise return the name
+ * unchanged.  Mutates node->u.v in place so an initializer assignment
+ * built from the same node targets the renamed slot. */
+char *
+block_scope_decl(Node *node, unsigned ctyp)
+{
+	char *v = node->u.v;
+	unsigned h0, h;
+
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (varh[h].v[0] == 0)
+			break;
+		if (strcmp(varh[h].v, v) == 0) {
+			if (varh[h].glo == 0 && !varh[h].isextern &&
+			    !varh[h].enumconst && varh[h].ctyp != ctyp) {
+				if (renamestksp >= NRename)
+					die("too many block-scoped renames");
+				sprintf(renamestk[renamestksp].mangled,
+					"%s$%d", v, ++rename_serial);
+				strcpy(renamestk[renamestksp].canon, v);
+				renamestk[renamestksp].depth = brace_depth;
+				strcpy(node->u.v,
+					renamestk[renamestksp].mangled);
+				renamestksp++;
+				return node->u.v;
+			}
+			break;
+		}
+		h = (h+1) % NVar;
+	} while (h != h0);
+	return v;
 }
 
 void
@@ -6714,7 +6805,7 @@ stmt: ';'                            { $$ = 0; }
         char *v;
         if ($1 == NIL)
             die("invalid void declaration");
-        v = $2->u.v;
+        v = block_scope_decl($2, $1);
         s = SIZE($1);
         varadd(v, 0, $1, 0);
         fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), s);
@@ -6732,7 +6823,7 @@ stmt: ';'                            { $$ = 0; }
         Node *init_node;
         if ($1 == NIL)
             die("invalid void declaration");
-        v = $2->u.v;
+        v = block_scope_decl($2, $1);
         s = SIZE($1);
         varadd(v, 0, $1, 0);
         fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), s);
@@ -7485,6 +7576,13 @@ yylex()
 		varclr();
 		pending_varclr = 0;
 	}
+	/* Retire inner-block renames whose block the lexer has already
+	 * closed.  Deferred to here (rather than firing at the '}' itself)
+	 * so a rename introduced by a block's *last* statement decl — which
+	 * reduces under the '}' lookahead — is still established before this
+	 * pop runs, and is then dropped before the next (outer) token is
+	 * lexed.  See [[minic-inner-block-scope]]. */
+	rename_pop_closed();
 	t = yylex_inner();
 	if (t == '{')
 		brace_depth++;
@@ -7928,6 +8026,23 @@ yylex_inner()
 				return TNAME;
 			}
 			yylval.n = vn;
+		}
+		/* Inner-block scope: rewrite a *use* of a source identifier to
+		 * its active block-scoped mangled name.  Suppressed when the
+		 * previous token is a type-specifier or struct/union/enum (this
+		 * IDENT is then a declarator or a tag, handled elsewhere, not a
+		 * value use).  Fires only when a rename is active, so files
+		 * with no different-typed block-scope collision are unaffected. */
+		if (prevtok != TVOID && prevtok != TCHAR && prevtok != TSHORT
+		    && prevtok != TINT && prevtok != TLNG && prevtok != TLNGLNG
+		    && prevtok != TUNSIGNED && prevtok != TSIGNED
+		    && prevtok != TFLOAT && prevtok != TDOUBLE
+		    && prevtok != TBOOL && prevtok != TNAME
+		    && prevtok != STRUCT && prevtok != UNION
+		    && prevtok != ENUM) {
+			char *m = rename_lookup(yylval.n->u.v);
+			if (m)
+				strcpy(yylval.n->u.v, m);
 		}
 		return IDENT;
 	}
