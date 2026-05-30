@@ -6653,6 +6653,14 @@ dcls:
 	if (constfoldable($4) && const_eval($4) == 0)
 		die("static assertion failed");
 }
+    | dcls TYPEDEF type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
+{
+	/* Function-local typedef of a function-pointer type.  C permits
+	 * typedefs in block scope; minic keeps a single global typedef
+	 * table, which is fine as long as the name does not clash.  Mirrors
+	 * the file-scope fnptr-typedef rule.  Needed by py stream.c. */
+	typhadd($6->u.v, IDIR(FUNC($3)));
+}
     ;
 
 idlist: IDENT                  { $$ = $1; $$->r = 0; }
@@ -7040,6 +7048,33 @@ stmt: ';'                            { $$ = 0; }
         i2 = mknode('=', $9, $11);
         ini = mknode(',', i1, i2);
         $$ = mkfor(ini, $13, $15, $17);
+    }
+    | FOR '(' type IDENT '=' expr ',' init_decllist ';' comma_exp0 ';' comma_exp0 ')' stmt
+                                     {
+        /* Multi-scalar-declarator C99 for-init sharing one base type:
+         *   for (size_t block = 0, len = 0, len_free = 0; !finish;)
+         * in py gc.c.  Allocate each declarator now (like every local);
+         * chain the initializers into one comma-expression that mkfor
+         * runs at loop entry.  Distinguished from the two-pointer form
+         * by the token after the comma (IDENT here vs a star there). */
+        int s;
+        Node *ini, *id, *n;
+        if ($3 == NIL)
+            die("invalid void declaration");
+        s = SIZE($3);
+        varadd($4->u.v, 0, $3, 0);
+        fprintf(of, "\t%%%s =%c alloc%d %d\n", $4->u.v, ALLOC_T(), iralign($3), s);
+        ini = mknode('=', $4, $6);
+        for (n = $8; n; n = n->r) {
+            varadd(n->u.v, 0, $3, 0);
+            fprintf(of, "\t%%%s =%c alloc%d %d\n", n->u.v, ALLOC_T(), iralign($3), s);
+            if (n->l) {
+                id = mknode('V', 0, 0);
+                strcpy(id->u.v, n->u.v);
+                ini = mknode(',', ini, mknode('=', id, n->l));
+            }
+        }
+        $$ = mkfor(ini, $10, $12, $14);
     }
     | SWITCH '(' expr ')' stmt       { $$ = mkstmt(Switch, $3, $5, 0); }
     | CASE pref ':' stmt             { Stmt *s = mkstmt(Case, 0, $4, 0); s->val = const_eval($2); $$ = s; }
