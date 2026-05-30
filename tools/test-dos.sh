@@ -98,6 +98,8 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/extern_struct_probe.c:minic/dos/tests/extern_struct_probe.golden.txt:medium"
 	"minic/dos/examples/extern_struct_probe.c:minic/dos/tests/extern_struct_probe.golden.txt:large"
 	"minic/dos/examples/block_static_probe.c:minic/dos/tests/block_static_probe.golden.txt:medium"
+	"minic/dos/examples/for_multidecl_probe.c:minic/dos/tests/for_multidecl_probe.golden.txt:medium"
+	"minic/dos/examples/for_multidecl_probe.c:minic/dos/tests/for_multidecl_probe.golden.txt:large"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:medium"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:large"
 	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:huge"

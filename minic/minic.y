@@ -6767,6 +6767,27 @@ stmt: ';'                            { $$ = 0; }
         init_expr = mknode('=', $4, $6);
         $$ = mkfor(init_expr, $8, $10, $12);
     }
+    | FOR '(' type IDENT '=' expr ',' '*' IDENT '=' expr ';' exp0 ';' exp0 ')' stmt
+                                     {
+        /* Two-pointer-declarator C99 for-init: the symmetric
+         * `for (T *a = e1, *b = e2; ...)` form.  The first star is
+         * folded into type by the type rule, so both vars share type
+         * $3.  Inits run left-to-right via a comma node.  Covers the
+         * MicroPython spelling in py objstr.c and py qstr.c. */
+        int s;
+        Node *i1, *i2, *ini;
+        if ($3 == NIL)
+            die("invalid void declaration");
+        s = SIZE($3);
+        varadd($4->u.v, 0, $3, 0);
+        fprintf(of, "\t%%%s =%c alloc%d %d\n", $4->u.v, ALLOC_T(), iralign($3), s);
+        varadd($9->u.v, 0, $3, 0);
+        fprintf(of, "\t%%%s =%c alloc%d %d\n", $9->u.v, ALLOC_T(), iralign($3), s);
+        i1 = mknode('=', $4, $6);
+        i2 = mknode('=', $9, $11);
+        ini = mknode(',', i1, i2);
+        $$ = mkfor(ini, $13, $15, $17);
+    }
     | SWITCH '(' expr ')' stmt       { $$ = mkstmt(Switch, $3, $5, 0); }
     | CASE pref ':' stmt             { Stmt *s = mkstmt(Case, 0, $4, 0); s->val = const_eval($2); $$ = s; }
     | CASE pref '+' pref ':' stmt    { Stmt *s = mkstmt(Case, 0, $6, 0); s->val = const_eval($2) + const_eval($4); $$ = s; }
