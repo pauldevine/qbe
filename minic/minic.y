@@ -187,6 +187,8 @@ struct AsmStmt {
 
 int yylex(void), yylex_inner(void), yyerror(char *);
 int prevtok = 0;  /* last token yylex returned; tag-namespace disambiguation */
+int brace_depth = 0;     /* { } nesting the lexer has returned so far */
+int pending_varclr = 0;  /* function body just closed; drop locals before next token */
 Symb expr(Node *), lval(Node *);
 void branch(Node *, int, int);
 int stmt(Stmt *, int, int);
@@ -235,8 +237,9 @@ struct {
 	                    * but symtab entry should be cleared between functions) */
 } varh[NVar];
 
-/* Typedef table */
-enum { NTyp = 128 };
+/* Typedef table.  Sized for real preprocessed TUs (MicroPython headers
+ * define well over 128 typedefs); minic is host-compiled so this is cheap. */
+enum { NTyp = 512 };
 struct {
 	char v[NString];
 	unsigned ctyp;
@@ -265,8 +268,11 @@ struct Member {
 	int isflex;      /* 1 = flexible array member `T x[];` (count 0 but decays) */
 };
 
-/* Struct/union definition table */
-enum { NStruct = 64 };
+/* Struct/union definition table.  minic is a host-compiled tool (runs on
+ * the build machine, not on DOS), so this is sized for real translation
+ * units: preprocessed MicroPython headers define well over 64 aggregate
+ * types in a single TU. */
+enum { NStruct = 256 };
 struct {
 	char name[NString];
 	int isunion;  /* 1 for union, 0 for struct */
@@ -822,6 +828,29 @@ var_isarray(char *v)
 			return 0;
 		if (strcmp(varh[h].v, v) == 0)
 			return varh[h].isarray;
+		h = (h+1) % NVar;
+	} while (h != h0);
+	return 0;
+}
+
+/* Probe the symbol table for a *local* declaration (parameter or
+ * function-scope variable, including static locals) named `v`.  Used by
+ * the lexer to recognise a name that shadows a same-named file-scope
+ * typedef: once such a local is in scope, uses of the name are ordinary
+ * identifiers (IDENT), not the typedef (TNAME).  Returns 0 if not found
+ * or only a global/enum/typedef entry exists. */
+int
+var_islocal(char *v)
+{
+	unsigned h0, h;
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (varh[h].v[0] == 0)
+			return 0;
+		if (strcmp(varh[h].v, v) == 0)
+			return (!varh[h].glo && !varh[h].enumconst)
+			    || varh[h].isstaticlocal;
 		h = (h+1) % NVar;
 	} while (h != h0);
 	return 0;
@@ -6496,7 +6525,25 @@ arg1: expr          { $$ = mknode(0, $1, 0); }
 int
 yylex()
 {
-	int t = yylex_inner();
+	int t;
+
+	/* A function body's closing '}' is the lookahead that reduces (and
+	 * emits) the body's last statement, which still reads locals via
+	 * varget(); so we can't drop locals the instant we return '}'.
+	 * Defer it to the next token request — by then all '}'-triggered
+	 * reductions are done.  Clearing here (rather than only at the next
+	 * function's init marker) means the prior function's locals are gone
+	 * before the next function's parameter-type tokens are lexed, so
+	 * var_islocal() can't misfire on a typedef-named param type. */
+	if (pending_varclr) {
+		varclr();
+		pending_varclr = 0;
+	}
+	t = yylex_inner();
+	if (t == '{')
+		brace_depth++;
+	else if (t == '}' && brace_depth > 0 && --brace_depth == 0)
+		pending_varclr = 1;
 	prevtok = t;
 	return t;
 }
@@ -6893,13 +6940,49 @@ yylex_inner()
 			}
 		yylval.n = mknode('V', 0, 0);
 		strcpy(yylval.n->u.v, v);
+		/* An identifier right after '.' or '->' is a struct/union member
+		 * name (the member namespace), never a type — return IDENT even
+		 * when it collides with a typedef, e.g. `h.qstr` / `p->qstr`
+		 * where `qstr` is also a typedef. */
+		if (prevtok == '.' || prevtok == ARROW)
+			return IDENT;
 		/* Check if it's a typedef name.  An identifier directly after
 		 * struct/union/enum is a tag (separate C namespace) and must
 		 * stay IDENT even when a same-named typedef exists, e.g.
-		 * `typedef struct Foo Foo; struct Foo { ... };`. */
+		 * `typedef struct Foo Foo; struct Foo { ... };`.  Probe into a
+		 * scratch ctyp (not yylval) so the IDENT node value survives if
+		 * we fall through. */
 		if (prevtok != STRUCT && prevtok != UNION && prevtok != ENUM
-		    && typhget(v, &yylval.u))
-			return TNAME;
+		    && !var_islocal(v)) {
+			unsigned tnctyp;
+			Node *vn = yylval.n;
+			if (typhget(v, &tnctyp)) {
+				/* If a complete type-specifier was just parsed, the
+				 * next identifier begins a declarator (a parameter /
+				 * variable / member name), even when it collides with
+				 * a typedef name — e.g. `qstr qstr` or `int qstr`.  C
+				 * keeps these contexts separate: a typedef name can
+				 * only appear as the *first* type token of a
+				 * declaration (or after a qualifier), never
+				 * immediately after another full type-specifier.
+				 * typhget() set g_td_array{dim,elem} from the typedef
+				 * entry; clear them since this is a declarator name. */
+				if (prevtok == TVOID || prevtok == TCHAR
+				    || prevtok == TSHORT || prevtok == TINT
+				    || prevtok == TLNG || prevtok == TLNGLNG
+				    || prevtok == TUNSIGNED || prevtok == TSIGNED
+				    || prevtok == TFLOAT || prevtok == TDOUBLE
+				    || prevtok == TBOOL || prevtok == TNAME) {
+					g_td_arraydim = 0;
+					g_td_arrayelem = 0;
+					yylval.n = vn;
+					return IDENT;
+				}
+				yylval.u = tnctyp;
+				return TNAME;
+			}
+			yylval.n = vn;
+		}
 		return IDENT;
 	}
 

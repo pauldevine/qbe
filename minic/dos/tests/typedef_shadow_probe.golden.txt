@@ -1,0 +1,4 @@
+member=42 (want 42)
+param=17 (want 17)
+param2=30 (want 30)
+local=105 (want 105)
