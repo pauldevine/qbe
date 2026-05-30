@@ -1,3 +1,46 @@
+# Next session — MicroPython port: py/*.c ASM->OBJ-clean (132/132 to OMF object) (post §1p)
+
+> **§1p (build bring-up step 2): all 132 py/*.c now survive asm->obj** — each
+> per-TU i8086 `.asm` (from §1o's `cg/<base>.asm`) goes through the real build's
+> `asm_to_omf.py` wrap + `nasm -f obj` and produces an OMF object file.  New
+> harness `build/mp-spike/run-asmobj.sh` (committed; the other spike scripts are
+> not).  First run: 13 OK, 119 NASM_FAIL — but only **3 distinct root causes**,
+> all fixed; second run **132/132 OK**.  `make check` green, 111 s/r 0 r/r, gate
+> **125→128**.
+> Re-run: `bash build/mp-spike/run-asmobj.sh $(cut -f1 build/mp-spike/codegen.tsv)`
+> (needs §1o's `run-codegen.sh` to have produced `cg/*.asm` first).
+>
+> **The three §1p fixes (so you don't redo them):**
+> 1. **`asm_to_omf.py` missed multi-underscore externs** (118 of 132 files).
+>    `__builtin_clz` is mangled by minic to `___builtin_clz` and called via
+>    `call far ___builtin_clz`.  `collect_referenced_syms`'s regex
+>    `\b(_[A-Za-z]…)` can't match it — the word boundary sits before the FIRST
+>    underscore, which is followed by `_` not a letter, so the symbol was never
+>    added to the `extern` set and nasm failed "symbol not defined".  Fix:
+>    `\b(_+[A-Za-z][\w]*)`.  (NB: `___builtin_clz` itself still has no runtime
+>    impl — that's a libstub/link-layer gap for later; the per-TU object just
+>    needs the extern declared.)
+> 2. **C labels collided across functions** (py/runtime.c).  Two functions each
+>    with a `too_short:` C label both emitted the flat `@user_too_short` block
+>    → one asm symbol `user_too_short:` defined twice → nasm "inconsistently
+>    redefined".  C labels are function-scoped.  Fix in `minic/minic.y`: a
+>    per-function counter `cur_fn_labelid` (bumped at all 4 function-body emit
+>    starts) suffixes every user label `@user_<name>_F<id>` at the Goto/Label
+>    emit sites.  These labels aren't exported, so cross-module is already safe;
+>    only the intra-module collision needed fixing.  Pinned by `dup_label_probe.c`.
+> 3. **16-bit Ocopy of a relocatable address into a slot dropped the size**
+>    (py/mpprint.c `_pad_common+17`, py/objstr.c `__str_uni_strip_whitespace`).
+>    `=w add $sym, off` folds to a copy; when rega lands it in a slot the
+>    generic `{Ocopy,Ki,"mov %=, %0"}` template emitted `mov [bp-N], _sym+off`
+>    with no `word`, so nasm's OBJ writer rejected the relocation ("OBJ format
+>    can only handle 16- or 32-bit relocations").  Fix in `i8086/emit.c`: an
+>    early special-case for `Ocopy Kw && to=RSlot && arg[0]=RCon` emits
+>    `mov word [bp-N], <imm/addr>` (no scratch reg, rega unaffected).  The Kl
+>    Ocopy path already sized CAddr→slot correctly.  Pinned by `caddr_slot_probe.c`
+>    (medium-only: far/Kl pointers route through the already-correct Kl path).
+>
+> Probes: `dup_label_probe.c` (medium+large), `caddr_slot_probe.c` (medium).
+
 # Next session — MicroPython port: py/*.c CODEGEN-clean (132/132 to i8086 asm) (post §1o)
 
 > **§1o (build bring-up step 1): all 132 py/*.c now survive the FULL codegen
@@ -143,17 +186,17 @@ action comments can use `'`/`"`/braces freely.
 
 ## Scope for next session — build bring-up, the next layer down the pipeline
 
-All 132 py/*.c now go C→preprocess→minic(SSA)→qbe(i8086 asm) cleanly (§1o).
-The next layers toward a runnable REPL, in increasing cost:
+All 132 py/*.c now go C→preprocess→minic(SSA)→qbe(i8086 asm)→asm_to_omf+nasm
+cleanly (§1o codegen, §1p asm→obj).  The next layers toward a runnable REPL,
+in increasing cost:
 
-1. **Extend the codegen spike to asm→obj per TU** (cheapest next signal).
-   `run-codegen.sh` stops at `qbe → .asm`.  The real build then runs the
-   asm-clean sed/awk/perl pipeline + `asm_to_omf.py` + `nasm -f obj` per TU
-   (see `tools/build-example.sh` stages 3–4).  Add those stages to a
-   `run-asmobj.sh` (or extend run-codegen.sh) over the 132 .asm files to find
-   asm-syntax / OMF-wrap gaps before attempting a link.  Per-TU, no link.
+1. **DONE (§1p): asm→obj per TU.**  `build/mp-spike/run-asmobj.sh` wraps each
+   `cg/<base>.asm` with `asm_to_omf.py` + `nasm -f obj`; 132/132 produce OMF
+   objects.  Three gaps fixed (multi-`_` externs, per-function label
+   uniquification, 16-bit Ocopy-CAddr→slot size) — see §1p above.
 
-2. **First real LINK of a curated core subset.**  The dos8086 port does NOT
+2. **First real LINK of a curated core subset** (NOW the cheapest next signal).
+   The dos8086 port does NOT
    need all 131 host objects — drop the other-arch `asm*`/`emitn*`/`nlr*`
    (keep `nlrsetjmp`).  Needs: (a) genhdr headers (already generated at
    `~/projects/micropython/ports/minimal/build/genhdr/` — point `-I` at it or
@@ -186,7 +229,7 @@ session that pinned the fnptr-cast at line 2718 of parse.pp.c in seconds.
   its `:` (this bit twice this session — keep standalone comments OUT of the
   space between a `;` and the next rule head; put them inside the action body
   instead, where `cpycode` is now comment-aware).
-- Run `tools/test-dos.sh` (must stay **121/121**) and `make check` (SSA, "All
+- Run `tools/test-dos.sh` (must stay **128/128**) and `make check` (SSA, "All
   is fine!") at the **repo root** (not minic/). Add or extend a probe per
   runtime-bearing feature; the gate runs ~5 min in DOSBox — run it in the
   background and wait.

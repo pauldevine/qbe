@@ -240,6 +240,13 @@ char cur_fn_name[NString];  /* Name of function currently being emitted — used
                              * to mangle function-local statics into file-scope
                              * data globals (`static int x;` in foo() →
                              * `data $_foo_x = ...`). */
+int cur_fn_labelid = 0;     /* Bumped once per emitted function body.  C `goto`
+                             * labels are function-scoped, but minic emits them
+                             * into a flat per-TU asm namespace (`@user_<name>`);
+                             * two functions sharing a label name (e.g. two
+                             * `too_short:` in py/runtime.c) then collide at the
+                             * assembler.  Suffixing every user label with this
+                             * id (`@user_<name>_F<id>`) makes them unique. */
 char *ini[NGlo];
 char gloname[NGlo][NString];  /* Real C name for each global slot — used to
                                * emit `data $foo = ...` instead of $glo1 so
@@ -3708,10 +3715,10 @@ stmt(Stmt *s, int b, int c)
 			stmt((Stmt*)s->p2, b, c);
 		return 0;
 	case Goto:
-		fprintf(of, "\tjmp @user_%s\n", s->label);
+		fprintf(of, "\tjmp @user_%s_F%d\n", s->label, cur_fn_labelid);
 		return 1;
 	case Label:
-		fprintf(of, "@user_%s\n", s->label);
+		fprintf(of, "@user_%s_F%d\n", s->label, cur_fn_labelid);
 		return stmt(s->p1, b, c);
 	case Asm: {
 		struct AsmStmt *a = (struct AsmStmt *)s->p1;
@@ -5102,6 +5109,7 @@ emit_knr_func(char *fname, Node *params)
 			varadd(n->u.v, 0, INT, 0);
 
 	curfntyp = INT;
+	cur_fn_labelid++;
 	strncpy(cur_fn_name, fname, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(fname, 1, FUNC(INT), 0);
@@ -5143,6 +5151,7 @@ emit_knr_func_typed(char *fname, Node *params)
 		if (!varget(n->u.v))
 			varadd(n->u.v, 0, INT, 0);
 
+	cur_fn_labelid++;
 	strncpy(cur_fn_name, fname, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(fname, 1, FUNC(curfntyp), 0);
@@ -6010,6 +6019,7 @@ ansi_func_proto: '(' init_ansi par0 ')'
 	int t, m;
 
 	curfntyp = parsed_type;
+	cur_fn_labelid++;
 	strncpy(cur_fn_name, parsed_ident, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
@@ -6145,6 +6155,7 @@ prot_knr: IDENT '(' par0 ')'
 	int t, m;
 
 	curfntyp = INT;
+	cur_fn_labelid++;
 	strncpy(cur_fn_name, $1->u.v, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd($1->u.v, 1, FUNC(INT), 0);

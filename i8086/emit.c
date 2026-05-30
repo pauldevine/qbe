@@ -1049,6 +1049,26 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		return;
 	}
 
+	/* Ocopy Kw with an immediate source into a memory (slot) destination.
+	 * The generic `mov %=, %0` template emits `mov [bp-N], <imm>` with no
+	 * size qualifier; for a relocatable address (`mov [bp-N], _sym+off`,
+	 * from a `=w add $sym, off` folded to a copy) or a bare integer, NASM
+	 * can't size the operand and the OBJ writer rejects the relocation
+	 * ("OBJ format can only handle 16- or 32-bit relocations").  A memory
+	 * destination needs an explicit `word`; a register dest does not.  No
+	 * scratch register is touched, so rega's allocation is unaffected. */
+	if (i->op == Ocopy && i->cls == Kw
+	    && rtype(i->to) == RSlot && rtype(i->arg[0]) == RCon) {
+		Con *pc = &fn->con[i->arg[0].val];
+		fprintf(f, "\tmov word [bp%+ld], ", (long)slot(i->to, fn));
+		if (pc->type == CAddr)
+			emitaddr(pc, f);
+		else
+			fprintf(f, "%"PRIi64, (int64_t)(int16_t)pc->bits.i);
+		fputc('\n', f);
+		return;
+	}
+
 	/* Special handling for 32-bit (Kl) operations on 16-bit hardware.
 	 * Ostorel reaches here even though its result class is Kw (void) —
 	 * the data IS 32-bit, so we need the multi-word path.  Same for

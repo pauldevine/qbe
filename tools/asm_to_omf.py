@@ -137,7 +137,11 @@ def collect_referenced_syms(line):
     syms = set()
     # Strip line comment so we don't pick up `; XXX was test es,es`
     code = re.split(r';', line, maxsplit=1)[0]
-    for m in re.finditer(r'\b(_[A-Za-z][\w]*)\b', code):
+    # One-or-more leading underscores: a C `__builtin_clz` reference is
+    # mangled by minic to `___builtin_clz`, and the word boundary only
+    # sits before the FIRST underscore — a `_[A-Za-z]` pattern there sees
+    # `__` and never matches, so such symbols silently miss the extern set.
+    for m in re.finditer(r'\b(_+[A-Za-z][\w]*)\b', code):
         syms.add(m.group(1))
     return syms
 
