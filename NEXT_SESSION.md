@@ -1,128 +1,164 @@
-# Next session — MicroPython port: remaining grammar blockers (post §1i)
+# Next session — MicroPython port: remaining grammar blockers (post §1j)
 
 > Master tracker: `MICROPYTHON_PORT.md`. Spike findings: `MICROPYTHON_SPIKE_REPORT.md`.
-> **Spike now at 118/132 OK** (was 111 at the start of §1i). Re-run
-> `build/mp-spike/run-spike.sh ~/projects/micropython/py/*.c` then
+> **Spike now at 120/132 OK** (was 118 at the start of §1j). Re-run
+> `bash build/mp-spike/run-spike.sh ~/projects/micropython/py/*.c` then
 > `cut -f2 build/mp-spike/summary.tsv | sort | uniq -c` to confirm before peeling more.
-> Gate **100/100**. 109 s/r, 0 r/r. `make check` green.
+> Gate **106/106**. 111 s/r, 0 r/r. `make check` green.
 
-## What changed last session (§1i — so you don't redo it)
+## What changed last session (§1j — so you don't redo it)
 
-Six independent minic frontend wins (spike 111 → 118), all in `minic/minic.y`; no
-i8086/QBE backend changes. Six commits, each with its own probe (medium + large unless
-noted), gate 89 → 100:
+Three independent minic wins (spike 118 → 120), all in `minic/minic.y` (+ a one-line
+`minic/yacc.c` change); no i8086/QBE backend changes. Three commits, each with its own
+probe (medium + large), gate 100 → 106:
 
-1. **Designated struct/union array initializers** (`b229efb`) — `T arr[]={ {.f=v}, … }` at
-   file scope and function-local `static`, routed through the generic aggregate machinery
-   (`emit_global_array`/`emit_static_array`/`build_array_init` → `agg_emit_array`). Byte-
-   identical to the old sai_* round-robin for plain cases (minic never pads structs); adds
-   per-element `.field=` designators incl. a union member set by a designator (the
-   `mp_arg_t allowed_args[]` idiom). Probe `mp_designated_array_probe.c`.
-2. **Pointer comparisons don't scale** (`759ab6f`) — `prom()` fell through to the
-   pointer-arith Scale path for `== != < <=`, computing `SIZE(DREF(void*))` → fatal "void
-   has no size" (blocked `if (ptr == 0)`). Now returns the pointer operand's type directly
-   for comparison ops. Also fixed a latent spurious-`mul` on ptr<->ptr compares. Probe
-   `void_ptr_cmp_probe.c`. **Flips py/malloc.c.**
-3. **extern struct fwd-decl + empty top-level `;`** (`3929eca`) — `extern struct TAG name;`
-   (+ `[]`/`*` forms) forward-declares an unseen tag instead of dying; a bare `;` at file
-   scope is an empty declaration (`prog ';'`). Probe `extern_struct_probe.c`. **Flips
-   py/modsys.c.**
-4. **static decls inside nested blocks** (`5b6c709`) — statement-scope `static T v=init;`,
-   `static T a[]={…};`, `static T a[N]={…};`, `static T a[N];` (were only in function-top
-   `dcls`). Lowered to mangled file-scope globals. Probe `block_static_probe.c` (medium-only;
-   `&global` items need far reloc). **Flips py/obj.c.**
-5. **Two-pointer-declarator C99 for-init** (`590c6ed`) — `for (T *a=e1, *b=e2; …)` (both vars
-   share the pointer type; inits via a comma node). Probe `for_multidecl_probe.c`. **Flips
-   py/qstr.c, py/map.c.**
-6. **char-array init from string literal** (`f9f3692`) — `char NAME[]="…";` at file scope and
-   static-local (was only the `char *p="…"` pointer init; even file-scope array form
-   failed). Emits NUL-terminated bytes; `sizeof` uses escape-aware `strlit_bytelen`. Probe
-   `string_array_probe.c`. **Flips py/objstr.c, py/repl.c.**
+1. **Tentative-definition reuse** (`53b3942`) — a file-scope uninitialized definition
+   (`static const T x;`) followed by an initialized one (`static const T x = {…};`) errored
+   with "double definition". Globals are buffered in `ini[]`/`gloname[]` and emitted at end
+   of translation, so the initialized definition reuses the tentative slot. New varh
+   `istentative` field; `mark_tentative()` flags the uninitialized global; `glo_redef_index()`
+   returns its buffered glo index (clearing the flag) so `emit_global_aggregate()` overwrites
+   `ini[idx]` instead of double-emitting `data $x`. Probe `tentative_def_probe.c`. **Flips
+   py/objdict.c.**
+2. **Const-expr file-scope scalar initializers + deeper parser stack** (`e890cc9`) — replaced
+   the `= NUM`/`= -NUM`/`= (NUM)`/`= (-NUM)` rules with a single `= expr ;` rule that folds
+   via `const_eval` (byte-identical output for the old cases; `= STR` and `= gaggr` keep
+   their own rules, bare NUM/STR still reduce via shift-resolution). Unblocks py/parse.c's
+   `static const size_t X = PAD1 >= 0x100 ? RULE_1 : … : 0;` (~160-level nested ternary over
+   enum constants). The deep right-associative ternary also overflowed the generated parser's
+   `StackSize=500` at ~120 levels → raised to **4000** in `yacc.c` (host-side stack, cheap;
+   regenerated y.tab.c picks it up). +2 s/r (NUM-vs-expr, STR-vs-expr; shift wins), 0 r/r.
+   Probe `const_init_probe.c`. **Advances py/parse.c** (next blocker is the double-def scope
+   issue below).
+3. **Comma expression in C99 for-init increment** (`0e2d9db`) — the C99 for-init rules used
+   `exp0` (no comma) for test/increment while the plain `for` used `comma_exp0`, so
+   `for (size_t i = n; i > 0; i--, ptrs++)` parse-errored. Both C99 for rules (single + the
+   two-pointer-declarator form) now use `comma_exp0`. Probe `for_comma_inc_probe.c`. **Flips
+   py/bc.c; advances py/gc.c.**
 
-## Scope for next session — remaining 14 failures
+## Scope for next session — remaining 12 failures
 
-Per-file actual MESSAGES (read `build/mp-spike/err/<file>.minic.err`, or rerun minic directly
-on `build/mp-spike/pp/<file>.pp.c`; the summary.tsv source line lags the lookahead):
+Per-file actual MESSAGES (read the real one; the summary.tsv source line lags the lookahead):
 ```sh
 for base in $(awk -F'\t' '$2=="MINIC_FAIL"{print $1}' build/mp-spike/summary.tsv); do
   ./minic/minic -m medium < build/mp-spike/pp/$base.pp.c >/dev/null 2>/tmp/e.err
   printf "%-12s %s\n" "$base" "$(grep -m1 error: /tmp/e.err)"
 done
 ```
-Current: **6 double definition** (compile, mpprint, objdict, runtime, sequence, vm) +
-**8 parse error** (bc, binary, gc, modbuiltins, objlist, objtype, parse, stream).
+Current: **6 double definition** (compile, mpprint, parse, runtime, sequence, vm) +
+**6 parse error** (binary, gc, modbuiltins, objlist, objtype, stream).
 
-### HIGHEST-VALUE target — inner-block scope (6 files)
+### HIGHEST-VALUE target — inner-block scope (6 files) — READ THIS, the model is subtle
 
-**vm, compile, sequence, mpprint, objdict, runtime** all hit `double definition`: a local
-name reused across sibling blocks with *different* types (`{const byte *t;} … {size_t t;}`)
-or distinct C99 `for (size_t i …)` inits. minic has one flat per-function `varh`
-(`varadd` at minic.y:372; `varclr` at :333; the same-type re-decl is folded at :413, but
-different-typed dies at :418).
+**compile, mpprint, parse, runtime, sequence, vm** all hit `double definition`: a local name
+reused across **sibling braced blocks** with *different* types. Confirmed all are pure
+sibling blocks (no live outer shadow), e.g. mpprint's switch cases
+`case 'c': { char str; }` … `case 's': { const char *str; }`, sequence's swap idiom
+`{ const byte *t=…; } { size_t t=…; }`, vm's two `case` blocks with `cause` as
+`mp_obj_t`/`mp_int_t`. compile is **for-init** scope: `for (size_t i …)` vs `for (int i …)`
+in the same function.
 
-Extend the §1e `var_islocal()` + lexer `brace_depth`/`pending_varclr` machinery to
-**push/pop a scope at every `{`/`}`**: tag each local `varh` entry with a scope depth; on
-block exit, drop names declared at that depth and **restore any shadowed outer binding**
-(needs a save/restore stack — a flat table holds one entry per name, so a shadowed outer
-binding must be stashed and reinstated). **DO NOT** just relax the `varadd` double-def
-check to overwrite `varh[].ctyp` — tried and reverted in §1g; minic emits in lexical order,
-so a later outer-scope use of the name would see the wrong (inner) type → silent
-miscompile. This is the single biggest remaining win but the most regression-prone — do it
-fresh with care, lots of probes, and verify the full 100/100 gate stays green.
+**CRITICAL — why a scoped symbol table alone is NOT enough (the §1g note understated this):**
+minic emits the function body **lazily** — `stmt($4, …)` runs in the function rule's action,
+*after* the whole body is parsed (see `typed_decl_rest: ansi_func_proto '{' dcls stmts '}'`).
+Variable USES are `'V'` AST nodes that store only the source **name**; their type is resolved
+at **emit time** by `varget(name)` (minic.y `lval()` case `'V'`, ~line 3120). So at emit time
+only ONE `varh` entry per name survives, and a push/pop scope stack that drops the inner
+binding would make the *earlier* sibling block's uses resolve to the *wrong* surviving type.
+
+**The fix that actually works: alpha-renaming at parse time.** When an inner-block decl
+(parser block-depth ≥ 1) collides with an existing `varh` entry, give the inner decl a unique
+mangled name (e.g. `t$3`), `varadd` it under the mangled name, emit `%t$3 =alloc…`, and push
+a **rename binding** `t → t$3` onto a scope-rename stack. The lexer stamps the mangled name
+into each `'V'` use node it creates (consult the rename map in `yylex_inner` right where it
+builds the `'V'` node, ~line 7812) so the AST carries already-resolved names and lazy
+`varget(t$3)` is correct. Because uses are lexed *after* the decl's reduce (which registers
+the rename), the rename is active when the use node is built — works for sibling blocks.
+
+**Shadow case (outer use after inner redecl) — handle it, don't miscompile.** Use a
+**deferred rename-pop**, mirroring the existing function-level `pending_varclr` defer
+(minic.y ~7407): when the lexer's `}` brings block-depth from D to D-1, schedule the pop of
+all rename entries tagged depth ≥ D to run at the *next* `yylex` call — i.e. *before* the
+lexer builds the next (outer) use node. Traced: `size_t t; { const byte *t; use(t);} use(t);`
+→ inner `use(t)`→`t$1`; deferred pop restores `t`→canonical before the outer `use(t)` is
+lexed → outer resolves to `size_t`. So the lexer-lag that breaks a naive scheme is exactly
+absorbed by the same defer the function-level clear already uses.
+
+**Depth tagging must use a PARSER counter, not the lexer's `brace_depth`.** A decl that is the
+last statement before `}` reduces with lookahead `}` (lexer already decremented), so tag each
+rename with a depth bumped by parse actions: add a `blockstart: '{' { pdepth++; }` nonterminal
+and replace `stmt: '{' stmts '}'` with `stmt: blockstart stmts '}' { pdepth--; … }` (the
+`structstart`/`enumstart` idiom — keeps it off the function-body `'{' dcls stmts '}'` rule).
+For-init gets its own scope likewise. Reset `pdepth`/rename-stack in the `init*` markers
+(where `varclr()` is called).
+
+**DO NOT** just overwrite `varh[].ctyp` (tried+reverted §1g). Decl rules to hook for renaming:
+the stmt-level `type IDENT …` family (~6640–6760) and the two C99 for-init rules (~6910, 6928).
+Probe heavily: sibling-different-type, sibling-same-type (**stevie for-bodies regression
+check** — they currently share one `%pos` via the same-type fold at minic.y:413; renaming
+changes the emitted names but not runtime — verify the gate + a stevie smoke), nested blocks,
+for-init siblings, and a genuine shadow (outer-after-inner) for the deferred-pop path. This is
+the single biggest remaining win (6 files) but the most regression-prone — verify 106/106 +
+`make check` + spike stays ≥120 the whole way.
 
 ### Smaller, file-specific blockers (each confirmed in isolation)
 
-- **Anonymous struct/union-typed local variable** — `struct { … } v;` / `union { … } v;`
-  parse-errors (no `type: STRUCT '{' … '}'` production; only typedef/sdcl/nested contexts
-  define inline bodies). Needs `objlist` (`struct { mp_arg_val_t key, reverse; } args;`) and
-  `modbuiltins` (`union { mp_arg_val_t args[N]; size_t len[2]; } u;`). Risky in miniyacc —
-  `STRUCT '{'` already appears in `typedefstructstart`/`nested_s_begin`; justify any new s/r.
-- **Local enum declaration** — `void f(){ enum { A, B, C }; … }` parse-errors. Needed by
-  **modbuiltins** (`enum { ARG_sep, ARG_end, ARG_file };`). Add an enum-decl alternative to
-  the statement / dcls rules (register the constants like file-scope enums).
-- **Local aggregate init with offsetof value + array-decay member** — **objtype**:
-  `struct class_lookup_data lookup = { .obj=self, .slot_offset=offsetof(T,m), .dest=member,
-  … };` where `member` is a local `mp_obj_t member[2]` (decays to ptr). The simple cases
-  (local sized array partial init; local designated struct) already work — isolate which of
-  the offsetof value or the array-name `.dest=member` item the local-aggregate (compound-
-  literal-desugar) path chokes on.
-- **parse** (line ~2337) — a file-scope `static const size_t X = PAD1_x >= 0x100 ? RULE_x :
-  …;` very long `?:` ternary chain initializer. Check the const-expr/ternary fold path and
-  any initializer-length cap.
-- **bc, binary, gc, stream** — true site is past the coarse `^[};]` boundary (the bisect
-  bracketed a big region whose head lines parse fine in isolation: bc's multi-name local
-  decl, binary/stream's `__attribute__((noreturn))` prototypes with `mp_rom_error_text_t`,
-  gc's `for(;;){ T *area = &(mp_state_ctx.mem.area); … }` all parse standalone). Re-bisect at
-  finer (per-`;`, not just column-0) granularity, then isolate.
+- **gc** — multi-scalar-declarator C99 for-init: `for (size_t block=0, len=0, len_free=0; …)`.
+  Needs a declarator-list generalization of the for-init rules. Tangles with the existing
+  single + two-pointer for rules (both start `type IDENT '=' expr ','`); the two-pointer rule
+  folds the first `*` into the type and ignores the second, so a clean unified `forinitlist`
+  must special-case the pointer form. Justify any new s/r; **no new r/r**. (gc's *first*
+  blocker, the comma increment, is already fixed §1j.)
+- **binary** — anonymous struct in a cast (inline `offsetof`):
+  `((size_t)&((struct { char c; short t; } *)0)->t)`. Needs `STRUCT '{' smembers '}'` usable
+  as a type in a cast/sizeof context. Risky in miniyacc — `STRUCT '{'` already appears in
+  `typedefstructstart`/`nested_s_begin`; justify any new s/r.
+- **objlist** — anonymous struct-typed local variable: `struct { mp_arg_val_t key, reverse; }
+  args;`. Same `STRUCT '{'` conflict surface as binary; a `type: STRUCT '{' smembers '}'`
+  production would cover both.
+- **modbuiltins** — local enum declaration (`enum { ARG_sep, ARG_end, ARG_file };` inside a
+  function) **and** an anonymous union-typed local
+  (`union { mp_arg_val_t args[N]; size_t len[2]; } u;`). Needs both.
+- **objtype** — local aggregate init with an `offsetof` value and an array-decay member:
+  `struct class_lookup_data lookup = { .obj=self, .slot_offset=offsetof(T,m), .dest=member, … };`
+  where `member` is a local `mp_obj_t member[2]`. The simple local-designated-struct case
+  already works; isolate which item (the offsetof value or the `.dest=member` array name) the
+  local compound-literal-desugar path chokes on.
+- **stream** — function-local typedef of a function-pointer type:
+  `typedef mp_uint_t (*io_func_t)(mp_obj_t obj, void *buf, mp_uint_t size, int *errcode);`
+  inside a function body. minic typedefs are file-scope only; add a statement/dcls-level
+  typedef alternative.
+
+### Incidental limitations found this session (not currently gating, but real)
+- **Multi-declarator with an initializer on the FIRST declarator inside an inner block**:
+  `{ int j = 0, k = 100; }` parse-errors. The stmt-level multi-decl rule is
+  `type IDENT ',' ext_decllist` — it requires the first declarator to be a bare `IDENT`
+  (no init) before the comma, so `int a = 0, b = …;` fails as a statement (works at
+  function-top via `dcls`). Easy-ish fix; no in-tree consumer among the 12 yet.
 
 ### How to find the true site (lag-proof technique, unchanged)
 minic's reported error line is the parser's *lookahead* line and lags the real construct.
-Forward-bisect: for each column-0 `}`/`;` boundary N, test `head -n N file.pp.c | minic -m
-medium`; the FIRST boundary whose prefix errors brackets the construct (between the previous
-clean boundary and N). For tight brackets use every `;`, not just column-0 ones. Extract into
-a standalone snippet (stub the few typedefs) and confirm under `minic -m medium`.
+Forward-bisect on column-0 `}`/`;` boundaries; cuts mid-construct error at the cut line, so
+the FIRST clean boundary whose prefix errors NOT-at-the-cut brackets the construct. For tight
+brackets bisect every `;`. Extract into a standalone snippet (stub the few typedefs) and
+confirm under `minic -m medium`.
 
 ## Guardrails (unchanged)
-
-- Rebuild with `cd minic && make minic`; local `yacc` prints conflict counts (now **109
-  s/r, 0 r/r**). Justify any new shift/reduce; **no new reduce/reduce**. miniyacc is picky:
-  no `/* … */` between a production head and its `:`, none trailing a rule's action, no
-  comment-only action body; **comments inside an action body must avoid `/`, `[`, `]`
-  characters** (burned again in §1i — a `static T arr[]` comment broke the yacc parse; keep
-  action comments plain prose). Long RHS is fine (existing for-decl rules run ~17 symbols).
-- Run `tools/test-dos.sh` (must stay **100/100**) and `make check` (SSA, "All is fine!").
-  Add or extend a probe per runtime-bearing feature; the gate runs ~5 min in DOSBox — run it
-  in the background and wait.
-- Spike harness uses **`clang -E`**. Read the real message from
-  `build/mp-spike/err/<file>.minic.err`, not the lagged summary.tsv line.
+- Rebuild with `cd minic && make minic`; local `yacc` prints conflict counts (now **111 s/r,
+  0 r/r**). Justify any new shift/reduce; **no new reduce/reduce**. miniyacc is picky: no
+  `/* … */` between a production head and its `:`, none trailing a rule's action, no
+  comment-only action body; **comments inside an action body must avoid `/`, `[`, `]`**.
+- Run `tools/test-dos.sh` (must stay **106/106**) and `make check` (SSA, "All is fine!") at
+  the **repo root** (not minic/). Add or extend a probe per runtime-bearing feature; the gate
+  runs ~5 min in DOSBox — run it in the background and wait.
+- Spike harness uses **`clang -E`**. Read the real message by running minic directly on
+  `build/mp-spike/pp/<file>.pp.c`, not the lagged summary.tsv line.
 - DOSBox capture is occasionally flaky. If a `--model=large` probe diff fails once, re-run.
 
 ## Orthogonal pre-existing limits (don't chase unless a real consumer needs them)
 - **Two divisions feeding one call** — i8086 div AX/DX clobber, `[[i8086-two-div-one-call-clobber]]`.
 - **Far-data static pointer relocation** (`l $sym` → far seg:off) — `&global` data items are
-  near-only, so `mp_aggregate_probe` / `block_static_probe` are medium-only.
+  near-only, so probes that take a static address are medium-only.
 - **Bare file-scope scalar pointer initializer** — `static int *p = &g;` parse-errors.
 - **Inline `100000L` literal** — lexer drops the `L`; build from small-literal arithmetic.
 - **Out-of-order designated array init** — `{ [3]=…, [0]=… }` dies (agg_emit_array is in-order).
-- **char-array string init leaves a duplicate `$gloN`** — the lexer's literal slot is still
-  emitted alongside the named array (harmless dead bytes; only short MP strings affected).
