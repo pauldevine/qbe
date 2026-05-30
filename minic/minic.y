@@ -189,6 +189,16 @@ int yylex(void), yylex_inner(void), yyerror(char *);
 int prevtok = 0;  /* last token yylex returned; tag-namespace disambiguation */
 int brace_depth = 0;     /* { } nesting the lexer has returned so far */
 int pending_varclr = 0;  /* function body just closed; drop locals before next token */
+int pending_static = 0;  /* a top-level `static` storage class is in effect for the
+                          * declaration currently being parsed.  C `static` on a
+                          * function/object = internal linkage, so its symbol must
+                          * NOT be exported (QBE `function`, not `export function`),
+                          * else `static inline` helpers in shared headers (e.g.
+                          * MicroPython's utf8_get_char in misc.h) collide as
+                          * duplicate public symbols across every TU that includes
+                          * them.  Set/cleared in the yylex() wrapper (lexer-level,
+                          * to dodge grammar conflicts); read at the function-header
+                          * emit sites via fn_export_kw(). */
 unsigned forinit_basetyp = 0;  /* base type of the current C99 for-init declarator(s) */
 
 /* Inner-block scope via alpha-renaming.  minic has a single flat local
@@ -5097,6 +5107,15 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
  * was registered (via kr_param_dcls' kr_namelist actions) with its
  * declared type.  Anything not declared defaults to int.  Return type
  * is implicitly int. */
+/* QBE function-definition keyword for the in-progress function: a C
+ * `static` function has internal linkage, so emit a module-local `function`
+ * (no `.globl`); everything else is `export function`.  See pending_static. */
+const char *
+fn_export_kw(void)
+{
+	return pending_static ? "function" : "export function";
+}
+
 void
 emit_knr_func(char *fname, Node *params)
 {
@@ -5113,7 +5132,7 @@ emit_knr_func(char *fname, Node *params)
 	strncpy(cur_fn_name, fname, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(fname, 1, FUNC(INT), 0);
-	fprintf(of, "export function w $%s(", fname);
+	fprintf(of, "%s w $%s(", fn_export_kw(), fname);
 	n = params;
 	if (n)
 		for (;;) {
@@ -5162,11 +5181,11 @@ emit_knr_func_typed(char *fname, Node *params)
 	cur_fn_sret_ctyp = curfntyp;
 
 	if (cur_fn_sret)
-		fprintf(of, "export function %c $%s(", DATAPTR_T(), fname);
+		fprintf(of, "%s %c $%s(", fn_export_kw(), DATAPTR_T(), fname);
 	else if (curfntyp == NIL)
-		fprintf(of, "export function $%s(", fname);
+		fprintf(of, "%s $%s(", fn_export_kw(), fname);
 	else
-		fprintf(of, "export function %c $%s(", irtyp_ret(curfntyp), fname);
+		fprintf(of, "%s %c $%s(", fn_export_kw(), irtyp_ret(curfntyp), fname);
 	if (cur_fn_sret) {
 		fprintf(of, "%c %%t%d", DATAPTR_T(), tmp++);
 		if (params)
@@ -6031,11 +6050,11 @@ ansi_func_proto: '(' init_ansi par0 ')'
 	cur_fn_sret_ctyp = curfntyp;
 
 	if (cur_fn_sret)
-		fprintf(of, "export function %c $%s(", DATAPTR_T(), parsed_ident);
+		fprintf(of, "%s %c $%s(", fn_export_kw(), DATAPTR_T(), parsed_ident);
 	else if (curfntyp == NIL)
-		fprintf(of, "export function $%s(", parsed_ident);
+		fprintf(of, "%s $%s(", fn_export_kw(), parsed_ident);
 	else
-		fprintf(of, "export function %c $%s(", irtyp_ret(curfntyp), parsed_ident);
+		fprintf(of, "%s %c $%s(", fn_export_kw(), irtyp_ret(curfntyp), parsed_ident);
 	if (cur_fn_sret) {
 		/* Hidden return pointer occupies %t0; real params follow. */
 		fprintf(of, "%c %%t%d", DATAPTR_T(), tmp++);
@@ -6159,7 +6178,7 @@ prot_knr: IDENT '(' par0 ')'
 	strncpy(cur_fn_name, $1->u.v, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd($1->u.v, 1, FUNC(INT), 0);
-	fprintf(of, "export function w $%s(", $1->u.v);
+	fprintf(of, "%s w $%s(", fn_export_kw(), $1->u.v);
 	n = $3;
 	if (n)
 		for (;;) {
@@ -7709,8 +7728,23 @@ yylex()
 	t = yylex_inner();
 	if (t == '{')
 		brace_depth++;
-	else if (t == '}' && brace_depth > 0 && --brace_depth == 0)
+	else if (t == '}' && brace_depth > 0 && --brace_depth == 0) {
 		pending_varclr = 1;
+		/* End of a function body: clear any internal-linkage flag so the
+		 * NEXT top-level declaration starts exported-by-default.  (The
+		 * current function's header was emitted at its ')' lookahead,
+		 * before this '}', so the flag was already consumed.) */
+		pending_static = 0;
+	}
+	/* Track a top-level `static` storage class.  Only at brace_depth 0:
+	 * a function-local `static` is a mangled file-scope global handled
+	 * separately and must not flip the enclosing function's linkage. */
+	if (brace_depth == 0) {
+		if (t == STATIC)
+			pending_static = 1;
+		else if (t == ';')
+			pending_static = 0;   /* end of a static *object* decl / prototype */
+	}
 	prevtok = t;
 	return t;
 }

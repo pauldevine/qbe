@@ -225,6 +225,7 @@ def main():
     current_huge = None   # active `_HUGE_<sym>` key when current == 'huge'
     publics = []          # symbols declared via `.globl`
     defined = set()       # all labels actually defined in this file
+    defined_text = set()  # labels defined in a .text (code) section
     referenced = set()    # all `_xxx` references seen in operands
 
     # Match `.section "_HUGE_foo"` or `.section _HUGE_foo` (qbe quotes
@@ -276,6 +277,8 @@ def main():
         lbl = is_label_def(line.strip())
         if lbl:
             defined.add(lbl)
+            if current == 'text':
+                defined_text.add(lbl)
         referenced |= collect_referenced_syms(line)
 
         if current == 'huge':
@@ -283,14 +286,24 @@ def main():
         else:
             sections[current].append(line)
 
-    # Auto-export every `_xxx`-prefixed label defined in this file.
+    # Auto-export every `_xxx`-prefixed *data* label defined in this file.
     # minic doesn't currently emit qbe `export` markers for file-scope
     # data, so qbe doesn't emit `.globl` for them — but C's default
     # linkage for file-scope identifiers IS external, so we promote
-    # every `_xxx:` label to a public.  The `<base>_xxx` per-module
+    # every data `_xxx:` label to a public.  The `<base>_xxx` per-module
     # local labels (jump targets, string literals) stay private.
+    #
+    # CODE labels (functions, defined in a .text section) are NOT
+    # auto-promoted: minic correctly emits `.globl` for an exported
+    # function (`export function`) and omits it for a `static` one
+    # (internal linkage).  Auto-promoting them would re-export `static`
+    # helpers and collide as duplicate publics across every TU that
+    # includes the same `static inline` header function (e.g.
+    # MicroPython's utf8_get_char in py/misc.h).
     public_set = set(publics)
     for sym in defined:
+        if sym in defined_text:
+            continue
         if sym.startswith('_') and sym not in public_set:
             publics.append(sym)
             public_set.add(sym)

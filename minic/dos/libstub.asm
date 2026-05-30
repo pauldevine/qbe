@@ -51,6 +51,88 @@
     jnz %%loop
 %endmacro
 
+; --- Compiler-builtin + libc helpers the MicroPython core needs --------------
+; These are NEW additive symbols (no existing gate test references them), and
+; they live in the always-emitted header region (before the prune skip region)
+; so libstub_prune.py / libstub_to_exe.py can't accidentally drop them.
+; Offsets are written in the NEAR form ([bp+4] = arg0); libstub_to_exe.py
+; shifts every [bp+N] by +2 and rewrites ret->retf for the medium .EXE build.
+
+; int __builtin_clz(unsigned int x) — count leading zero bits of a 16-bit
+; `unsigned int` (this target's int is 16 bits).  Result 0..15; clz(0) is
+; undefined in C, return the bit width (16).  8086 has no BSR, so loop.
+global ___builtin_clz
+___builtin_clz:
+    push bp
+    mov bp, sp
+    mov cx, [bp+4]             ; x
+    or  cx, cx
+    jnz .scan
+    mov ax, 16                 ; clz(0): undefined; return width
+    pop bp
+    ret
+.scan:
+    xor ax, ax                 ; count = 0
+.loop:
+    test cx, 0x8000
+    jnz .done
+    inc ax
+    shl cx, 1
+    jmp .loop
+.done:
+    pop bp
+    ret
+
+; long __builtin_expect(long exp, long c) — branch-prediction hint; returns
+; its first argument.  MicroPython's mp_likely/mp_unlikely wrap a boolean, so
+; the low word in AX is all the consumer reads.
+global ___builtin_expect
+___builtin_expect:
+    push bp
+    mov bp, sp
+    mov ax, [bp+4]             ; exp (low word)
+    pop bp
+    ret
+
+; void __builtin_unreachable(void) — marks unreachable code.  Reaching it is
+; undefined behaviour; just return so a stray call can't hang headless tests.
+global ___builtin_unreachable
+___builtin_unreachable:
+    ret
+
+; void *memmove(void *dst, const void *src, size_t n) — overlap-safe copy.
+; Near-data (medium model): pointers are 16-bit DGROUP offsets, so comparing
+; offsets is sufficient to pick copy direction.
+global _memmove
+_memmove:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    mov di, [bp+4]            ; dst
+    mov si, [bp+6]            ; src
+    mov cx, [bp+8]            ; n
+    cmp di, si
+    jbe .fwd                  ; dst <= src: forward copy is safe
+    ; dst > src: copy backward to avoid clobbering the overlap
+    std
+    add si, cx
+    add di, cx
+    dec si
+    dec di
+    rep movsb
+    cld
+    jmp .ret
+.fwd:
+    cld
+    rep movsb
+.ret:
+    mov ax, [bp+4]           ; return dst
+    pop di
+    pop si
+    pop bp
+    ret
+
 global _malloc
 _malloc:
     push bp

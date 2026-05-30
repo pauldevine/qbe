@@ -36,8 +36,8 @@ and tracks phase progress. Update the status table + running log as work lands.
 | 1e — Typedef-name shadowing + capacity | ✅ **Done** (2026-05-29) | (a) **Lexer disambiguation:** a declarator / parameter / member / member-access identifier that collides with a typedef name now lexes as `IDENT`, not `TNAME` — the real `py/scope.h` shape `scope_find_or_add_id(scope_t *scope, qstr qstr, …)`.  Three rules in the `yylex()`/`yylex_inner()` wrapper: (1) after a complete type-specifier token (type keyword or `TNAME`) → `IDENT`; (2) in-scope local/param (`var_islocal()`) → `IDENT`, with the previous function's locals dropped on its body's closing `}` (deferred one token via `pending_varclr`/`brace_depth` so the body's last statement still resolves, and so the next function's typedef-named param type isn't shadowed by a stale local); (3) after `.`/`->` (member namespace) → `IDENT`.  0 new conflicts.  Pinned by `typedef_shadow_probe.c` (medium + large).  (b) **Capacity:** `NStruct` 64→256, `NTyp` 128→512 — preprocessed MicroPython TUs define >64 aggregates / >128 typedefs; minic is host-compiled so this is cheap.  This (not the shadow fix) was what gated the 8 `scope_kind_t` files (their real error was *"too many struct/union definitions"*, masked behind the lookahead-lagged `} scope_kind_t;` source line).  **Spike 82→87/132.** |
 | 1c — `long long`, limits, `_Bool` | 🟡 **Partial** | `long long` ✅. Member cap 16→64 ✅. **`NVar` 512→4096 ✅ (2026-05-29)** — was the #1 blocker once cpp was clean (62/132 files); raising it flipped 17→26 OK and eliminated *all* limit-cap failures (remaining 106 are pure grammar).  `_Bool` + `NGlo` raise still pending (not yet hit). |
 | **2 — Runtime / libc** | 🟡 **cpp-clean** | `stdint.h` fixed + shipped (2026-05-29): `int32_t`/`uint32_t`=`long` (were wrongly 16-bit `int`), added `intptr_t`/`uintptr_t` (FAR_DATA-conditional) + `INTPTR_MAX`/`SIZE_MAX`/`INTPTR_UMAX`; pinned by `stdint_probe.c`.  Spike stub `unistd.h` added.  `limits.h` stub already had target widths.  **All 132 files preprocess cleanly (CPP_FAIL 132→0).**  Still pending: real `setjmp`/`longjmp` (medium model — note `jmp_buf` is an array typedef, blocked on Phase-1 grammar), `realloc`/`calloc`. |
-| **3 — Port glue + build** | 🟡 **config landed** | `ports/dos8086/mpconfigport.h` created (2026-05-29) — locked target config + explicit `MP_ENDIANNESS_LITTLE`; this is what unblocked cpp.  Minimal `mphalport.h` stub added.  Spike now points `-I` at `ports/dos8086` (replacing the ad-hoc `stubinc` shims).  Still pending: `mphalport.c`, `main.c`, `tools/build-micropython.sh`. |
-| **4 — DOSBox bring-up** | ⛔ Gated | Link, run headless, debug codegen/stack/heap. Target: `print(1+2)` → `3`. |
+| **3 — Port glue + build** | ✅ **Done** (2026-05-30, §1q) | `ports/dos8086/mpconfigport.h` (locked config + `MP_ENDIANNESS_LITTLE` + `MICROPY_NO_ALLOCA`), `main.c` (`do_str("print(1+2)")` milestone entry + `nlr_jump_fail`/`gc_collect` stubs), `mphalport.c` (INT 21h AH=40h console out), and `tools/build-micropython.sh` (the canonical per-TU compile + omf_link harness) all landed.  106/106 TUs compile to OMF objects. |
+| **4 — DOSBox bring-up** | 🟡 **link 1 symbol away** (2026-05-30, §1q) | First real link of the curated subset: links cleanly except `setjmp`/`longjmp` (the NLR primitive — needs a far-form medium-model implementation, its own session).  Then: run headless, debug codegen/stack/heap. Target: `print(1+2)` → `3`. |
 
 ## Key reusable assets
 
@@ -47,6 +47,36 @@ and tracks phase progress. Update the status table + running log as work lands.
 - **Generated MP headers:** `~/projects/micropython/ports/minimal/build/genhdr/` (host build output).
 
 ## Running log
+
+- **2026-05-30 — §1q build bring-up step 3: FIRST REAL LINK of the curated core subset; links cleanly except setjmp/longjmp; gate 128→130.**
+  New canonical harness `tools/build-micropython.sh`: per-TU `clang -E` → minic
+  -m medium → qbe -t i8086 → asm_to_omf → nasm, then crt0_exe + all .obj +
+  libstub_exe → omf_link → `build/mp-link/mpython.exe`.  Curated subset = all
+  py/*.c minus the other-arch native emitters / inline asms / NLR backends
+  (kept nlr.c + nlrsetjmp.c).  **106/106 TUs (104 core + 2 port) compile to OMF
+  objects, 0 failures.**  New port glue in the micropython tree:
+  `ports/dos8086/main.c` (drives `do_str("print(1+2)")` directly — the Phase-4
+  milestone path — to keep the link py-core-only) + `mphalport.c` (INT 21h
+  console output).  `make check` green, 111 s/r 0 r/r (no grammar change).
+  Link wall hit and cleared, in order:
+  1. **`static` functions exported as duplicate public symbols** (real bug).
+     minic emitted `export function` for every function and `asm_to_omf.py`
+     auto-promoted every code label, so `static inline` header helpers
+     (`utf8_get_char`) collided across TUs.  Fix: minic emits module-local
+     `function` for `static` (new `pending_static` lexer flag + `fn_export_kw()`
+     at all 8 emit sites); `asm_to_omf.py` no longer auto-promotes `.text`
+     labels (data still auto-promotes — minic doesn't `export data` yet).
+     Pinned by `static_linkage_probe.c` (medium + large).
+  2. **Undefined runtime symbols**, resolved: `___builtin_clz` (16-bit CLZ loop),
+     `_memmove` (overlap-safe), `___builtin_expect` (returns arg0),
+     `___builtin_unreachable` (ret) — all NEW additive `libstub.asm` helpers;
+     `gc_collect` — bring-up stub in main.c (no root scan; OK for the milestone);
+     `alloca` — eliminated via `MICROPY_NO_ALLOCA=(1)` (routes to `m_malloc`).
+  - **Remaining: `setjmp`/`longjmp`** — the NLR keystone, the single undefined
+    symbol left.  Far-call-frame ABI sensitive (4-byte CS:IP return, `retf`,
+    far jmp on longjmp), so NOT mechanically convertible from a near stub —
+    must be hand-written far-form in `libstub_to_exe.py`'s EPILOGUE, with a real
+    nlr_push/raise/pop runtime probe.  Its own session.  See `NEXT_SESSION.md`.
 
 - **2026-05-30 — §1o build bring-up step 1: all 132 py/*.c clear the FULL minic→qbe(i8086) codegen pipeline; spike codegen 124 → 132/132; gate 123→125.**
   New harness `build/mp-spike/run-codegen.sh` runs each preprocessed TU through

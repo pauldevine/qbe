@@ -1,3 +1,80 @@
+# Next session — MicroPython port: implement medium-model setjmp/longjmp (the LAST link blocker) (post §1q)
+
+> **§1q (build bring-up step 3): FIRST REAL LINK of the curated core subset.**
+> The whole MicroPython core (104 curated py/*.c + 2 port glue TUs) now
+> compiles to OMF objects (106/106, 0 failures) and **links cleanly except for
+> ONE remaining undefined symbol: `setjmp`/`longjmp`** (the NLR primitive).
+> Everything else — duplicate-symbol collisions, `__builtin_clz`, `memmove`,
+> `__builtin_expect`/`unreachable`, `gc_collect`, `alloca` — is resolved.
+>
+> New canonical harness `tools/build-micropython.sh` (committed): per-TU
+> `clang -E` → minic -m medium → qbe -t i8086 → asm_to_omf → nasm, then
+> crt0_exe + all .obj + libstub_exe → omf_link → `build/mp-link/mpython.exe`.
+> Re-run: `bash tools/build-micropython.sh --keep-going`.
+> New port glue (in the micropython tree): `ports/dos8086/main.c` (a
+> `do_str("print(1+2)")` entry — the Phase-4 milestone path, avoids pulling in
+> pyexec/readline so the subset stays py-core-only) and `ports/dos8086/mphalport.c`
+> (INT 21h AH=40h console output).  Gate **128→130/130**, `make check` green,
+> 111 s/r 0 r/r (no grammar change).
+>
+> **The fixes this session (so you don't redo them):**
+> 1. **`static` functions were exported as public OMF symbols** (the link wall:
+>    `duplicate public symbol '_utf8_get_char'`).  C `static` = internal
+>    linkage; `static inline` helpers in shared headers (MicroPython's
+>    `utf8_get_char` in py/misc.h, etc.) were defined-and-exported by every TU
+>    that included them → duplicate publics.  TWO-part fix:
+>    (a) **minic** (`minic.y`): emit QBE module-local `function` (not `export
+>    function`) for a `static` function.  New `pending_static` flag, set/cleared
+>    in the `yylex()` wrapper (lexer-level — set on a top-level `STATIC` token,
+>    cleared at the function-body-closing `}` and at a top-level `;`), read at
+>    all 8 function-header emit sites via the new `fn_export_kw()` helper.
+>    Lexer-level (not grammar) keeps conflicts at 111 s/r 0 r/r.
+>    (b) **`tools/asm_to_omf.py`**: stop auto-promoting CODE labels to publics.
+>    It used to promote EVERY `_xxx:` label because minic didn't mark file-scope
+>    *data* as exported.  Now it tracks `defined_text` (labels in a `.text`
+>    section) and auto-promotes only NON-text (data/bss) labels; code labels are
+>    public iff minic emitted `.globl` (i.e. `export function`).  Static data is
+>    still auto-promoted (minic still doesn't `export data` — a separate, not-yet-
+>    blocking gap; revisit if static-data duplicates ever surface).
+>    Pinned by `static_linkage_probe.c` (medium + large): static fns reachable
+>    via the far-call path (direct, nested static->static, recursion, and a
+>    function pointer to a static fn), plus a non-static `exported_double` that
+>    must stay exported.
+> 2. **libstub helpers** (`minic/dos/libstub.asm`, near form — libstub_to_exe.py
+>    shifts `[bp+N]→[bp+N+2]` and `ret→retf` for the .EXE): `___builtin_clz`
+>    (16-bit CLZ, loop — 8086 has no BSR), `_memmove` (overlap-safe, near-data
+>    offset compare picks direction), `___builtin_expect` (returns arg0),
+>    `___builtin_unreachable` (bare ret).  All NEW additive symbols (no gate
+>    test referenced them); placed before the prune skip region.
+> 3. **`gc_collect`** — bring-up STUB in `main.c` (`gc_collect_start();
+>    gc_collect_end();`, no root scan).  `print(1+2)` allocates far below the
+>    24 KB heap so no collection triggers.  **Must be replaced with a real
+>    stack scan** (needs working setjmp to spill callee-saved regs) before any
+>    non-trivial program.
+> 4. **`alloca` eliminated via config, not codegen** — `MICROPY_NO_ALLOCA=(1)`
+>    in `ports/dos8086/mpconfigport.h` routes `alloca(x)`→`m_malloc(x)` (GC
+>    heap).  True alloca needs a stack-frame-extending builtin minic doesn't
+>    have, and a far-called libstub helper can't grow the *caller's* frame —
+>    so config is the right call.
+>
+> **THE remaining blocker — `setjmp`/`longjmp` for the medium model.**  This is
+> the NLR keystone: `nlr_push`/`nlr_pop` (py/nlrsetjmp.c) and the whole
+> exception/unwind path depend on it, so NOTHING runs until it works.  It is
+> **NOT mechanically convertible** from a near-form libstub stub: the
+> medium-model far-call frame has a 4-byte return address (CS:IP), needs `retf`,
+> and longjmp must do a FAR jump to restore CS:IP — the `[bp+N]+2` / `ret→retf`
+> rewrite in libstub_to_exe.py cannot synthesize that.  So write it directly in
+> the **far form** in `tools/libstub_to_exe.py`'s EPILOGUE (alongside
+> FAR_STDIO_EXE etc.), or as a model-specific asm.  `jmp_buf` is `int[8]`
+> (16 bytes); save BP, SP-at-resume (= lea bp+6 in the far frame), SI, DI, BX,
+> and the return CS:IP; longjmp restores them and `jmp far` to CS:IP with the
+> value in AX (longjmp(env,0) must yield 1).  **Add a real NLR runtime probe**
+> (nlr_push/nlr_raise/nlr_pop round-trip — not just a setjmp smoke test) since
+> the ABI is subtle; verify unwinding across a nested call.  Then
+> `build-micropython.sh` should produce `mpython.exe` — try `print(1+2)` → `3`
+> in DOSBox (Phase 4 milestone).  Expect to then hit codegen/stack/heap runtime
+> bugs (the gc_collect stub, far-code segment-count limits, etc.).
+
 # Next session — MicroPython port: py/*.c ASM->OBJ-clean (132/132 to OMF object) (post §1p)
 
 > **§1p (build bring-up step 2): all 132 py/*.c now survive asm->obj** — each

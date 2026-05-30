@@ -1,0 +1,7 @@
+inc(41)=42
+inc2(40)=42
+fact(5)=120
+clampw(300)=255
+fp(-7)=0
+fp(100)=100
+exported_double(21)=42
