@@ -1107,6 +1107,34 @@ constfoldable(Node *n)
 	}
 }
 
+/* Type of an expression, for sizeof(expr).  minic has no pure
+ * type-inference pass, so this runs the normal expr() emitter with `of`
+ * redirected to the bit bucket and the scratch counters restored
+ * afterwards.  sizeof is unevaluated in C, so discarding the emitted
+ * code is correct.  (Any string / compound-literal data globals
+ * registered during the walk are left in place — harmless extra data
+ * that is never referenced.)  Used for the `sizeof(arr)/sizeof(arr[0])`
+ * count idiom and `sizeof(*ptr)`. */
+unsigned
+typeof_expr(Node *n)
+{
+	FILE *save_of = of, *nullf;
+	int save_tmp = tmp, save_lbl = lbl, save_clit = clit;
+	Symb s;
+
+	nullf = fopen("/dev/null", "w");
+	if (nullf)
+		of = nullf;
+	s = expr(n);
+	of = save_of;
+	if (nullf)
+		fclose(nullf);
+	tmp = save_tmp;
+	lbl = save_lbl;
+	clit = save_clit;
+	return s.ctyp;
+}
+
 char
 irtyp(unsigned ctyp)
 {
@@ -6881,16 +6909,15 @@ post: NUM
         $$ = mknode('N', 0, 0);
         $$->u.n = SIZE($3) * dim;
     }
-    | SIZEOF '(' IDENT ')' {
-        Symb *vs = varget($3->u.v);
-        int ab = var_arraybytes($3->u.v);
+    | SIZEOF '(' expr ')' {
+        /* sizeof of an expression: unevaluated; report its type size.
+         * A bare array variable reports its whole-array byte size;
+         * everything else routes through typeof_expr. */
         $$ = mknode('N', 0, 0);
-        if (!vs)
-            die("sizeof on undeclared identifier");
-        /* For an array variable, report the whole-array byte size
-         * (varh stores arrays as pointer-to-element, so SIZE(ctyp)
-         * would otherwise give the pointer size). */
-        $$->u.n = ab > 0 ? ab : SIZE(vs->ctyp);
+        if ($3->op == 'V' && var_arraybytes($3->u.v) > 0)
+            $$->u.n = var_arraybytes($3->u.v);
+        else
+            $$->u.n = SIZE(typeof_expr($3));
     }
     | ALIGNOF '(' type ')' {
         /* _Alignof returns alignment requirement for type */

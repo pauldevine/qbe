@@ -40,6 +40,11 @@
  *      { … }` with fewer items than N (trailing elements zero-filled).
  *      MicroPython spells `static const char pad_spaces[16] = {…}`.
  *
+ *   8. sizeof(expr) -- general expression operand (was type / ident /
+ *      type[expr] only).  Evaluated via typeof_expr (emit-and-discard).
+ *      Unblocks the MicroPython count idiom
+ *      `sizeof(arr) / sizeof(arr[0])` and `sizeof(*ptr)`.
+ *
  * Build:  tools/build-example.sh --model=medium \
  *             minic/dos/examples/mp_grammar_probe.c
  * Verify: tools/run-dos-exe.sh build/examples/mp_grammar_probe/mp_grammar_probe.exe \
@@ -122,6 +127,20 @@ main(void)
 	/* (7) sized file-scope array, declared length 8 with 3 items. */
 	printf("sized=%d,%d,%d,%d,%d (want 97 98 99 0 0)\r\n",
 	       sized[0], sized[1], sized[2], sized[3], sized[7]);
+
+	/* (8) sizeof(expr): count idiom + element + deref.  i8086 int=2.
+	 * NB: each count is printed in its own call — two `/` divisions
+	 * feeding one call hit a pre-existing i8086 div AX/DX clobber bug
+	 * (unrelated to sizeof; see [[i8086-two-div-one-call-clobber]]). */
+	{
+		int *ip = squares;
+		printf("cnt_tbl=%d (want 5)\r\n",
+		       (int)(sizeof(tbl) / sizeof(tbl[0])));
+		printf("cnt_sq=%d (want 6)\r\n",
+		       (int)(sizeof(squares) / sizeof(squares[0])));
+		printf("elem=%d deref=%d (want 2 2)\r\n",
+		       (int)sizeof(squares[0]), (int)sizeof(*ip));
+	}
 
 	return 0;
 }
