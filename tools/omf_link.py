@@ -727,6 +727,19 @@ class Linker:
             seg = self.modules[mi].segments[si]
             self._place_distinct(mi, si, seg)
 
+        # FAR_DATA / FAR_BSS: far-data-model module statics.  Each module's
+        # `<BASE>_DATA` / `<BASE>_BSS` segment is placed DISTINCTLY (its own
+        # paragraph base, addressed by its own `seg _sym` selector), OUTSIDE
+        # DGROUP — so the aggregate static data can exceed 64KB.  Laid out
+        # after the stack so they never inflate the DGROUP/SP overflow check.
+        for cls in ('FAR_DATA', 'FAR_BSS'):
+            for mi, m in enumerate(self.modules):
+                for si, seg in enumerate(m.segments):
+                    if seg is None:
+                        continue
+                    if seg.cls.upper() == cls:
+                        self._place_distinct(mi, si, seg)
+
         # Compute paragraph bases.  HUGE chunks already arrive in
         # `_HUGE_<sym>_N` order so the `_0`, `_1`, ... chunks of the
         # same array land at consecutive paragraph bases — provided
@@ -1105,9 +1118,13 @@ class Linker:
         code_bytes = sum(s.length for s in self.out_segs if s.cls.upper() == 'CODE')
         data_bytes = sum(s.length for s in self.out_segs
                          if s.cls.upper() in ('DATA', 'BSS'))
+        fardata_bytes = sum(s.length for s in self.out_segs
+                            if s.cls.upper() in ('FAR_DATA', 'FAR_BSS', 'HUGE'))
         n_relocs = len(self.relocs)
         print('omf_link: linked %d modules' % n_mods)
         print('  code: %d bytes' % code_bytes)
+        if fardata_bytes:
+            print('  far data: %d bytes' % fardata_bytes)
         print('  data+bss: %d bytes' % data_bytes)
         print('  relocations: %d' % n_relocs)
         print('  image: %d bytes (header %d + body %d)'

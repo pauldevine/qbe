@@ -1,4 +1,65 @@
-# Next session — MicroPython port: MicroPython LINKS but HANGS — DGROUP is too small; move static data to far segments (post §1r)
+# Next session — finish far-data: make direct global access far so far-static-data can be the default (post §1s)
+
+> **§1s — additional far data segment(s): the placement INFRASTRUCTURE is in
+> and proven, landed OPT-IN.  The remaining work is the minic/qbe far-GLOBAL
+> direct-access codegen so it can become the default and unblock MicroPython.**
+>
+> **What landed (opt-in, gate green at 132→… with `fardata_probe`):**
+> Under a far-data model (compact/large/huge), passing
+> `asm_to_omf.py --far-static-data` routes a module's statics into its OWN far
+> segment `<BASE>_DATA`/`<BASE>_BSS` (class FAR_DATA/FAR_BSS) placed by
+> `omf_link.py` DISTINCTLY, OUTSIDE DGROUP.  Each segment has its own `seg sym`
+> selector (the same mechanism `_HUGE_<sym>` arrays already use), so **total
+> static data can exceed the single 64 KB DGROUP** — DGROUP is left holding only
+> the hand-asm crt0/libstub near data + the stack.  No 64 KB bin-packing needed:
+> each module gets its own segment.  Proven by `fardata_probe.c` (medium-…er,
+> compact/large/huge): **48 KB of statics in a far segment, read back correctly**
+> (`big[0]`/`big[6000]`/`big[11999]`, a strided sum, an initialized `seed[]`/`tag[]`)
+> — a link that overflows 64 KB under the old all-in-DGROUP scheme.
+> `build-example.sh` opts in via env `QBE_FAR_STATIC_DATA=1`; `test-dos.sh`
+> sets it for `fardata_probe` only (basename-gated).  Default OFF, so every
+> existing compact/large/huge probe is byte-identical (DGROUP, near) and the
+> gate stays green.  KEY ENABLER discovered: qbe ALREADY addresses every global
+> far under far-data (`mov ax, seg _sym; mov es,ax; es:[bx]` — never assumes
+> DGROUP), and the linker already resolves `seg sym` for non-DGROUP segments —
+> so ACCESS needs no codegen change, only PLACEMENT.  See [[minic-far-data-segment]].
+>
+> **Why it's OPT-IN, not default — the far-GLOBAL-access gap (THE next task).**
+> Turning placement on for ALL probes surfaced that minic emits **near**
+> load/store for DIRECT global access (`g`, `the_thing.v`, `g = x`, `g++`) under
+> far-data — it only ever worked because globals lived in DGROUP (=DS).  Array
+> subscript (`arr[i]`) already goes far (Kl pointer arith), which is why
+> `fardata_probe` passes without any minic change.  I prototyped the fix — a
+> `FARSTORAGE(s) = (!NEAR_DATA() && (s.t==Glo||s.t==Ext))` predicate threaded
+> through `load()`, the store sites, and member-access (clean storage-vs-value
+> separation, handles scalar AND pointer globals, no type pollution) — and it
+> took the all-on gate from **12 → 6** failures (fixed extern_struct, tentative_def,
+> const_init, phase_bprime, storefl).  **REVERTED** it because it exposed TWO
+> more latent backend bugs it doesn't itself fix, and shipping a half-far
+> global model would be worse than opt-in:
+> 1. **`storefw`/`store*` to a CAddr (`$g_sink`) destination corrupts a live
+>    slot** — surfaced in `farretprobe` `two_live_a` (the `g_sink` write made the
+>    `p`-return path return garbage).  A far store whose DEST is a global symbol
+>    address (not a register far pointer) mis-targets / clobbers.  Likely an
+>    i8086 `Ostoref{b,h,w}` RCon-CAddr-dest register-save gap (cf. caddr_arith).
+> 2. **Segment-boundary unsigned compare vs a CAddr** — `caddr_cmp_probe`
+>    `ltu_sym`/`leu_sym`: `(k-1) < &g_long` where `&g_long` now has off=0 in its
+>    own far segment, so `k-1` borrows into the segment word; the cmp32 CAddr
+>    unsigned high-word path gives the wrong order.  Only reachable once a global
+>    sits at offset 0 of a far segment (which far placement makes common).
+>
+> **Plan to make far-static-data the DEFAULT (and unblock MicroPython data):**
+> (a) re-apply `FARSTORAGE` in minic (the prototype was correct in direction;
+> reconstruct from this note / git reflog), (b) fix bug 1 in `i8086/emit.c`
+> (`Ostoref*` with RCon CAddr dest — push/pop the scratch regs, mirror the load
+> path), (c) fix bug 2 (cmp32 CAddr unsigned high-word ordering at a segment
+> boundary), (d) then flip placement on by default under far-data models and
+> drop the `--far-static-data` gate.  Each bug wants its own probe.  THEN
+> MicroPython under `large` needs its 27 far-data TU compile failures fixed
+> (separate: `gvn.c:210` KWIDE assertion + minic "non-homogeneous pointers in
+> substraction") before it links far.  See [[minic-far-data-segment]].
+
+# (prior) Next session — MicroPython port: MicroPython LINKS but HANGS — DGROUP is too small; move static data to far segments (post §1r)
 
 > **§1r — medium-model `setjmp`/`longjmp` landed; MicroPython now LINKS to a
 > complete `mpython.exe`, but it HANGS at runtime.**  The setjmp/longjmp link

@@ -140,8 +140,16 @@ grep -v -E '^\.(text|data|bss|balign|section|globl|type|size|local|file|ident|st
 	' \
 	> "$asm_clean"
 
-# Stage 4: OMF wrap and assemble
-"$QBE_DIR/tools/asm_to_omf.py" "$base" \
+# Stage 4: OMF wrap and assemble.  Under a far-data model, opting in with
+# QBE_FAR_STATIC_DATA=1 routes this module's statics into its own far
+# `<BASE>_DATA`/`<BASE>_BSS` segment (outside DGROUP) so total static data
+# can exceed 64KB.  Off by default — see NEXT_SESSION.md (the far-global
+# direct-access codegen isn't complete yet, so it's opt-in for now).
+FARSTATIC_FLAG=""
+if [ "${QBE_FAR_STATIC_DATA:-0}" = "1" ]; then
+	FARSTATIC_FLAG="--far-static-data"
+fi
+"$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" $FARSTATIC_FLAG "$base" \
 	"$OUT_DIR/$base.asm" "$OUT_DIR/$base.omf.asm" 2>>"$ERR"
 nasm -w-label-redef-late -f obj "$OUT_DIR/$base.omf.asm" \
 	-o "$OUT_DIR/$base.obj" 2>>"$ERR"

@@ -196,10 +196,21 @@ def emit_huge_section(out, sec_name, lines):
 def main():
     args = sys.argv[1:]
     model = 'medium'
+    far_static_data = False
     while args and args[0].startswith('--'):
         a = args.pop(0)
         if a.startswith('--model='):
             model = a[len('--model='):]
+        elif a == '--far-static-data':
+            # Opt-in: route this module's statics into its own far
+            # `<BASE>_DATA`/`<BASE>_BSS` segment OUTSIDE DGROUP (so total
+            # static data can exceed 64KB).  Requires a far-data model
+            # (every global is then addressed via `seg sym`).  OFF by
+            # default: direct global access still emits near loads/stores
+            # in minic, which only resolve correctly when globals live in
+            # DGROUP — making this the default awaits the far-global-access
+            # work (see NEXT_SESSION.md).
+            far_static_data = True
         else:
             print('asm_to_omf: unknown option: ' + a, file=sys.stderr)
             sys.exit(2)
@@ -322,8 +333,24 @@ def main():
     out.append('bits 16')
     out.append('cpu 8086')
     out.append('')
-    out.append('group DGROUP _DATA _BSS')
-    out.append('')
+    # Far-data models (compact/large/huge): every global is addressed
+    # far (qbe emits `mov ax, seg _sym; mov es, ax; es:[bx]` — it never
+    # assumes DGROUP), so a module's static data can live in its OWN far
+    # segment OUTSIDE DGROUP.  This is what lets total static data exceed
+    # 64KB: each module's `<BASE>_DATA` segment has its own selector and
+    # `seg _sym` resolves to wherever the symbol's segment landed (the
+    # same mechanism the `_HUGE_<sym>` arrays already rely on).  DGROUP
+    # then holds only the hand-asm crt0/libstub near data + the stack.
+    # Near-data models (tiny/small/medium) keep the classic single
+    # DGROUP-resident `_DATA`/`_BSS`.
+    far_data = far_static_data and model in ('compact', 'large', 'huge')
+    data_seg  = (prefix + 'DATA') if far_data else '_DATA'
+    bss_seg   = (prefix + 'BSS')  if far_data else '_BSS'
+    data_cls  = 'FAR_DATA' if far_data else 'DATA'
+    bss_cls   = 'FAR_BSS'  if far_data else 'BSS'
+    if not far_data:
+        out.append('group DGROUP _DATA _BSS')
+        out.append('')
     for e in externs:
         out.append('extern ' + e)
     if externs:
@@ -344,11 +371,11 @@ def main():
     out.extend(sections['text'])
     out.append('')
 
-    out.append('segment _DATA class=DATA align=2 use16')
+    out.append('segment %s class=%s align=2 use16' % (data_seg, data_cls))
     out.extend(sections['data'])
     out.append('')
 
-    out.append('segment _BSS class=BSS align=2 use16')
+    out.append('segment %s class=%s align=2 use16' % (bss_seg, bss_cls))
     out.extend(sections['bss'])
     out.append('')
 
