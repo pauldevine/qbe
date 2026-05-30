@@ -853,7 +853,7 @@ nexttk()
 char *
 cpycode()
 {
-	int c, nest, in, len, pos;
+	int c, nest, in, incmt, cmtlen, len, pos;
 	char *s;
 
 	len = 64;
@@ -861,26 +861,46 @@ cpycode()
 	s[0] = '{';
 	pos = 1;
 	nest = 1;
-	in = 0;
+	in = 0;        /* nonzero (a quote char) while inside a string/char literal */
+	incmt = 0;     /* 1 inside a block comment, 2 inside a line comment */
+	cmtlen = 0;    /* chars consumed since a block comment opened */
 
+	/* Copy the action body verbatim from the opening brace to its match.
+	 * Track string/char literals and comments so that braces, quotes,
+	 * and apostrophes inside them are not mistaken for structure: an
+	 * apostrophe in a comment (e.g. "doesn't") would otherwise open a
+	 * phantom char literal and swallow the closing brace. */
 	while (nest) {
 		c = fgetc(fin);
-		if (in) {
+		if (c == EOF)
+			die("syntax error, unclosed code block");
+		if (incmt == 1) {
+			if (c == '/' && s[pos-1] == '*' && cmtlen > 0)
+				incmt = 0;
+			cmtlen++;
+		} else if (incmt == 2) {
+			if (c == '\n')
+				incmt = 0;
+		} else if (in) {
 			if (c == in)
 			if (s[pos-1] != '\\')
 				in = 0;
 		} else {
-			if (c == '"' || c == '\'')
+			if (c == '*' && s[pos-1] == '/') {
+				incmt = 1;
+				cmtlen = 0;
+			} else if (c == '/' && s[pos-1] == '/') {
+				incmt = 2;
+			} else if (c == '"' || c == '\'') {
 				in = c;
-			if (c == '{')
+			} else if (c == '{') {
 				nest++;
-			if (c == '}')
+			} else if (c == '}') {
 				nest--;
-			if (c == EOF)
-				die("syntax error, unclosed code block");
-			if (c == '\n')
-				lineno++;
+			}
 		}
+		if (c == '\n')
+			lineno++;
 		if (pos>=len)
 		if (!(s=realloc(s, len=2*len+1)))
 			die("out of memory");
