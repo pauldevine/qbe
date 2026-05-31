@@ -95,6 +95,22 @@ int memmodel = MSmall;
 #define ISUNSIGNED(x) ((x) & UNSIGNED)
 #define ISFLOAT(x) ((x) & FLOAT)
 #define ISFAR(x) ((x) & FAR)
+/* FARSTORAGE(s): true when Symb `s` denotes a file-scope/external symbol
+ * whose STORAGE must be reached with a far (segment:offset) access under a
+ * far-data model.  Unlike ISFAR (a property of the *value* type — "this is
+ * a 4-byte far pointer / this lvalue was reached through a far deref"),
+ * FARSTORAGE is a property of WHERE the object lives: every global/extern
+ * datum under compact/large/huge is addressed far (qbe already emits
+ * `mov es, seg sym; es:[bx]` for globals — see [[minic-far-data-segment]]),
+ * so DIRECT access (g, g.m, g = x, g++) must route through the far
+ * loadfX/storefX path just like array-subscript already does.  Holds for
+ * both scalar AND pointer globals (a global pointer variable 4-byte value
+ * still lives in a far segment), so it intentionally has NO PTR/FUN
+ * exclusion.  Under NEAR_DATA (tiny/small/medium) it is always false, so
+ * those models stay byte-identical.  Correct whether the global is left in
+ * DGROUP (far access via ES=DGROUP reads the same bytes) or relocated to
+ * its own far segment by asm_to_omf --far-static-data. */
+#define FARSTORAGE(s) (!NEAR_DATA() && ((s).t == Glo || (s).t == Ext))
 #define BASETYPE(x) (KIND(x) & ~UNSIGNED)
 /* Storage sizes — must match `irtyp`'s storage class so struct member
  * offsets agree with the layout emit_struct_array_data writes:
@@ -1663,10 +1679,22 @@ Scale:
 	return l->ctyp;
 }
 
+void loadfar(Symb d, Symb s);  /* fwd decl: load() delegates to it for FARSTORAGE */
+
 void
 load(Symb d, Symb s)
 {
 	char t;
+
+	/* Direct access to a global/extern datum under a far-data model must
+	 * go through the far load path — its storage lives in a far segment
+	 * (or DGROUP reached via ES).  Delegate to loadfar so every caller of
+	 * load() (the `V` variable read, member loads, inc/dec) gets it for
+	 * free.  See FARSTORAGE / [[minic-far-data-segment]]. */
+	if (FARSTORAGE(s)) {
+		loadfar(d, s);
+		return;
+	}
 
 	fprintf(of, "\t");
 	psymb(d);
@@ -1771,8 +1799,12 @@ emit_struct_copy(Symb dst, Symb src)
 	int sidx = DREF(dst.ctyp);
 	int sz = structh[sidx].size;
 	int off;
-	int src_far = ISFAR(src.ctyp);
-	int dst_far = ISFAR(dst.ctyp);
+	/* FARSTORAGE: a global/extern aggregate lives in a far segment, so a
+	 * copy where either side is a direct global must use the far per-word
+	 * load/store path (and 4-byte address arithmetic) even though the
+	 * aggregate's own ctyp carries no FAR bit. */
+	int src_far = ISFAR(src.ctyp) || FARSTORAGE(src);
+	int dst_far = ISFAR(dst.ctyp) || FARSTORAGE(dst);
 	char src_klass = src_far ? 'l' : 'w';
 	char dst_klass = dst_far ? 'l' : 'w';
 	unsigned src_ptyp = src_far ? IDIR_FAR(INT) : IDIR(INT);
@@ -2641,10 +2673,13 @@ expr(Node *n)
 			 * far-pointer deref it carries the FAR bit and the address
 			 * is Kl (4-byte seg:off).  The add must then be `=l add` so
 			 * we don't truncate to 16 bits.  Mirror s0's FAR-ness onto
-			 * addr so downstream load/store picks the right width. */
+			 * addr so downstream load/store picks the right width.
+			 * FARSTORAGE: a global struct accessed directly (`g.m`) lives
+			 * in a far segment too, so its member address is also Kl. */
 			{
-				char klass = ISFAR(s0.ctyp) ? 'l' : 'w';
-				unsigned ptyp = ISFAR(s0.ctyp) ? IDIR_FAR(m->ctyp)
+				int base_far = ISFAR(s0.ctyp) || FARSTORAGE(s0);
+				char klass = base_far ? 'l' : 'w';
+				unsigned ptyp = base_far ? IDIR_FAR(m->ctyp)
 				                              : (IDIR(m->ctyp) & ~FAR);
 				if (m->offset > 0) {
 					addr.t = Tmp;
@@ -2807,8 +2842,9 @@ expr(Node *n)
 					/* Bitfield assignment - read-modify-write */
 					Symb addr, oldval, newval, clearmask, shifted, merged;
 					unsigned long mask, invmask;
-					char klass = ISFAR(s_struct.ctyp) ? 'l' : 'w';
-					unsigned ptyp = ISFAR(s_struct.ctyp)
+					int base_far = ISFAR(s_struct.ctyp) || FARSTORAGE(s_struct);
+					char klass = base_far ? 'l' : 'w';
+					unsigned ptyp = base_far
 					    ? IDIR_FAR(m->ctyp)
 					    : (IDIR(m->ctyp) & ~FAR);
 
@@ -3028,7 +3064,7 @@ expr(Node *n)
 		 * `vga` is itself a far pointer variable) is regular storage —
 		 * the slot lives in normal memory and holds the 4-byte far
 		 * pointer value, so use storel/storew per irtyp. */
-		if (ISFAR(s1.ctyp) && KIND(s1.ctyp) != PTR && KIND(s1.ctyp) != FUN) {
+		if ((ISFAR(s1.ctyp) && KIND(s1.ctyp) != PTR && KIND(s1.ctyp) != FUN) || FARSTORAGE(s1)) {
 			char t = irtyp(s1.ctyp);
 			if (t == 'b')
 				fprintf(of, "\tstorefb ");
@@ -3065,7 +3101,7 @@ expr(Node *n)
 		 * *variable* lives in normal memory and its slot holds the
 		 * 4-byte pointer value -- use plain load/store, matching the
 		 * assignment case below.  See [[minic-far-var-assign-storefw]]. */
-		if (ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) {
+		if ((ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) || FARSTORAGE(sl)) {
 			loadfar(s0, sl);
 		} else {
 			load(s0, sl);
@@ -3085,7 +3121,7 @@ expr(Node *n)
 			fprintf(of, "\n");
 		}
 		/* Store new value (handle far pointer) */
-		if (ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) {
+		if ((ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) || FARSTORAGE(sl)) {
 			char t = irtyp(sl.ctyp);
 			if (t == 'b')
 				fprintf(of, "\tstorefb ");
@@ -3118,7 +3154,7 @@ expr(Node *n)
 		        ? sl.ctyp
 		        : (sl.ctyp & ~FAR);
 		/* Load current value (see note above on PTR/FUN exclusion). */
-		if (ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) {
+		if ((ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) || FARSTORAGE(sl)) {
 			loadfar(s0, sl);
 		} else {
 			load(s0, sl);
@@ -3218,7 +3254,7 @@ expr(Node *n)
 	}
 	if (n->op == 'P' || n->op == 'M') {
 		/* Store new value (see note on the p/m prefix case above). */
-		if (ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) {
+		if ((ISFAR(sl.ctyp) && KIND(sl.ctyp) != PTR && KIND(sl.ctyp) != FUN) || FARSTORAGE(sl)) {
 			char t = irtyp(sl.ctyp);
 			if (t == 'b')
 				fprintf(of, "\tstorefb ");
@@ -3357,9 +3393,14 @@ lval(Node *n)
 			 * data, when s0 came through a far-ptr deref it carries the
 			 * FAR bit and the address is Kl.  Propagate FAR onto sr so
 			 * the assignment site (which checks ISFAR(sl.ctyp)) routes
-			 * through storefar instead of plain store. */
-			klass = ISFAR(s0.ctyp) ? 'l' : 'w';
-			far_flag = ISFAR(s0.ctyp) ? FAR : 0;
+			 * through storefar instead of plain store.  FARSTORAGE: a
+			 * global struct lives in a far segment, so `g.m = x` also
+			 * needs the Kl address + FAR propagation. */
+			{
+			int base_far = ISFAR(s0.ctyp) || FARSTORAGE(s0);
+			klass = base_far ? 'l' : 'w';
+			far_flag = base_far ? FAR : 0;
+			}
 			if (m->offset > 0) {
 				sr.t = Tmp;
 				sr.u.n = tmp++;

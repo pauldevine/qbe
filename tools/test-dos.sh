@@ -133,6 +133,9 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/fardata_probe.c:minic/dos/tests/fardata_probe.golden.txt:compact"
 	"minic/dos/examples/fardata_probe.c:minic/dos/tests/fardata_probe.golden.txt:large"
 	"minic/dos/examples/fardata_probe.c:minic/dos/tests/fardata_probe.golden.txt:huge"
+	"minic/dos/examples/farglobal_probe.c:minic/dos/tests/farglobal_probe.golden.txt:compact"
+	"minic/dos/examples/farglobal_probe.c:minic/dos/tests/farglobal_probe.golden.txt:large"
+	"minic/dos/examples/farglobal_probe.c:minic/dos/tests/farglobal_probe.golden.txt:huge"
 	"minic/dos/examples/local_typedef_probe.c:minic/dos/tests/local_typedef_probe.golden.txt:medium"
 	"minic/dos/examples/local_typedef_probe.c:minic/dos/tests/local_typedef_probe.golden.txt:large"
 	"minic/dos/examples/array_designate_probe.c:minic/dos/tests/array_designate_probe.golden.txt:medium"
@@ -260,7 +263,7 @@ run_runtime_probe() {
 	# (statics outside DGROUP).  Gated by basename so only these exercise it
 	# until far-global direct access is complete (see NEXT_SESSION.md).
 	farstatic=0
-	case "$base" in fardata_probe) farstatic=1 ;; esac
+	case "$base" in fardata_probe|farglobal_probe) farstatic=1 ;; esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" "$QBE_DIR/$src" >/dev/null
 	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?

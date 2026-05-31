@@ -1,0 +1,12 @@
+g_i ok
+g_u ok
+g_l ok
+g_i_inc ok
+g_u_dec ok
+pt_x ok
+pt_y ok
+pt_tag ok
+ptcopy ok
+gptr ok
+gptr_idx ok
+g_i_rw ok
