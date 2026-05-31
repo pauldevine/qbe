@@ -22,22 +22,36 @@
 >   stdout:**
 >   1. **Serial → host file** (simplest; this is what `myfreedos/boot/victor/
 >      test_mame.sh` uses): `-rs232a null_modem -bitbanger /tmp/cap.txt`.  The
->      boot disk's `AUTOEXEC.BAT` does `portset a 9600 none 1 8` then
->      `ctty seriala`, so DOS CON (handle 1 = stdout) is redirected to serial.
->      Our qbe programs already write stdout via INT 21h AH=40h to handle 1, so
->      `ctty seriala` routes that straight to `/tmp/cap.txt` — no program change.
+>      `AUTOEXEC.BAT` does (EXACT sequence, user-confirmed) `portset a 9600 none
+>      1 8` then `ctty seriala`, redirecting DOS CON (handle 1 = stdout) to
+>      serial port A.  **9600 is the CEILING — MAME's serial timing breaks above
+>      it** (the image's CONFIG.SYS defaults porta to 1200; `portset` bumps it to
+>      9600 at runtime).  Our qbe programs already write stdout via INT 21h
+>      AH=40h to handle 1, so `ctty seriala` routes that to `/tmp/cap.txt` with
+>      no program change.  `portset` syntax:
+>      `PORTSET <A|B> <baud> <parity> <stopbits> <bits>`.
 >   2. **Screen-RAM dump** (alternative; `newlibc/phase3_newlib/run_test.sh`
 >      `--auto`): a MAME `-autoboot_script` Lua dumps screen RAM at `0xF0000`
 >      (4000 B = 80×25×2), decoded by `phase3_newlib/tools/decode_victor_screen.py`
 >      (char glyph = low byte − 0x60).  Heavier; only needed if we test the
 >      Victor text screen directly rather than stdout.
-> - **Boot/program disk**: a FreeDOS-on-Victor FAT16 **hard disk** image mounted
->   `-hard1 <img>`, built à la `myfreedos/boot/victor/build_stage1_disk.sh`
->   (Victor IPL in sectors 1–128, FAT16 BPB at 129).  Programs + a custom
->   `AUTOEXEC.BAT` are injected into the FAT area (see `create_floppy.py` /
->   `copy_to_victor_dos.py` for the FAT writer).  A bootable FreeDOS-Victor image
->   already exists in the myfreedos tree — reuse it as the base rather than
->   building DOS from scratch.
+> - **Boot/program disk (USE THE STABLE MS-DOS 3.1 FLOPPY, not myfreedos):** the
+>   base is `~/Desktop/randos/python.img` — a bootable **Victor MS-DOS 3.1
+>   single-sided floppy** (MSDOS.SYS + COMMAND.COM + the PORTA/PORTB/PORTSET
+>   serial utils; CONFIG.SYS already `device=porta.exe`/`portb.exe`).  Chosen
+>   over the myfreedos FreeDOS image because myfreedos is itself under test — MS
+>   DOS 3.1 is the stable reference OS.  Mount it in MAME as a **floppy**:
+>   `-flop1 <img>` (NOT `-hard1`).
+> - **File injection — `vtg_image_util` (on PATH; CONFIRMED working):** it
+>   reads/writes Victor FAT12 floppies.  `vtg_image_util copy <localfile>
+>   <img>:\\NAME.EXT` writes (OVERWRITES an existing name; there is no `-f` for
+>   copy — that flag is `create`-only).  `copy <img>:\\NAME .` reads back;
+>   `list`/`info`/`delete` as expected.  **ALWAYS operate on a COPY of
+>   python.img — never mutate the user's master.**  So the harness: `cp
+>   python.img run.img`; `vtg_image_util copy <prog>.exe run.img:\\PROG.EXE`;
+>   write an `AUTOEXEC.BAT` (`@echo off` / `portset a 9600 none 1 8` /
+>   `ctty seriala` / `PROG.EXE` / a sentinel echo) and `vtg_image_util copy
+>   AUTOEXEC.BAT run.img:\\AUTOEXEC.BAT`.
 > - **Exit detection**: fixed `-seconds_to_run` (myfreedos uses 150; tune down),
 >   or a `PASS:`/`FAIL:` sentinel regex over the captured output.
 > - **Interactive debugging (NOT for the gate, but invaluable when a run
@@ -49,18 +63,23 @@
 >
 > **CONCRETE DELIVERABLES for the session:**
 > 1. **`tools/run-victor-mame.sh`** — the `victor9k` analog of `run-dos-exe.sh`:
->    takes a built `.EXE`, produces/updates a FreeDOS-Victor disk image with the
->    EXE + an `AUTOEXEC.BAT` (`portset a 9600 none 1 8` / `ctty seriala` /
->    `<prog>` / a sentinel echo so we know it finished), runs MAME headless with
->    `-rs232a null_modem -bitbanger <cap>` + `-seconds_to_run`, then streams the
->    serial capture (CRLF/0x1A-stripped, à la `run-dos-exe.sh`) to stdout.  Exit
->    77 (skip) if `mame`, the roms, or the base disk image are missing — so the
->    gate degrades gracefully on machines without the Victor MAME setup.
-> 2. **Disk-image plumbing** — a small helper (reuse/port `create_floppy.py`'s
->    FAT writer or use `mtools` if simpler) that drops `<prog>.EXE` +
->    `AUTOEXEC.BAT` into a copy of the base FreeDOS-Victor image without
->    rebuilding DOS.  Keep the base image path overridable by env
->    (`$VICTOR_DISK`), mirroring `$DOSBOX`.
+>    takes a built `.EXE`, `cp`s the base `python.img` to a scratch `run.img`,
+>    injects the EXE + a generated `AUTOEXEC.BAT` (`@echo off` /
+>    `portset a 9600 none 1 8` / `ctty seriala` / `PROG.EXE` / a sentinel echo
+>    so we know it finished) via `vtg_image_util copy`, runs MAME headless
+>    (`SDL_VIDEODRIVER=dummy mame victor9k -ramsize 896K -flop1 run.img
+>    -video none -sound none -nothrottle -skip_gameinfo -seconds_to_run <N>
+>    -rs232a null_modem -bitbanger <cap>`), then streams the serial capture
+>    (CRLF/0x1A-stripped, à la `run-dos-exe.sh`) to stdout, trimmed to between
+>    the sentinel markers.  Exit 77 (skip) if `mame`, its roms, or
+>    `$VICTOR_DISK` are missing — so the gate degrades gracefully on machines
+>    without the Victor MAME setup.  Base image path overridable by env
+>    `$VICTOR_DISK` (default `~/Desktop/randos/python.img`), mirroring `$DOSBOX`.
+> 2. **File injection uses `vtg_image_util` directly** — no custom FAT writer
+>    needed (it already does Victor FAT12 read/write).  Just `cp` the master to
+>    scratch and `vtg_image_util copy` the EXE + AUTOEXEC.BAT in.  The one open
+>    question to settle empirically on the first MAME run: confirm the serial
+>    capture actually fills (porta = MAME `-rs232a` port A; baud held at 9600).
 > 3. **VALIDATE THE HARNESS WITH A TINY PROGRAM FIRST** — e.g. the existing
 >    far-data "halprobe" that prints `3`, or a 1-line hello `.EXE`.  This proves
 >    the serial-capture path end-to-end INDEPENDENT of mpython's size, and
@@ -73,11 +92,13 @@
 >    near/far probes it already validates (it's faster and needs no Victor
 >    image); use MAME for the on-target / >640KB / Victor-hardware cases.
 >
-> **RESOURCES (paths):** MAME `~/projects/mame/mame` (machine `victor9k`);
-> harness exemplars `~/projects/myfreedos/boot/victor/{test_mame.sh,
-> build_stage1_disk.sh,create_floppy.py,copy_to_victor_dos.py}` +
-> `~/projects/newlibc/phase3_newlib/{run_test.sh,tools/decode_victor_screen.py}`
-> + `~/projects/newlibc/MAME_DEBUG_GUIDE.md`; MCP/skill
+> **RESOURCES (paths):** MAME `~/projects/mame/mame` (machine `victor9k`); **base
+> boot floppy `~/Desktop/randos/python.img` (Victor MS-DOS 3.1)**; **file-inject
+> tool `vtg_image_util` (on PATH)** — `copy`/`list`/`info`/`delete` Victor FAT12;
+> harness exemplars `~/projects/myfreedos/boot/victor/test_mame.sh` (the serial
+> `-bitbanger` pattern) + `~/projects/newlibc/phase3_newlib/{run_test.sh,
+> tools/decode_victor_screen.py}` + `~/projects/newlibc/MAME_DEBUG_GUIDE.md`;
+> MCP/skill
 > `~/projects/Victor9000-Development-Private/mame/mame-mcp-server/` (`mame-victor-test`);
 > Victor HW docs `~/Documents/Victor9k Stuff/Manuals/{subsystem-docs,GPTFiles}`;
 > full Victor FreeDOS port `~/projects/myfreedos`; OEM **MS-DOS 3.1 sources**
