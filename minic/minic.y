@@ -152,6 +152,9 @@ struct Symb {
 
 struct Node {
 	char op;
+	unsigned char nlong;  /* 'N' nodes: 1 if the integer literal is `long`
+	                       * (L/l suffix, or value too wide for i8086's
+	                       * 16-bit int) so expr() types it LNG not INT. */
 	union {
 		int n;
 		char v[NString];
@@ -1483,6 +1486,18 @@ psymb(Symb s)
 void
 sext(Symb *s)
 {
+	/* Sign-extending a COMPILE-TIME CONSTANT: don't emit `extsw`.  On
+	 * i8086 the `w` class is 16-bit, so `=l extsw <const>` makes the
+	 * backend sign-extend only the low 16 bits — truncating any constant
+	 * that needs more (e.g. `long x = 555666L` became 31250) and
+	 * misreading bit 15 of an in-range value (`40000` -> negative).  The
+	 * Con already holds the full intended value in u.n (the lexer stored
+	 * the host-int value), so just retype it LNG; psymb prints the whole
+	 * number and the backend materializes the 32-bit constant. */
+	if (s->t == Con) {
+		s->ctyp = LNG;
+		return;
+	}
 	fprintf(of, "\t%%t%d =l extsw ", tmp);
 	psymb(*s);
 	fprintf(of, "\n");
@@ -2364,7 +2379,7 @@ expr(Node *n)
 	case 'N':
 		sr.t = Con;
 		sr.u.n = n->u.n;
-		sr.ctyp = INT;
+		sr.ctyp = n->nlong ? LNG : INT;
 		break;
 
 	case 'F':
@@ -3864,6 +3879,7 @@ mknode(char op, Node *l, Node *r)
 
 	n = alloc(sizeof *n);
 	n->op = op;
+	n->nlong = 0;
 	n->l = l;
 	n->r = r;
 	return n;
@@ -7852,6 +7868,7 @@ yylex_inner()
 		{ 0, 0 }
 	};
 	int i, c, c1;
+	int suffix_l;  /* set when an integer literal carries an L/l suffix */
 	unsigned long n;
 	char v[NString], *p;
 
@@ -7894,6 +7911,7 @@ yylex_inner()
 
 	if (isdigit(c) || c == '.') {
 		int isfloat = 0;
+		suffix_l = 0;
 		p = v;
 
 		/* Handle leading dot for numbers like .5 */
@@ -7934,15 +7952,16 @@ yylex_inner()
 					c = getchar();
 				}
 				/* Consume integer suffixes: U, L, UL, LU, ULL, LLU, etc. */
+				suffix_l = 0;
 				for (i = 0; i < 3; i++) {
-					if (c == 'u' || c == 'U' || c == 'l' || c == 'L')
-						c = getchar();
-					else
-						break;
+					if (c == 'l' || c == 'L') { suffix_l = 1; c = getchar(); }
+					else if (c == 'u' || c == 'U') c = getchar();
+					else break;
 				}
 				ungetc(c, stdin);
 				yylval.n = mknode('N', 0, 0);
 				yylval.n->u.n = (int)n;
+				yylval.n->nlong = suffix_l || (n > 0xFFFFUL);
 				return NUM;
 			} else if (c >= '0' && c <= '7') {
 				/* Octal */
@@ -7952,15 +7971,16 @@ yylex_inner()
 					c = getchar();
 				}
 				/* Consume integer suffixes: U, L, UL, LU, ULL, LLU, etc. */
+				suffix_l = 0;
 				for (i = 0; i < 3; i++) {
-					if (c == 'u' || c == 'U' || c == 'l' || c == 'L')
-						c = getchar();
-					else
-						break;
+					if (c == 'l' || c == 'L') { suffix_l = 1; c = getchar(); }
+					else if (c == 'u' || c == 'U') c = getchar();
+					else break;
 				}
 				ungetc(c, stdin);
 				yylval.n = mknode('N', 0, 0);
 				yylval.n->u.n = (int)n;
+				yylval.n->nlong = suffix_l || (n > 0xFFFFUL);
 				return NUM;
 			} else {
 				/* Could be 0, 0.5, or 0e10 */
@@ -8029,6 +8049,7 @@ yylex_inner()
 				c = getchar();
 			} else {
 				/* Integer long suffix; consume one or two L/l. */
+				suffix_l = 1;
 				c = getchar();
 				if (c == 'l' || c == 'L')
 					c = getchar();
@@ -8056,6 +8077,7 @@ yylex_inner()
 		} else {
 			yylval.n = mknode('N', 0, 0);
 			yylval.n->u.n = (int)n;
+			yylval.n->nlong = suffix_l || (n > 0xFFFFUL);
 			return NUM;
 		}
 	}

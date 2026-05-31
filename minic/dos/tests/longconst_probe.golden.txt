@@ -1,0 +1,6 @@
+a ok
+b ok
+c ok
+structlong ok
+vararg 222333
+addconst ok

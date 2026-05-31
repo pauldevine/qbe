@@ -247,7 +247,13 @@ def(Slice sl, bits msk, Blk *b, Ins *i, Loc *il)
 
 	if (!i)
 		i = &b->ins[b->nins];
-	cls = sl.sz > 4 ? Kl : Kw;
+	/* A slice wider than one machine word needs the wide class so the
+	 * shl/or reconstruction below runs at full width.  Hardcoding 4
+	 * assumed a 32-bit word (Kw); on i8086 (T.wordsz==2) a 4-byte slice
+	 * is Kl, else `high << 16` shifts a 16-bit Kw temp to 0 and the
+	 * loadl loses its high word (struct-copy of a long member).  No
+	 * change on 32-bit-word targets where T.wordsz==4. */
+	cls = sl.sz > T.wordsz ? Kl : Kw;
 	msks = MASK(sl.sz);
 
 	while (i > b->ins) {
