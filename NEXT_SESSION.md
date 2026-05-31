@@ -1,4 +1,48 @@
-# Next session — finish far-data: make direct global access far so far-static-data can be the default (post §1s)
+# Next session — finish far-data: re-apply FARSTORAGE (far-GLOBAL direct access), then decide default vs opt-in (post §1t)
+
+> **§1t — backend bug 1 FIXED & committed (`2e76a99`); "bug 2" DEMYSTIFIED as a
+> segmented-pointer semantic limit, NOT a codegen defect.  FARSTORAGE NOT yet
+> re-applied (deferred by user choice — "stop here for now").**
+>
+> **Bug 1 (DONE): far-store AX/DX save bracket.**  `Ostorefb/Ostorefh/Ostorefw`
+> saved ES/BX/CX but not AX/DX; when the dest address is an RCon CAddr (far store
+> to a constant global address, e.g. `arr[CONST]=v`), `load_farptr_con`'s
+> `mov ax, seg sym` clobbered an AX-resident live temp (return value).  Fix:
+> `kl_save_axdx`/`kl_restore_axdx` bracket, mirroring `Oloadf*`/`Ostorefl`.  Probe
+> `caddr_store_probe.c` (compact/large/huge) — verified bug-loud ("ret_w FAIL 908"
+> = `seg arr` leaked into AX).  Gate 134→137, `make check` green.
+>
+> **Bug 2 (NOT A BUG — do not try to "fix" cmp32).**  Reproduced via
+> `QBE_FAR_STATIC_DATA=1 caddr_cmp_probe` (g_long at off=0 of its far segment):
+> ltu_sym/leu_sym/gtu_lo/geu_lo FAIL.  ROOT CAUSE: QBE folds `&g_long - 1` into a
+> CAddr `$g_long + (-1)`; on i8086 far that −1 addend WRAPS the 16-bit offset
+> (0→0xFFFF) WITHOUT borrowing into the segment word, so k_lo materializes as
+> `S:0xFFFF` (asm literally `mov ax, _g_long+-1`), not flat `(S-1):0xFFFF`.  cmp32
+> then faithfully compares the wrapped representation — it is CORRECT.  The
+> probe's k_lo assertions assume FLAT 32-bit pointer arithmetic, which segmented
+> far pointers don't honor (`&g-1` is UB; far ptr ±n is offset-only in
+> compact/large; there is no single seg:off that is "the byte before a paragraph
+> base" without normalization).  So the cmp32 path needs NO change.
+>
+> **What this means for the default-flip:** the original step (c) "fix bug 2"
+> dissolves.  To make far-static-data the DEFAULT you must instead NEUTRALIZE
+> caddr_cmp_probe's k_lo cases under far-segment-offset-0 placement (keep that
+> probe's symbol in DGROUP, or drop the k_lo cases when far-placed) — they test
+> ill-defined cross-segment-boundary far-pointer ordering, not codegen.
+>
+> **REMAINING WORK — re-apply FARSTORAGE (the real far-global-access codegen).**
+> This is the actual prize and is needed for MicroPython data regardless of the
+> default decision.  Open question (asked, user chose to defer): wire it as an
+> OPT-IN far-globals mode (gated behind a minic flag mirroring the
+> `--far-static-data` opt-in; default gate stays byte-identical) vs UNCONDITIONAL
+> under far-data + flip placement to default.  Opt-in is lower-risk and still
+> unblocks MicroPython (it needs far placement + far globals together anyway).
+> Reconstruction recipe is below (the prototype was correct in direction).
+> Verify with the all-on experiment: with bug 1 fixed, the ONLY all-on failures
+> should be caddr_cmp's k_lo cases (the segmented-semantics non-bug above).
+> See [[minic-far-data-segment]].
+
+# (superseded) Next session — finish far-data: make direct global access far so far-static-data can be the default (post §1s)
 
 > **§1s — additional far data segment(s): the placement INFRASTRUCTURE is in
 > and proven, landed OPT-IN.  The remaining work is the minic/qbe far-GLOBAL
