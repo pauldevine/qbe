@@ -281,14 +281,28 @@ class ModuleParser:
         align_map = {1: 1, 2: 2, 3: 16, 4: 256, 5: 4, 6: 4096}
         align = align_map.get(align_field, 16)
 
-        length = struct.unpack_from('<H', body, i)[0]
-        i += 2
-        # 64KB segment: explicit "big" record (0x99) OR big_bit in attr.
-        # A length of 0 with big-flag set means 64KB; without big-flag it
-        # means a genuinely empty segment.
+        # SEGDEF2 (record 0x99) carries a 4-byte length field; the 16-bit
+        # SEGDEF (0x98) carries 2 bytes.  nasm emits the 32-bit form when a
+        # segment's length (or any LEDATA offset within it) exceeds 64KB.
+        if big:
+            length = struct.unpack_from('<I', body, i)[0]
+            i += 4
+        else:
+            length = struct.unpack_from('<H', body, i)[0]
+            i += 2
+        # 64KB segment: a length of 0 with the big-flag set means exactly
+        # 64KB; without the big-flag it means a genuinely empty segment.
         is_big = big or big_bit
         if is_big and length == 0:
             length = 0x10000
+        # A USE16 (real-mode) segment cannot exceed 64KB — there is no
+        # seg:off that addresses past the segment's 64KB window.  Reject
+        # with a clear diagnostic rather than silently truncating (a >64KB
+        # code segment means a TU's text must be split across more CODE
+        # segments at function boundaries; see asm_to_omf.py).
+        if not use32 and length > 0x10000:
+            die('%s: USE16 segment exceeds 64KB (length %d); split the TU\'s '
+                'text into more CODE segments' % (self.path, length))
 
         name_idx, i = read_index(body, i)
         class_idx, i = read_index(body, i)

@@ -1,4 +1,70 @@
-# Next session — toolchain gaps: long const/struct + huge ptrdiff FIXED (§1w/§1x); MicroPython far-data compiles clean (§1v); next = FAR_SETJMP_EXE then link far
+# Next session — MicroPython LINKS under compact far-data (§1y/§1z); the wall is now IMAGE SIZE (951KB > 640KB conventional RAM), not codegen — next = shrink (dead-strip or subset/config trim)
+
+> **§1y (commit `76c69eb`) — FAR_SETJMP_EXE: far-data setjmp/longjmp.**  New
+> `_far_setjmp`/`_far_longjmp` in `tools/libstub_to_exe.py` (4-byte far env
+> ptr via ES:BX; longjmp's `val` at `[bp+10]`).  Resume-SP arithmetic is
+> IDENTICAL to the medium SETJMP_EXE (`lea [bp+6]`) — args sit above the
+> 4-byte CS:IP return address regardless of width.  Appended only under
+> far-data models.  `minic.y`: `setjmp`/`longjmp` added to `far_stdlib[]` →
+> mangled to `_far_setjmp`/`_far_longjmp` under compact/large/huge.
+> `setjmp_probe` now gated medium + compact + large (full NLR round-trip,
+> byte-identical golden across all three).  Gate 145→**147**, `make check`
+> green, 111 s/r 0 r/r (no grammar change).
+>
+> **§1z — MicroPython LINKS under `--model=compact` far-data, and the
+> remaining blocker is IMAGE SIZE, not the toolchain.**  `tools/build-
+> micropython.sh --model=compact` now: compiles 106/106 TUs (0 fail) with
+> `--far-static-data` + `-DFAR_DATA`/`-DDOS_FAR_DATA`, then LINKS to
+> `build/mp-link/mpython.exe` (108 modules; 861KB far code; 43KB far data
+> OUTSIDE DGROUP; only 37KB in DGROUP — the §1r DGROUP-overflow hang is GONE).
+> Two real gaps fixed to get there:
+> 1. **>64KB CODE segment** (`compile.obj` was 78KB — far-data codegen ~2x's
+>    code size, pushing MicroPython's biggest TU past the 64KB real-mode
+>    segment cap).  nasm emitted a `SEGDEF2` (32-bit, 4-byte length) +
+>    `LEDATA32`; `omf_link._handle_segdef` always read a 2-byte length →
+>    misparse → "bad LNAMES index 0".  FIX (two parts): (a) `asm_to_omf.py`
+>    now SPLITS a TU's `.text` across multiple `<BASE>_TEXT`/`_TEXT1`/`_TEXT2`
+>    CODE segments at FUNCTION boundaries (qbe emits a `.text` directive
+>    before every function) when the estimated size exceeds `TEXT_SEG_BUDGET`
+>    (56KB; `est_line_bytes`≈4×, ~2x margin over the measured ~2.1 B/line).
+>    Far calls resolve cross-segment via symbol fixups (already how
+>    cross-module calls work) and each function stays wholly in one segment so
+>    intra-function near jumps remain segment-local.  `omf_link` places every
+>    CODE-class segment distinctly (`_place_distinct`), so N per module just
+>    works.  (b) `omf_link._handle_segdef` now reads the 4-byte length for
+>    `SEGDEF2` and HARD-REJECTS any USE16 segment >64KB with a clear message
+>    (defensive: a real-mode segment can't exceed 64KB).  Single-segment TUs
+>    are byte-identical; no probe is big enough to split.
+> 2. **`mphalport.c` console HAL was medium-only** (near-data ABI: `str` at
+>    `[bp+6]` near, `len` at `[bp+8]`, INT 21h via DS:DX).  Under far-data
+>    `str` is a 4-byte far ptr (`[bp+6]`/`[bp+8]`), `len` at `[bp+10]`, and the
+>    buffer is OUTSIDE DGROUP so DS must be set to `str.seg`.  Made it
+>    `#if DOS_FAR_DATA` (build-micropython passes `-DDOS_FAR_DATA=1` under far
+>    models).  **VERIFIED CORRECT** by a standalone far-data probe that prints
+>    "3" — so the console path works; the HAL is NOT the blocker.
+>
+> **THE remaining blocker — IMAGE SIZE.**  `mpython.exe` is 951KB; a DOS .EXE
+> loads ENTIRELY into conventional memory (~640KB max), so it never loads (no
+> output, no crash — DOS EXEC just fails).  The squeeze: MEDIUM (452KB) fits
+> in RAM but its single 64KB DGROUP overflows (§1r hang); COMPACT (951KB)
+> fixes DGROUP but the code is too big to load.  This is NOT a codegen/link
+> defect — it's that we link the WHOLE curated core (the linker has no
+> dead-code elimination) while `print(1+2)` touches a small fraction.
+> **Next-move options (in rough order of payoff):**
+> 1. **Dead-strip unreferenced functions/segments in `omf_link`** — mark from
+>    `_start`/`_main` through PUBDEF/EXTDEF/FIXUPP reachability and drop
+>    unreached CODE segments.  Now that each big TU is split per-~function-
+>    group, granularity is finer; biggest single lever (print(1+2) needs maybe
+>    10-20% of the core).
+> 2. **Shrink `MICROPY_CONFIG`** — drop builtins/modules, smaller qstr set,
+>    trim the compiler, so fewer TUs/functions are pulled in.
+> 3. **Curate a smaller link subset** — only the modules transitively needed
+>    for lexer→parse→compile→`mp_call_function_0`+print.
+> The toolchain (compile + far-data link + setjmp + far console) is now PROVEN
+> end-to-end at small scale; this is purely a fit-in-640KB problem.
+> See [[minic-setjmp-longjmp]], [[minic-far-data-segment]].
+
+# (DONE §1y/§1z) Prior next-session note — toolchain gaps: long const/struct + huge ptrdiff FIXED (§1w/§1x); MicroPython far-data compiles clean (§1v); next = FAR_SETJMP_EXE then link far
 
 > **PRINCIPLE (reaffirmed): the goal is to FIND AND FIX QBE-toolchain gaps;
 > running MicroPython is the vehicle, not the prize.  When a probe trips a real

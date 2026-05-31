@@ -146,6 +146,67 @@ def collect_referenced_syms(line):
     return syms
 
 
+# Code-segment split budget.  A real-mode USE16 segment caps at 64KB.  We
+# split a TU's text at function boundaries so each CODE segment stays under
+# this estimated-byte budget.  EST_INSTR_BYTES over-estimates the average
+# qbe i8086 instruction (~2.1 bytes measured) by ~2x, so a segment estimated
+# at TEXT_SEG_BUDGET is really well under 64KB even for denser-than-average
+# code; over-splitting is harmless (just a few more segments).  omf_link
+# hard-rejects any USE16 segment that still slips past 64KB.
+TEXT_SEG_BUDGET = 56000
+EST_INSTR_BYTES = 4
+
+
+def est_line_bytes(line):
+    """Rough upper-ish estimate of a qbe asm line's encoded size."""
+    s = line.strip()
+    if (not s or s.startswith(';') or s.startswith('/*')
+            or s.startswith('.') or s.endswith(':')):
+        return 0
+    return EST_INSTR_BYTES
+
+
+def emit_text_segments(out, code_seg, text_lines, func_bounds):
+    """Emit the TU's `.text` as one CODE segment, or — if its estimated size
+    exceeds TEXT_SEG_BUDGET — several, split at function boundaries.  The
+    first segment keeps the canonical `<BASE>_TEXT` name (single-segment TUs
+    are byte-identical to before); overflow functions go to `<BASE>_TEXT1`,
+    `<BASE>_TEXT2`, ...  Far calls resolve cross-segment via symbol fixups,
+    so the split is transparent; each function stays wholly in one segment so
+    its intra-function near jumps remain segment-local."""
+    n = len(text_lines)
+    # Function start indices, normalised: start at 0, strictly increasing,
+    # within range.  qbe emits a `.text` before every function.
+    starts = sorted(set(b for b in func_bounds if 0 <= b < n))
+    if not starts or starts[0] != 0:
+        starts = [0] + starts
+    starts.append(n)
+
+    # Pack consecutive functions into segments under the byte budget.
+    segs = []        # list of (lo, hi) line ranges
+    seg_lo = 0
+    seg_bytes = 0
+    for k in range(len(starts) - 1):
+        lo, hi = starts[k], starts[k + 1]
+        fb = sum(est_line_bytes(l) for l in text_lines[lo:hi])
+        if hi == lo:
+            continue
+        # Start a new segment if this function would push us over budget
+        # (but never emit an empty segment — always keep at least one fn).
+        if seg_bytes > 0 and seg_bytes + fb > TEXT_SEG_BUDGET:
+            segs.append((seg_lo, lo))
+            seg_lo = lo
+            seg_bytes = 0
+        seg_bytes += fb
+    segs.append((seg_lo, n))
+
+    for idx, (lo, hi) in enumerate(segs):
+        nm = code_seg if idx == 0 else '%s%d' % (code_seg, idx)
+        out.append('segment %s class=CODE align=2 use16' % nm)
+        out.extend(text_lines[lo:hi])
+        out.append('')
+
+
 def emit_huge_section(out, sec_name, lines):
     """Emit one `.section "_HUGE_<sym>"` bucket as one or more NASM
     `segment` blocks of at most HUGE_CHUNK_BYTES.  Splits the trailing
@@ -232,6 +293,13 @@ def main():
     # arrays > 65520 bytes) and is laid out outside DGROUP by the
     # linker so it can hold > 64K data.
     huge_sections = {}
+    # Function-boundary indices into sections['text'].  qbe emits a `.text`
+    # directive before EVERY function, so each `.text` marks where the next
+    # function's lines begin.  Used to split an oversized TU's code across
+    # multiple <=64KB CODE segments at function boundaries (a real-mode
+    # segment caps at 64KB; far-data codegen can push one big TU's text past
+    # it — MicroPython's py/compile.c is 78KB under compact).
+    text_func_bounds = []
     current = 'text'
     current_huge = None   # active `_HUGE_<sym>` key when current == 'huge'
     publics = []          # symbols declared via `.globl`
@@ -249,6 +317,7 @@ def main():
 
         # Section markers
         if s == '.text':
+            text_func_bounds.append(len(sections['text']))
             current = 'text'; current_huge = None; continue
         if s == '.data':
             current = 'data'; current_huge = None; continue
@@ -367,9 +436,7 @@ def main():
     # _BSS go into shared DGROUP segments (so DS addresses everything).
     code_seg = basename.upper() + '_TEXT'
     _ = near_code  # reserved for future tiny/small/compact coalescing
-    out.append('segment ' + code_seg + ' class=CODE align=2 use16')
-    out.extend(sections['text'])
-    out.append('')
+    emit_text_segments(out, code_seg, sections['text'], text_func_bounds)
 
     out.append('segment %s class=%s align=2 use16' % (data_seg, data_cls))
     out.extend(sections['data'])

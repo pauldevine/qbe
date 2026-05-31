@@ -37,10 +37,13 @@ for arg in "$@"; do
 done
 
 # Far-data models route each module's statics to its own far segment so
-# total static data can exceed the single 64KB DGROUP.
+# total static data can exceed the single 64KB DGROUP.  DOS_FAR_DATA tells
+# the port's inline-asm console HAL (mphalport.c) to read its args under the
+# 4-byte-far-pointer ABI.
 FARSTATIC_FLAG=""
+FARDATA_DEF=""
 case "$MODEL" in
-	compact|large|huge) FARSTATIC_FLAG="--far-static-data" ;;
+	compact|large|huge) FARSTATIC_FLAG="--far-static-data"; FARDATA_DEF="-DDOS_FAR_DATA=1" ;;
 esac
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -87,7 +90,7 @@ for f in "${ALL_SRCS[@]}"; do
 	err="$OUT_DIR/$base.err"
 	: > "$err"
 
-	if ! clang -E -P -nostdinc -DDOS -D__TURBOC__ \
+	if ! clang -E -P -nostdinc -DDOS -D__TURBOC__ $FARDATA_DEF \
 			"-I$DOSPORT" "-I$STUB" "-I$INC_DIR" "-I$MP" "-I$GENHDR" \
 			"$f" 2>"$err" > "$OUT_DIR/$base.raw.c"; then
 		fail+=("$base (cpp)"); [ $KEEP_GOING -eq 0 ] && { echo "FAIL cpp: $base"; cat "$err"; exit 1; }; continue
