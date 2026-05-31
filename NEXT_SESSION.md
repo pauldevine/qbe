@@ -1,8 +1,61 @@
-# Next session — DEBUG the gc_alloc hang: MicroPython now RUNS on the real Victor 9000 (boot→main→qstr_init), but mp_init() hangs at the FIRST heap allocation
+# Next session — MicroPython runs through mp_init() + into compiling print(1+2) on the real Victor; NEW blocker = 24KB heap exhausts during compile (gc_collect is a no-op stub)
 
-> **§2b (DONE 2026-05-31) — `--gc-sections` dead-strip + first on-target execution
-> of MicroPython.  The size wall is CLEARED; the new blocker is a runtime hang in
-> the GC allocator, precisely localized.**
+> **§2c (DONE 2026-05-31, committed `d70c280`) — the gc_alloc hang is FIXED.  It
+> was a 16-bit div/mul AX:DX register-clobber codegen bug, NOT a far-data pointer
+> bug.  Verified ON THE REAL VICTOR: mpython now runs through `mp_init()` (C4) and
+> deep into compiling `print(1+2)`, with gc_alloc succeeding repeatedly.**
+>
+> ROOT CAUSE: 8086 idiv/imul/div are fixed-register (dividend in AX, DX:AX the
+> implicit pair, DX clobbered).  The i8086 backend emits them in-place instead of
+> precoloring TMP(RAX)/TMP(RDX) in isel (amd64 does), so rega kept a value live
+> ACROSS such an op in AX/DX and the next div/mul destroyed it.
+> `gc_setup_area` computes `gc_alloc_table_byte_len = (24576-1)/(1+8/2*(4*4)) =
+> 24575/65 = 378`, but the outer dividend (in AX) was zeroed by the inner
+> idiv(8/2)/imul → came out **0** → 0 heap blocks → first gc_alloc finds nothing,
+> returns NULL, caller retries forever → hang at `mp_init`'s first
+> `mp_obj_dict_init`.  Localized with serial checkpoints (S: layout dump in
+> gc_setup_area showed `total=0x6000 table=0x0000 pool=0x0000`; after the fix
+> `table=0x17a=378 pool=0x5e8=1512`).  See [[feedback_i8086_div_divisor_axdx_clobber]].
+>
+> FIXES (DOS gate **147→148**, `make check` green, amd64/arm64/rv64 byte-identical):
+> - **spill.c** + new `Target.divclob` field (i8086 = `BIT(RAX)|BIT(RDX)`, 0
+>   elsewhere): for div/mul/rem, OR divclob into the live-across avoid mask,
+>   mirroring caller-save-across-call, so rega keeps cross-living temps out of AX/DX.
+> - **i8086/emit.c**: Kw idiv/div backstop — stage a divisor that still lands in
+>   AX/DX into BX before the DX:AX setup (xchg-ax-bx subcase when dividend in BX).
+> - **libstub.asm**: `__builtin_clzl` (32-bit CLZ), now referenced once uintptr_t
+>   widened to 32-bit.
+> - **build-micropython.sh / recompile-mp-tu.sh**: pass `-DFAR_DATA=1` to the C
+>   preprocessor for far-data models.  `stdint.h` gates intptr_t/uintptr_t width on
+>   `FAR_DATA`; without it `mp_uint_t`/`mp_obj_t` tagging was 16-bit and truncated
+>   far pointers' segments (a real bug, but NOT the hang — the hang persisted after
+>   this until the div fix).
+> - **divreg_probe.c** (+golden, medium gate): nested div/mul in div operands;
+>   bug-loud (`t1=0`) without the fix, `t1=378 t2=4607 t3=3 t4=-500 t5=0` with it.
+>
+> **THE NEW blocker — the 24KB heap fills during compilation of `print(1+2)` and
+> `gc_collect` is still a NO-OP STUB (main.c), so nothing is reclaimed → a gc_alloc
+> eventually returns NULL → the program crashes/reboots (a second `__V9BEGIN__`
+> appears in the serial capture).**  The on-target capture shows: `C4` (mp_init
+> done), then dozens of successful `A0 A1 A2 Af Am Ar` gc_alloc cycles as the
+> lexer/parser/compiler allocate, then an `A0 A1 A2 A2` (gc_collect retry → still
+> NULL), then a reboot — never reaching `C5`/`3`/`__V9END__`.  **NEXT MOVES (pick):**
+> (1) **bump `MICROPY_HEAP_SIZE`** in ports/dos8086/mpconfigport.h (it's 24KB; the
+> far-data model leaves lots of conventional RAM — try 64–128KB) as the cheap first
+> test; (2) **implement a real `gc_collect`** (stack scan; now that setjmp/longjmp
+> work it can spill callee-saved regs and scan [SP, stack_top) — see
+> [[minic-setjmp-longjmp]]); (3) confirm whether the reboot is pure OOM or a
+> separate crash (add an OOM checkpoint in m_malloc_fail / gc_alloc's NULL return).
+> The serial checkpoints (C*/Q*/S:/A* in main.c, runtime.c, gc.c — in the
+> ~/projects/micropython tree, NOT the qbe repo) are STILL IN PLACE; strip the
+> noisy gc.c A*/S: ones once the heap path is solid (they print per-alloc).
+> SASI harness recipe unchanged (below).  Reproduce: `bash
+> tools/build-micropython.sh --model=compact --keep-going` then inject + run via
+> the SASI disk (see the §2b block).
+>
+> ---
+>
+> # (DONE §2b) — `--gc-sections` dead-strip + first on-target execution of MicroPython
 >
 > **What landed (committed `70e9c8a`): `omf_link.py --gc-sections`** — segment-
 > granular dead-code elimination via FIXUPP reachability from `_start` (standard
