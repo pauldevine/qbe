@@ -2943,11 +2943,19 @@ expr(Node *n)
 					/* Evaluate RHS */
 					s0 = expr(n->r);
 
-					/* Load current storage unit value */
+					/* Load current storage unit value.  addr is far
+					 * (ptyp = IDIR_FAR) under any far-data model, so the
+					 * RMW must go through loadfar/storefar — a near
+					 * load/store would hit only the offset against DS and
+					 * silently read/write the wrong segment.  Mirror the
+					 * bitfield READ path above. */
 					oldval.t = Tmp;
 					oldval.u.n = tmp++;
 					oldval.ctyp = m->ctyp;
-					load(oldval, addr);
+					if (base_far)
+						loadfar(oldval, addr);
+					else
+						load(oldval, addr);
 
 					/* Create masks */
 					mask = (1UL << m->bitwidth) - 1;
@@ -3006,12 +3014,16 @@ expr(Node *n)
 					psymb(shifted);
 					fprintf(of, "\n");
 
-					/* Store back */
-					fprintf(of, "\tstore%c ", irtyp(m->ctyp));
-					psymb(merged);
-					fprintf(of, ", ");
-					psymb(addr);
-					fprintf(of, "\n");
+					/* Store back (far when the base address is far). */
+					if (base_far) {
+						storefar(merged, addr);
+					} else {
+						fprintf(of, "\tstore%c ", irtyp(m->ctyp));
+						psymb(merged);
+						fprintf(of, ", ");
+						psymb(addr);
+						fprintf(of, "\n");
+					}
 
 					sr = s0;  /* Assignment returns the assigned value */
 					break;
@@ -3758,6 +3770,48 @@ stmt(Stmt *s, int b, int c)
 		}
 		if (s->p1) {
 			x = expr(s->p1);
+			/* Coerce the return value to the function's declared return
+			 * type, mirroring the assignment converter.  Without this a
+			 * narrow (INT/CHR) value returned from an `l` function reached
+			 * `ret %tN` as a `w` temp; selret never widened it to DX:AX, so
+			 * the function returned stale AX:DX (the MicroPython lexer's
+			 * `mp_uint_t readbyte(){ return *cur; }` returned garbage, which
+			 * the parser saw as MP_LEXER_INVALID_BYTE and hung).  Float and
+			 * narrowing conversions are handled too for completeness. */
+			if (ISFLOAT(curfntyp) && !ISFLOAT(x.ctyp)) {
+				fprintf(of, "\t%%t%d =%c ", tmp, irtyp(curfntyp));
+				fprintf(of, KIND(x.ctyp) == LNG ? "sltof " : "swtof ");
+				psymb(x);
+				fprintf(of, "\n");
+				x.t = Tmp; x.ctyp = curfntyp; x.u.n = tmp++;
+			} else if (!ISFLOAT(curfntyp) && ISFLOAT(x.ctyp)) {
+				fprintf(of, "\t%%t%d =%c ", tmp, irtyp(curfntyp));
+				fprintf(of, KIND(curfntyp) == LNG ? "dtosi " : "stosi ");
+				psymb(x);
+				fprintf(of, "\n");
+				x.t = Tmp; x.ctyp = curfntyp; x.u.n = tmp++;
+			} else if (ISFLOAT(curfntyp) && ISFLOAT(x.ctyp) && curfntyp != x.ctyp) {
+				fprintf(of, "\t%%t%d =%c ", tmp, irtyp(curfntyp));
+				fprintf(of, KIND(curfntyp) == LNG ? "exts " : "truncd ");
+				psymb(x);
+				fprintf(of, "\n");
+				x.t = Tmp; x.ctyp = curfntyp; x.u.n = tmp++;
+			} else if (KIND(curfntyp) == LNG &&
+			           (KIND(x.ctyp) == INT || KIND(x.ctyp) == CHR) &&
+			           !ISFLOAT(curfntyp)) {
+				/* Widen a narrow integer value to the long return. */
+				sext(&x);
+			} else if (KIND(curfntyp) != LNG && KIND(curfntyp) != PTR &&
+			           KIND(curfntyp) != FUN &&
+			           KIND(x.ctyp) == LNG && !ISFLOAT(x.ctyp)) {
+				/* Narrow a long value to an int/char return. */
+				fprintf(of, "\t%%t%d =w copy ", tmp);
+				psymb(x);
+				fprintf(of, "\n");
+				x.t = Tmp;
+				x.ctyp = (KIND(curfntyp) == CHR) ? CHR : INT;
+				x.u.n = tmp++;
+			}
 			fprintf(of, "\tret ");
 			psymb(x);
 			fprintf(of, "\n");
