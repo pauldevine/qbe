@@ -3423,6 +3423,43 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		r0 = i->arg[0]; /* dividend */
 		r1 = i->arg[1]; /* divisor */
 
+		/* HAZARD: idiv/div implicitly use DX:AX as the dividend, so a divisor
+		 * that rega placed in AX or DX is destroyed by the `mov ax, dividend`
+		 * / `cwd` setup below (it would silently divide by 0 or by AX).  Stage
+		 * such a divisor into BX (push/pop preserved) before touching AX/DX. */
+		if (rtype(r1) == RTmp && (r1.val == RAX || r1.val == RDX)) {
+			fprintf(f, "\tpush bx\n");
+			if (rtype(r0) == RTmp && r0.val == RBX) {
+				/* dividend in BX, divisor in AX/DX: get both into place
+				 * without clobbering either source */
+				if (r1.val == RAX)
+					fprintf(f, "\txchg ax, bx\n");   /* ax<-dividend, bx<-divisor */
+				else {
+					fprintf(f, "\tmov ax, bx\n");    /* ax<-dividend */
+					fprintf(f, "\tmov bx, dx\n");    /* bx<-divisor */
+				}
+			} else {
+				fprintf(f, "\tmov bx, %s\n", rname[r1.val]);  /* capture divisor first */
+				if (!(rtype(r0) == RTmp && r0.val == RAX)) {
+					if (rtype(r0) == RTmp)
+						fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+					else if (rtype(r0) == RCon)
+						fprintf(f, "\tmov ax, %"PRIi64"\n", fn->con[r0.val].bits.i);
+				}
+			}
+			fprintf(f, "\tcwd\n");
+			fprintf(f, "\tidiv bx\n");
+			fprintf(f, "\tpop bx\n");
+			if (i->op == Odiv) {
+				if (rtype(i->to) == RTmp && i->to.val != RAX)
+					{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+			} else {
+				if (rtype(i->to) == RTmp)
+					fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
+			}
+			return;
+		}
+
 		/* Move dividend to AX if not already there */
 		if (rtype(r0) != RTmp || r0.val != RAX) {
 			fprintf(f, "\tmov ax, ");
@@ -3471,6 +3508,39 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 */
 		r0 = i->arg[0]; /* dividend */
 		r1 = i->arg[1]; /* divisor */
+
+		/* HAZARD (see signed path above): a divisor in AX/DX is destroyed by
+		 * the `mov ax, dividend` / `xor dx, dx` DX:AX setup.  Stage it to BX. */
+		if (rtype(r1) == RTmp && (r1.val == RAX || r1.val == RDX)) {
+			fprintf(f, "\tpush bx\n");
+			if (rtype(r0) == RTmp && r0.val == RBX) {
+				if (r1.val == RAX)
+					fprintf(f, "\txchg ax, bx\n");   /* ax<-dividend, bx<-divisor */
+				else {
+					fprintf(f, "\tmov ax, bx\n");    /* ax<-dividend */
+					fprintf(f, "\tmov bx, dx\n");    /* bx<-divisor */
+				}
+			} else {
+				fprintf(f, "\tmov bx, %s\n", rname[r1.val]);  /* capture divisor first */
+				if (!(rtype(r0) == RTmp && r0.val == RAX)) {
+					if (rtype(r0) == RTmp)
+						fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+					else if (rtype(r0) == RCon)
+						fprintf(f, "\tmov ax, %"PRIi64"\n", fn->con[r0.val].bits.i);
+				}
+			}
+			fprintf(f, "\txor dx, dx\n");
+			fprintf(f, "\tdiv bx\n");
+			fprintf(f, "\tpop bx\n");
+			if (i->op == Oudiv) {
+				if (rtype(i->to) == RTmp && i->to.val != RAX)
+					{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+			} else {
+				if (rtype(i->to) == RTmp)
+					fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
+			}
+			return;
+		}
 
 		/* Move dividend to AX if not already there */
 		if (rtype(r0) != RTmp || r0.val != RAX) {

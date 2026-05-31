@@ -32,6 +32,8 @@ Target T_i8086 = {
 	.memmodel = Msmall,  /* Default to small memory model */
 	.wordsz = 2,         /* Kw is 16 bits on 8086; storew/loadw are
 	                      * single `mov word` instructions */
+	.divclob = BIT(RAX) | BIT(RDX),  /* idiv/imul/div/etc are emitted
+	                      * in-place and clobber the AX:DX pair */
 	.gpr0 = RAX,
 	.ngpr = NGPR,
 	.fpr0 = 0,  /* no FPU initially */

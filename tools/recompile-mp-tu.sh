@@ -23,7 +23,7 @@ MP="$HOME/projects/micropython"; DOSPORT="$MP/ports/dos8086"
 GENHDR="$MP/ports/minimal/build"; INC_DIR="minic/include"; STUB="build/mp-spike/stubinc"
 MINIC="minic/minic"; QBE="./qbe"; OUT_DIR="build/mp-link"; MODEL=compact
 NORMALIZE='s/\bunsigned short int\b/unsigned short/g;s/\bunsigned long int\b/unsigned long/g;s/\bsigned short int\b/short/g;s/\bsigned long int\b/long/g;s/\blong long int\b/long long/g;s/\blong int\b/long/g;s/\bshort int\b/short/g;s/\bsigned char\b/char/g;s/\bsigned long long\b/long long/g;s/\bsigned long\b/long/g;s/\bsigned int\b/int/g'
-clang -E -P -nostdinc -DDOS -D__TURBOC__ -DDOS_FAR_DATA=1 \
+clang -E -P -nostdinc -DDOS -D__TURBOC__ -DDOS_FAR_DATA=1 -DFAR_DATA=1 \
   "-I$DOSPORT" "-I$STUB" "-I$INC_DIR" "-I$MP" "-I$GENHDR" "$src" 2>"$OUT_DIR/$base.err" > "$OUT_DIR/$base.raw.c"
 tr -d '\r\032' < "$OUT_DIR/$base.raw.c" | sed "$NORMALIZE" > "$OUT_DIR/$base.pp.c"
 "$MINIC" -m "$MODEL" < "$OUT_DIR/$base.pp.c" > "$OUT_DIR/$base.ssa" 2>"$OUT_DIR/$base.err" || { echo "MINIC_FAIL $base"; cat "$OUT_DIR/$base.err"; exit 1; }

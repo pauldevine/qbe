@@ -590,6 +590,20 @@ spill(Fn *fn)
 				for (rs=0; T.rsave[rs]>=0; rs++)
 					r |= BIT(T.rsave[rs]);
 			}
+			/* Integer div/mul/rem that the backend emits in-place
+			 * (i8086 idiv/imul/div) clobber a fixed reg pair (AX:DX)
+			 * without isel modeling it.  Force temps live ACROSS
+			 * such an op to avoid those regs, mirroring the call
+			 * case above; otherwise a nested div/mul in one operand
+			 * silently destroys a value the surrounding op still
+			 * needs.  T.divclob is 0 on targets that decompose
+			 * div/mul in isel (amd64/arm64/rv64), so this is inert
+			 * there. */
+			if (T.divclob
+			 && (i->op == Odiv || i->op == Oudiv
+			  || i->op == Orem || i->op == Ourem
+			  || i->op == Omul))
+				r |= T.divclob;
 			if (r)
 				sethint(v, r);
 		}

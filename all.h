@@ -84,6 +84,11 @@ struct Target {
 	int wordsz; /* byte width of Kw on this target (4 for 32/64-bit
 	             * targets; 2 for i8086, where the backend emits
 	             * `storew`/`loadw` as 16-bit `mov word`) */
+	bits divclob; /* regs clobbered by integer div/mul/rem that the
+	               * backend emits in-place (not modeled via precolored
+	               * temps in isel).  i8086 sets BIT(RAX)|BIT(RDX) so
+	               * spill.c keeps live-across temps out of AX/DX; 0
+	               * elsewhere (amd64 decomposes div/mul in isel). */
 	int gpr0;   /* first general purpose reg */
 	int ngpr;
 	int fpr0;   /* first floating point reg */

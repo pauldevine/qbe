@@ -39,11 +39,14 @@ done
 # Far-data models route each module's statics to its own far segment so
 # total static data can exceed the single 64KB DGROUP.  DOS_FAR_DATA tells
 # the port's inline-asm console HAL (mphalport.c) to read its args under the
-# 4-byte-far-pointer ABI.
+# 4-byte-far-pointer ABI.  FAR_DATA tells minic/include/stdint.h to make
+# intptr_t/uintptr_t (hence mp_int_t/mp_uint_t/mp_obj_t-tagging) 32-bit so a
+# far pointer survives a uintptr_t round-trip — without it gc_setup_area's
+# pointer math truncates the segment and gc_alloc's scan loop spins forever.
 FARSTATIC_FLAG=""
 FARDATA_DEF=""
 case "$MODEL" in
-	compact|large|huge) FARSTATIC_FLAG="--far-static-data"; FARDATA_DEF="-DDOS_FAR_DATA=1" ;;
+	compact|large|huge) FARSTATIC_FLAG="--far-static-data"; FARDATA_DEF="-DDOS_FAR_DATA=1 -DFAR_DATA=1" ;;
 esac
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"

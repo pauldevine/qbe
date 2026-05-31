@@ -83,6 +83,39 @@ ___builtin_clz:
     pop bp
     ret
 
+; int __builtin_clzl(unsigned long x) — count leading zero bits of a 32-bit
+; `unsigned long`.  Result 0..32; clzl(0) is undefined in C, return width (32).
+; Needed under the far-data models where mp_uint_t/uintptr_t widen to 32 bits,
+; so MicroPython's bit-width helpers reach for the `long` form.  The 4-byte arg
+; is low word [bp+4], high word [bp+6] (libstub_to_exe shifts both by +2).
+global ___builtin_clzl
+___builtin_clzl:
+    push bp
+    mov bp, sp
+    mov dx, [bp+6]             ; high word
+    or  dx, dx
+    jnz .scan                 ; high nonzero: ax=0, scan high word
+    mov dx, [bp+4]            ; low word
+    or  dx, dx
+    jnz .lowscan
+    mov ax, 32                 ; clzl(0): undefined; return width
+    pop bp
+    ret
+.lowscan:
+    mov ax, 16                 ; high word contributes 16 leading zeros
+    jmp .loop
+.scan:
+    xor ax, ax
+.loop:
+    test dx, 0x8000
+    jnz .done
+    inc ax
+    shl dx, 1
+    jmp .loop
+.done:
+    pop bp
+    ret
+
 ; long __builtin_expect(long exp, long c) — branch-prediction hint; returns
 ; its first argument.  MicroPython's mp_likely/mp_unlikely wrap a boolean, so
 ; the low word in AX is all the consumer reads.
