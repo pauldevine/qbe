@@ -130,6 +130,8 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/static_linkage_probe.c:minic/dos/tests/static_linkage_probe.golden.txt:medium"
 	"minic/dos/examples/static_linkage_probe.c:minic/dos/tests/static_linkage_probe.golden.txt:large"
 	"minic/dos/examples/setjmp_probe.c:minic/dos/tests/setjmp_probe.golden.txt:medium"
+	"minic/dos/examples/setjmp_probe.c:minic/dos/tests/setjmp_probe.golden.txt:compact"
+	"minic/dos/examples/setjmp_probe.c:minic/dos/tests/setjmp_probe.golden.txt:large"
 	"minic/dos/examples/fardata_probe.c:minic/dos/tests/fardata_probe.golden.txt:compact"
 	"minic/dos/examples/fardata_probe.c:minic/dos/tests/fardata_probe.golden.txt:large"
 	"minic/dos/examples/fardata_probe.c:minic/dos/tests/fardata_probe.golden.txt:huge"

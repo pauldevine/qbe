@@ -1,12 +1,15 @@
 /*
- * setjmp_probe.c -- medium-model setjmp/longjmp + an NLR round-trip.
+ * setjmp_probe.c -- setjmp/longjmp + an NLR round-trip (medium + far-data).
  *
  * setjmp/longjmp are the keystone of MicroPython's exception/unwind path
  * (py/nlrsetjmp.c: nlr_push == setjmp(buf->jmpbuf); nlr_jump == longjmp).
  * The medium model uses far code (4-byte CS:IP return address, retf), so
  * the helpers are written directly in far form in tools/libstub_to_exe.py
  * (SETJMP_EXE) -- longjmp restores the caller's stack and far-jumps to the
- * saved CS:IP.  This probe is the runtime regression guard.
+ * saved CS:IP.  Under far-data models (compact/large/huge) the env arg is a
+ * 4-byte far pointer reached via ES:BX (FAR_SETJMP_EXE; minic mangles
+ * setjmp/longjmp -> _far_setjmp/_far_longjmp).  This probe is the runtime
+ * regression guard for both forms (gated medium + compact + large).
  *
  * It checks:
  *   1. setjmp returns 0 on the direct call.

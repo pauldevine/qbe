@@ -2255,6 +2255,73 @@ _longjmp:
 """
 
 
+# Far-data (compact/large/huge) setjmp/longjmp.  Identical stack arithmetic
+# to SETJMP_EXE -- the resume SP is still `lea [bp+6]` (args sit ABOVE the
+# 4-byte CS:IP return address regardless of their size, since the i8086 ABI
+# reserves arg slots in the caller frame and does not clean them).  The only
+# differences from the medium form:
+#   * `env` is a 4-byte FAR pointer (off at [bp+6], seg at [bp+8]) reached via
+#     ES:BX, not a 2-byte near ptr via DS:BX.
+#   * longjmp's `val` is at [bp+10] (after the 4-byte env), not [bp+8].
+# minic mangles setjmp/longjmp -> far_setjmp/far_longjmp (asm _far_setjmp /
+# _far_longjmp) under far-data models via call_target_name's far_stdlib[].
+# The jmp_buf contents are still 7 16-bit words; only the POINTER to it is far.
+# ES is left clobbered by longjmp (it jumps back to the caller's post-setjmp
+# code, bypassing _far_setjmp's `pop es`); under far-data codegen ES is always
+# reloaded before a far access, so it is never assumed live across a call.
+FAR_SETJMP_EXE = """
+
+segment LIBSTUB_TEXT
+
+global _far_setjmp
+_far_setjmp:
+    push bp
+    mov bp, sp
+    push es                      ; save caller ES (restored on the direct path)
+    mov dx, bx                   ; dx = caller's BX (scratch-save before clobber)
+    mov es, [bp+8]               ; es = env.seg
+    mov bx, [bp+6]               ; bx = env.off
+    mov ax, [bp+0]               ; caller BP
+    mov [es:bx+0], ax
+    lea ax, [bp+6]               ; resume SP (caller SP just before the far call)
+    mov [es:bx+2], ax
+    mov [es:bx+4], si
+    mov [es:bx+6], di
+    mov [es:bx+8], dx            ; caller BX
+    mov ax, [bp+2]               ; ret IP
+    mov [es:bx+10], ax
+    mov ax, [bp+4]               ; ret CS
+    mov [es:bx+12], ax
+    xor ax, ax                   ; setjmp returns 0 on the direct call
+    mov bx, dx                   ; restore caller's BX (callee-saved here)
+    pop es                       ; restore caller ES
+    pop bp
+    retf
+
+global _far_longjmp
+_far_longjmp:
+    push bp
+    mov bp, sp
+    mov es, [bp+8]               ; es = env.seg (SS-relative read, before SP switch)
+    mov bx, [bp+6]               ; bx = env.off (kept live until the final retf)
+    mov ax, [bp+10]              ; val
+    test ax, ax
+    jnz .nz
+    mov ax, 1                    ; longjmp(env,0) must surface as 1
+.nz:
+    mov si, [es:bx+4]            ; restore SI
+    mov di, [es:bx+6]            ; restore DI
+    mov cx, [es:bx+12]           ; ret CS
+    mov dx, [es:bx+10]           ; ret IP
+    mov sp, [es:bx+2]            ; restore caller SP (env still reachable via ES:BX)
+    push cx                      ; CS \\ pushed below restored SP, reclaimed
+    push dx                      ; IP / by the retf below
+    mov bp, [es:bx+0]            ; restore caller BP
+    mov bx, [es:bx+8]            ; restore caller BX (final use of env ptr)
+    retf                         ; far-jump to ret CS:IP with AX = val
+"""
+
+
 def far_data_model(model):
     """Compact/large/huge models use 4-byte data pointers; medium does not."""
     return model in ('compact', 'large', 'huge')
@@ -2266,6 +2333,7 @@ def build_epilogue(model):
     parts = [MALLOC_EXE, FILEIO_EXE, FAR_SPRINTF_EXE, FAR_DOSIO_EXE, SETJMP_EXE]
     if far_data_model(model):
         parts.append(FAR_STDIO_EXE)
+        parts.append(FAR_SETJMP_EXE)
     return ''.join(parts)
 
 

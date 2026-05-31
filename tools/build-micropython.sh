@@ -15,18 +15,34 @@
 # symbols, segment-count limits, setjmp/longjmp).  --keep-going tolerates
 # per-TU compile failures and links whatever succeeded.
 #
-# Usage: tools/build-micropython.sh [--keep-going]
+# Under a far-data model (--model=compact|large|huge) the build sets
+# QBE_FAR_STATIC_DATA so each TU's statics land in its OWN far segment
+# (class FAR_DATA/FAR_BSS) placed outside DGROUP — freeing DGROUP for the
+# heap+stack (the §1r runtime-hang fix: medium's single 64KB DGROUP can't
+# hold MicroPython's ~55KB of static data PLUS heap+stack).  Far-data
+# stdlib/stdio/setjmp routing is handled by minic's far_stdlib[] mangling +
+# the FAR_*_EXE helpers in libstub_to_exe.py.
+#
+# Usage: tools/build-micropython.sh [--keep-going] [--model=<m>]
 
 set -u
 KEEP_GOING=0
+MODEL=medium
 for arg in "$@"; do
 	case "$arg" in
 		--keep-going) KEEP_GOING=1 ;;
+		--model=*) MODEL="${arg#--model=}" ;;
 		*) echo "unknown arg '$arg'" >&2; exit 1 ;;
 	esac
 done
 
-MODEL=medium
+# Far-data models route each module's statics to its own far segment so
+# total static data can exceed the single 64KB DGROUP.
+FARSTATIC_FLAG=""
+case "$MODEL" in
+	compact|large|huge) FARSTATIC_FLAG="--far-static-data" ;;
+esac
+
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 MP="$HOME/projects/micropython"
 DOSPORT="$MP/ports/dos8086"
@@ -57,7 +73,7 @@ done
 PORT_SRCS=("$DOSPORT/main.c" "$DOSPORT/mphalport.c")
 ALL_SRCS=("${CORE_SRCS[@]}" "${PORT_SRCS[@]}")
 
-echo "=== Compiling ${#ALL_SRCS[@]} TUs (${#CORE_SRCS[@]} core + ${#PORT_SRCS[@]} port) ==="
+echo "=== Compiling ${#ALL_SRCS[@]} TUs (${#CORE_SRCS[@]} core + ${#PORT_SRCS[@]} port) [model=$MODEL${FARSTATIC_FLAG:+, far-static-data}] ==="
 
 pass_objs=()
 fail=()
@@ -87,7 +103,7 @@ for f in "${ALL_SRCS[@]}"; do
 	if ! "$QBE" -t i8086 -m "$MODEL" "$ssa" > "$asm" 2>"$err"; then
 		fail+=("$base (qbe)"); [ $KEEP_GOING -eq 0 ] && { echo "FAIL qbe: $base"; cat "$err"; exit 1; }; continue
 	fi
-	if ! "$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" "$base" "$asm" "$omf" 2>"$err"; then
+	if ! "$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" $FARSTATIC_FLAG "$base" "$asm" "$omf" 2>"$err"; then
 		fail+=("$base (omf-wrap)"); [ $KEEP_GOING -eq 0 ] && { echo "FAIL omf-wrap: $base"; cat "$err"; exit 1; }; continue
 	fi
 	if ! nasm -w-label-redef-late -f obj "$omf" -o "$obj" 2>"$err"; then
@@ -101,8 +117,13 @@ if [ ${#fail[@]} -gt 0 ]; then
 	printf '    FAIL: %s\n' "${fail[@]}"
 fi
 
-# crt0 + libstub (medium model, near data, far code)
-nasm -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" 2>"$OUT_DIR/crt0.err" || {
+# crt0 + libstub.  Far-data models need crt0_exe to build argv as 4-byte far
+# pointers (the FAR_DATA-gated path in crt0_exe.asm).
+CRT0_FLAGS=""
+case "$MODEL" in
+	compact|large|huge) CRT0_FLAGS="-DFAR_DATA=1" ;;
+esac
+nasm $CRT0_FLAGS -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" 2>"$OUT_DIR/crt0.err" || {
 	echo "FAIL crt0 nasm"; cat "$OUT_DIR/crt0.err"; exit 1; }
 "$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" \
 	"$DOS_DIR/libstub.asm" "$OUT_DIR/libstub_exe.asm" 2>"$OUT_DIR/libstub.err" || {
