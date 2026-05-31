@@ -1,4 +1,44 @@
-# Next session — finish far-data: re-apply FARSTORAGE (far-GLOBAL direct access), then decide default vs opt-in (post §1t)
+# Next session — far-data DONE for opt-in; either flip placement to default or build MicroPython under far placement (post §1u)
+
+> **§1u — FARSTORAGE landed (commit `cfde49b`): direct far-GLOBAL access
+> (load/store/member/struct-copy/++/pointer-global) now works under far
+> placement.  Gate 137→140 green, `make check` green, 111 s/r 0 r/r.**
+>
+> New `FARSTORAGE(s)` predicate (true for a Glo/Ext symbol under a far-data
+> model — a STORAGE-location property, distinct from ISFAR's value-type bit;
+> NO PTR/FUN exclusion since a global pointer's 4-byte value also lives far).
+> Threaded through `load()` (delegates to loadfar), the assignment +
+> prefix/postfix inc-dec STORE conditions (`|| FARSTORAGE`), the three
+> member-address sites (Kl `=l add` + FAR propagation when base_far), and
+> `emit_struct_copy` (far per-word path when either side is a direct global).
+> KEY finding while verifying: the i8086 backend's IMPLICIT far-lowering of a
+> near `storew/loadw $sym` already covered SIMPLE scalar global access (so most
+> cases "worked"), but FAILED `emit_struct_copy` and some RMW — FARSTORAGE makes
+> minic emit the explicit reliable storefX/loadfX so it's correct everywhere.
+> Bug 1 (§1t far-store AX/DX bracket) is a prerequisite (the storefw-to-CAddr
+> path it enables).  Probe `farglobal_probe.c` (compact/large/huge, built with
+> `QBE_FAR_STATIC_DATA=1` so globals sit at offset 0 of their own FAR_DATA
+> segment); verified bug-loud without FARSTORAGE ("ptcopy FAIL 5764",
+> "g_i_rw FAIL 23").  NEAR_DATA models byte-identical (predicate false there).
+>
+> **Placement is still OPT-IN** (`QBE_FAR_STATIC_DATA=1` / `--far-static-data`).
+> With FARSTORAGE done, far placement + far globals now work TOGETHER, so the
+> two honest next moves are:
+> 1. **Build the MicroPython subset under far placement (compact/large)** — the
+>    actual goal: `tools/build-micropython.sh` with `QBE_FAR_STATIC_DATA=1` and
+>    `-m compact`/`-m large`, freeing DGROUP for heap+stack.  Needs a far-data
+>    setjmp/longjmp variant (`FAR_SETJMP_EXE`, 4-byte env ptr + ES — mirror
+>    FAR_STDIO_EXE gating), and likely surfaces the 27 far-data TU compile
+>    failures noted at §1s (`gvn.c:210` KWIDE assert + minic "non-homogeneous
+>    pointers in subtraction").
+> 2. **Flip placement to DEFAULT under far-data** (drop the `--far-static-data`
+>    gate).  ONLY blocker now is neutralizing caddr_cmp_probe's k_lo cases (the
+>    segmented-semantics non-bug from §1t — `&g-1` offset-wrap; keep that probe's
+>    symbol in DGROUP or drop the k_lo asserts when far-placed).  Then re-run the
+>    whole far-data gate with placement on for all probes.
+> See [[minic-far-data-segment]].
+
+# (DONE §1t/§1u) Next session — finish far-data: re-apply FARSTORAGE (far-GLOBAL direct access), then decide default vs opt-in (post §1t)
 
 > **§1t — backend bug 1 FIXED & committed (`2e76a99`); "bug 2" DEMYSTIFIED as a
 > segmented-pointer semantic limit, NOT a codegen defect.  FARSTORAGE NOT yet
