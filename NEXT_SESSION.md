@@ -1,4 +1,59 @@
-# Next session — far-data DONE for opt-in; either flip placement to default or build MicroPython under far placement (post §1u)
+# Next session — far-data MicroPython core COMPILES clean (compact+large); next = FAR_SETJMP_EXE then link under far placement (post §1v)
+
+> **§1v — the "27 far-data TU compile fails" are CLEARED (commit `75bf7d0`).**
+> The curated MicroPython core now compiles **106/106 TUs** minic→qbe(-t i8086)
+> under `-m compact` AND `-m large`, 0 fail (was ok=79 / minicfail=2 /
+> qbefail=25).  Sweep harness: `bash build/mp-far-probe/sweep.sh compact`
+> (and `large`) — re-run to reproduce.  `make check` green, DOS gate **140→142**,
+> 111 s/r 0 r/r (no grammar change — fix #3 only edits action bodies).
+>
+> Three independent root causes, three fixes (all far-data; NEAR_DATA models
+> byte-identical for #2/#3; #1 model-independent):
+> 1. **i8086/isel.c** — the fast-alloc slot loop scanned only `fn->start`, so a
+>    constant-size `alloc4` in a NON-entry block (a block-scoped local declared
+>    inside a loop/if body — py/bc.c's `mp_bytecode_get_source_line` lineinfo
+>    buffer is the canonical case) reached emit as `Oalloc4 cls Kl` and died
+>    ("unsupported 32-bit op 81 (cls Kl)").  Now slots constant allocs in EVERY
+>    block (C block-scoped locals reuse one frame slot; real `alloca` is routed
+>    to the GC heap by `MICROPY_NO_ALLOCA`, so no dynamic alloc survives — the
+>    simple fixed-slot fix beats amd64's salloc/Osalloc dynamic path and dodges
+>    far-pointer-to-SS:sp).  Cleared 23 TUs.
+> 2. **minic.y** — member-base address of a LOCAL aggregate under far-data
+>    emitted `=w add %localKl, off`, truncating the Kl slot address
+>    (`ALLOC_T()` is 'l'); the following far `loadfX` then read the wrong place,
+>    and the const-fold case tripped gvn `assoccon`'s `KWIDE` assert
+>    (parse.c, compile.c).  `base_far` now includes `|| !NEAR_DATA()` at all
+>    three member-address sites (expr read, bitfield store, lval addr) — under
+>    far-data every object address is a far Kl pointer.
+> 3. **minic.y** — the `type '*'` declarator rule did `IDIR_FAR($1 & ~FAR)`,
+>    stripping the pointee's FAR bit, so `char **` was built as far-ptr-to-NEAR-
+>    char*.  `*pp` then came out near, making `q - *pp` a near-vs-far
+>    "non-homogeneous pointers in subtraction" error (bc.c, objint.c) and a
+>    silent miscompile elsewhere.  Fix: keep `$1`'s FAR (`IDIR_FAR($1)` —
+>    IDIR_FAR shifts it to the inner-far position, bit 27).  3 sites
+>    (`*`, `* CONST`, `* VOLATILE`).
+>
+> New probe `farlocal_probe.c` (+golden), wired compact+large in `test-dos.sh`.
+> Huge is omitted ONLY for the pointer-MINUS-pointer (`q - *pp`) case — that
+> needs seg*16+off linearization the backend doesn't do (a separate pre-existing
+> huge gap); the alloc/member/struct-return cases all pass under huge too.
+>
+> **THE next moves (unchanged goal — get MicroPython data out of DGROUP):**
+> 1. **FAR_SETJMP_EXE** — a far-data setjmp/longjmp variant (4-byte env ptr +
+>    ES), gated by far_data_model() the way FAR_STDIO_EXE is.  The medium
+>    SETJMP_EXE (§1r, in `tools/libstub_to_exe.py`) reads a 2-byte near env ptr;
+>    under compact/large the env arg is a 4-byte far ptr.  Mirror FAR_STDIO_EXE's
+>    ES handling; extend `setjmp_probe.c` to compact/large.
+> 2. **Link MicroPython under far placement.**  Parametrize
+>    `tools/build-micropython.sh` to take `--model=compact` (or large) and set
+>    `QBE_FAR_STATIC_DATA=1` (so each module's statics go to its own FAR_DATA
+>    segment outside DGROUP, freeing DGROUP for heap+stack — the §1r runtime-hang
+>    fix).  The compile step is now clean (this session); expect to surface
+>    link-layer gaps (far-data far_stdlib mangling already exists) and then a
+>    runtime attempt at `print(1+2)` → `3`.  `gc_collect` is still a no-scan STUB.
+> See [[minic-far-data-segment]], [[minic-setjmp-longjmp]].
+
+# (DONE §1v compile) Next session — far-data DONE for opt-in; either flip placement to default or build MicroPython under far placement (post §1u)
 
 > **§1u — FARSTORAGE landed (commit `cfde49b`): direct far-GLOBAL access
 > (load/store/member/struct-copy/++/pointer-global) now works under far
