@@ -43,26 +43,37 @@
 >    models).  **VERIFIED CORRECT** by a standalone far-data probe that prints
 >    "3" — so the console path works; the HAL is NOT the blocker.
 >
-> **THE remaining blocker — IMAGE SIZE.**  `mpython.exe` is 951KB; a DOS .EXE
-> loads ENTIRELY into conventional memory (~640KB max), so it never loads (no
-> output, no crash — DOS EXEC just fails).  The squeeze: MEDIUM (452KB) fits
-> in RAM but its single 64KB DGROUP overflows (§1r hang); COMPACT (951KB)
-> fixes DGROUP but the code is too big to load.  This is NOT a codegen/link
-> defect — it's that we link the WHOLE curated core (the linker has no
-> dead-code elimination) while `print(1+2)` touches a small fraction.
-> **Next-move options (in rough order of payoff):**
+> **THE remaining blocker — IMAGE SIZE (but only modestly over).**  TARGET IS
+> THE **VICTOR 9000 / Sirius 1**, which has up to **~896KB** of contiguous
+> conventional RAM (NOT the IBM-PC 640KB — its non-IBM memory map allows more).
+> `mpython.exe`'s loaded footprint is **928.7KB** (body 951024 B, minalloc 0)
+> → only **~33KB over the 896KB raw ceiling** (more once DOS + PSP + heap/stack
+> headroom is counted, but the same order of magnitude — NOT the wild overage a
+> 640KB ceiling would imply).  This is NOT a codegen/link defect — we link the
+> WHOLE curated core (omf_link has no dead-code elimination) while `print(1+2)`
+> touches a small fraction.  **Next-move options (rough payoff order):**
 > 1. **Dead-strip unreferenced functions/segments in `omf_link`** — mark from
->    `_start`/`_main` through PUBDEF/EXTDEF/FIXUPP reachability and drop
->    unreached CODE segments.  Now that each big TU is split per-~function-
->    group, granularity is finer; biggest single lever (print(1+2) needs maybe
->    10-20% of the core).
-> 2. **Shrink `MICROPY_CONFIG`** — drop builtins/modules, smaller qstr set,
->    trim the compiler, so fewer TUs/functions are pulled in.
-> 3. **Curate a smaller link subset** — only the modules transitively needed
->    for lexer→parse→compile→`mp_call_function_0`+print.
-> The toolchain (compile + far-data link + setjmp + far console) is now PROVEN
-> end-to-end at small scale; this is purely a fit-in-640KB problem.
-> See [[minic-setjmp-longjmp]], [[minic-far-data-segment]].
+>    `_start`/`_main` through PUBDEF/EXTDEF/FIXUPP reachability, drop unreached
+>    CODE segments.  Now that big TUs split per-~function-group the granularity
+>    is finer; biggest lever (print(1+2) needs maybe 10-20% of the core, so this
+>    likely shaves FAR more than the ~33-100KB needed).
+> 2. **Shrink `MICROPY_CONFIG`** — fewer builtins/modules, smaller qstr set,
+>    trim the compiler.  Even a small trim likely closes a 33KB gap.
+> 3. **Curate a smaller link subset** — only modules transitively needed for
+>    lexer→parse→compile→`mp_call_function_0`+print.
+>
+> **TEST-ENVIRONMENT CAVEAT:** the `tools/run-dos-exe.sh` / DOSBox path emulates
+> a 640KB IBM PC, so a >640KB image won't load THERE regardless of the Victor
+> ceiling.  Validating `print(1+2)` on the real target needs a Victor 9000
+> emulator/hardware path (there is a `victor9000-engineer` agent + a Victor
+> codebase in `~/projects/newlibc`).  Small far-data probes (setjmp_probe,
+> halprobe printing "3") DO run under DOSBox and prove the toolchain end-to-end.
+>
+> **PLANNED LIBC (deferred, user direction):** `~/projects/newlibc` is a real
+> Victor-9000-targeted C library; the plan is to integrate it at a LATER stage
+> (it replaces the current libstub.asm / minic/include stopgaps).  Do NOT wire
+> it in yet — the current libstub path is the bring-up vehicle.
+> See [[project-minic-far-setjmp-and-size-wall]], [[minic-far-data-segment]].
 
 # (DONE §1y/§1z) Prior next-session note — toolchain gaps: long const/struct + huge ptrdiff FIXED (§1w/§1x); MicroPython far-data compiles clean (§1v); next = FAR_SETJMP_EXE then link far
 
