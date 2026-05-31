@@ -617,10 +617,16 @@ class GlobalSymbol:
 
 class Linker:
     def __init__(self, modules: List[Module],
-                 stack_size: int, entry_symbol: str):
+                 stack_size: int, entry_symbol: str,
+                 gc_sections: bool = False):
         self.modules = modules
         self.stack_size = stack_size
         self.entry_symbol = entry_symbol
+        self.gc_sections = gc_sections
+        # Set of (module_idx, mod_seg_idx) reachable from the entry symbol.
+        # None means "no dead-strip" (every segment is live).
+        self.live_segs: Optional[set] = None
+        self.n_stripped: int = 0
 
         self.out_segs: List[OutSeg] = []
         # Map (module_idx, mod_seg_idx) → (out_seg_idx, byte_offset_within_out_seg)
@@ -641,6 +647,8 @@ class Linker:
 
     def link(self, out_path: str, map_path: Optional[str]) -> None:
         self._build_symbol_table()
+        if self.gc_sections:
+            self._compute_liveness()
         self._layout_segments()
         self._coalesce_groups()
         self._resolve_entry()
@@ -675,6 +683,105 @@ class Linker:
                 msgs.append('  %s: %s' % (path, name))
             die('\n'.join(msgs))
 
+    # -------------------- dead-strip (--gc-sections) --------------------
+
+    def _fixup_referenced_segs(self, m: Module, mi: int,
+                               fix: Fixup) -> List[Tuple[int, int]]:
+        """Return the (module_idx, mod_seg_idx) segments a fixup depends on.
+
+        We follow BOTH the target (the symbol/segment being referenced) and
+        the frame (whose paragraph base the selector is computed against),
+        because a far reference needs both placed for the address to
+        resolve.  Group references pull in every member (conservative: a
+        DGROUP frame keeps its near-data contributors, which are tiny).
+        Unresolved externs are silently skipped — _build_symbol_table has
+        already proven every extern resolves, so this only skips the rare
+        case where the symbol table lacks an entry."""
+        out: List[Tuple[int, int]] = []
+
+        def add_seg(target_mi: int, target_si: int) -> None:
+            out.append((target_mi, target_si))
+
+        def add_group(group_mi: int, gidx: int) -> None:
+            if 0 < gidx < len(self.modules[group_mi].groups):
+                g = self.modules[group_mi].groups[gidx]
+                if g is not None:
+                    for si in g.seg_indices:
+                        out.append((group_mi, si))
+
+        def add_extern(ext_mi: int, eidx: int) -> None:
+            if 0 < eidx < len(self.modules[ext_mi].externs):
+                sym = self.symbols.get(self.modules[ext_mi].externs[eidx])
+                if sym is not None:
+                    out.append((sym.module_idx, sym.seg_idx))
+
+        tm = fix.target_method & 0x3
+        if tm == 0:        # segment + disp
+            add_seg(mi, fix.target_index)
+        elif tm == 1:      # group + disp
+            add_group(mi, fix.target_index)
+        elif tm == 2:      # external + disp
+            add_extern(mi, fix.target_index)
+
+        fm = fix.frame_method
+        if fm == 0:        # segment
+            add_seg(mi, fix.frame_index)
+        elif fm == 1:      # group
+            add_group(mi, fix.frame_index)
+        elif fm == 2:      # external
+            add_extern(mi, fix.frame_index)
+
+        return out
+
+    def _compute_liveness(self) -> None:
+        """Mark every segment reachable from the entry symbol through FIXUPP
+        references.  Segments that nothing reachable points at are dropped
+        from the image (the standard linker --gc-sections model).
+
+        Reachability is segment-granular: if any byte of a segment is
+        referenced, the whole segment is kept.  asm_to_omf.py splits a large
+        TU's text into per-function-group CODE segments, so the granularity
+        is finer than per-TU.  This is SOUND for this toolchain because every
+        cross-segment dependency (a call, a data-table function pointer, a
+        `seg sym` selector load) is emitted as an OMF fixup — there are no
+        hand-computed addresses outside crt0/libstub, which themselves use
+        nasm-generated fixups."""
+        entry = self.symbols.get(self.entry_symbol)
+        if entry is None:
+            die('entry symbol %r not found' % self.entry_symbol)
+
+        live: set = set()
+        work: List[Tuple[int, int]] = [(entry.module_idx, entry.seg_idx)]
+        while work:
+            key = work.pop()
+            if key in live:
+                continue
+            live.add(key)
+            mi, si = key
+            if mi >= len(self.modules):
+                continue
+            m = self.modules[mi]
+            if si <= 0 or si >= len(m.segments):
+                continue
+            seg = m.segments[si]
+            if seg is None:
+                continue
+            for fix in seg.fixups:
+                for tgt in self._fixup_referenced_segs(m, mi, fix):
+                    if tgt not in live:
+                        work.append(tgt)
+
+        self.live_segs = live
+        n_total = sum(1 for m in self.modules
+                      for seg in m.segments[1:] if seg is not None)
+        self.n_stripped = n_total - sum(
+            1 for (mi, si) in live
+            if 0 < si < len(self.modules[mi].segments)
+            and self.modules[mi].segments[si] is not None)
+
+    def _live(self, mi: int, si: int) -> bool:
+        return self.live_segs is None or (mi, si) in self.live_segs
+
     # -------------------- layout --------------------
 
     def _layout_segments(self) -> None:
@@ -695,6 +802,8 @@ class Linker:
             for si, seg in enumerate(m.segments):
                 if seg is None:
                     continue
+                if not self._live(mi, si):
+                    continue
                 if seg.cls.upper() == 'CODE':
                     self._place_distinct(mi, si, seg)
 
@@ -704,6 +813,8 @@ class Linker:
             for si, seg in enumerate(m.segments):
                 if seg is None:
                     continue
+                if not self._live(mi, si):
+                    continue
                 if seg.cls.upper() == 'DATA':
                     self._place_coalesced(mi, si, seg, coalesced_data)
 
@@ -712,6 +823,8 @@ class Linker:
         for mi, m in enumerate(self.modules):
             for si, seg in enumerate(m.segments):
                 if seg is None:
+                    continue
+                if not self._live(mi, si):
                     continue
                 if seg.cls.upper() == 'BSS':
                     self._place_coalesced(mi, si, seg, coalesced_bss)
@@ -734,6 +847,8 @@ class Linker:
             for si, seg in enumerate(m.segments):
                 if seg is None:
                     continue
+                if not self._live(mi, si):
+                    continue
                 if seg.cls.upper() == 'HUGE':
                     huge_segs.append((mi, si))
         huge_segs.sort(key=lambda p: self.modules[p[0]].segments[p[1]].name)
@@ -750,6 +865,8 @@ class Linker:
             for mi, m in enumerate(self.modules):
                 for si, seg in enumerate(m.segments):
                     if seg is None:
+                        continue
+                    if not self._live(mi, si):
                         continue
                     if seg.cls.upper() == cls:
                         self._place_distinct(mi, si, seg)
@@ -1118,7 +1235,10 @@ class Linker:
         lines.append('Symbols:')
         for name in sorted(self.symbols):
             sym = self.symbols[name]
-            out_idx, base = self.seg_map[(sym.module_idx, sym.seg_idx)]
+            placed = self.seg_map.get((sym.module_idx, sym.seg_idx))
+            if placed is None:
+                continue  # symbol's segment was dead-stripped
+            out_idx, base = placed
             seg = self.out_segs[out_idx]
             lines.append('  %-32s seg=%-12s para=0x%04X off=0x%04X (mod=%s)'
                          % (name, seg.name, seg.para_base,
@@ -1136,6 +1256,8 @@ class Linker:
                             if s.cls.upper() in ('FAR_DATA', 'FAR_BSS', 'HUGE'))
         n_relocs = len(self.relocs)
         print('omf_link: linked %d modules' % n_mods)
+        if self.gc_sections:
+            print('  dead-stripped %d segments (--gc-sections)' % self.n_stripped)
         print('  code: %d bytes' % code_bytes)
         if fardata_bytes:
             print('  far data: %d bytes' % fardata_bytes)
@@ -1160,6 +1282,8 @@ def main() -> None:
     ap.add_argument('--entry', default='_start', help='entry point symbol')
     ap.add_argument('--memory-model', default='medium',
                     help='only "medium" is currently supported')
+    ap.add_argument('--gc-sections', dest='gc_sections', action='store_true',
+                    help='dead-strip segments unreachable from --entry')
     ap.add_argument('objs', nargs='+', help='input .obj files')
     args = ap.parse_args()
 
@@ -1180,7 +1304,8 @@ def main() -> None:
         m = ModuleParser(path, data).parse()
         modules.append(m)
 
-    linker = Linker(modules, args.stack_size, args.entry)
+    linker = Linker(modules, args.stack_size, args.entry,
+                    gc_sections=args.gc_sections)
     linker.link(args.output, args.map_path)
 
 
