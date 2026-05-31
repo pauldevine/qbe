@@ -85,6 +85,8 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/aggregate_init_probe.c:minic/dos/tests/aggregate_init_probe.golden.txt:medium"
 	"minic/dos/examples/sret_probe.c:minic/dos/tests/sret_probe.golden.txt:medium"
 	"minic/dos/examples/sret_probe.c:minic/dos/tests/sret_probe.golden.txt:large"
+	"minic/dos/examples/structarg_probe.c:minic/dos/tests/structarg_probe.golden.txt:compact"
+	"minic/dos/examples/structarg_probe.c:minic/dos/tests/structarg_probe.golden.txt:large"
 	"minic/dos/examples/typedef_shadow_probe.c:minic/dos/tests/typedef_shadow_probe.golden.txt:medium"
 	"minic/dos/examples/typedef_shadow_probe.c:minic/dos/tests/typedef_shadow_probe.golden.txt:large"
 	"minic/dos/examples/scalar_array_probe.c:minic/dos/tests/scalar_array_probe.golden.txt:medium"

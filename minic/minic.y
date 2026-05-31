@@ -1973,6 +1973,67 @@ alloc_sret_slot(unsigned aggr_ctyp)
 	return slot;
 }
 
+static int
+is_aggr(unsigned ctyp)
+{
+	return KIND(ctyp) == STRUCT_T || KIND(ctyp) == UNION_T;
+}
+
+/* Struct/union pass-BY-VALUE ABI.  A by-value aggregate argument crosses the
+ * call boundary as a POINTER to its storage: the caller yields the aggregate's
+ * address, the callee copies *ptr into its own local (C copy semantics).  The
+ * rule is type-driven on both ends (aggregate <-> one pointer slot), so caller
+ * and callee agree across separate compilation.  Without this minic emitted a
+ * single scalar word for a whole struct argument, truncating every member past
+ * the first — e.g. mp_lexer_new(qstr, mp_reader_t) dropped the reader's
+ * readbyte far fn-ptr, so next_char's first indirect call went wild. */
+static Symb
+eval_arg(Node *a)
+{
+	Symb s = expr(a->l);
+	if (is_aggr(s.ctyp)) {
+		int op = a->l->op;
+		/* expr() already yields the result-slot address for a call /
+		 * indirect call / compound literal; for an lvalue (V/@/.) it
+		 * loaded a scalar word, so re-derive the address (that dead load
+		 * is DCE'd).  Re-running lval on C/I/L would emit it twice. */
+		if (op != 'C' && op != 'I' && op != 'L')
+			s = lval(a->l);
+	}
+	return s;
+}
+
+static void
+emit_arg(Symb s)
+{
+	if (is_aggr(s.ctyp))
+		fprintf(of, "%c ", DATAPTR_T());   /* struct passed by pointer */
+	else
+		fprintf(of, "%c ", irtyp_ret(s.ctyp));
+	psymb(s);
+	fprintf(of, ", ");
+}
+
+/* Prologue binding for parameter `name' (type *s) delivered in %t<t>: alloc
+ * local storage and store the incoming value.  A by-value aggregate arrives as
+ * a POINTER to the caller's copy, so copy the pointed-to struct into our local
+ * storage (and use far load/store under a far-data model — see eval_arg). */
+static void
+bind_param(char *name, Symb *s, int t)
+{
+	fprintf(of, "\t%%%s =%c alloc%d %d\n", name, ALLOC_T(),
+		iralign(s->ctyp), SIZE(s->ctyp));
+	if (is_aggr(s->ctyp)) {
+		Symb dst = *s, src;        /* *s is the Var symbol (its u.v = name) */
+		unsigned fbit = NEAR_DATA() ? 0 : FAR;
+		dst.ctyp = s->ctyp | fbit;
+		src.t = Tmp; src.u.n = t; src.ctyp = s->ctyp | fbit;
+		emit_struct_copy(dst, src);
+	} else {
+		fprintf(of, "\tstore%c %%t%d, %%%s\n", irtyp(s->ctyp), t, name);
+	}
+}
+
 void
 call(Node *n, Symb *sr)
 {
@@ -2010,7 +2071,7 @@ call(Node *n, Symb *sr)
 
 			/* Evaluate all arguments */
 			for (a=n->r; a; a=a->r)
-				a->u.s = expr(a->l);
+				a->u.s = eval_arg(a);
 
 			/* Generate indirect call */
 			if (sret) {
@@ -2029,11 +2090,8 @@ call(Node *n, Symb *sr)
 				psymb(fptr);
 				fprintf(of, "(");
 			}
-			for (a=n->r; a; a=a->r) {
-				fprintf(of, "%c ", irtyp_ret(a->u.s.ctyp));
-				psymb(a->u.s);
-				fprintf(of, ", ");
-			}
+			for (a=n->r; a; a=a->r)
+				emit_arg(a->u.s);
 			fprintf(of, "...)\n");
 			if (sret) {
 				sr->t = Tmp;
@@ -2063,7 +2121,7 @@ call(Node *n, Symb *sr)
 	if (sret)
 		sret_slot = alloc_sret_slot(aggr);
 	for (a=n->r; a; a=a->r)
-		a->u.s = expr(a->l);
+		a->u.s = eval_arg(a);
 	{
 	char *cf = call_target_name(f);
 	if (sret) {
@@ -2079,11 +2137,8 @@ call(Node *n, Symb *sr)
 		fprintf(of, " =%c call $%s(", irtyp_ret(sr->ctyp), cf);
 	}
 	}
-	for (a=n->r; a; a=a->r) {
-		fprintf(of, "%c ", irtyp_ret(a->u.s.ctyp));
-		psymb(a->u.s);
-		fprintf(of, ", ");
-	}
+	for (a=n->r; a; a=a->r)
+		emit_arg(a->u.s);
 	fprintf(of, "...)\n");
 	if (sret) {
 		/* The call result IS the result slot's address (an aggregate
@@ -2548,7 +2603,7 @@ expr(Node *n)
 
 			/* Evaluate all arguments */
 			for (a=n->r; a; a=a->r)
-				a->u.s = expr(a->l);
+				a->u.s = eval_arg(a);
 
 			/* Generate indirect call */
 			if (sret) {
@@ -2567,11 +2622,8 @@ expr(Node *n)
 				psymb(fptr);
 				fprintf(of, "(");
 			}
-			for (a=n->r; a; a=a->r) {
-				fprintf(of, "%c ", irtyp_ret(a->u.s.ctyp));
-				psymb(a->u.s);
-				fprintf(of, ", ");
-			}
+			for (a=n->r; a; a=a->r)
+				emit_arg(a->u.s);
 			fprintf(of, "...)\n");
 			if (sret) {
 				sr.t = Tmp;
@@ -5229,7 +5281,7 @@ emit_knr_func(char *fname, Node *params)
 	if (n)
 		for (;;) {
 			s = varget(n->u.v);
-			fprintf(of, "%c ", irtyp_ret(s->ctyp));
+			fprintf(of, "%c ", is_aggr(s->ctyp) ? DATAPTR_T() : irtyp_ret(s->ctyp));
 			fprintf(of, "%%t%d", tmp++);
 			n = n->r;
 			if (n)
@@ -5241,10 +5293,7 @@ emit_knr_func(char *fname, Node *params)
 	fprintf(of, "@l%d\n", lbl++);
 	for (t = 0, n = params; n; t++, n = n->r) {
 		s = varget(n->u.v);
-		m = SIZE(s->ctyp);
-		fprintf(of, "\t%%%s =%c alloc%d %d\n", n->u.v, ALLOC_T(), iralign(s->ctyp), m);
-		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
-		fprintf(of, ", %%%s\n", n->u.v);
+		bind_param(n->u.v, s, t);
 	}
 }
 
@@ -5287,7 +5336,7 @@ emit_knr_func_typed(char *fname, Node *params)
 	if (n)
 		for (;;) {
 			s = varget(n->u.v);
-			fprintf(of, "%c ", irtyp_ret(s->ctyp));
+			fprintf(of, "%c ", is_aggr(s->ctyp) ? DATAPTR_T() : irtyp_ret(s->ctyp));
 			fprintf(of, "%%t%d", tmp++);
 			n = n->r;
 			if (n)
@@ -5303,10 +5352,7 @@ emit_knr_func_typed(char *fname, Node *params)
 	}
 	for (t = (cur_fn_sret ? 1 : 0), n = params; n; t++, n = n->r) {
 		s = varget(n->u.v);
-		m = SIZE(s->ctyp);
-		fprintf(of, "\t%%%s =%c alloc%d %d\n", n->u.v, ALLOC_T(), iralign(s->ctyp), m);
-		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
-		fprintf(of, ", %%%s\n", n->u.v);
+		bind_param(n->u.v, s, t);
 	}
 }
 
@@ -6157,7 +6203,7 @@ ansi_func_proto: '(' init_ansi par0 ')'
 	if (n)
 		for (;;) {
 			s = varget(n->u.v);
-			fprintf(of, "%c ", irtyp_ret(s->ctyp));
+			fprintf(of, "%c ", is_aggr(s->ctyp) ? DATAPTR_T() : irtyp_ret(s->ctyp));
 			fprintf(of, "%%t%d", tmp++);
 			n = n->r;
 			if (n)
@@ -6175,10 +6221,7 @@ ansi_func_proto: '(' init_ansi par0 ')'
 	}
 	for (t = (cur_fn_sret ? 1 : 0), n=$3; n; t++, n=n->r) {
 		s = varget(n->u.v);
-		m = SIZE(s->ctyp);
-		fprintf(of, "\t%%%s =%c alloc%d %d\n", n->u.v, ALLOC_T(), iralign(s->ctyp), m);
-		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
-		fprintf(of, ", %%%s\n", n->u.v);
+		bind_param(n->u.v, s, t);
 	}
 };
 

@@ -1,4 +1,83 @@
-# Next session — MicroPython runs through mp_init() + into compiling print(1+2) on the real Victor; NEW blocker = 24KB heap exhausts during compile (gc_collect is a no-op stub)
+# Next session — struct pass-BY-VALUE ABI landed; MicroPython lexer crash CLEARED on the real Victor; NEW blocker = a HANG in mp_parse (after the lexer, before parse completes)
+
+> **§2d (DONE 2026-05-31) — minic now passes STRUCTS BY VALUE as arguments; the
+> deterministic lexer reboot on the real Victor is FIXED.  MicroPython now runs
+> through mp_init AND the whole lexer, into `mp_parse`.**  DOS gate **148→150**,
+> `make check` green, 111 s/r 0 r/r (no grammar change — C-action edits only),
+> amd64/arm64/rv64 byte-identical.
+>
+> ROOT CAUSE (found by serial-checkpoint bisection on-target, then reading the
+> generated SSA): minic had struct *return*-by-value (§1d) but NOT struct
+> *pass*-by-value.  A by-value aggregate ARGUMENT was emitted as a SINGLE scalar
+> word (`%t20 =w loadw %reader; call ...(w %t20)`), and the callee declared a
+> one-word param + stored only that word into its N-byte local — so every member
+> past the first was uninitialised.  The canonical victim: the lexer's
+> `mp_lexer_new(qstr, mp_reader_t)` takes a 12-byte `mp_reader_t` (far fn-ptr
+> `readbyte` at offset 4 + far `data` + `close`) by value; only the first word
+> arrived, the callee read a garbage far fn-ptr, and `next_char`'s first indirect
+> `call far` jumped to nowhere → a hard reboot ~4 allocs into compiling
+> `print(1+2)`.  (The "24KB heap exhaust" framing in the §2c note below was WRONG
+> — there was an earlier deterministic crash; `gc_collect` never even ran because
+> `gc_init` sets the alloc threshold to `(size_t)-1`, so collection only fires on
+> heap-full, which `print(1+2)` never reached.)
+>
+> FIX — by-value aggregate crosses the call boundary as a POINTER to its storage
+> (mirrors the §1d sret design; type-driven on both ends so it agrees across
+> separate compilation).  All in `minic/minic.y`:
+> - new helpers `is_aggr`, `eval_arg` (caller yields the aggregate's ADDRESS, not
+>   a truncated load — re-derives via `lval` for V/@/. lvalues; C/I/L expr()
+>   already yield a slot address), `emit_arg` (emits a struct arg as a
+>   `DATAPTR_T()` pointer), `bind_param` (callee: alloc the local + `emit_struct_copy`
+>   the pointed-to struct in; far loadfw/storefw under far-data).
+> - wired into all 3 call-emission paths (direct, fn-ptr-var, indirect `(*fp)()`),
+>   the ANSI function-def param signature + binding, and both K&R emit paths.
+> Probe `structarg_probe.c` (+golden): struct-with-far-fn-ptr-member passed by
+> value, callee calls through the member; C copy semantics (callee mutation
+> doesn't touch caller); struct arg between scalars; pass-through; indirect call
+> with a struct arg.  Gated **compact + large** (the far-data MicroPython target).
+> VERIFIED on the real Victor: serial trace now shows `C1 C2 C3 Q0..Q3 C4 D0
+> E0..E5 D1` (mp_init, then `mp_lexer_new` fully through `mp_lexer_to_next`,
+> returning into `do_str`) with NO reboot — the lexer is sound.
+>
+> **MEDIUM is intentionally OMITTED from the probe** — it trips a SEPARATE,
+> pre-existing backend bug: the callee's by-value copy is near `storew`s, which
+> QBE load.c forwards + reconstructs into the member `loadl` (4-byte far code
+> ptr) via Kl `shl/and/or`; on i8086 that reconstruction CLOBBERS a live value
+> rega parked in AX (the call's `data` arg), returning garbage.  That is the
+> [[i8086-kl-shift-clobbers-ax]] / [[qbe-loadc-wordsize-i8086]] family (Kl ops
+> not declaring their AX/DX clobber to rega), independent of this ABI and not hit
+> under far-data (which uses opaque `loadfw`/`storefw`, no slice reconstruction).
+> Fixing it (mirror §2c's `Target.divclob`: add a Kl-arith clobber to rega's
+> avoid mask for the reconstruction ops) would let the probe cover medium too.
+>
+> ALSO this session (in the ~/projects/micropython tree, a SEPARATE repo — NOT
+> committed with the qbe change): `ports/dos8086/main.c` `gc_collect` is now a
+> real conservative C-stack scan (`[sp, stack_top)`, scanned at BOTH even
+> alignments since 8086 slots are 2-byte but a far ptr is 4 bytes; no register
+> spill needed because the Kl-slot-resident invariant keeps every live 4-byte
+> mp_obj_t in a stack slot; mp_state roots are already traced by
+> `gc_collect_start`).  NOT yet exercised (the run hasn't reached heap-full).
+> The heap STAYS 24KB: bumping it to 56KB made the image 863KB and DOS reported
+> "Program too big to fit in memory" — the Victor leaves essentially no headroom
+> over the ~831KB that loads, so a working gc_collect (not a bigger heap) is the
+> reclaim path.  The gc.c per-alloc/`S:` serial checkpoints are now SILENCED
+> (`GCK` no-op); the C*/D*/E*/Q* phase markers remain.
+>
+> **THE NEW blocker — a HANG in `mp_parse`.**  On-target the trace stops at `D1`
+> (lexer done, entering `mp_parse`) and never reaches `D2` (parse done) in ~150s
+> of 1.5×-speed emulation, with NO reboot (so not a crash/OOM — a hang or
+> infinite loop).  `print(1+2)` parses trivially, so this is almost certainly
+> another far-data codegen gap (likely another struct-by-value or far-ptr shape
+> the parser hits — `mp_parse` threads `parser_t`/`mp_parse_node_t` structs).
+> NEXT: add checkpoints inside `py/parse.c::mp_parse` (and `push_result_*` /
+> `pop_result`), recompile via `tools/recompile-mp-tu.sh parse
+> ~/projects/micropython/py/parse.c`, and bisect on the Victor (SASI recipe
+> below).  Reproduce: full build `bash tools/build-micropython.sh --model=compact
+> --keep-going`, inject onto `victor_python.img:0:\PROG.EXE`, run via MAME SASI
+> (see the §2b block).  The C/D/E/Q checkpoints in main.c + runtime.c + lexer.c
+> are still in place.
+
+# (prior) Next session — MicroPython runs through mp_init() + into compiling print(1+2) on the real Victor; NEW blocker = 24KB heap exhausts during compile (gc_collect is a no-op stub)
 
 > **§2c (DONE 2026-05-31, committed `d70c280`) — the gc_alloc hang is FIXED.  It
 > was a 16-bit div/mul AX:DX register-clobber codegen bug, NOT a far-data pointer
