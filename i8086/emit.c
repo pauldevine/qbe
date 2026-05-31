@@ -3161,9 +3161,21 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * clobbered.  Surfaced by stevie's filetonext: nextra.35 lived
 		 * in CX across the `*screenp = c` storefb, every loop iteration
 		 * corrupted it via the `mov cl, bl` low-byte write.
+		 *
+		 * AX/DX clobber: when r1 is an RCon CAddr destination (a far store
+		 * to a constant global address, e.g. `$g_sink`), load_farptr_con
+		 * stages the segment via `mov ax, seg sym` — clobbering AX, which
+		 * rega does NOT model.  A live SSA temp in AX across the store
+		 * (e.g. a pointer-return value) is silently destroyed.  Wrap with
+		 * kl_save_axdx (outermost, mirroring Oloadf* and Ostorefl) so the
+		 * live value survives.  The value (r0) is staged into CX before
+		 * the far-ptr load runs, so reading r0 from AX still sees the
+		 * original.  See [[minic-far-data-segment]] bug 1.
 		 */
 		r0 = i->arg[0];  /* value */
 		r1 = i->arg[1];  /* far pointer */
+		{
+		AxDxSave s_storefb = kl_save_axdx(i->to, f);
 		fprintf(f, "\tpush es\n");
 		fprintf(f, "\tpush bx\n");
 		fprintf(f, "\tpush cx\n");
@@ -3198,6 +3210,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		fprintf(f, "\tpop cx\n");
 		fprintf(f, "\tpop bx\n");
 		fprintf(f, "\tpop es\n");
+		kl_restore_axdx(s_storefb, f);
+		}
 		return;
 
 	case Ostorefh:
@@ -3210,10 +3224,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * Push/pop ES + BX around the access — see Oloadfb for rationale.
 		 * CX is the value-staging scratch (mov cx, ...); save it too or
 		 * any live SSA temp rega placed in CX is silently clobbered.
-		 * Mirror of the Ostorefb fix.
+		 * AX/DX save bracket (kl_save_axdx) for the RCon-CAddr-dest
+		 * load_farptr_con AX clobber — same shape as Ostorefb.  Mirror of
+		 * the Ostorefb fix.  See [[minic-far-data-segment]] bug 1.
 		 */
 		r0 = i->arg[0];  /* value */
 		r1 = i->arg[1];  /* far pointer */
+		{
+		AxDxSave s_storefw = kl_save_axdx(i->to, f);
 		fprintf(f, "\tpush es\n");
 		fprintf(f, "\tpush bx\n");
 		fprintf(f, "\tpush cx\n");
@@ -3240,6 +3258,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		fprintf(f, "\tpop cx\n");
 		fprintf(f, "\tpop bx\n");
 		fprintf(f, "\tpop es\n");
+		kl_restore_axdx(s_storefw, f);
+		}
 		return;
 
 	case Ostorefl:
