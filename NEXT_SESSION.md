@@ -1,3 +1,41 @@
+# Next session — toolchain gaps: long const/struct + huge ptrdiff FIXED (§1w/§1x); MicroPython far-data compiles clean (§1v); next = FAR_SETJMP_EXE then link far
+
+> **PRINCIPLE (reaffirmed): the goal is to FIND AND FIX QBE-toolchain gaps;
+> running MicroPython is the vehicle, not the prize.  When a probe trips a real
+> codegen defect, FIX THE GAP — don't scope the probe around it.**
+>
+> **§1w (commit `0eec5f4`) — three model-INDEPENDENT `long` truncation gaps**
+> (i8086 `int` is 16-bit; bit under medium too):
+> 1. `minic.y sext()` sign-extended a COMPILE-TIME CONSTANT via `=l extsw`,
+>    which on i8086 keeps only the low 16 bits → `long x = 555666L` became
+>    31250 (and bit-15-set 40000 went negative).  Fix: retype the Con LNG
+>    directly (its full value is already known), no extsw.
+> 2. Integer literals were always typed INT and the L/l suffix discarded, so a
+>    `long` literal > 16 bits passed to an `l` parameter or a `%ld` vararg went
+>    out as a 16-bit word.  Fix: new `Node.nlong` (lexer sets it on L/l suffix
+>    or value > 0xFFFF), `'N'` case types it LNG.
+> 3. `load.c def()` reconstructing a 4-byte slice (a `loadl` from two 2-byte
+>    `storew`s — struct-copy of a returned `long` member) used class Kw because
+>    the width test hardcoded `sl.sz > 4`; `high << 16` then shifted a 16-bit
+>    temp to 0 and lost the high word.  Fix: `sl.sz > T.wordsz`
+>    (**target-general**; no-op on amd64/arm64/rv64 where wordsz==4).
+> Probe `longconst_probe.c`.  Closes [[qbe-loadc-wordsize-i8086]] residual,
+> the struct-return-long limit, and [[minic-long-literal-as-int-vararg]].
+>
+> **§1x (commit `ef870bd`) — huge ptr-MINUS-ptr.**  Two normalised far pointers
+> into one object can sit in different segments, so a flat 32-bit `sub` of their
+> seg:off words gave (Δseg<<16)+Δoff not the true Δseg*16+Δoff
+> (`&a[20]-&a[3]` ≠ 17).  Routed MHuge ptr-ptr through the existing-but-dead
+> `_qbe_huge_cmp` helper (returns signed linear(p)-linear(q)); the element-size
+> `div` post-step still scales it, so int*/long* diffs are correct too.  Flat
+> sub stays for compact/large/near; huge comparison stays flat (normalisation
+> makes seg:off monotonic).  `farlocal_probe` now covers huge as well.
+> FOOTGUN hit: `int*/long*` in a minic.y action-body comment closes the block
+> comment (`*/`).  See [[long-and-huge-ptrdiff-gaps]].
+>
+> `make check` green throughout; compact MicroPython sweep stayed 106/106; DOS
+> gate 142→**145**.
+
 # Next session — far-data MicroPython core COMPILES clean (compact+large); next = FAR_SETJMP_EXE then link under far placement (post §1v)
 
 > **§1v — the "27 far-data TU compile fails" are CLEARED (commit `75bf7d0`).**
