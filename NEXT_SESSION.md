@@ -1,6 +1,58 @@
-# Next session — BUILD A MAME VICTOR 9000 HEADLESS TEST HARNESS (replace DOSBox); then re-gate on-target
+# Next session — SHRINK mpython.exe under the ~896KB Victor ceiling, then run print(1+2) on-target via the new MAME harness
 
-> **WHY THIS IS THE NEXT SESSION (user direction 2026-05-30):** the real target
+> **§2a (DONE 2026-05-30) — the MAME Victor 9000 headless harness is BUILT,
+> VALIDATED, and GATED.**  DOSBox emulates a 640KB IBM PC (wrong machine); the
+> on-target / >640KB path now runs under MAME machine `victor9k` (~896KB RAM).
+> New, all committed:
+> - **`tools/run-victor-mame.sh`** — the `victor9k` analog of `run-dos-exe.sh`.
+>   Takes a built `.EXE` + optional `seconds_to_run` (default 90); `cp`s the
+>   base `python.img` to a scratch `run.img`; injects the EXE as `PROG.EXE` +
+>   a generated `AUTOEXEC.BAT` via `vtg_image_util copy`; runs MAME headless
+>   (`SDL_VIDEODRIVER=dummy mame victor9k -ramsize 896K -flop1 run.img -video
+>   none -sound none -nothrottle -skip_gameinfo -seconds_to_run N -rs232a
+>   null_modem -bitbanger <cap>`, in a `-homepath` sandbox so it never touches
+>   the user's `~/.mame`); streams the serial capture (CR/0x1A-stripped,
+>   trimmed between `__V9BEGIN__`/`__V9END__` sentinels) to stdout.  **Exit 77
+>   (skip-not-fail)** if MAME / its roms / `$VICTOR_DISK` / `vtg_image_util` is
+>   missing.  Env overrides: `$VICTOR_DISK` (default `~/Desktop/randos/
+>   python.img`), `$MAME`, `$MAME_ROMS`, `$VTG_IMAGE_UTIL`, `$VICTOR_RUN_SECS`.
+> - **`tools/test-victor.sh`** — a SEPARATE gate (each MAME run boots MS-DOS
+>   3.1 from floppy, ~45-60s wall-clock, so it's kept off the fast DOSBox
+>   gate).  `VICTOR_TESTS` array (`<src>:<golden>:<model>`), same run/skip/diff
+>   shape as `test-dos.sh`.  Currently 1 entry: `cprobe` (the harness smoke
+>   test).  **Passes 2/2 (build + cprobe).**
+> - **`minic/dos/tests/cprobe.golden.txt`** — golden for the smoke test.
+>
+> **The TWO gotchas found and fixed (so you don't re-hit them):**
+> 1. **`flop1` not `hard1`** — the base is a bootable FLOPPY; `-flop1 run.img`
+>    (myfreedos's `-hard1` was for a hard-disk image).
+> 2. **`echo off`, NOT `@echo off`** — MS-DOS 3.1 predates the `@` line prefix,
+>    so `@echo off` is parsed as an unknown `@echo` command and leaves echo ON,
+>    which leaks the `A:\>PROG.EXE` prompt+command into the serial capture.
+>    Bare `echo off` gives clean program-only output.
+>
+> Confirmed working: `tools/run-victor-mame.sh build/examples/cprobe/cprobe.exe`
+> → exactly `x=42 (want 42)\nx=99 (want 99)`, stable across repeated runs.  The
+> serial-capture path (`ctty seriala` → MAME `-bitbanger`) is proven end-to-end
+> independent of mpython's size.  No minic/qbe/backend change this session —
+> just three new files — so the DOSBox gate + `make check` are unaffected.
+>
+> **THE NEXT MOVE — shrink `mpython.exe` (footprint 928.7KB, ~33KB over the
+> ~896KB Victor ceiling) so it loads, then run `print(1+2)` → `3` on the Victor
+> via this harness** (add it as a `VICTOR_TESTS` entry).  Shrink levers, rough
+> payoff order: (1) **dead-strip unreferenced functions/segments in
+> `omf_link`** (reachability from `_start`/`_main` through PUBDEF/EXTDEF/FIXUPP;
+> now that big TUs split per-function-group the granularity is finer — biggest
+> lever, `print(1+2)` touches maybe 10-20% of the linked core); (2) **trim
+> `MICROPY_CONFIG`** (fewer builtins/modules, smaller qstr set); (3) **curate a
+> smaller link subset**.  See the §1y/§1z block below + [[project-victor9000-target]],
+> [[project-minic-far-setjmp-and-size-wall]].
+
+---
+
+# (DONE §2a) Original spec — BUILD A MAME VICTOR 9000 HEADLESS TEST HARNESS (kept for reference)
+
+> **WHY THIS WAS THE NEXT SESSION (user direction 2026-05-30):** the real target
 > is the **Victor 9000 / Sirius 1** (~896KB RAM, non-IBM memory map), NOT the
 > 640KB IBM PC that `tools/run-dos-exe.sh` drives under DOSBox.  DOSBox was only
 > ever a convenient stand-in; it emulates the WRONG machine, so it can neither
