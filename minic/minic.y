@@ -3200,6 +3200,32 @@ expr(Node *n)
 		if (huge_ptr_binop(o, sr, s0, s1))
 			break;
 
+		/* Under MHuge, ptr - ptr (a byte/element COUNT, not a pointer) must
+		 * be computed on the LINEAR addresses: two normalised far pointers
+		 * into the same object can sit in different segments, so a flat
+		 * 32-bit `sub` of their seg:off words gives (Δseg<<16)+Δoff instead
+		 * of the true Δseg*16+Δoff.  `_qbe_huge_cmp(p,q)` already returns the
+		 * signed linear difference linear(p)-linear(q); reuse it.  (Flat sub
+		 * stays correct under compact/large, where the segment is shared and
+		 * cancels — and under near-data.  Comparison `p<q` also stays flat:
+		 * normalisation makes the seg:off word monotonic in linear address.)
+		 * The element-size `div` post-step below the switch still runs after
+		 * this break, so wider pointees scale correctly too (verified with
+		 * int and long element types: q-p divides the linear byte delta by
+		 * the element SIZE). */
+		if (memmodel == MHuge && o == '-'
+		&& KIND(s0.ctyp) == PTR && KIND(s1.ctyp) == PTR
+		&& KIND(DREF(s0.ctyp)) != FUN) {
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =l call $qbe_huge_cmp(l ");
+			psymb(s0);
+			fprintf(of, ", l ");
+			psymb(s1);
+			fprintf(of, ")\n");
+			break;
+		}
+
 		/* Validate operations on floating-point types */
 		if (ISFLOAT(sr.ctyp)) {
 			/* Disallow modulo on floats */

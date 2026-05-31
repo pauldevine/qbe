@@ -97,11 +97,9 @@ int main(void)
 	else printf("structret FAIL %d %d %d\r\n", r.a, r.b, r.c);
 
 	/* Fix 3: multi-level pointer.  *pp must be a far char*; q-*pp must
-	 * be a homogeneous far-pointer subtraction yielding 3.  Wired for
-	 * compact + large only: under huge, pointer-MINUS-pointer needs
-	 * seg*16+off linearization the backend doesn't do (a separate
-	 * pre-existing huge gap), so dptr_diff mis-reports there.  The other
-	 * cases pass under huge too. */
+	 * be a homogeneous far-pointer subtraction yielding 3.  (Under huge,
+	 * ptr-MINUS-ptr is computed on linear addresses via _qbe_huge_cmp —
+	 * §1x; flat sub stays correct under compact/large/near.) */
 	storage[0] = 'a'; storage[1] = 'b'; storage[2] = 'c';
 	storage[3] = 'd'; storage[4] = 'e'; storage[5] = '\0';
 	p = storage;
