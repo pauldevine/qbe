@@ -1,4 +1,96 @@
-# Next session — MicroPython LINKS under compact far-data (§1y/§1z); the wall is now IMAGE SIZE (951KB > 640KB conventional RAM), not codegen — next = shrink (dead-strip or subset/config trim)
+# Next session — BUILD A MAME VICTOR 9000 HEADLESS TEST HARNESS (replace DOSBox); then re-gate on-target
+
+> **WHY THIS IS THE NEXT SESSION (user direction 2026-05-30):** the real target
+> is the **Victor 9000 / Sirius 1** (~896KB RAM, non-IBM memory map), NOT the
+> 640KB IBM PC that `tools/run-dos-exe.sh` drives under DOSBox.  DOSBox was only
+> ever a convenient stand-in; it emulates the WRONG machine, so it can neither
+> load a >640KB image nor exercise Victor-specific hardware.  Before we chase
+> the mpython.exe shrink (or anything else "does it run on target"), we need a
+> **MAME-based `victor9k` harness** that runs a built program headlessly and
+> captures its output for golden-diff assertions — the same way
+> `~/projects/myfreedos` and `~/projects/newlibc` already test on this platform.
+> Build the harness FIRST, validate it with a TINY program, then point the gate
+> (or a new victor-gate) at it.  See [[project-victor9000-target]].
+>
+> **THE PROVEN PATTERN (reverse-engineered from myfreedos + newlibc — reuse it,
+> don't reinvent):**
+> - **MAME**: binary at `~/projects/mame/mame`, machine `victor9k`, `-ramsize 896K`.
+> - **Headless flags**: `-video none -sound none -nothrottle -skip_gameinfo
+>   -seconds_to_run <N>` with `SDL_VIDEODRIVER=dummy` in the env.  (`-rompath
+>   ~/projects/mame/roms` if roms aren't on the default path.)
+> - **Output capture — TWO mechanisms, pick the serial one for line-oriented
+>   stdout:**
+>   1. **Serial → host file** (simplest; this is what `myfreedos/boot/victor/
+>      test_mame.sh` uses): `-rs232a null_modem -bitbanger /tmp/cap.txt`.  The
+>      boot disk's `AUTOEXEC.BAT` does `portset a 9600 none 1 8` then
+>      `ctty seriala`, so DOS CON (handle 1 = stdout) is redirected to serial.
+>      Our qbe programs already write stdout via INT 21h AH=40h to handle 1, so
+>      `ctty seriala` routes that straight to `/tmp/cap.txt` — no program change.
+>   2. **Screen-RAM dump** (alternative; `newlibc/phase3_newlib/run_test.sh`
+>      `--auto`): a MAME `-autoboot_script` Lua dumps screen RAM at `0xF0000`
+>      (4000 B = 80×25×2), decoded by `phase3_newlib/tools/decode_victor_screen.py`
+>      (char glyph = low byte − 0x60).  Heavier; only needed if we test the
+>      Victor text screen directly rather than stdout.
+> - **Boot/program disk**: a FreeDOS-on-Victor FAT16 **hard disk** image mounted
+>   `-hard1 <img>`, built à la `myfreedos/boot/victor/build_stage1_disk.sh`
+>   (Victor IPL in sectors 1–128, FAT16 BPB at 129).  Programs + a custom
+>   `AUTOEXEC.BAT` are injected into the FAT area (see `create_floppy.py` /
+>   `copy_to_victor_dos.py` for the FAT writer).  A bootable FreeDOS-Victor image
+>   already exists in the myfreedos tree — reuse it as the base rather than
+>   building DOS from scratch.
+> - **Exit detection**: fixed `-seconds_to_run` (myfreedos uses 150; tune down),
+>   or a `PASS:`/`FAIL:` sentinel regex over the captured output.
+> - **Interactive debugging (NOT for the gate, but invaluable when a run
+>   misbehaves)**: the **`mame-victor-test` skill** + MCP server at
+>   `~/projects/Victor9000-Development-Private/mame/mame-mcp-server/` exposes
+>   `mame_read_screen_text`, `mame_read_memory`, `mame_get_registers`,
+>   breakpoints, single-step, etc.  myfreedos's CLAUDE.md marks it MANDATORY for
+>   ad-hoc MAME work ("DO NOT run MAME directly" — for interactive sessions).
+>
+> **CONCRETE DELIVERABLES for the session:**
+> 1. **`tools/run-victor-mame.sh`** — the `victor9k` analog of `run-dos-exe.sh`:
+>    takes a built `.EXE`, produces/updates a FreeDOS-Victor disk image with the
+>    EXE + an `AUTOEXEC.BAT` (`portset a 9600 none 1 8` / `ctty seriala` /
+>    `<prog>` / a sentinel echo so we know it finished), runs MAME headless with
+>    `-rs232a null_modem -bitbanger <cap>` + `-seconds_to_run`, then streams the
+>    serial capture (CRLF/0x1A-stripped, à la `run-dos-exe.sh`) to stdout.  Exit
+>    77 (skip) if `mame`, the roms, or the base disk image are missing — so the
+>    gate degrades gracefully on machines without the Victor MAME setup.
+> 2. **Disk-image plumbing** — a small helper (reuse/port `create_floppy.py`'s
+>    FAT writer or use `mtools` if simpler) that drops `<prog>.EXE` +
+>    `AUTOEXEC.BAT` into a copy of the base FreeDOS-Victor image without
+>    rebuilding DOS.  Keep the base image path overridable by env
+>    (`$VICTOR_DISK`), mirroring `$DOSBOX`.
+> 3. **VALIDATE THE HARNESS WITH A TINY PROGRAM FIRST** — e.g. the existing
+>    far-data "halprobe" that prints `3`, or a 1-line hello `.EXE`.  This proves
+>    the serial-capture path end-to-end INDEPENDENT of mpython's size, and
+>    becomes the harness's own smoke test / golden.  (mpython.exe is 928.7KB —
+>    ~33KB over 896KB — so it still needs the shrink before IT runs; do that
+>    AFTER the harness exists, in a later session.)
+> 4. **Gate wiring** — add a `victor` runtime path to `tools/test-dos.sh` (a new
+>    RUNTIME-style array gated on `$VICTOR_DISK`/`mame` being present), or a
+>    sibling `tools/test-victor.sh`.  Keep the DOSBox path for the small
+>    near/far probes it already validates (it's faster and needs no Victor
+>    image); use MAME for the on-target / >640KB / Victor-hardware cases.
+>
+> **RESOURCES (paths):** MAME `~/projects/mame/mame` (machine `victor9k`);
+> harness exemplars `~/projects/myfreedos/boot/victor/{test_mame.sh,
+> build_stage1_disk.sh,create_floppy.py,copy_to_victor_dos.py}` +
+> `~/projects/newlibc/phase3_newlib/{run_test.sh,tools/decode_victor_screen.py}`
+> + `~/projects/newlibc/MAME_DEBUG_GUIDE.md`; MCP/skill
+> `~/projects/Victor9000-Development-Private/mame/mame-mcp-server/` (`mame-victor-test`);
+> Victor HW docs `~/Documents/Victor9k Stuff/Manuals/{subsystem-docs,GPTFiles}`;
+> full Victor FreeDOS port `~/projects/myfreedos`; OEM **MS-DOS 3.1 sources**
+> `~/projects/myfreedos/Victor Vintage Software/MS-DOS 3.1 Sources`.  There is a
+> `victor9000-engineer` agent for Victor hardware/MS-DOS-internals questions.
+>
+> **STILL DEFERRED (user):** `~/projects/newlibc` (the real Victor-targeted libc)
+> integrates at a LATER stage — keep the libstub path for now.  The mpython
+> shrink (omf_link dead-strip / MICROPY_CONFIG trim) is the move AFTER the
+> harness exists.  See [[project-victor9000-target]],
+> [[project-minic-far-setjmp-and-size-wall]].
+
+# (DONE §1y/§1z) MicroPython LINKS under compact far-data; image size is the wall (now measured vs the ~896KB Victor ceiling, not 640KB)
 
 > **§1y (commit `76c69eb`) — FAR_SETJMP_EXE: far-data setjmp/longjmp.**  New
 > `_far_setjmp`/`_far_longjmp` in `tools/libstub_to_exe.py` (4-byte far env
