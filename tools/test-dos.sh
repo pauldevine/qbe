@@ -136,6 +136,8 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/farglobal_probe.c:minic/dos/tests/farglobal_probe.golden.txt:compact"
 	"minic/dos/examples/farglobal_probe.c:minic/dos/tests/farglobal_probe.golden.txt:large"
 	"minic/dos/examples/farglobal_probe.c:minic/dos/tests/farglobal_probe.golden.txt:huge"
+	"minic/dos/examples/farlocal_probe.c:minic/dos/tests/farlocal_probe.golden.txt:compact"
+	"minic/dos/examples/farlocal_probe.c:minic/dos/tests/farlocal_probe.golden.txt:large"
 	"minic/dos/examples/local_typedef_probe.c:minic/dos/tests/local_typedef_probe.golden.txt:medium"
 	"minic/dos/examples/local_typedef_probe.c:minic/dos/tests/local_typedef_probe.golden.txt:large"
 	"minic/dos/examples/array_designate_probe.c:minic/dos/tests/array_designate_probe.golden.txt:medium"

@@ -415,33 +415,47 @@ i8086_isel(Fn *fn)
 	int64_t sz;
 
 	/* Assign slots to "fast" allocs — constant-size Oalloc4/8/16 in
-	 * the entry block.  Mirrors amd64/isel.c, but slots are 2 bytes
-	 * here (vs. 4 on amd64), so divide by 2 instead of 4.  After this
-	 * pass the alloc instruction is a Onop and the result temp's
-	 * `slot` field holds its slot index; fixarg() then turns each use
-	 * into an explicit `lea reg, [bp+offset]` (Oaddr).  Without this,
+	 * ANY block.  Mirrors amd64/isel.c, but slots are 2 bytes here
+	 * (vs. 4 on amd64), so divide by 2 instead of 4.  After this pass
+	 * the alloc instruction is a Onop and the result temp's `slot`
+	 * field holds its slot index; fixarg() then turns each use into an
+	 * explicit `lea reg, [bp+offset]` (Oaddr).  Without this,
 	 * Oalloc4/8/16 with class Kl falls through to the unhandled-32-bit
-	 * arm of emitins() and produces a "TODO: 32-bit op" comment, so
-	 * the alloc'd region is never addressable and the result temp
-	 * holds garbage. */
-	b = fn->start;
+	 * arm of emitins() and dies ("unsupported 32-bit op 81 (cls Kl)"),
+	 * so the alloc'd region is never addressable.
+	 *
+	 * amd64 only fast-slots allocs in fn->start and routes the rest
+	 * through salloc()/Osalloc (dynamic stack growth).  We instead
+	 * slot constant allocs in every block: minic emits a fixed-size
+	 * `alloc` at the C declaration point of a block-scoped local, which
+	 * can be inside a loop or `if` body (e.g. py/bc.c's
+	 * mp_bytecode_get_source_line allocates its lineinfo buffer inside
+	 * the decode loop).  A C block-scoped local reuses one frame slot
+	 * across iterations (its address must not escape the block — that
+	 * would be UB), so a single fixed slot is correct.  This also dodges
+	 * the far-pointer-to-SS:sp complications a dynamic Osalloc would
+	 * carry under compact/large.  True variable-size alloca is routed to
+	 * the GC heap by the frontend (MICROPY_NO_ALLOCA), so a non-constant
+	 * size here is left in place (it would die at emit) rather than
+	 * dynamically lowered. */
 	for (al = Oalloc, n = 4; al <= Oalloc1; al++, n *= 2)
-		for (i = b->ins; i < &b->ins[b->nins]; i++)
-			if (i->op == al) {
-				if (rtype(i->arg[0]) != RCon)
-					break;
-				sz = fn->con[i->arg[0].val].bits.i;
-				if (sz < 0 || sz >= INT_MAX-15)
-					err("invalid alloc size %"PRId64, sz);
-				sz = (sz + n-1) & -n;
-				sz /= 2;  /* 2-byte slots on i8086 */
-				if (sz > INT_MAX - fn->slot)
-					die("alloc too large");
-				fn->tmp[i->to.val].slot = fn->slot;
-				fn->slot += sz;
-				fn->salign = 2 + al - Oalloc;
-				*i = (Ins){.op = Onop};
-			}
+		for (b = fn->start; b; b = b->link)
+			for (i = b->ins; i < &b->ins[b->nins]; i++)
+				if (i->op == al) {
+					if (rtype(i->arg[0]) != RCon)
+						continue;
+					sz = fn->con[i->arg[0].val].bits.i;
+					if (sz < 0 || sz >= INT_MAX-15)
+						err("invalid alloc size %"PRId64, sz);
+					sz = (sz + n-1) & -n;
+					sz /= 2;  /* 2-byte slots on i8086 */
+					if (sz > INT_MAX - fn->slot)
+						die("alloc too large");
+					fn->tmp[i->to.val].slot = fn->slot;
+					fn->slot += sz;
+					fn->salign = 2 + al - Oalloc;
+					*i = (Ins){.op = Onop};
+				}
 
 	/* Process blocks in forward order */
 	for (b = fn->start; b; b = b->link) {

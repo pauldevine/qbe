@@ -1,0 +1,7 @@
+blockalloc ok
+localmem_x ok
+localmem_y ok
+localmem_tag ok
+structret ok
+dptr_deref ok
+dptr_diff ok

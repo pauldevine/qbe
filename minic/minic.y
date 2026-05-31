@@ -2675,9 +2675,15 @@ expr(Node *n)
 			 * we don't truncate to 16 bits.  Mirror s0's FAR-ness onto
 			 * addr so downstream load/store picks the right width.
 			 * FARSTORAGE: a global struct accessed directly (`g.m`) lives
-			 * in a far segment too, so its member address is also Kl. */
+			 * in a far segment too, so its member address is also Kl.
+			 * !NEAR_DATA(): a LOCAL aggregate's address is likewise a
+			 * far (Kl) pointer under compact/large/huge (ALLOC_T() emits
+			 * the slot temp as `=l`), so `&local.m` must add as `=l` too
+			 * — otherwise a `=w add %localKl, off` truncates the Kl base
+			 * and feeds an invalid narrow temp into the far loadfX (and
+			 * trips gvn's assoccon KWIDE assert when const-folded). */
 			{
-				int base_far = ISFAR(s0.ctyp) || FARSTORAGE(s0);
+				int base_far = ISFAR(s0.ctyp) || FARSTORAGE(s0) || !NEAR_DATA();
 				char klass = base_far ? 'l' : 'w';
 				unsigned ptyp = base_far ? IDIR_FAR(m->ctyp)
 				                              : (IDIR(m->ctyp) & ~FAR);
@@ -2842,7 +2848,8 @@ expr(Node *n)
 					/* Bitfield assignment - read-modify-write */
 					Symb addr, oldval, newval, clearmask, shifted, merged;
 					unsigned long mask, invmask;
-					int base_far = ISFAR(s_struct.ctyp) || FARSTORAGE(s_struct);
+					/* !NEAR_DATA(): local aggregate addresses are far Kl too. */
+					int base_far = ISFAR(s_struct.ctyp) || FARSTORAGE(s_struct) || !NEAR_DATA();
 					char klass = base_far ? 'l' : 'w';
 					unsigned ptyp = base_far
 					    ? IDIR_FAR(m->ctyp)
@@ -3395,9 +3402,10 @@ lval(Node *n)
 			 * the assignment site (which checks ISFAR(sl.ctyp)) routes
 			 * through storefar instead of plain store.  FARSTORAGE: a
 			 * global struct lives in a far segment, so `g.m = x` also
-			 * needs the Kl address + FAR propagation. */
+			 * needs the Kl address + FAR propagation.  !NEAR_DATA(): a
+			 * local aggregate's address is far Kl as well. */
 			{
-			int base_far = ISFAR(s0.ctyp) || FARSTORAGE(s0);
+			int base_far = ISFAR(s0.ctyp) || FARSTORAGE(s0) || !NEAR_DATA();
 			klass = base_far ? 'l' : 'w';
 			far_flag = base_far ? FAR : 0;
 			}
@@ -6798,9 +6806,9 @@ gival: expr                   { $$ = $1; }
 
 type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; }
         | type '*' TFAR              { $$ = IDIR_FAR($1); g_td_arraydim = 0; }
-        | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1 & ~FAR) : IDIR($1); g_td_arraydim = 0; }
-        | type '*' CONST             { $$ = ($1 & FAR) ? IDIR_FAR($1 & ~FAR) : IDIR($1); g_td_arraydim = 0; }
-        | type '*' VOLATILE          { $$ = ($1 & FAR) ? IDIR_FAR($1 & ~FAR) : IDIR($1); g_td_arraydim = 0; }
+        | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; }
+        | type '*' CONST             { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; }
+        | type '*' VOLATILE          { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; }
         | TFAR type                  { $$ = $2 | FAR; }
         | TCHAR                      { $$ = CHR; }
     | TSHORT                     { $$ = INT | SHORT; }
