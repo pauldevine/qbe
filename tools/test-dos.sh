@@ -76,6 +76,8 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/divreg_probe.c:minic/dos/tests/divreg_probe.golden.txt:medium"
 	"minic/dos/examples/shlconst_probe.c:minic/dos/tests/shlconst_probe.golden.txt:medium"
 	"minic/dos/examples/shlconst_probe.c:minic/dos/tests/shlconst_probe.golden.txt:compact"
+	"minic/dos/examples/sigencode_probe.c:minic/dos/tests/sigencode_probe.golden.txt:medium"
+	"minic/dos/examples/sigencode_probe.c:minic/dos/tests/sigencode_probe.golden.txt:compact"
 	"minic/dos/examples/uchar_widen_probe.c:minic/dos/tests/uchar_widen_probe.golden.txt:medium"
 	"minic/dos/examples/uchar_widen_probe.c:minic/dos/tests/uchar_widen_probe.golden.txt:compact"
 	"minic/dos/examples/declgram_probe.c:minic/dos/tests/declgram_probe.golden.txt:medium"

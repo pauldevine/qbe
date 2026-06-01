@@ -1365,8 +1365,19 @@ emitins(Ins *i, Fn *fn, FILE *f)
 
 		case Oand:
 			/*
-			 * 32-bit bitwise AND: dest = src0 & src1
+			 * 32-bit bitwise AND: dest = src0 & src1.
+			 * load32_dxax + the op use AX/DX as scratch; rega doesn't
+			 * model that implicit clobber, so preserve the caller's
+			 * AX/DX across the op — same bracketing as Oadd/Osub Kl
+			 * ([[i8086-kl-add-sub-mul-r1-alias]]).  Without this, a
+			 * live value rega parked in AX/DX (e.g. a loop-carried temp
+			 * live across this OR-chain) is silently corrupted.  Slot
+			 * operands are bp-relative, so the push/pop of AX/DX (which
+			 * move SP, not BP) leaves their offsets valid.
 			 */
+			{
+			int dst_in_dx_and = (rtype(i->to) == RTmp && i->to.val == RDX);
+			AxDxSave s_and = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
 
 			if (rtype(r1) == RSlot) {
@@ -1380,14 +1391,25 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+				if (dst_in_dx_and) {
+					fprintf(f, "\tmov dx, ax\n");
+				} else if (strcmp(rname[i->to.val], "ax") != 0) {
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				}
+			}
+
+			kl_restore_axdx(s_and, f);
 			}
 			return;
 
 		case Oor:
 			/*
-			 * 32-bit bitwise OR: dest = src0 | src1
+			 * 32-bit bitwise OR: dest = src0 | src1.  AX/DX-clobber
+			 * preservation, same shape as Oand Kl above.
 			 */
+			{
+			int dst_in_dx_or = (rtype(i->to) == RTmp && i->to.val == RDX);
+			AxDxSave s_or = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
 
 			if (rtype(r1) == RSlot) {
@@ -1401,14 +1423,25 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+				if (dst_in_dx_or) {
+					fprintf(f, "\tmov dx, ax\n");
+				} else if (strcmp(rname[i->to.val], "ax") != 0) {
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				}
+			}
+
+			kl_restore_axdx(s_or, f);
 			}
 			return;
 
 		case Oxor:
 			/*
-			 * 32-bit bitwise XOR: dest = src0 ^ src1
+			 * 32-bit bitwise XOR: dest = src0 ^ src1.  AX/DX-clobber
+			 * preservation, same shape as Oand Kl above.
 			 */
+			{
+			int dst_in_dx_xor = (rtype(i->to) == RTmp && i->to.val == RDX);
+			AxDxSave s_xor = kl_save_axdx(i->to, f);
 			load32_dxax(r0, fn, f);
 
 			if (rtype(r1) == RSlot) {
@@ -1422,7 +1455,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			} else if (rtype(i->to) == RTmp) {
-				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
+				if (dst_in_dx_xor) {
+					fprintf(f, "\tmov dx, ax\n");
+				} else if (strcmp(rname[i->to.val], "ax") != 0) {
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+				}
+			}
+
+			kl_restore_axdx(s_xor, f);
 			}
 			return;
 
