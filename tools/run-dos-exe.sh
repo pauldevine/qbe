@@ -88,6 +88,10 @@ EOF
 #   -W  wait until it exits (and propagate its exit status)
 #   -n  always start a fresh instance (don't reactivate one the user has open)
 #   --args  forward the DOSBox flags to the app
+# IMPORTANT: point `open -a` at the DOSBox *binary*
+# (.../Contents/MacOS/DOSBox), NOT the `.app` bundle — `open -a <bundle>
+# --args …` does NOT forward the flags to the emulator (the program never
+# runs, so OUT.TXT is never produced).  `open -a <binary> --args …` does.
 # (Environment variables do NOT propagate through `open`/launchd, so the SDL
 # dummy-video driver can't be used on this path — `-g -j` is what keeps it
 # from disturbing the user.)  Output still flows through the in-DOS OUT.TXT
@@ -97,7 +101,7 @@ EOF
 # directly with the SDL dummy drivers for a truly headless, windowless run.
 run_dosbox() {
 	if [ -n "$DOSBOX_APP" ]; then
-		open -gjWn -a "$DOSBOX_APP" --args -conf "$CONF" -exit
+		open -a "$DOSBOX_BIN" -g -j -W -n --args -conf "$CONF" -exit
 	else
 		SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
 			"$DOSBOX_BIN" -conf "$CONF" -exit
