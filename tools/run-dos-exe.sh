@@ -72,7 +72,13 @@ EOF
 
 # DOSBox writes copious chatter to its own stdout/stderr.  We don't need
 # any of it for the diff — silence everything except a non-zero exit.
-if ! "$DOSBOX_BIN" -conf "$CONF" -exit >/dev/null 2>&1; then
+#
+# SDL_VIDEODRIVER=dummy (+ dummy audio) runs DOSBox truly headless: no SDL
+# window is created, so a gate run never opens windows or steals keyboard
+# focus from whatever the user is doing on the same machine.  Output still
+# flows through the OUT.TXT redirect, which is independent of the display.
+if ! SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+		"$DOSBOX_BIN" -conf "$CONF" -exit >/dev/null 2>&1; then
 	echo "run-dos-exe: DOSBox exited non-zero" >&2
 	exit 1
 fi

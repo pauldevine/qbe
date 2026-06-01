@@ -314,6 +314,24 @@ struct {
 	                    * buffered ini[]/gloname[] slot instead of erroring. */
 } varh[NVar];
 
+/* Per-function parameter-type table, for argument coercion at call sites.
+ * C11 6.5.2.2p4: when a prototype is in scope, each argument is converted
+ * as if by assignment to its corresponding parameter type.  minic otherwise
+ * sizes every stack argument by the ARGUMENT'S own type, so a wide (`l`,
+ * 4-byte) value handed to a narrow (`w`, 2-byte) parameter is pushed as 4
+ * bytes where the callee reads 2 — shifting every later stack argument.
+ * (Canonical victim: `mp_parse_num_base(str, top - str, &base)` — the
+ * far-pointer difference `top - str` is `l` but `size_t len` is `w`, so
+ * `&base` was read from the wrong slot.)  We record each function's fixed
+ * parameter types here (keyed by name, open addressing like varh) and
+ * coerce arguments to them in the direct-call emit path. */
+enum { NFnParam = 16 };  /* fixed params recorded per fn; extras uncoerced */
+struct {
+	char v[NString];
+	unsigned ptyp[NFnParam];
+	int nparam;  /* fixed params recorded (>=0); entry absent => -1 at lookup */
+} fnproto[NVar];
+
 /* Typedef table.  Sized for real preprocessed TUs (MicroPython headers
  * define well over 128 typedefs); minic is host-compiled so this is cheap. */
 enum { NTyp = 512 };
@@ -1990,6 +2008,110 @@ is_aggr(unsigned ctyp)
 	return KIND(ctyp) == STRUCT_T || KIND(ctyp) == UNION_T;
 }
 
+/* Record the fixed parameter types of function `name' (declared or defined)
+ * for later argument coercion.  `params' is the par0 Node chain; each node's
+ * u.v is a parameter name still live in the local symtab, so its type is
+ * varget(name)->ctyp.  A variadic `...' contributes no node, so nparam counts
+ * only the fixed parameters — exactly the ones an argument must be converted
+ * to (true varargs keep their own promoted type).  Overwrites any prior entry
+ * (a definition supersedes an earlier prototype). */
+static void
+fnproto_record(char *name, Node *params)
+{
+	unsigned h0, h;
+	Node *n;
+	int i;
+	Symb *s;
+
+	h0 = hash(name);
+	h = h0;
+	do {
+		if (fnproto[h].v[0] == 0 || strcmp(fnproto[h].v, name) == 0) {
+			strcpy(fnproto[h].v, name);
+			i = 0;
+			for (n = params; n && i < NFnParam; n = n->r) {
+				s = varget(n->u.v);
+				fnproto[h].ptyp[i++] = s ? s->ctyp : INT;
+			}
+			fnproto[h].nparam = i;
+			return;
+		}
+		h = (h + 1) % NVar;
+	} while (h != h0);
+	/* table full: silently skip (coercion just won't fire for this fn) */
+}
+
+/* Look up function `name' in the prototype table.  Returns its index, or -1
+ * if no prototype was recorded (e.g. an implicitly-declared or K&R-unspecified
+ * function — leave its arguments untouched). */
+static int
+fnproto_find(char *name)
+{
+	unsigned h0, h;
+
+	h0 = hash(name);
+	h = h0;
+	do {
+		if (fnproto[h].v[0] == 0)
+			return -1;
+		if (strcmp(fnproto[h].v, name) == 0)
+			return (int)h;
+		h = (h + 1) % NVar;
+	} while (h != h0);
+	return -1;
+}
+
+/* Coerce a call argument value `s' to the declared parameter type `ptyp'
+ * (C11 6.5.2.2p4).  Only integer-scalar width mismatches are handled — the
+ * case that shifts the stack-argument layout; pointer/float/aggregate
+ * arguments keep their own type. */
+static Symb
+coerce_arg(Symb s, unsigned ptyp)
+{
+	int arg_int, par_int;
+	char ac, pc;
+
+	arg_int = (KIND(s.ctyp) == INT || KIND(s.ctyp) == CHR || KIND(s.ctyp) == LNG)
+	          && !ISFLOAT(s.ctyp);
+	par_int = (KIND(ptyp) == INT || KIND(ptyp) == CHR || KIND(ptyp) == LNG)
+	          && !ISFLOAT(ptyp);
+	if (!arg_int || !par_int)
+		return s;
+	ac = irtyp_ret(s.ctyp);   /* 'w' or 'l' */
+	pc = irtyp_ret(ptyp);
+	if (ac == pc)
+		return s;
+	if (pc == 'l') {
+		/* widen w -> l */
+		if (s.t == Con) {
+			s.ctyp = ISUNSIGNED(ptyp) ? (LNG | UNSIGNED) : LNG;
+			return s;
+		}
+		if (ISUNSIGNED(s.ctyp)) {
+			fprintf(of, "\t%%t%d =l extuw ", tmp);
+			psymb(s);
+			fprintf(of, "\n");
+			s.t = Tmp; s.ctyp = LNG | UNSIGNED; s.u.n = tmp++;
+		} else {
+			sext(&s);  /* Con-aware signed widen to LNG */
+		}
+	} else {
+		/* narrow l -> w */
+		unsigned rc = (KIND(ptyp) == CHR) ? CHR : INT;
+		if (ISUNSIGNED(ptyp))
+			rc |= UNSIGNED;
+		if (s.t == Con) {
+			s.ctyp = rc;
+			return s;
+		}
+		fprintf(of, "\t%%t%d =w copy ", tmp);
+		psymb(s);
+		fprintf(of, "\n");
+		s.t = Tmp; s.ctyp = rc; s.u.n = tmp++;
+	}
+	return s;
+}
+
 /* Struct/union pass-BY-VALUE ABI.  A by-value aggregate argument crosses the
  * call boundary as a POINTER to its storage: the caller yields the aggregate's
  * address, the callee copies *ptr into its own local (C copy semantics).  The
@@ -2129,10 +2251,18 @@ call(Node *n, Symb *sr)
 	int sret = (KIND(sr->ctyp) == STRUCT_T || KIND(sr->ctyp) == UNION_T);
 	unsigned aggr = sr->ctyp;
 	int sret_slot = 0;
+	int proto = fnproto_find(f);
+	int argi = 0;
 	if (sret)
 		sret_slot = alloc_sret_slot(aggr);
-	for (a=n->r; a; a=a->r)
+	for (a=n->r; a; a=a->r, argi++) {
 		a->u.s = eval_arg(a);
+		/* Convert each argument to the declared parameter type (C11
+		 * 6.5.2.2p4) so its stack width matches what the callee reads;
+		 * leave true-vararg arguments (index >= nparam) untouched. */
+		if (proto >= 0 && argi < fnproto[proto].nparam)
+			a->u.s = coerce_arg(a->u.s, fnproto[proto].ptyp[argi]);
+	}
 	{
 	char *cf = call_target_name(f);
 	if (sret) {
@@ -5361,6 +5491,7 @@ emit_knr_func(char *fname, Node *params)
 	strncpy(cur_fn_name, fname, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(fname, 1, FUNC(INT), 0);
+	fnproto_record(fname, params);
 	fprintf(of, "%s w $%s(", fn_export_kw(), fname);
 	n = params;
 	if (n)
@@ -5400,6 +5531,7 @@ emit_knr_func_typed(char *fname, Node *params)
 	strncpy(cur_fn_name, fname, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(fname, 1, FUNC(curfntyp), 0);
+	fnproto_record(fname, params);
 
 	/* Struct/union return-by-value: hidden first pointer parameter +
 	 * pointer return (see cur_fn_sret notes near the top of the file). */
@@ -5666,6 +5798,7 @@ externdcl: EXTERN type IDENT ';'
 		varadd($3->u.v, 1, FUNC(NIL), 0);
 	else
 		varadd($3->u.v, 1, FUNC($2), 0);
+	fnproto_record($3->u.v, $5);
 }
          | EXTERN type ext_decllist ';'
 {
@@ -6244,6 +6377,7 @@ ansi_proto_register: '(' init_ansi par0 ')'
 	/* Prototype-only registration: register function type, no IR emission. */
 	curfntyp = parsed_type;
 	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
+	fnproto_record(parsed_ident, $3);
 };
 
 knr_func_proto: '(' init_kr kr_idlist ')' kr_param_dcls
@@ -6265,6 +6399,7 @@ ansi_func_proto: '(' init_ansi par0 ')'
 	strncpy(cur_fn_name, parsed_ident, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
+	fnproto_record(parsed_ident, $3);
 
 	/* Struct/union return-by-value: lower to a hidden first pointer
 	 * parameter (caller-allocated result storage) plus a pointer
@@ -6608,6 +6743,7 @@ dcls:
 {
 	/* Local ANSI prototype with typed args. */
 	varadd($3->u.v, 1, FUNC($2), 0);
+	fnproto_record($3->u.v, $5);
 }
     | dcls ALIGNAS '(' NUM ')' type IDENT ';'
 {
