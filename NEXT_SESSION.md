@@ -1,4 +1,104 @@
-# Next session (§2j DONE — the `mp_compile` exception blocker is FIXED: it was a minic local-struct `= {0}` PARTIAL ZERO-INIT bug, NOT the suspected fn-ptr arg shift) — NEW state = the fix is correct + gated (DOS gate 161→164, `make check` green, committed `f8040ee`), and the §2i compile blocker's ROOT CAUSE is confirmed fixed on-target; BUT the corrected (full-coverage) zeroing grew the MicroPython image ~850 B OVER the razor-thin Victor load ceiling, so the end-to-end `print(1+2)` → `3` milestone is NOT yet verified on hardware. NEXT = a ~850 B shrink (recommended lever below), then re-run on the Victor to confirm the milestone.
+# Next session (§2j' DONE — the ~850 B shrink lever landed: emit_clit_aggr now fills local-init dest DIRECTLY, dropping the compound-literal temp + struct copy and fixing far member-init truncation; committed `df3c76a`, DOS gate 164/164, `make check` green, 111 s/r 0 r/r) — the compact far-data mpython image now LOADS on the real Victor (body 825152→820480 B, UNDER the ~824.3KB ceiling) and the §2j compile_error fix is HARDWARE-CONFIRMED (the §2i/§2j bogus `DE` exception is GONE). The `print(1+2)`→`3` milestone is STILL not reached: a NEW blocker is now exposed — `mp_compile` HANGS in the bytecode EMIT pass. NEXT = debug the EMIT-pass hang (precisely localized below; almost certainly an emitbc.c/compile_scope far-data codegen bug, NOT the struct-init change).
+
+> **§2j' (DONE 2026-06-01, committed `df3c76a`) — the ~850 B shrink lever (the
+> §2j NEXT) landed and is hardware-verified.**  DOS gate 164/164, `make check`
+> green, 111 s/r 0 r/r (C-action only).
+>
+> WHAT LANDED (all `minic/minic.y`): `emit_clit_aggr` now takes a destination
+> ADDRESS operand (any aggregate lvalue — a `%_clit` slot, a local `%var`, a
+> `*p` deref temp) instead of only a `%_clit` number, and is FAR-CORRECT (member
+> stores are `storef%c` at `=l add` offsets under far-data; the old `%_clit`-only
+> path used near `=w add`+`store%c`, which TRUNCATED the segment of a pointer
+> member written at offset>0 — a latent miscompile).  New `symb_operand` helper
+> formats a Symb's address operand to a string.  The `=` handler special-cases
+> `dst = (T){...}` (the desugaring the local-aggregate-init rules emit, and any
+> user struct-literal assign): it fills `dst` IN PLACE via `emit_zero_aggr` +
+> `emit_clit_aggr`, skipping the compound-literal temp AND the whole-struct copy.
+> That drops far more than 850 B (every `S s = {...}` loses its temp alloc +
+> ~size/2-word copy) AND fixes far-data member-init truncation for locals (the
+> old non-zero path went through `emit_struct_copy`, which for a local aggregate
+> computed `dst_far=false` under far-data → near stores into a far stack slot).
+> Probe `local_zeroinit_probe.c` gains `init`/`mid2`/`desig` NON-zero cases
+> (positional `small_t` + designated `big_t`) that DEREF a pointer member written
+> past the first word, so a far-store segment truncation is bug-loud; medium is
+> byte-identical (far=0 path unchanged).
+>
+> RESULT ON HARDWARE: compact far-data `mpython.exe` body 825152→**820480 B**
+> (−4672), UNDER the ~824.3KB Victor load ceiling (824192 loads, 824512 doesn't).
+> On the real Victor (SASI) the image LOADS and runs through `mp_init` +
+> `mp_parse`: trace `C1 C2 C3 C4 D0 D1 D2`.  The §2i/§2j bogus compile-time `DE`
+> exception is GONE (the §2j `compile_error` fix is hardware-confirmed; before, it
+> was unverifiable because the image was over the ceiling).
+>
+> **THE NEW blocker — `mp_compile` HANGS in the bytecode EMIT pass.**  Bisected
+> on-target with E-markers in `py/compile.c::mp_compile_to_raw_code` (markers
+> since REVERTED — tree is clean; re-add via the recipe below).  Trace:
+> `D2 E0 E1 E2 E3 Es Ec Ee Ei Ei` then HANG.  Decode:
+>  - `E0`→`E3`: scope creation + `MP_PASS_SCOPE` loop + `scope_compute_things` all
+>    COMPLETE.
+>  - `Es`: `compile_scope(MP_PASS_STACK_SIZE)` ran and RETURNED.
+>  - `Ec`: `compile_scope(MP_PASS_CODE_SIZE)` ran and RETURNED.
+>  - `Ee`: entered the `while (!compile_scope(comp, s, MP_PASS_EMIT)) {}` loop.
+>  - `Ei Ei`: the EMIT `compile_scope` returned FALSE (= `mp_emit_bc_end_pass`
+>    reported the emitted size did NOT settle: `bytecode_offset != bytecode_size`
+>    or `code_info_offset != code_info_size`, emitbc.c:384) on TWO successive
+>    passes, requesting another pass each time.
+>  - HANG: the **3rd** `compile_scope(MP_PASS_EMIT)` call never returns (no 3rd
+>    `Ei`, no `Ed`/`E4`).  Even at 300s emulation it stays at the hang (true hang,
+>    not slow; no reboot — no 2nd `__V9BEGIN__`).
+> Bytecode emit normally converges in ONE pass; two non-settling passes is itself
+> abnormal, so the bytecode/code-info SIZE is oscillating across EMIT passes —
+> classic symptom of a miscompiled jump-offset / size accumulator under far-data
+> (`bytecode_offset`/`code_info_offset` are `size_t` = `int` = 2 bytes in minic's
+> stddef.h; the jump-encoding at emitbc.c:242-279 computes signed
+> `label_offsets[label] - bytecode_offset - 2` and picks 1/2/3-byte encodings —
+> a width/sign bug there would shift sizes every pass and never settle, and the
+> 3rd pass walking a corrupted offset could loop).
+>
+> WHY THIS IS ALMOST CERTAINLY NOT THE §2j' STRUCT-INIT CHANGE: STACK_SIZE,
+> CODE_SIZE, and TWO full EMIT passes all ran `compile_scope` to completion over
+> the SAME struct initializers; a miscompiled local-aggregate init would corrupt
+> every pass uniformly, not specifically hang the 3rd EMIT pass on a size-
+> convergence path.  (If you want to be 100% sure, the only `S s = {...}`-shaped
+> locals on the compile path are the suspect — but the gate's `local_zeroinit_probe`
+> init/mid2/desig cases already pass on compact+large.)
+>
+> **NEXT — pin the EMIT-pass hang.**  (1) Instrument `py/emitbc.c`:
+> `mp_emit_bc_end_pass` (print `bytecode_offset`/`bytecode_size`/`code_info_offset`/
+> `code_info_size` each EMIT pass — see if they oscillate vs. grow unboundedly)
+> and the jump-offset encoder `emit_write_bytecode_byte_signed_label`-style code
+> at emitbc.c:242-279 (print `label`, `label_offsets[label]`, `bytecode_offset`,
+> the chosen encoding size).  Use 16-bit-only debug printers (NO Kl shift —
+> [[i8086-kl-shift-clobbers-ax]]).  (2) Recompile that ONE TU via
+> `tools/recompile-mp-tu.sh emitbc ~/projects/micropython/py/emitbc.c` (compact
+> far-data, --gc-sections; reuses every other .obj + /tmp/mp_objs.txt), run
+> `tools/run-victor-sasi.sh build/mp-link/mpython.exe 200`, and watch the offsets.
+> (3) Likely fix is in i8086/qbe codegen for the offset arithmetic / size_t
+> compares (a width or sign-extension bug), or possibly in how `label_offsets[]`
+> (a far array under far-data) is indexed/stored.  RE-ADD the compile.c E-markers
+> recipe (if you need to re-confirm the phase): `#include "py/mphal.h"` +
+> `#define EMARK(s) mp_hal_stdout_tx_strn_cooked((s),3)` after
+> `#if MICROPY_ENABLE_COMPILER`, then `EMARK("E0\n")` at the top of
+> `mp_compile_to_raw_code`, `E1` after `emit_bc_new`, `E2`/`E3` around the
+> `scope_compute_things` loop, `Es`/`Ec`/`Ee` before the STACK_SIZE/CODE_SIZE/EMIT
+> `compile_scope` calls, `Ei` inside the EMIT while-body, `Ed`/`E4` after the loop.
+> CAUTION: markers cost image bytes — the clean image is 820480 B with ~3.7KB of
+> headroom under the ceiling; a handful of EMARKs fit, but strip them before any
+> milestone confirmation run.  Build: `bash tools/build-micropython.sh
+> --model=compact --keep-going`.
+>
+> MICROPYTHON TREE STATE (separate repo, ~/projects/micropython, uncommitted):
+> `py/compile.c` reverted CLEAN (E-markers removed).  `build/mp-link/mpython.exe`
+> rebuilt clean (compile.obj marker-free, body 820480 B).  The C/D phase markers
+> in `ports/dos8086/main.c::do_str` remain (D0=lexer, D1=before mp_parse, D2=parse
+> done, D3=compile done, D4=call done, DE=exception).  `gc_collect` is the real
+> stack-scanning collector.
+>
+> ALSO STILL OPEN (unchanged): Finding 3 — a raised exception object's far pointer
+> loses its SEGMENT on the raise path; needed for any real exception to print, but
+> `print(1+2)` raises none, so it does not block the milestone.
+
+> # (prior) §2j — the `mp_compile` exception blocker (FIXED in f8040ee; this is the predecessor of §2j' above)
 
 > **§2j (DONE 2026-06-01, committed `f8040ee`) — the §2i NEW blocker (an
 > uncaught exception raised DURING `mp_compile` of the correct parse tree of
