@@ -1,4 +1,86 @@
-# Next session (§2i DONE — wide-arg→narrow-param FIXED, `mp_parse` now COMPLETES on the real Victor) — NEW blocker = an uncaught exception is raised DURING `mp_compile` (trace `C1 C2 C3 C4 D0 D1 D2 DE C5`: parse reaches D2, then DE before D3). The §2i fix covers DIRECT named calls only; minic's function-pointer TYPES carry no param info, so a wide→narrow shift through a FN-PTR call (MicroPython's compiler emit_t method-table dispatch) is STILL latent and is the prime suspect. Also still open: Finding 3 (raised exception object's far pointer loses its SEGMENT on the raise path).
+# Next session (§2j DONE — the `mp_compile` exception blocker is FIXED: it was a minic local-struct `= {0}` PARTIAL ZERO-INIT bug, NOT the suspected fn-ptr arg shift) — NEW state = the fix is correct + gated (DOS gate 161→164, `make check` green, committed `f8040ee`), and the §2i compile blocker's ROOT CAUSE is confirmed fixed on-target; BUT the corrected (full-coverage) zeroing grew the MicroPython image ~850 B OVER the razor-thin Victor load ceiling, so the end-to-end `print(1+2)` → `3` milestone is NOT yet verified on hardware. NEXT = a ~850 B shrink (recommended lever below), then re-run on the Victor to confirm the milestone.
+
+> **§2j (DONE 2026-06-01, committed `f8040ee`) — the §2i NEW blocker (an
+> uncaught exception raised DURING `mp_compile` of the correct parse tree of
+> `print(1+2)`) is FIXED.  It was NOT the suspected fn-ptr arg-coercion shift —
+> that suspicion was WRONG for this config (MicroPython MINIMUM-ROM has
+> `MICROPY_EMIT_NATIVE=0`, so `EMIT_ARG` is a DIRECT `mp_emit_bc_*` call, NOT
+> emit_t method-table dispatch — already coerced by §2i).  DOS gate 161→164,
+> `make check` green, 111 s/r 0 r/r (C-action only).**
+>
+> HOW IT WAS FOUND (on-target bisection, the decisive method): injected K0..K3
+> phase markers + a Z0/Z1 init probe into `py/compile.c::mp_compile_to_raw_code`
+> on the real Victor (SASI).  Trace showed compile ran ALL passes (`K3`) then hit
+> `comp->compile_error != NULL` though `SYN` (the only compile_error setter once
+> native is off) never printed — and `Z1` fired: `compiler_t comp_state = {0};`
+> left the `compile_error` POINTER field (past the first word) as non-NULL stack
+> GARBAGE.  So `mp_compile` raised a bogus exception on a perfectly good parse
+> tree.  (Lesson reinforced: get on-target DATA before building a big speculative
+> fix — the fn-ptr mechanism would have been wasted effort.)
+>
+> ROOT CAUSE: every minic local-aggregate zero-init looped `j += 4` while
+> emitting a 2-byte `storew` (T.wordsz == 2 on i8086), zeroing only HALF the
+> bytes — alternating 2-byte gaps of stack garbage; under far-data the near
+> `=w add`/store also truncated the segment.  FIVE sites had this (the two
+> compound-literal 'L' paths + three bare struct-local decl paths).
+>
+> FIX (all `minic/minic.y`): new `emit_zero_aggr(addr, s)` — correct full-
+> coverage zero-fill (a `memset` call for s>8, mangled to `_far_memset` under
+> far-data; tiny aggregates inline storel/storew/storeb with a 4-byte stride);
+> all five sites route through it.  Implicit bare `struct S s;` zero-init is now
+> gated on the struct actually having a bitfield (`struct_has_bitfield`) — C
+> leaves an uninitialized automatic indeterminate, the old half-fill couldn't be
+> relied on, and most structs have no bitfield (net size win).  `S s = {0};`
+> locals (dcls + stmt rules) now zero the target DIRECTLY via `memset`, skipping
+> the compound-literal temp AND the struct copy.  Probe `local_zeroinit_probe.c`
+> (+golden), gated medium+compact+large; bug-loud (all members garbage) without
+> the fix.  Also added `fnptr_argwiden_probe.c` (UNGATED) documenting the
+> separate, still-latent fn-ptr wide→narrow arg gap (fn-ptr TYPE carries no
+> param list; not hit by this config).
+>
+> **THE NEW state — image is ~850 B OVER the Victor load ceiling.**  Correct
+> (full) zeroing legitimately costs more code than the buggy half-fill, so the
+> compact far-data mpython.exe body grew to **825152 B**, and DOS reports
+> "Program too big to fit in memory" on the Victor (observed ceiling: a 824192 B
+> body LOADS, 824512 B does NOT — so ~824.3 KB).  Three shrink levers already
+> applied this session got it from 828896→825152 (memset-for-big, direct-`{0}`
+> on-target, bitfield-conditional bare-decl), but ~850 B remain.  The on-target
+> `print(1+2)` → `3` MILESTONE is therefore NOT yet verified — it is blocked ONLY
+> by this size wall, not by correctness (the fix is proven by the probe across 3
+> models + the Z1 on-target root-cause).
+>
+> **NEXT — shrink ~850 B, then verify the milestone on the Victor.**  RECOMMENDED
+> LEVER (clean, also fixes a latent bug): generalize `emit_clit_aggr` to take a
+> destination ADDRESS (like `emit_zero_aggr` now does) and be far-correct
+> (it currently uses near `=w add %_clit, off` + `store%c` for explicit members
+> at offset>0 — which TRUNCATES the segment under far-data, a latent bug), then
+> have the local-aggregate-init rules (dcls `type IDENT '=' '{' … '}'` ~line
+> 6755, and the stmt-level one ~line 7360) fill the freshly-alloc'd `%v`
+> DIRECTLY — zero it via `emit_zero_aggr("%v", s)` then `emit_clit_aggr("%v", …)`
+> — eliminating the compound-literal temp AND the per-init struct copy for ALL
+> aggregate initializers (not just `{0}`).  That removes far more than 850 B
+> (every `S s = {…};` loses its ~S/2-word copy) AND fixes the far-data member-
+> init truncation.  Keep the `%_clit` path for genuine compound-literal VALUES
+> (`(T){…}` used as an rvalue).  Extend `local_zeroinit_probe.c` with a non-zero
+> `S s = {a, b, …};` case (medium+compact+large) to guard the far-correctness.
+> Then: `make check`, `tools/test-dos.sh` (expect 164+), full rebuild
+> `bash tools/build-micropython.sh --model=compact --keep-going`, and
+> `tools/run-victor-sasi.sh build/mp-link/mpython.exe 220` — expect the trace to
+> reach `D3 D4` and print `3`.
+>
+> MICROPYTHON TREE STATE (separate repo, ~/projects/micropython, uncommitted):
+> `py/compile.c` was reverted CLEAN (the K0..K3/Z markers are gone).
+> `ports/dos8086/main.c` gc_collect was restored to the real stack-scanning
+> collector (it had been stubbed empty for size headroom during the bisection).
+> The C/D phase markers in main.c's do_str remain.  Reproduce the bisection if
+> needed by re-adding markers; the recipe is `tools/recompile-mp-tu.sh compile
+> ~/projects/micropython/py/compile.c` then `tools/run-victor-sasi.sh`.  CAUTION:
+> markers cost image bytes against the razor-thin ceiling — temporarily stub
+> gc_collect (empty) to make room, as this session did.
+>
+> ALSO STILL OPEN (unchanged from §2h): Finding 3 — a raised exception object's
+> far pointer loses its SEGMENT on the raise path; needed for any real exception
+> to print, but `print(1+2)` raises none, so it does not block the milestone.
 
 > **§2i (DONE 2026-06-01, committed `96553e4`) — the wide-arg→narrow-param
 > blocker is FIXED; `mp_parse` now runs to completion on the real Victor.**
