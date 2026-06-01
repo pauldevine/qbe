@@ -47,12 +47,14 @@
 > probe `slotarray_probe.c` (compact + far-static, MicroPython's config)
 > exercises BOTH bugs (a flexible fn-ptr-member dispatch + a runtime-indexed
 > `int *` array); passes on the Victor via the MAME/SASI harness.
-> fnptrprobe re-verified unchanged.  **NOTE: DOSBox was UNAVAILABLE in this
-> environment** (even the known-good sigencode_probe produced "no OUT.TXT"
-> via `tools/run-dos-exe.sh`; `open -gjWn -a dosbox.app` never captured), so
-> all probe validation used `tools/run-victor-sasi.sh` / `run-victor-mame.sh`
-> (the authoritative real-hardware path).  The DOS-gate count couldn't be
-> re-measured locally; rerun `tools/test-dos.sh` where DOSBox works.
+> fnptrprobe re-verified unchanged.  **Full DOS gate GREEN: 168→169/169 ok**
+> (the new slotarray_probe row; no regressions from the two minic fixes).
+> NOTE: `tools/run-dos-exe.sh` had a macOS launch bug — it ran `open -gjWn -a
+> dosbox.app --args …`, but `open -a <bundle> --args` does NOT forward flags
+> to DOSBox (every probe reported "no OUT.TXT").  Fixed (committed `78f1cf1`)
+> to `open -a <binary> -g -j -W -n --args …` (point at
+> .../Contents/MacOS/DOSBox).  The MAME Victor harness (run-victor-sasi.sh /
+> run-victor-mame.sh) is the other validation path and works headlessly.
 >
 > SIZE NOTE: the BUG 1 fix correctly emits all the previously-dropped type
 > slots, so the compact far-data mpython body grew 823360 → **824928 B**,
