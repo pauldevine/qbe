@@ -1,4 +1,166 @@
-# Next session — struct pass-BY-VALUE ABI landed; MicroPython lexer crash CLEARED on the real Victor; NEW blocker = a HANG in mp_parse (after the lexer, before parse completes)
+# Next session — THREE far-data fixes (§2f/§2g) cleared the file_input loop + qstr-intern hang; parser now consumes "print" and reaches token 2.  NEW blocker = the lexer's SECOND token reads MP_TOKEN_INVALID (1) instead of `(` (0x51) — a latent far-data lexer gap on token 2.  ALSO: the fully-instrumented image is now ~846KB → "too big to fit in memory" on the Victor; strip debug markers (or shrink) to get a loadable image.
+
+> **§2f/§2g (DONE 2026-05-31, committed `014ee64` + `bb61947`) — THREE
+> far-data fixes, found by on-target bisection on the real Victor.  DOS gate
+> 154→158, `make check` green, 111 s/r 0 r/r.  MicroPython's `print(1+2)`
+> parse advanced from an INFINITE LOOP (single_input→file_input→file_input_2→
+> file_input_3 forever) all the way through "print" qstr interning and the
+> first token, to the SECOND token.**
+>
+> Each fix has a probe (where a synthetic probe was authorable) and is
+> bug-loud-verified.  Decode helpers for the on-target traces: token enum
+> (MINIMUM rom level, FSTRINGS+ASYNC OFF): END=0, NEWLINE=4, INDENT=5, DEDENT=6,
+> NAME=7, INTEGER=8, DEL_PAREN_OPEN=0x51, OP_PLUS=0x3c; rule-id decode from the
+> compiled enum in `build/mp-link/parse.pp.c` (single_input=56=0x38).
+>
+> FIX 1 — **unsigned char widened to int SIGN-extended** (`minic.y`,
+> model-INDEPENDENT).  Every char→int widening emitted `extsb`; a `uint8_t`
+> with bit 7 set (0x8D) sign-extended to 0xFF8D (the byte already sits
+> zero-extended in a `w` temp — loadub/loadfb clear the high byte — so
+> sign-extending the low byte corrupts it).  Fix: emit `extub` when
+> ISUNSIGNED(src) at the int=char assignment site + the three prom()
+> char-promotion sites.  Canonical victim: py/parse.c `get_rule_arg()` reads a
+> `const uint8_t` offset table; a 0x8D offset → 0xFF8D indexed the rule-arg
+> table wild → `rule(stmt)`/`rule(simple_stmt)` resolved to rule 0 → the
+> file_input loop.  Probe `uchar_widen_probe.c` (medium+compact); bug-loud
+> "idx FAIL -115 / sum FAIL -227".
+>
+> FIX 2 — **pointer MEMBER of a far struct stored NEAR** (`minic.y`).  The
+> assignment far-store fired only for ISFAR && KIND!=PTR/FUN, or a DIRECT
+> global (FARSTORAGE).  A pointer member of a far struct reaches the store as a
+> computed Tmp address (FARSTORAGE false) with a PTR value type (the ISFAR
+> clause excludes PTR), so minic emitted a NEAR store (to the DGROUP shadow)
+> while the member READ correctly used loadfar of the real far segment — value
+> written never reached where the reader looked.  Fix: a storage-far
+> side-channel `lval_storage_far`, set by `lval()` (member-of-far-struct /
+> far-pointer-deref / far-global-variable) and OR'd into the store's far
+> trigger — distinguishing "lives in far storage" from the value-FAR bit
+> (which on a PTR means the VALUE is a far pointer in NEAR storage, e.g. a
+> local far-pointer variable, which must stay a near store).  Additive: only
+> adds far stores where storage is genuinely far.  Canonical victim:
+> qstr_init's `MP_STATE_VM(last_pool) = &CONST_POOL` (mp_state_ctx is a far BSS
+> struct, last_pool a pointer member) wrote near, qstr_find_strn read far → the
+> qstr pool loop saw NULL.  Probe `farstruct_ptr_probe.c` (compact+large,
+> far-static); bug-loud "p/next/q/wr FAIL".
+>
+> FIX 3 — **far-pointer DATA relocation lost its segment** (`tools/asm_to_omf.py`).
+> A relocatable pointer initializer in static data was emitted by qbe as
+> `.long _sym` → nasm `dd _sym` → OMF loc-9 32-bit OFFSET fixup, segment word
+> left 0.  Under far-data a data pointer is a 4-byte seg:off far pointer, so the
+> missing segment = wrong-segment deref.  Fix: under far-data, split a
+> relocatable `.long _sym[+N]` into `dw _sym+N` (loc-1 offset) + `dw seg _sym`
+> (loc-2 segment + runtime reloc); `omf_link` already resolves both.
+> Canonical victim: the static qstr pools — each pool's `prev` (and
+> `qstrs[]`/`lengths[]`) is a compile-time `&far_static`, so the pool->prev
+> chain walked into GARBAGE pools (observed bogus lengths 0x652, 0x9a58, never
+> terminating); after the fix the chain reads the real pools (lengths 31 then
+> 183) and terminates at NULL.  NO synthetic gate probe — authoring one is
+> blocked by ORTHOGONAL minic limits on far arrays-of-pointers (static-array
+> element deref + far-pointer equality, both separate gaps); validated by the
+> on-target qstr chain + the `.omf.asm` emitting `dw _sym / dw seg _sym`.
+> CAVEAT: fix 3 ADDS a relocation per far-pointer data item (5158 relocs now),
+> growing the MZ header ~3KB → re-tightens the Victor size wall.
+>
+> **THE NEW blocker — the lexer's SECOND token is MP_TOKEN_INVALID (1).**  On
+> the v9 build (qstr patched) the on-target token trace is exactly `T07`
+> (preload NAME "print") then, after the parser matches the NAME atom and calls
+> mp_lexer_to_next, `T01` (= MP_TOKEN_INVALID) — it should be `T51`
+> (DEL_PAREN_OPEN) for the `(`.  So the SECOND mp_lexer_to_next mis-tokenises
+> `(` as INVALID.  The first token has been correct since §2e, so this is a
+> latent far-data lexer gap on token N>1, only now reachable (the parser never
+> got past token 1 before).  NEXT: instrument `py/lexer.c::mp_lexer_to_next`
+> (next_char chr0/chr1/chr2 cache, the token-classification `tok_enc` table walk
+> — those tables are far static data; also is_char/is_char_or etc.) to see what
+> the lexer reads for `(` and where it decides INVALID.  Use 16-bit-only debug
+> printers (no Kl shift — [[i8086-kl-shift-clobbers-ax]]).
+>
+> **FIRST, get a loadable image.**  The full rebuild + the debug instrumentation
+> now in the micropython tree (qstr.c/lexer.c/parse.c/runtime.c/gc.c K*/F*/T*/
+> rXX markers — UNCOMMITTED, separate repo) totals ~846KB and DOS reports
+> "Program too big to fit in memory" on the Victor.  Strip the noisy markers
+> (keep a minimal targeted set for the token-2 probe), and/or revisit the
+> shrink levers (dead-strip is on; MICROPY_CONFIG trim, smaller link subset —
+> see the §2b/§1z blocks).  Build: `bash tools/build-micropython.sh
+> --model=compact --keep-going`; run: `tools/run-victor-sasi.sh
+> build/mp-link/mpython.exe 240`.  The C/D/E/Q phase markers in main.c +
+> lexer.c + runtime.c + gc.c are still in place.
+>
+> ---
+>
+> # (DONE §2e) mp_parse HANG CLEARED (two far-data codegen fixes); blocker was parser ends with non-END token (NOW understood: the file_input loop, fixed in §2f)
+
+> **§2e (DONE 2026-05-31, committed `29e225a`) — the mp_parse HANG is FIXED.
+> Two far-data codegen bugs, both with probes, DOS gate 150→154, `make check`
+> green, 111 s/r 0 r/r (C-action edits only), amd64/arm64/rv64 byte-identical.**
+>
+> Found by on-target bisection on the real Victor via a NEW harness
+> `tools/run-victor-sasi.sh` (the SASI hard-disk sibling of run-victor-mame.sh —
+> boots `victor_python.img` partition 0, NO floppy, `-scsi:0 harddisk -hard1`;
+> needed because mpython.exe is >612KB and a Victor floppy can't hold it).
+>
+> BUG 1 — **bitfield WRITE through a far address** (`minic.y` case `'='` on a
+> `.` member).  The bitfield read-modify-write computed a far storage-unit
+> address (`ptyp=IDIR_FAR`, `base_far` true under any far-data model) but then
+> emitted a NEAR `load`/`store%c` — a near store of a far Kl address uses only
+> the offset against DS, so the write hit the wrong segment and the bitfield
+> value never reached its real (far) home.  The bitfield READ path already used
+> `loadfar`; only the WRITE was wrong.  Now both use `loadfar`/`storefar` when
+> `base_far`.  Canonical victim: py/parse.c's `rule_stack_t { size_t rule_id:8;
+> … }` in the GC heap — `push_rule` wrote `rule_id` to the wrong segment,
+> `pop_rule` always read 0, and `mp_parse` spun forever (rule stack never
+> emptied → the observed hang).  Probe `bitfield_far_probe.c` (compact+large);
+> bug-loud specifically on the HEAP-pointer case (a stack local's far segment
+> happens to be DS-reachable so it masks the bug — the GC-heap case is the true
+> exposure, matching the on-target hang).
+>
+> BUG 2 — **return-value type coercion missing** (`minic.y` `Ret`).  `return
+> expr;` emitted `ret <x>` WITHOUT coercing `x` to the function's declared
+> return type.  A narrow (INT/CHR) value returned from an `l` function reached
+> `ret %tN` as a `w` temp; selret never widened it to DX:AX, so the function
+> returned stale AX:DX.  py/lexer.c `next_char` does `mp_uint_t chr2 =
+> lex->reader.readbyte(lex->reader.data)` where `mp_uint_t`==`uintptr_t` (32-bit
+> under far-data) and `mp_reader_mem_readbyte` does `return *cur;` (byte→Kl):
+> the byte was read CORRECTLY (cur/end/0x70 verified on-target inside readbyte)
+> but the caller got ~`0x00000001`, which the lexer mapped to
+> `MP_LEXER_INVALID_BYTE` (`'\1'`) → every source byte mis-tokenised → first
+> token became 0x2f instead of NAME.  `Ret` now runs the assignment converter
+> (LNG widen via `sext` / LNG narrow / float) against `curfntyp`.  Probe
+> `fnptr_klret_probe.c` (compact+large); bug-loud (`c0 FAIL 3a80001`).  NOTE:
+> the earlier passing `ret_byte` masked this because its EXPLICIT `(unsigned
+> long)` cast already produced the widening; only the IMPLICIT return coercion
+> was missing.  (While debugging, also re-confirmed the latent
+> [[i8086-kl-shift-clobbers-ax]] — a 32-bit `>>=4` loop in a debug helper hung;
+> avoid Kl shifts in on-target debug printers, use 16-bit word aliasing.)
+>
+> VERIFIED on the real Victor (clean build, instrumentation removed): the lexer
+> now produces correct tokens and **`mp_parse` completes its rule loop in 11
+> iterations with NO hang** (was: spun forever).
+>
+> **THE NEW blocker — parser ends with a NON-END token → `syntax_error`.**  On
+> the clean build the trace reaches `D1` (enter mp_parse), the loop runs 11
+> iters and exits normally, but at the end-of-parse check `lex->tok_kind` is
+> `0x07` (NOT `MP_TOKEN_END`=0), so `lex->tok_kind != MP_TOKEN_END` is true and
+> the `syntax_error:` path is taken (never reaches `D2`).  For `print(1+2)`
+> SINGLE_INPUT, 11 rule iterations looks LOW — the parser likely stopped early
+> (matched a shorter production / consumed too few tokens), leaving a token
+> unconsumed.  So this is almost certainly ANOTHER far-data codegen gap, in
+> either (a) the incremental `mp_lexer_to_next` calls DURING parse (a later
+> token mis-read — the FIRST token is now correct, but token N may not be), or
+> (b) the parser's token-match / push_result / result-stack logic.  NEXT:
+> re-add the per-rule token trace (loop-top `pdbg_hex(rule_id)` + `t<tok_kind>`)
+> AND a `mp_lexer_to_next`-site trace, recompile `parse` (+`lexer`) via
+> `tools/recompile-mp-tu.sh`, run via `tools/run-victor-sasi.sh
+> build/mp-link/mpython.exe 240`, and see WHICH token first goes wrong / where
+> the parse stops short.  Use 16-bit-only debug printers (no Kl shift).  First
+> determine the exact token enum values for THIS config (FSTRINGS/ASYNC may be
+> on — check MICROPY_CONFIG_ROM_LEVEL) so 0x07/0x2f decode correctly.  Build:
+> `bash tools/build-micropython.sh --model=compact --keep-going`.  The
+> C/D/E/Q/A phase markers in main.c + lexer.c + runtime.c + gc.c (the
+> ~/projects/micropython tree, NOT the qbe repo) are still in place.
+>
+> ---
+
+# (DONE §2d) Next session — struct pass-BY-VALUE ABI landed; MicroPython lexer crash CLEARED on the real Victor; NEW blocker = a HANG in mp_parse (after the lexer, before parse completes)
 
 > **§2d (DONE 2026-05-31) — minic now passes STRUCTS BY VALUE as arguments; the
 > deterministic lexer reboot on the real Victor is FIXED.  MicroPython now runs
