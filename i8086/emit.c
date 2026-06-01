@@ -242,6 +242,33 @@ emitaddr(Con *c, FILE *f)
 		fprintf(f, "+%"PRIi64, c->bits.i);
 }
 
+/* Materialize a Kw shift's VALUE operand (arg[0]) into register `reg`.
+ * The shift handler operates on a single destination register, and used to
+ * assume the value was already there — true only when arg[0] is an RTmp the
+ * register allocator placed in the destination.  A constant or slot-resident
+ * value (e.g. `1 << count`, where the count was just computed into the dest)
+ * was silently never loaded, so the shift ran on the leftover dest contents
+ * (typically the count itself).  Callers must emit this AFTER securing the
+ * count into CL, so a count living in `reg` is read before being overwritten. */
+static void
+emit_shift_val(const char *reg, Ref r0, Fn *fn, FILE *f)
+{
+	Con *pc;
+	if (rtype(r0) == RTmp) {
+		if (strcmp(reg, rname[r0.val]) != 0)
+			fprintf(f, "\tmov %s, %s\n", reg, rname[r0.val]);
+	} else if (rtype(r0) == RCon) {
+		pc = &fn->con[r0.val];
+		if (pc->type == CAddr) {
+			fprintf(f, "\tmov %s, ", reg);
+			emitaddr(pc, f);
+			fputc('\n', f);
+		} else
+			fprintf(f, "\tmov %s, %"PRIi64"\n", reg, pc->bits.i);
+	} else if (rtype(r0) == RSlot)
+		fprintf(f, "\tmov %s, word [bp%+ld]\n", reg, (long)slot(r0, fn));
+}
+
 /* Render just the memory operand text (no leading tab, no instruction
  * mnemonic) so callers can compose it into custom instruction sequences.
  * Mirrors the %M handler in emitf. */
@@ -940,13 +967,23 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		if (rtype(r1) == RCon)
 			imm_cnt = fn->con[r1.val].bits.i;
 
-		/* Move value to destination if needed.  This must happen
-		 * before any CX/CL load, because when dst==CX the dst-mov
-		 * would otherwise clobber the loaded count. */
+		/* Move an RTmp value to destination if needed.  This must
+		 * happen before any CX/CL load, because when dst==CX the
+		 * dst-mov would otherwise clobber the loaded count.  A
+		 * non-RTmp value (RCon / RSlot) is NOT in any register, so it
+		 * is loaded into the destination later, after the count is
+		 * secured (see emit_shift_val), via need_val_load. */
 		if (rtype(i->to) == RTmp && r0.val != i->to.val && rtype(r0) == RTmp) {
 			fprintf(f, "\tmov %s, %s\n", rname[i->to.val], rname[r0.val]);
 			r0 = i->to;
 		}
+		/* True when the value operand still needs materializing into
+		 * the destination register (it is a constant or slot, not an
+		 * already-placed RTmp).  Without this the shift ran on whatever
+		 * the destination happened to hold — e.g. `1 << count` shifted
+		 * the count by itself, and `1 << 0` (count divisible by the ATB
+		 * stride in gc_alloc) produced 0, silently dropping the mark. */
+		int need_val_load = (rtype(r0) == RCon || rtype(r0) == RSlot);
 
 		/* Pick the destination register name we'll print in `shl/shr/sar`. */
 		const char *dstname =
@@ -956,10 +993,13 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		                (rtype(r0)    == RTmp && r0.val    == RCX);
 
 		if (imm_cnt == 1) {
+			if (need_val_load) emit_shift_val(dstname, r0, fn, f);
 			fprintf(f, "\t%s %s, 1\n", shiftop, dstname);
 		} else if (imm_cnt == 0) {
-			/* No-op shift — emit syntactically valid output. */
-			fprintf(f, "\t%s %s, 0\n", shiftop, dstname);
+			/* Count 0: result is the value unchanged; just ensure
+			 * the value is in the destination. */
+			if (need_val_load) emit_shift_val(dstname, r0, fn, f);
+			else fprintf(f, "\t%s %s, 0\n", shiftop, dstname);
 		} else if (imm_cnt > 1 && imm_cnt <= 8) {
 			/* Small immediate count: unroll into repeated
 			 * `shl dst, 1`.  This avoids touching CX/CL entirely,
@@ -968,6 +1008,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 * `mov cl, imm` would corrupt any live Kw value rega
 			 * happened to keep in CX across the shift. */
 			int64_t k;
+			if (need_val_load) emit_shift_val(dstname, r0, fn, f);
 			for (k = 0; k < imm_cnt; k++)
 				fprintf(f, "\t%s %s, 1\n", shiftop, dstname);
 		} else if (imm_cnt > 8) {
@@ -978,7 +1019,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 * different scratch — route via BX. */
 			if (dst_is_cx) {
 				fprintf(f, "\tpush bx\n");
-				fprintf(f, "\tmov bx, %s\n", dstname);
+				if (need_val_load) emit_shift_val("bx", r0, fn, f);
+				else fprintf(f, "\tmov bx, %s\n", dstname);
 				fprintf(f, "\tmov cl, %"PRIi64"\n", imm_cnt);
 				fprintf(f, "\t%s bx, cl\n", shiftop);
 				fprintf(f, "\tmov %s, bx\n", dstname);
@@ -986,21 +1028,32 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			} else {
 				fprintf(f, "\tpush cx\n");
 				fprintf(f, "\tmov cl, %"PRIi64"\n", imm_cnt);
+				if (need_val_load) emit_shift_val(dstname, r0, fn, f);
 				fprintf(f, "\t%s %s, cl\n", shiftop, dstname);
 				fprintf(f, "\tpop cx\n");
 			}
 		} else {
 			/* Non-immediate count: must come through CL.  Save CX
 			 * around the shift to preserve any unrelated live value
-			 * (and use BX as scratch when dst==CX). */
+			 * (and use BX as scratch when dst==CX).  The value is
+			 * materialized AFTER the count is loaded into CX, so a
+			 * count register that aliases the destination is read
+			 * before the value overwrites it. */
 			if (dst_is_cx) {
 				fprintf(f, "\tpush bx\n");
-				fprintf(f, "\tmov bx, %s\n", dstname);
+				/* When the value is an RTmp it lives in CX (the
+				 * dst); save it to BX before the count overwrites
+				 * CX.  When it is a constant/slot it is not in a
+				 * register, so load the count into CX first, then
+				 * materialize the value into BX. */
+				if (!need_val_load)
+					fprintf(f, "\tmov bx, %s\n", dstname);
 				if (rtype(r1) == RTmp && r1.val != RCX)
 					fprintf(f, "\tmov cx, %s\n", rname[r1.val]);
 				else if (rtype(r1) == RSlot)
 					fprintf(f, "\tmov cx, [bp%+ld]\n",
 						(long)slot(r1, fn));
+				if (need_val_load) emit_shift_val("bx", r0, fn, f);
 				fprintf(f, "\t%s bx, cl\n", shiftop);
 				fprintf(f, "\tmov %s, bx\n", dstname);
 				fprintf(f, "\tpop bx\n");
@@ -1011,6 +1064,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				else if (rtype(r1) == RSlot)
 					fprintf(f, "\tmov cx, [bp%+ld]\n",
 						(long)slot(r1, fn));
+				if (need_val_load) emit_shift_val(dstname, r0, fn, f);
 				fprintf(f, "\t%s %s, cl\n", shiftop, dstname);
 				fprintf(f, "\tpop cx\n");
 			}

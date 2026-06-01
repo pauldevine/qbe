@@ -1,4 +1,73 @@
-# Next session (§2j' DONE — the ~850 B shrink lever landed: emit_clit_aggr now fills local-init dest DIRECTLY, dropping the compound-literal temp + struct copy and fixing far member-init truncation; committed `df3c76a`, DOS gate 164/164, `make check` green, 111 s/r 0 r/r) — the compact far-data mpython image now LOADS on the real Victor (body 825152→820480 B, UNDER the ~824.3KB ceiling) and the §2j compile_error fix is HARDWARE-CONFIRMED (the §2i/§2j bogus `DE` exception is GONE). The `print(1+2)`→`3` milestone is STILL not reached: a NEW blocker is now exposed — `mp_compile` HANGS in the bytecode EMIT pass. NEXT = debug the EMIT-pass hang (precisely localized below; almost certainly an emitbc.c/compile_scope far-data codegen bug, NOT the struct-init change).
+# Next session (§2k DONE — the mp_compile EMIT-pass HANG is FIXED; it was a QBE i8086 Kw-shift codegen bug corrupting `gc_alloc`, NOT the emitbc jump-offset/size_t hypothesis. DOS gate 164→166, `make check` green. NEW blocker = an uncaught exception DURING `mp_compile` — Victor trace `D0 D1 D2 DE` — so compile now runs on un-corrupted data but raises before D3.)
+
+> **§2k (DONE 2026-06-01) — the §2j' "mp_compile EMIT-pass hang" is FIXED, and the
+> §2j' emitbc.c jump-offset/size_t-width hypothesis was WRONG.**  The real bug was a
+> general QBE i8086 BACKEND codegen bug in the Kw shift handler.  DOS gate 164→**166**,
+> `make check` green.  All in `i8086/emit.c` + a new gate probe.
+>
+> ROOT CAUSE: the Kw shift handler (`Oshl`/`Oshr`/`Osar`, `cls != Kl`) only
+> materialized the VALUE operand `arg[0]` into the destination register when it was an
+> `RTmp` the allocator had already placed there.  When `arg[0]` was an `RCon`
+> (constant) or `RSlot`, it was NEVER loaded — the shift ran on whatever the dest reg
+> held, which for `CONST << count` was the freshly-computed COUNT.  So `1 << count`
+> emitted `count << count`, and `1 << 0` → `0 << 0 == 0`.  (minic SSA was correct:
+> `%t =w shl 1, %count`.)
+>
+> CANONICAL VICTIM: `py/gc.c` `gc_alloc`'s ATB head-mark
+> `gc_alloc_table_start[b/4] |= (AT_HEAD << (2*(b&3)))` = `1 << (2*(b&3))`.  For a
+> block whose index is divisible by 4 the shift is 0, so the mark became `|= 0` — a
+> NO-OP.  The block was never recorded used, so the NEXT `gc_alloc` handed out the
+> SAME live block and `m_new0` zero-filled it.  In the port this zeroed a freshly-
+> allocated `scope`'s `pn` (parse-tree root) — set correctly by `scope_new`, then
+> wiped by the immediately-following `raw_code = m_new0(...)` which returned the SAME
+> address as `scope`.  `compile_node(scope->pn)` then saw NULL → the CODE_SIZE pass
+> emitted nothing → `code_base` was sized at ~2 bytes → the EMIT pass overflowed it
+> (~24 bytes) → GC-heap corruption → the observed "EMIT pass size won't settle / 3rd
+> pass hangs."
+>
+> HOW FOUND (on-target bisection, the decisive method again): instrumented
+> `emitbc.c`/`compile.c`/`scope.c` with 16-bit-only hex printers over
+> `run-victor-sasi.sh`.  Trace showed CODE_SIZE emitted 2 bytecode ops vs EMIT's 12
+> (opcodes differed: CODE_SIZE = just the module epilogue), then `scope->pn` read 0 at
+> compile but was set correctly in `scope_new`, then `raw_code`'s `m_new0` returned the
+> SAME address as `scope` → read the `gc_alloc` marking asm → `shl ax, cl` with `ax`
+> holding the COUNT, never loaded with 1.
+>
+> FIX (`i8086/emit.c`): new `emit_shift_val(reg, r0, fn, f)` materializes the value
+> operand (RTmp / RCon incl. CAddr / RSlot) into the shift register, emitted AFTER the
+> count is secured into CL so a count register that aliases the destination is read
+> before being overwritten.  The `dst==CX` via-BX path orders the value-save vs count-
+> load per operand kind.  Probe `shlconst_probe.c` (+golden, medium+compact): the
+> `gc_alloc` ATB pattern (`atb[b/4] |= 1<<(2*(b&3))` for 8 blocks → 0x55/0x55) plus
+> direct `CONST<<var`; bug-loud (atb garbage) without the fix.  Wired into
+> `tools/test-dos.sh` RUNTIME_TESTS.
+>
+> RESULT: clean compact far-data `mpython.exe` body 820480→**820624 B** (the fix adds a
+> `mov reg,const` before some shifts; still well under the ~824.3KB ceiling).  On the
+> real Victor (SASI) the EMIT-pass hang is GONE — the trace advanced from `D2`(hang) to
+> **`D0 D1 D2 DE C5`**: `mp_parse` returns (D2), `mp_compile` now runs to completion-or-
+> raise without hanging, and raises an exception (DE) before D3.
+>
+> **THE NEW blocker — an uncaught exception DURING `mp_compile`** (trace `D0 D1 D2 DE`,
+> DE = `do_str`'s nlr-else branch in `ports/dos8086/main.c`, between parse-done D2 and
+> compile-done D3).  This is the SAME shape as the §2i-era compile exception; with
+> `gc_alloc` now correct, `mp_compile` is operating on un-corrupted data but still
+> raises.  NEXT: instrument `py/compile.c` (and the emit path) to find WHERE in compile
+> it raises and WHAT exception (likely a `comp->compile_error` setter, or a real raise
+> from a remaining far-data miscompile).  Use 16-bit-only debug printers (no Kl shift).
+> Note Finding 3 is STILL open: a raised exception object's far pointer loses its
+> SEGMENT on the raise path (offset kept, segment garbage) — so even a legitimate error
+> will print wrong / crash `mp_obj_print_exception`; pin that on the raise path
+> (`mp_raise`→`nlr_raise`→`nlr_jump`) too.  Build: `bash tools/build-micropython.sh
+> --model=compact --keep-going`; run: `tools/run-victor-sasi.sh build/mp-link/mpython.exe
+> 200`.  The C/D phase markers in main.c::do_str remain; the MicroPython tree is
+> otherwise CLEAN (all §2k instrumentation reverted).  fnptr_argwiden_probe.c (ungated)
+> documents the still-latent fn-ptr wide→narrow arg-coercion gap (a prime suspect for
+> the compile exception if it's an arg-shift through an emit_t-style fn-ptr call).
+>
+> ---
+
+# (prior) Next session (§2j' DONE — the ~850 B shrink lever landed: emit_clit_aggr now fills local-init dest DIRECTLY, dropping the compound-literal temp + struct copy and fixing far member-init truncation; committed `df3c76a`, DOS gate 164/164, `make check` green, 111 s/r 0 r/r) — the compact far-data mpython image now LOADS on the real Victor (body 825152→820480 B, UNDER the ~824.3KB ceiling) and the §2j compile_error fix is HARDWARE-CONFIRMED (the §2i/§2j bogus `DE` exception is GONE). The `print(1+2)`→`3` milestone is STILL not reached: a NEW blocker is now exposed — `mp_compile` HANGS in the bytecode EMIT pass. NEXT = debug the EMIT-pass hang (precisely localized below; almost certainly an emitbc.c/compile_scope far-data codegen bug, NOT the struct-init change).
 
 > **§2j' (DONE 2026-06-01, committed `df3c76a`) — the ~850 B shrink lever (the
 > §2j NEXT) landed and is hardware-verified.**  DOS gate 164/164, `make check`
