@@ -74,6 +74,8 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/mediumprobe.c:minic/dos/tests/mediumprobe.golden.txt:large"
 	"minic/dos/examples/mediumprobe.c:minic/dos/tests/mediumprobe.golden.txt:huge"
 	"minic/dos/examples/divreg_probe.c:minic/dos/tests/divreg_probe.golden.txt:medium"
+	"minic/dos/examples/uchar_widen_probe.c:minic/dos/tests/uchar_widen_probe.golden.txt:medium"
+	"minic/dos/examples/uchar_widen_probe.c:minic/dos/tests/uchar_widen_probe.golden.txt:compact"
 	"minic/dos/examples/declgram_probe.c:minic/dos/tests/declgram_probe.golden.txt:medium"
 	"minic/dos/examples/ellipsis_probe.c:minic/dos/tests/ellipsis_probe.golden.txt:medium"
 	"minic/dos/examples/declgram2_probe.c:minic/dos/tests/declgram2_probe.golden.txt:medium"
@@ -148,6 +150,8 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/farlocal_probe.c:minic/dos/tests/farlocal_probe.golden.txt:compact"
 	"minic/dos/examples/farlocal_probe.c:minic/dos/tests/farlocal_probe.golden.txt:large"
 	"minic/dos/examples/farlocal_probe.c:minic/dos/tests/farlocal_probe.golden.txt:huge"
+	"minic/dos/examples/farstruct_ptr_probe.c:minic/dos/tests/farstruct_ptr_probe.golden.txt:compact"
+	"minic/dos/examples/farstruct_ptr_probe.c:minic/dos/tests/farstruct_ptr_probe.golden.txt:large"
 	"minic/dos/examples/longconst_probe.c:minic/dos/tests/longconst_probe.golden.txt:medium"
 	"minic/dos/examples/longconst_probe.c:minic/dos/tests/longconst_probe.golden.txt:large"
 	"minic/dos/examples/local_typedef_probe.c:minic/dos/tests/local_typedef_probe.golden.txt:medium"
@@ -277,7 +281,7 @@ run_runtime_probe() {
 	# (statics outside DGROUP).  Gated by basename so only these exercise it
 	# until far-global direct access is complete (see NEXT_SESSION.md).
 	farstatic=0
-	case "$base" in fardata_probe|farglobal_probe) farstatic=1 ;; esac
+	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe) farstatic=1 ;; esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" "$QBE_DIR/$src" >/dev/null
 	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?

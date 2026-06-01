@@ -263,6 +263,15 @@ int cur_fn_weak;      /* 1 if current function has __attribute__((weak)) */
  * `ret` statement can reload it regardless of which basic block it sits
  * in.  cur_fn_sret marks that the in-progress function uses this ABI;
  * cur_fn_sret_ctyp carries the aggregate ctyp (for the copy size). */
+int lval_storage_far;       /* side-channel from lval(): 1 if the lvalue just
+                             * returned lives in FAR storage (its address is a
+                             * far seg:off pointer).  Distinct from the FAR bit
+                             * on the value type, which for a PTR/FUN means "the
+                             * VALUE is a far pointer" (near storage).  The store
+                             * site reads this to far-store a pointer member of a
+                             * far struct (e.g. mp_state_ctx.vm.last_pool), which
+                             * the value-FAR bit alone can't distinguish from a
+                             * near far-pointer variable. */
 int cur_fn_sret;            /* 1 if current fn returns struct/union by value */
 unsigned cur_fn_sret_ctyp;  /* the aggregate ctyp returned by value */
 char cur_fn_name[NString];  /* Name of function currently being emitted — used
@@ -1578,15 +1587,17 @@ prom(int op, Symb *l, Symb *r)
 		return target_type;
 	}
 
-	/* Promote char to int for comparisons (both operands must be int or larger) */
+	/* Promote char to int for comparisons (both operands must be int or larger).
+	 * Honor each operand's signedness: an unsigned char zero-extends (extub),
+	 * a signed char sign-extends (extsb) — see the int=char assignment note. */
 	if (strchr("ne<l", op) && KIND(l->ctyp) == CHR && KIND(r->ctyp) == CHR) {
-		fprintf(of, "\t%%t%d =w extsb ", tmp);
+		fprintf(of, "\t%%t%d =w %s ", tmp, ISUNSIGNED(l->ctyp) ? "extub" : "extsb");
 		psymb(*l);
 		fprintf(of, "\n");
 		l->t = Tmp;
 		l->ctyp = INT;
 		l->u.n = tmp++;
-		fprintf(of, "\t%%t%d =w extsb ", tmp);
+		fprintf(of, "\t%%t%d =w %s ", tmp, ISUNSIGNED(r->ctyp) ? "extub" : "extsb");
 		psymb(*r);
 		fprintf(of, "\n");
 		r->t = Tmp;
@@ -1598,10 +1609,10 @@ prom(int op, Symb *l, Symb *r)
 	if (l->ctyp == r->ctyp && KIND(l->ctyp) != PTR)
 		return l->ctyp;
 
-	/* Promote char to int */
+	/* Promote char to int (zero-extend unsigned char, sign-extend signed) */
 	if (KIND(l->ctyp) == CHR && KIND(r->ctyp) != CHR) {
 		/* Extend char to int */
-		fprintf(of, "\t%%t%d =w extsb ", tmp);
+		fprintf(of, "\t%%t%d =w %s ", tmp, ISUNSIGNED(l->ctyp) ? "extub" : "extsb");
 		psymb(*l);
 		fprintf(of, "\n");
 		l->t = Tmp;
@@ -1609,7 +1620,7 @@ prom(int op, Symb *l, Symb *r)
 		l->u.n = tmp++;
 	}
 	if (KIND(r->ctyp) == CHR && KIND(l->ctyp) != CHR) {
-		fprintf(of, "\t%%t%d =w extsb ", tmp);
+		fprintf(of, "\t%%t%d =w %s ", tmp, ISUNSIGNED(r->ctyp) ? "extub" : "extsb");
 		psymb(*r);
 		fprintf(of, "\n");
 		r->t = Tmp;
@@ -2303,6 +2314,7 @@ expr(Node *n)
 	};
 	Symb sr, s0, s1, sl;
 	int o, l;
+	int s1_far_storage = 0;
 	char ty[2];
 
 	sr.t = Tmp;
@@ -3033,6 +3045,7 @@ expr(Node *n)
 
 		s0 = expr(n->r);
 		s1 = lval(n->l);
+		s1_far_storage = lval_storage_far;  /* capture before any further expr/lval */
 		sr = s0;
 
 		/* Struct/union assignment: emit a multi-step copy.  The
@@ -3123,8 +3136,13 @@ expr(Node *n)
 			/* Truncate int to char - no explicit conversion needed */
 			/* QBE will handle truncation in storeb */
 		} else if (KIND(s1.ctyp) == INT && KIND(s0.ctyp) == CHR) {
-			/* Extend char to int */
-			fprintf(of, "\t%%t%d =w extsb ", tmp);
+			/* Extend char to int.  An UNSIGNED char (uint8_t) must
+			 * zero-extend (extub) — the byte already sits zero-extended
+			 * in a `w` temp (loadub/loadfb both clear the high byte), so
+			 * sign-extending its low byte would corrupt any value with
+			 * bit 7 set (e.g. a 0x8D table index → 0xFF8D).  Signed char
+			 * keeps extsb. */
+			fprintf(of, "\t%%t%d =w %s ", tmp, ISUNSIGNED(s0.ctyp) ? "extub" : "extsb");
 			psymb(s0);
 			fprintf(of, "\n");
 			s0.t = Tmp;
@@ -3151,7 +3169,7 @@ expr(Node *n)
 		 * `vga` is itself a far pointer variable) is regular storage —
 		 * the slot lives in normal memory and holds the 4-byte far
 		 * pointer value, so use storel/storew per irtyp. */
-		if ((ISFAR(s1.ctyp) && KIND(s1.ctyp) != PTR && KIND(s1.ctyp) != FUN) || FARSTORAGE(s1)) {
+		if ((ISFAR(s1.ctyp) && KIND(s1.ctyp) != PTR && KIND(s1.ctyp) != FUN) || FARSTORAGE(s1) || s1_far_storage) {
 			char t = irtyp(s1.ctyp);
 			if (t == 'b')
 				fprintf(of, "\tstorefb ");
@@ -3394,6 +3412,8 @@ lval(Node *n)
 {
 	Symb sr;
 
+	lval_storage_far = 0;  /* default: lvalue lives in near storage (slot/DGROUP) */
+
 	switch (n->op) {
 	default:
 		die("invalid lvalue");
@@ -3413,6 +3433,9 @@ lval(Node *n)
 		if (!varget(n->u.v))
 			die("undefined variable");
 		sr = *varget(n->u.v);
+		/* A far global variable lives in far storage; a local/near one
+		 * does not (even if its value type is a far pointer). */
+		lval_storage_far = FARSTORAGE(sr) ? 1 : 0;
 		break;
 	case 'L':
 		/* Compound literal as lvalue - allocate and initialize, return address */
@@ -3474,6 +3497,9 @@ lval(Node *n)
 		/* Preserve FAR flag to indicate this address came from far pointer dereference */
 		{
 			unsigned far_flag = ISFAR(sr.ctyp) ? FAR : 0;
+			/* Storage is far iff the dereferenced POINTER was far (i.e. the
+			 * pointee lives at a far seg:off address). */
+			lval_storage_far = far_flag ? 1 : 0;
 			sr.ctyp = DREF(sr.ctyp) | far_flag;
 		}
 		break;
@@ -3514,6 +3540,11 @@ lval(Node *n)
 			int base_far = ISFAR(s0.ctyp) || FARSTORAGE(s0) || !NEAR_DATA();
 			klass = base_far ? 'l' : 'w';
 			far_flag = base_far ? FAR : 0;
+			/* The member lives in far storage iff its containing struct
+			 * does — independent of whether the member's own value type
+			 * is a far pointer.  The store site needs this to far-store a
+			 * pointer member of a far struct. */
+			lval_storage_far = base_far ? 1 : 0;
 			}
 			if (m->offset > 0) {
 				sr.t = Tmp;
