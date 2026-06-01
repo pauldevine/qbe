@@ -247,6 +247,7 @@ Symb expr(Node *), lval(Node *);
 void branch(Node *, int, int);
 int stmt(Stmt *, int, int);
 void emit_struct_copy(Symb, Symb);
+char *call_target_name(char *);
 
 FILE *of;
 int line;
@@ -1940,6 +1941,129 @@ emit_struct_copy(Symb dst, Symb src)
 	}
 }
 
+/* Zero-fill `s` bytes of compound-literal storage %_clit<clitnum>.
+ *
+ * On i8086 a `storew`/`storefw` writes 2 bytes (T.wordsz == 2), so the fill
+ * MUST step by 2.  The old loops here stepped `j += 4` while emitting 2-byte
+ * stores, leaving alternating 2-byte GAPS of stack garbage — so every member
+ * of a `S s = {0};` local past the first word read non-zero.  Canonical victim:
+ * py/compile.c's `compiler_t comp_state = {0};` — the `compile_error` pointer
+ * field (well past the first word) read garbage, so mp_compile raised a bogus
+ * exception on the correct parse tree of `print(1+2)`.
+ *
+ * Under a far-data model %_clit is a Kl (SS:offset) address, so offset arith is
+ * `=l add` and the stores are `storefw`/`storefb` — a near `=w add` would
+ * truncate the segment and scatter the zeros into the wrong segment.  Mirrors
+ * emit_struct_copy's per-element stepping (kept strictly Kw/Kb so loadopt won't
+ * fuse adjacent stores into a wider Kl op). */
+/* Zero-fill `s` bytes of aggregate storage whose address is the SSA operand
+ * `addr` (e.g. "%_clit3" for a compound literal or "%foo" for a named local).
+ * See the long note above for the bug history.  Used by the compound-literal
+ * 'L' paths and the bare struct-local declaration. */
+static void
+emit_zero_aggr(const char *addr, int s)
+{
+	int far = !NEAR_DATA();
+	char klass = far ? 'l' : 'w';
+	const char *sl = far ? "storefl" : "storel";   /* 4-byte store */
+	const char *sw = far ? "storefw" : "storew";   /* 2-byte store */
+	const char *sb = far ? "storefb" : "storeb";   /* 1-byte store */
+	int off = 0;
+
+	/* For all but the smallest aggregates, a `memset(addr, 0, s)` call is
+	 * far smaller than unrolled stores — important because zeroing CORRECTLY
+	 * (the bug below was a half-fill) roughly doubles the inline store code,
+	 * and the Victor image-size budget is razor-thin.  memset() is in
+	 * far_stdlib, so call_target_name mangles it to _far_memset under a
+	 * far-data model (4-byte far dest ptr); the near _memset reaches a stack
+	 * local fine since SS == DGROUP under near-data.  Tiny aggregates stay
+	 * inline to avoid the call overhead. */
+	if (s > 8) {
+		fprintf(of, "\tcall $%s(%c %s, w 0, w %d, ...)\n",
+			call_target_name("memset"), DATAPTR_T(), addr, s);
+		return;
+	}
+
+	/* The old loops stepped `off += 4` but emitted a 2-byte storew, so they
+	 * zeroed only half the bytes (T.wordsz == 2 on i8086).  Keep the 4-byte
+	 * stride — which keeps the store count identical, important for the
+	 * razor-thin Victor image-size budget — but use a real 4-byte store, then
+	 * mop up a 2-byte and/or 1-byte tail for sizes not a multiple of 4. */
+	while (off + 4 <= s) {
+		if (off == 0)
+			fprintf(of, "\t%s 0, %s\n", sl, addr);
+		else {
+			fprintf(of, "\t%%t%d =%c add %s, %d\n", tmp, klass, addr, off);
+			fprintf(of, "\t%s 0, %%t%d\n", sl, tmp);
+			tmp++;
+		}
+		off += 4;
+	}
+	if (off + 2 <= s) {
+		if (off == 0)
+			fprintf(of, "\t%s 0, %s\n", sw, addr);
+		else {
+			fprintf(of, "\t%%t%d =%c add %s, %d\n", tmp, klass, addr, off);
+			fprintf(of, "\t%s 0, %%t%d\n", sw, tmp);
+			tmp++;
+		}
+		off += 2;
+	}
+	if (off < s) {
+		if (off == 0)
+			fprintf(of, "\t%s 0, %s\n", sb, addr);
+		else {
+			fprintf(of, "\t%%t%d =%c add %s, %d\n", tmp, klass, addr, off);
+			fprintf(of, "\t%s 0, %%t%d\n", sb, tmp);
+			tmp++;
+		}
+	}
+}
+
+/* Zero-fill `sz` bytes of the named local `v` (the bitfield-support zero-init
+ * for a struct/union local declaration). */
+static void
+emit_zero_local(char *v, int sz)
+{
+	char zaddr[NString];
+	snprintf(zaddr, sizeof zaddr, "%%%s", v);
+	emit_zero_aggr(zaddr, sz);
+}
+
+/* True when struct/union `sidx` (or a nested struct/union member) contains a
+ * bitfield.  minic implicitly zero-initializes a bare `struct S s;` local only
+ * so a later bitfield read-modify-write sees defined bits; C otherwise leaves
+ * an uninitialized automatic object indeterminate.  Gating the implicit
+ * zero-init on this both matches C and saves a lot of code on the size-tight
+ * Victor target (most structs have no bitfields).  Note the old implicit
+ * zero-init was a buggy HALF-fill anyway, so no correct program could have
+ * relied on it. */
+static int
+struct_has_bitfield(int sidx)
+{
+	int i;
+	for (i = 0; i < structh[sidx].nmembers; i++) {
+		struct Member *m = &structh[sidx].members[i];
+		if (m->bitwidth > 0)
+			return 1;
+		if ((KIND(m->ctyp) == STRUCT_T || KIND(m->ctyp) == UNION_T)
+		    && struct_has_bitfield(DREF(m->ctyp)))
+			return 1;
+	}
+	return 0;
+}
+
+/* True when an initializer list is exactly `{ 0 }` (the all-zero idiom).  Such
+ * a local `S s = {0};` can be lowered to a direct zero-fill of the target,
+ * skipping the compound-literal temporary AND the struct copy — both a code-size
+ * and a speed win (and the dominant initializer shape in MicroPython, e.g.
+ * `compiler_t comp_state = {0};`). */
+static int
+initlist_is_zero(Node *il)
+{
+	return il && il->r == 0 && il->l && il->l->op == 'N' && il->l->u.n == 0;
+}
+
 /*
  * In far-data memory models (compact/large/huge) default `char *` and
  * other data pointers are 32-bit segment:offset. The stock libstub
@@ -2627,15 +2751,12 @@ expr(Node *n)
 				init = n->l;
 				i = 0;
 
-				/* Zero-initialize first */
-				for (int j = 0; j < s; j += 4) {
-					if (j == 0)
-						fprintf(of, "\tstorew 0, %%_clit%d\n", clitnum);
-					else {
-						fprintf(of, "\t%%t%d =w add %%_clit%d, %d\n", tmp, clitnum, j);
-						fprintf(of, "\tstorew 0, %%t%d\n", tmp);
-						tmp++;
-					}
+				/* Zero-initialize first (C11 6.7.9p21: members with no
+				 * explicit initializer are zeroed). */
+				{
+					char zaddr[24];
+					snprintf(zaddr, sizeof zaddr, "%%_clit%d", clitnum);
+					emit_zero_aggr(zaddr, s);
 				}
 
 				/* Initialize members from initlist with designator
@@ -3585,15 +3706,12 @@ lval(Node *n)
 				init = n->l;
 				i = 0;
 
-				/* Zero-initialize first */
-				for (int j = 0; j < s; j += 4) {
-					if (j == 0)
-						fprintf(of, "\tstorew 0, %%_clit%d\n", clitnum);
-					else {
-						fprintf(of, "\t%%t%d =w add %%_clit%d, %d\n", tmp, clitnum, j);
-						fprintf(of, "\tstorew 0, %%t%d\n", tmp);
-						tmp++;
-					}
+				/* Zero-initialize first (C11 6.7.9p21: members with no
+				 * explicit initializer are zeroed). */
+				{
+					char zaddr[24];
+					snprintf(zaddr, sizeof zaddr, "%%_clit%d", clitnum);
+					emit_zero_aggr(zaddr, s);
 				}
 
 				/* Initialize members from initlist with designator
@@ -5354,18 +5472,8 @@ emit_local_multi_decl_full(unsigned base, Node *list)
 		t = (n->op == 'P' || n->op == 'A') ? IDIR(base) : base;
 		varadd(v, 0, t, n->op == 'A' ? 1 : 0);
 		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
-		if (KIND(t) == STRUCT_T || KIND(t) == UNION_T) {
-			int sz = SIZE(t);
-			for (i = 0; i < sz; i += 4) {
-				if (i == 0)
-					fprintf(of, "\tstorew 0, %%%s\n", v);
-				else {
-					fprintf(of, "\t%%_zinit%d =w add %%%s, %d\n", tmp, v, i);
-					fprintf(of, "\tstorew 0, %%_zinit%d\n", tmp);
-				}
-				tmp++;
-			}
-		}
+		if ((KIND(t) == STRUCT_T || KIND(t) == UNION_T) && struct_has_bitfield(DREF(t)))
+			emit_zero_local(v, SIZE(t));
 		(void)next;
 	}
 }
@@ -5388,16 +5496,8 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 	v = first;
 	varadd(v, 0, base, 0);
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(base), s);
-	if (KIND(base) == STRUCT_T || KIND(base) == UNION_T)
-		for (i = 0; i < s; i += 4) {
-			if (i == 0)
-				fprintf(of, "\tstorew 0, %%%s\n", v);
-			else {
-				fprintf(of, "\t%%_zinit%d =w add %%%s, %d\n", tmp, v, i);
-				fprintf(of, "\tstorew 0, %%_zinit%d\n", tmp);
-			}
-			tmp++;
-		}
+	if ((KIND(base) == STRUCT_T || KIND(base) == UNION_T) && struct_has_bitfield(DREF(base)))
+		emit_zero_local(v, s);
 	for (n = rest; n; n = n->r) {
 		/* When the leading declarator's `*` was absorbed by greedy
 		 * type matching, the base already carries that pointer
@@ -5440,18 +5540,8 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 		t = (n->op == 'A') ? IDIR(ebase) : ebase;
 		varadd(v, 0, t, n->op == 'A' ? 1 : 0);
 		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
-		if (KIND(t) == STRUCT_T || KIND(t) == UNION_T) {
-			int sz = SIZE(t);
-			for (i = 0; i < sz; i += 4) {
-				if (i == 0)
-					fprintf(of, "\tstorew 0, %%%s\n", v);
-				else {
-					fprintf(of, "\t%%_zinit%d =w add %%%s, %d\n", tmp, v, i);
-					fprintf(of, "\tstorew 0, %%_zinit%d\n", tmp);
-				}
-				tmp++;
-			}
-		}
+		if ((KIND(t) == STRUCT_T || KIND(t) == UNION_T) && struct_has_bitfield(DREF(t)))
+			emit_zero_local(v, SIZE(t));
 		if (n->op == 0 && n->l) {
 			Node *id = mknode('V', 0, 0);
 			strcpy(id->u.v, v);
@@ -6657,17 +6747,11 @@ dcls:
 	varadd(v, 0, $2, 0);
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), s);
 
-	/* Zero-initialize struct/union for bitfield support */
-	if (KIND($2) == STRUCT_T || KIND($2) == UNION_T) {
-		/* Store 0 to each word of the struct */
-		for (i = 0; i < s; i += 4) {
-			if (i == 0)
-				fprintf(of, "\tstorew 0, %%%s\n", v);
-			else
-				fprintf(of, "\t%%_zinit%d =w add %%%s, %d\n\tstorew 0, %%_zinit%d\n", tmp, v, i, tmp);
-			tmp++;
-		}
-	}
+	/* Implicit zero-init only when the struct has a bitfield (see
+	 * struct_has_bitfield); an explicit `= {0}` zeroes via the rule above. */
+	if ((KIND($2) == STRUCT_T || KIND($2) == UNION_T) && struct_has_bitfield(DREF($2)))
+		emit_zero_local(v, s);
+	(void)i;
 	}
 }
     | dcls type IDENT '=' expr ';'
@@ -6704,10 +6788,17 @@ dcls:
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), s);
-	clit_node = mknode('L', $6, 0);
-	clit_node->u.n = (int)$2;
-	init_node = mknode('=', $3, clit_node);
-	expr(init_node);
+	if (initlist_is_zero($6) &&
+	    (KIND($2) == STRUCT_T || KIND($2) == UNION_T)) {
+		/* `S s = {0};` — zero the target directly (no compound-literal
+		 * temp, no struct copy). */
+		emit_zero_local(v, s);
+	} else {
+		clit_node = mknode('L', $6, 0);
+		clit_node->u.n = (int)$2;
+		init_node = mknode('=', $3, clit_node);
+		expr(init_node);
+	}
 }
     | dcls type IDENT ',' ext_decllist ';' { emit_local_multi_decl($2, $3->u.v, $5); }
     | dcls type IDENT '[' expr ']' ',' ext_decllist ';'
@@ -7295,10 +7386,29 @@ stmt: ';'                            { $$ = 0; }
         s = SIZE($1);
         varadd(v, 0, $1, 0);
         fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), s);
-        clit_node = mknode('L', $5, 0);
-        clit_node->u.n = (int)$1;
-        init_node = mknode('=', $2, clit_node);
-        $$ = mkstmt(Expr, init_node, 0, 0);
+        if (initlist_is_zero($5) &&
+            (KIND($1) == STRUCT_T || KIND($1) == UNION_T)) {
+            /* `S s = {0};` mid-block — defer a `memset(&s, 0, s)` (no
+             * compound-literal temp, no struct copy).  Deferred (not a direct
+             * emit) so it re-zeroes on each loop re-entry, like the general
+             * initializer path. */
+            Node *vnode = mknode('V', 0, 0);
+            Node *addr, *zero, *size, *callee, *args;
+            strcpy(vnode->u.v, v);
+            addr = mknode('A', vnode, 0);
+            zero = mknode('N', 0, 0); zero->u.n = 0;
+            size = mknode('N', 0, 0); size->u.n = s;
+            /* call args are wrapper nodes: mknode(0, expr, next) */
+            args = mknode(0, addr, mknode(0, zero, mknode(0, size, 0)));
+            callee = mknode('V', 0, 0);
+            strcpy(callee->u.v, "memset");
+            $$ = mkstmt(Expr, mknode('C', callee, args), 0, 0);
+        } else {
+            clit_node = mknode('L', $5, 0);
+            clit_node->u.n = (int)$1;
+            init_node = mknode('=', $2, clit_node);
+            $$ = mkstmt(Expr, init_node, 0, 0);
+        }
     }
     | type IDENT '[' expr ']' ';'     {
         /* Block-scoped fixed-size array.  Dimension is a
