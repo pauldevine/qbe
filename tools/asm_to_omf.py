@@ -40,10 +40,19 @@ def apply_local_prefix(line, prefix):
     return line
 
 
-def transform_line(line, prefix):
+def transform_line(line, prefix, far_data=False):
     """Apply the same syntactic rewrites the sed/perl pipeline did,
     but leave section markers in place — the caller routes lines into
-    per-section buckets."""
+    per-section buckets.  May return a multi-LINE string (joined with
+    '\\n'); the caller splits before bucketing.
+
+    far_data: under a far-data model every data POINTER is a 4-byte
+    seg:off far pointer.  A relocatable `.long _sym[+N]` data initializer
+    is therefore a far pointer and must carry BOTH offset and segment.
+    Emitting it as `dd _sym` makes nasm produce a 32-bit *offset* fixup
+    (OMF loc 9) — the segment word is left 0, so the pointer is wrong.
+    Split it into `dw _sym+N` (loc-1 offset) + `dw seg _sym` (loc-2
+    segment + runtime reloc), both of which omf_link already resolves."""
     # 32-bit op stub note
     line = re.sub(r'; TODO: 32-bit op \d+',
                   '; XXX 32-bit op stub - codegen incomplete', line)
@@ -74,6 +83,16 @@ def transform_line(line, prefix):
     # GAS data directives → NASM
     line = re.sub(r'^\s*\.byte (.*)$',  r'db \1', line)
     line = re.sub(r'^\s*\.short (.*)$', r'dw \1', line)
+    # Far-data: a relocatable `.long _sym[+N]` is a 4-byte far pointer —
+    # split into offset + segment words (see docstring).  Numeric `.long`
+    # (a real 32-bit constant) falls through to `dd`.
+    if far_data:
+        m = re.match(r'^\s*\.long\s+(_?[A-Za-z][\w]*)\s*(\+\s*\d+)?\s*$', line)
+        if m:
+            sym = m.group(1)
+            off = (m.group(2) or '').replace(' ', '')
+            line = '\tdw %s%s\n\tdw seg %s' % (sym, off, sym)
+            return line
     line = re.sub(r'^\s*\.long (.*)$',  r'dd \1', line)
     line = re.sub(r'^\s*\.int (.*)$',   r'dw \1', line)
     line = re.sub(r'^\s*\.word (.*)$',  r'dw \1', line)
@@ -285,6 +304,11 @@ def main():
     with open(in_path) as f:
         raw_lines = f.readlines()
 
+    # Far-data models address every global via `seg sym`, so a relocatable
+    # data pointer is a 4-byte far pointer (offset + segment).  Needed in the
+    # line loop below for transform_line's `.long _sym` → dw/dw-seg split.
+    far_data = far_static_data and model in ('compact', 'large', 'huge')
+
     sections = {'text': [], 'data': [], 'bss': []}
     # `huge_sections` is OrderedDict-like: maps `_HUGE_<sym>` → list of
     # lines emitted by qbe between the `.section "_HUGE_<sym>"` marker
@@ -350,21 +374,22 @@ def main():
         if s == '':
             continue
 
-        # Apply transforms (after section/globl handling)
-        line = transform_line(line, prefix)
+        # Apply transforms (after section/globl handling).  transform_line
+        # may return a multi-line string (far-pointer `.long` split into
+        # dw offset + dw seg); bucket each resulting line independently.
+        for line in transform_line(line, prefix, far_data).split('\n'):
+            # Track defined labels & referenced symbols
+            lbl = is_label_def(line.strip())
+            if lbl:
+                defined.add(lbl)
+                if current == 'text':
+                    defined_text.add(lbl)
+            referenced |= collect_referenced_syms(line)
 
-        # Track defined labels & referenced symbols
-        lbl = is_label_def(line.strip())
-        if lbl:
-            defined.add(lbl)
-            if current == 'text':
-                defined_text.add(lbl)
-        referenced |= collect_referenced_syms(line)
-
-        if current == 'huge':
-            huge_sections[current_huge].append(line)
-        else:
-            sections[current].append(line)
+            if current == 'huge':
+                huge_sections[current_huge].append(line)
+            else:
+                sections[current].append(line)
 
     # Auto-export every `_xxx`-prefixed *data* label defined in this file.
     # minic doesn't currently emit qbe `export` markers for file-scope
@@ -411,8 +436,8 @@ def main():
     # same mechanism the `_HUGE_<sym>` arrays already rely on).  DGROUP
     # then holds only the hand-asm crt0/libstub near data + the stack.
     # Near-data models (tiny/small/medium) keep the classic single
-    # DGROUP-resident `_DATA`/`_BSS`.
-    far_data = far_static_data and model in ('compact', 'large', 'huge')
+    # DGROUP-resident `_DATA`/`_BSS`.  (far_data computed above for the
+    # line loop's far-pointer `.long` split.)
     data_seg  = (prefix + 'DATA') if far_data else '_DATA'
     bss_seg   = (prefix + 'BSS')  if far_data else '_BSS'
     data_cls  = 'FAR_DATA' if far_data else 'DATA'
