@@ -1,4 +1,158 @@
-# Next session — THREE far-data fixes (§2f/§2g) cleared the file_input loop + qstr-intern hang; parser now consumes "print" and reaches token 2.  NEW blocker = the lexer's SECOND token reads MP_TOKEN_INVALID (1) instead of `(` (0x51) — a latent far-data lexer gap on token 2.  ALSO: the fully-instrumented image is now ~846KB → "too big to fit in memory" on the Victor; strip debug markers (or shrink) to get a loadable image.
+# Next session (§2i DONE — wide-arg→narrow-param FIXED, `mp_parse` now COMPLETES on the real Victor) — NEW blocker = an uncaught exception is raised DURING `mp_compile` (trace `C1 C2 C3 C4 D0 D1 D2 DE C5`: parse reaches D2, then DE before D3). The §2i fix covers DIRECT named calls only; minic's function-pointer TYPES carry no param info, so a wide→narrow shift through a FN-PTR call (MicroPython's compiler emit_t method-table dispatch) is STILL latent and is the prime suspect. Also still open: Finding 3 (raised exception object's far pointer loses its SEGMENT on the raise path).
+
+> **§2i (DONE 2026-06-01, committed `96553e4`) — the wide-arg→narrow-param
+> blocker is FIXED; `mp_parse` now runs to completion on the real Victor.**
+> DOS gate 158→**161**, `make check` green, 111 s/r 0 r/r (C-action only).
+>
+> FIX (the §2h Finding 2 "GENERAL/correct" option a, all in `minic/minic.y`):
+> minic recorded only a function's RETURN type, so `emit_arg` sized every
+> call argument by the argument's OWN type — a wide `l` (4-byte) value handed
+> to a narrow `w` (2-byte) parameter was pushed 4 bytes where the callee reads
+> 2, shifting every later stack arg.  Now:
+>  - New `fnproto[]` table (open addressing, keyed by name) records each
+>    function's fixed parameter types + count.
+>  - `fnproto_record()` wired into every prototype/definition site:
+>    `ansi_proto_register`, `ansi_func_proto`, `emit_knr_func{,_typed}`, the
+>    `EXTERN type IDENT(par1);` proto, and the `dcls`-level local proto.
+>  - `coerce_arg()` narrows/widens an integer-scalar arg to the declared
+>    param width (`=w copy` / `extuw` / Con-aware `sext`); pointer/float/
+>    aggregate args untouched.  Fires in the DIRECT-call emit loop, skipping
+>    true-vararg args (index ≥ nparam).  Also fixes the symmetric long→int
+>    shift latent on medium.
+> Probe `argwiden_probe.c` (+golden), gated medium+compact+large; bug-loud
+> `r FAIL 99` / `base FAIL 0` (the exact mp_parse_num_base symptom) without
+> the fix, all pass with it.  ALSO: `tools/run-dos-exe.sh` now runs DOSBox
+> headless (`SDL_VIDEODRIVER=dummy` + `SDL_AUDIODRIVER=dummy`) so gate runs
+> open no windows / steal no focus.
+>
+> VERIFIED ON THE REAL VICTOR (clean compact far-data build, body 824064 B —
+> just under the ~824.9KB wall, links 106/106 + --gc-sections): the trace
+> advanced from `D0 D1 DE` (ValueError mid-parse) to **`D0 D1 D2 DE`** —
+> `mp_parse` now returns a valid parse tree (D2), and the failure has MOVED
+> into `mp_compile` (DE appears before D3).
+>
+> **THE NEW blocker — an uncaught exception during `mp_compile`.**  Trace:
+> `C1 C2 C3 C4 D0 D1 D2 DE C5` (main.c driver in ~/projects/micropython;
+> D2=parse done, D3 would be compile done, DE=do_str's nlr else branch).  So
+> something raises between D2 and D3.  PRIME SUSPECT: the §2i fix coerces only
+> DIRECT named calls — minic's function-pointer TYPES encode only the return
+> type (`FUNC(rettype)`), no param list, so a wide→narrow arg shift through a
+> FN-PTR call is STILL latent, and the compiler is fn-ptr-dispatch-heavy
+> (emit_t method tables: `emit->method(...)`).  NEXT: (1) instrument
+> `py/compile.c` (checkpoints around the compile passes / scope walk) +
+> recompile via `tools/recompile-mp-tu.sh compile ~/projects/micropython/py/
+> compile.c`, run `tools/run-victor-sasi.sh build/mp-link/mpython.exe 220`, and
+> bisect WHERE in compile it raises and WHAT (use 16-bit-only debug printers —
+> [[i8086-kl-shift-clobbers-ax]]).  (2) If it's a fn-ptr-call wide→narrow
+> shift, extending coercion needs param types carried in the function-POINTER
+> type (a bigger minic change — fn-ptr types currently only hold the return
+> type).  (3) Finding 3 (exception object far pointer loses its SEGMENT on the
+> raise path: offset kept, segment garbage) is STILL open and needed for any
+> real exception to print — instrument the raise path
+> (`mp_raise`→`nlr_raise`→`nlr_jump`) to pin the 16-bit truncation.  Build:
+> `bash tools/build-micropython.sh --model=compact --keep-going`.
+>
+> ---
+>
+> # (prior) §2h diagnosis — wide-arg→narrow-param was diagnosed here (NOW FIXED in §2i above)
+>
+> The §2g "token-2 INVALID" was an INSTRUMENTATION ARTIFACT (the lexer is provably correct); the REAL blocker is a minic far-data ABI bug: a wide (`l`, 4-byte) argument passed to a narrow (`size_t`/`w`, 2-byte) prototype parameter is NOT narrowed, shifting all later stack args. This makes `mp_parse_num_integer` raise `ValueError("invalid syntax for integer")` on the INTEGER token `1`, aborting `mp_parse`. FIX minic to narrow wide args to the prototype's param width (or type pointer-difference as `ptrdiff_t`/int). A SECOND independent bug: the raised exception object's far pointer loses its SEGMENT on the raise path (offset kept, segment garbage) → `mp_obj_print_exception` crashes.
+
+> **§2h (DIAGNOSIS ONLY — 2026-05-31, NO qbe-repo code change, nothing committed).
+> All work was on-target bisection on the real Victor (SASI) + static SSA/asm
+> reading. The MicroPython tree (~/projects/micropython, separate repo) has an
+> uncommitted lexer-only→full-pipeline debug driver in ports/dos8086/main.c; the
+> §2-era instrumentation in py/{lexer,gc,parse,qstr,runtime}.c is STASHED
+> (`git stash list`: stash@{0}=lexer, stash@{1}=gc/parse/qstr/runtime) — pop if
+> needed, but the CLEAN tree is what proved the lexer correct.**
+>
+> **FINDING 1 — the §2g "token-2 reads MP_TOKEN_INVALID" was an INSTRUMENTATION
+> ARTIFACT, not a real bug.** With clean (un-instrumented) py/parse.c + py/qstr.c,
+> the lexer tokenises `print(1+2)` PERFECTLY. Verified two ways on the Victor:
+> (a) a lexer-only driver (do_str just calls mp_lexer_to_next in a loop) emits the
+> full correct stream `T07 T51 T08 T3c T08 T52 T04 T00` (NAME `(` 1 `+` 2 `)` NEWLINE END);
+> (b) under real mp_parse the first three tokens are `T07 T51 T08` (correct). The
+> §2g debug prints in parse.c/qstr.c perturbed register allocation and TRIGGERED a
+> latent clobber that mis-set `tok_kind`. LESSON: heavy instrumentation can CREATE
+> codegen bugs here — keep probes minimal and re-test clean. (Also exhaustively
+> verified statically that `tok_enc`, its far-pointer relocation, `is_char`'s
+> `ceql`, and `chr0` are all correct — the lexer codegen is sound.)
+>
+> **FINDING 2 (THE REAL BLOCKER) — minic passes a WIDE arg to a NARROW prototype
+> param without narrowing → stack-arg shift → ValueError in integer parsing.**
+> `mp_parse` consumes `print` `(` `1`, then `push_result_token` for the INTEGER
+> calls `mp_parse_num_integer("1",1,0,lex)`, which calls
+> `mp_parse_num_base((const char*)str, top - str, &base)`. ROOT CAUSE (airtight,
+> from the generated asm):
+>   - Caller SSA: `call $mp_parse_num_base(l %t72, l %t80, l %base)` — `len` (=
+>     `top - str`, a FAR-pointer difference) is typed `l` (4 bytes) and pushed as 4 bytes.
+>   - Callee asm reads `str` at `[bp+6/8]` (4B), **`len` at `[bp+10]` (2B, it's
+>     `size_t`)**, `base` at `[bp+12/14]` (4B). minic's `size_t`/`ptrdiff_t` are
+>     `int`=2 bytes (minic/include/stddef.h).
+>   - So the 4-byte `len` push shifts EVERY later arg by 2 bytes: the callee reads
+>     `&base` from `[bp+12]/[bp+14]` = caller's `len`-high-word(0) + `base`-low-word
+>     → a GARBAGE `base` pointer. `mp_parse_num_base`'s (correct) `*base=10`
+>     `storefw` writes to that wild address; the caller's real `base` (SS:[bp-226])
+>     stays **0**. Then `mp_parse_num_integer`'s digit loop `if (dig >= base) break`
+>     is `1 >= 0` → breaks on the first digit → 0 chars parsed → `value_error` →
+>     `ValueError("invalid syntax for integer")`.
+>   - VERIFIED on-target (probes in mp_parse_num_integer): `str`=valid heap far ptr,
+>     `len`=1, `*str`='1' (all inputs CORRECT), but `base`=**0** after
+>     mp_parse_num_base (`R0000`), 0 chars parsed (`S0000`). And the created
+>     exception type resolved to `mp_type_ValueError`.
+> THE FIX (minic): coerce each CALL argument to the callee's declared parameter
+> width. minic currently records ONLY the return type (`FUNC(rettype)`); it has NO
+> per-function parameter-type table, and `emit_arg`/`eval_arg` (minic.y ~1997-2021)
+> size each arg by the ARGUMENT'S own type via `irtyp_ret`. Two fix options:
+>   (a) GENERAL/correct: record per-function param-type lists at every
+>       prototype/definition (varadd sites ~5358/5397/6264) and, at the 3 call-emit
+>       sites (minic.y 2079-2101 fnptr, 2129-2148 named, 2589-2638 inline expr —
+>       all share `emit_arg`), narrow/widen each arg to the param class (reuse the
+>       `=w copy` truncation idiom at ~3124 and `sext`/`extuw` at ~1490). Also fixes
+>       the symmetric `long`→`int`-param shift that is latent on MEDIUM too.
+>   (b) TARGETED: type a pointer-pointer DIFFERENCE as `ptrdiff_t` (=`int`/`w`, per
+>       minic's stddef.h) instead of `l` in `expr()`'s `-` handling — then `top-str`
+>       is a 2-byte `w` matching the `size_t` param. Smaller but only fixes the
+>       ptr-diff case (the general wide→narrow shift stays latent).
+> EITHER fix MUST be verified: rebuild minic, `make check` (expect 111 s/r 0 r/r),
+> `tools/test-dos.sh` (gate ~158), then full MicroPython rebuild + `run-victor-sasi`.
+> Fixing this may let `print(1+2)` parse (then compile/exec are the next frontiers).
+>
+> **FINDING 3 (SECONDARY, independent bug) — a raised exception OBJECT's far
+> pointer loses its SEGMENT on the raise path.** `exc` (= nlr.ret_val) reads as
+> `<garbage-seg>:0x0180` — the OFFSET is constant/correct but the SEGMENT is stale
+> stack garbage (varied c5f9/c5fc/c5fd across runs). `nlr_jump`'s `top->ret_val =
+> val` store is a correct `storefl` (4 bytes) and `do_str`'s read is a correct
+> `loadfl`, so the segment is dropped UPSTREAM in the raise path
+> (`mp_raise…`→`nlr_raise(exc)`→`nlr_jump(MP_OBJ_TO_PTR(exc))`): a far
+> `void*`/`mp_obj_t` truncated to 16 bits somewhere. This is WHY
+> `mp_obj_print_exception` crashes (the reboot-after-DE) and why the exception type
+> read as garbage. Independent of Finding 2; needed for ANY real exception to
+> propagate. Next session: instrument the raise path (print exc seg:off at each
+> hop from creation to nlr_jump) to pin the truncation, then fix in minic/qbe.
+>
+> **ALSO learned:**
+>  - minic gap: `T a = x, b = y;` (multi-declarator WITH initializers) parse-errors
+>    (CLAUDE.md §1j noted it). Hit it in debug code; split into one decl per line.
+>    MicroPython core compiles 106/106 without it, so it's not a port blocker.
+>  - IMAGE SIZE WALL (precise): a body of ~823.4KB LOADS on the Victor; ~824.9KB+ →
+>    "Program too big to fit in memory". Razor-thin (~824KB). Each debug print
+>    costs; keep instrumentation tiny or strip working-phase probes (stashed).
+>  - The lexer-only `do_str` does NOT shrink the image (the runtime stays reachable
+>    via inline-helper / mp_state_ctx fixups; --gc-sections can't prune the
+>    connected component). And dropping `mp_init()` crashes the lexer preload.
+>    main.c is left with the FULL-pipeline driver + a minimal "DE\n" handler (the
+>    real mp_obj_print_exception crashes under far-data — Finding 3).
+>  - `gc_collect` is NOT involved (never runs — heap not full; verified with a marker).
+>
+> **REPRODUCE:** `bash tools/build-micropython.sh --model=compact --keep-going`
+> then `tools/run-victor-sasi.sh build/mp-link/mpython.exe 190`. Fast inner loop:
+> `tools/recompile-mp-tu.sh <base> <src.c>` (recompiles one TU + relinks; needs
+> /tmp/mp_objs.txt). The C/D phase markers in ports/dos8086/main.c are in place.
+>
+> ---
+>
+> # (prior) Next session — THREE far-data fixes (§2f/§2g) cleared the file_input loop + qstr-intern hang; parser now consumes "print" and reaches token 2.  NEW blocker = the lexer's SECOND token reads MP_TOKEN_INVALID (1) instead of `(` (0x51) — a latent far-data lexer gap on token 2.  ALSO: the fully-instrumented image is now ~846KB → "too big to fit in memory" on the Victor; strip debug markers (or shrink) to get a loadable image.
 
 > **§2f/§2g (DONE 2026-05-31, committed `014ee64` + `bb61947`) — THREE
 > far-data fixes, found by on-target bisection on the real Victor.  DOS gate
