@@ -5072,6 +5072,29 @@ agg_emit_array(unsigned elemty, int cnt, Node *init, char *buf, int *bl, int *fi
 	}
 }
 
+/* Number of elements a braced initializer occupies, honouring `[k]=v`
+ * designators (C99 6.7.8: a designator sets the cursor, so the count is the
+ * highest index reached + 1).  Used to size a flexible-array-member init,
+ * whose length is implied by its initializer rather than declared. */
+int
+agg_brace_count(Node *agg)
+{
+	int pos = 0, maxpos = 0;
+	Node *ln;
+
+	if (!agg || agg->op != '{')
+		return 0;
+	for (ln = agg->l; ln; ln = ln->r) {
+		Node *item = ln->l;
+		if (item->op == 'd')
+			pos = const_eval(item->r);
+		pos++;
+		if (pos > maxpos)
+			maxpos = pos;
+	}
+	return maxpos;
+}
+
 void
 agg_emit_struct(int sidx, int isunion, Node *agg, char *buf, int *bl, int *first)
 {
@@ -5183,8 +5206,19 @@ agg_emit_struct(int sidx, int isunion, Node *agg, char *buf, int *bl, int *first
 			agg_zfill(m->offset - cursor, buf, bl, first);
 			cursor = m->offset;
 		}
-		agg_emit_value(m->ctyp, m->count, val, buf, bl, first);
-		msize = m->count ? SIZE(m->ctyp) * m->count : SIZE(m->ctyp);
+		if (m->isflex) {
+			/* Flexible array member `T x[];` — its length is implied by
+			 * the initializer's element count, not declared.  Emit ALL
+			 * brace elements (a scalar emit would drop all but the
+			 * first); the member contributes 0 to structsize, so the
+			 * extra bytes legitimately push cursor past structsize. */
+			int nflex = agg_brace_count(val);
+			agg_emit_array(m->ctyp, nflex, val, buf, bl, first);
+			msize = SIZE(m->ctyp) * nflex;
+		} else {
+			agg_emit_value(m->ctyp, m->count, val, buf, bl, first);
+			msize = m->count ? SIZE(m->ctyp) * m->count : SIZE(m->ctyp);
+		}
 		cursor += msize;
 		memidx++;
 		if (isunion)
@@ -5356,13 +5390,17 @@ build_array_init(unsigned elemtyp, long count, Node *agg, char *buf)
 	return (long)SIZE(elemtyp) * count;
 }
 
-/* Var-type to register for an array of `elemtyp`: pointer-element arrays
- * register the element (pointer) type itself; scalar and struct element
- * arrays register IDIR(elemtyp).  Matches the legacy per-kind rules. */
+/* Var-type to register for an array of `elemtyp`.  A C array of T decays to
+ * T* (pointer-to-element), so the variable's value type is always
+ * IDIR(elemtyp) — INCLUDING pointer-element arrays (`T *arr[]` decays to
+ * `T **`).  The earlier pointer-element special case (register `elemtyp`
+ * itself) was wrong: it made `arr[i]` scale subscripts by sizeof(*T) instead
+ * of sizeof(T*), so e.g. an array of `mp_obj_type_t *` indexed at runtime
+ * read 20-byte-strided garbage (MicroPython's mp_obj_get_type `types[]`). */
 unsigned
 array_vartyp(unsigned elemtyp)
 {
-	return (KIND(elemtyp) == PTR) ? elemtyp : IDIR(elemtyp);
+	return IDIR(elemtyp);
 }
 
 void
