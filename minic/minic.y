@@ -1511,6 +1511,38 @@ psymb(Symb s)
 	}
 }
 
+/* Format a Symb's address operand into `buf` (the same textual form psymb
+ * prints).  Lets the address-string helpers emit_zero_aggr/emit_clit_aggr
+ * target an arbitrary aggregate lvalue (a local %var, a *p deref temp, ...),
+ * not just a %_clit compound-literal slot. */
+static void
+symb_operand(Symb s, char *buf, size_t n)
+{
+	switch (s.t) {
+	case Tmp:
+		snprintf(buf, n, "%%t%d", s.u.n);
+		break;
+	case Var:
+		snprintf(buf, n, "%%%s", s.u.v);
+		break;
+	case Glo:
+		if (s.u.n > 0 && s.u.n < NGlo && gloname[s.u.n][0] != 0)
+			snprintf(buf, n, "$%s", gloname[s.u.n]);
+		else
+			snprintf(buf, n, "$glo%d", s.u.n);
+		break;
+	case Ext:
+		snprintf(buf, n, "$%s", s.u.v);
+		break;
+	case Con:
+		snprintf(buf, n, "%d", s.u.n);
+		break;
+	default:
+		buf[0] = 0;
+		break;
+	}
+}
+
 void
 sext(Symb *s)
 {
@@ -2492,15 +2524,26 @@ huge_ptr_binop(int op, Symb dst, Symb lhs, Symb rhs)
 	return 1;
 }
 
-/* Fill a struct/union compound literal's members from an initlist into
- * `%_clit<clitnum>` at byte offset `base_off`.  Sequential and `.field=`
- * designated items are both handled; a nested-brace item (`{ … }`, op
- * '{') recurses into a sub-struct/union member, so
- * `(T){{a}, b, c}` (e.g. py/objtype.c's mp_obj_super_t) works.  The
- * caller has already zero-initialised the storage. */
+/* Fill a struct/union aggregate's members from an initlist into the storage
+ * whose address is the SSA operand `dst` (e.g. "%_clit3" for a compound
+ * literal, or "%foo"/"%t9" for a named local / deref target — see the
+ * local-aggregate-init rules which fill the destination directly, skipping
+ * the compound-literal temp AND the per-init struct copy), at byte offset
+ * `base_off`.  Sequential and `.field=` designated items are both handled; a
+ * nested-brace item (`{ … }`, op '{') recurses into a sub-struct/union
+ * member, so `(T){{a}, b, c}` (e.g. py/objtype.c's mp_obj_super_t) works.
+ * The caller has already zero-initialised the storage.
+ *
+ * Far-correct: under a far-data model the destination address is a Kl
+ * (seg:offset) far pointer, so offset arithmetic is `=l add` and member
+ * stores are `storef%c` — a near `=w add` + `store%c` would TRUNCATE the
+ * segment and scatter members into the wrong segment (the latent member-init
+ * truncation the old %_clit-only near path carried). */
 static void
-emit_clit_aggr(int clitnum, int base_off, int sidx, Node *init)
+emit_clit_aggr(const char *dst, int base_off, int sidx, Node *init)
 {
+	int far = !NEAR_DATA();
+	char klass = far ? 'l' : 'w';
 	int i = 0;
 
 	while (init) {
@@ -2508,6 +2551,8 @@ emit_clit_aggr(int clitnum, int base_off, int sidx, Node *init)
 		int midx, off;
 		struct Member *m;
 		Symb val;
+		char tc;
+		const char *spfx;
 
 		if (item->op == 'D') {
 			midx = structfindmember(sidx, item->r->u.v);
@@ -2526,19 +2571,23 @@ emit_clit_aggr(int clitnum, int base_off, int sidx, Node *init)
 			/* Nested aggregate initializer fills a sub-struct/union. */
 			if (KIND(m->ctyp) != STRUCT_T && KIND(m->ctyp) != UNION_T)
 				die("braced initializer for non-aggregate member");
-			emit_clit_aggr(clitnum, off, DREF(m->ctyp), item->l);
+			emit_clit_aggr(dst, off, DREF(m->ctyp), item->l);
 		} else {
 			val = expr(item);
+			tc = irtyp(m->ctyp);
+			/* storef has no float/double form; far float members
+			 * (no in-tree consumer) keep the plain store, as before. */
+			spfx = (far && tc != 's' && tc != 'd') ? "storef" : "store";
 			if (off > 0) {
-				fprintf(of, "\t%%t%d =w add %%_clit%d, %d\n", tmp, clitnum, off);
-				fprintf(of, "\tstore%c ", irtyp(m->ctyp));
+				fprintf(of, "\t%%t%d =%c add %s, %d\n", tmp, klass, dst, off);
+				fprintf(of, "\t%s%c ", spfx, tc);
 				psymb(val);
 				fprintf(of, ", %%t%d\n", tmp);
 				tmp++;
 			} else {
-				fprintf(of, "\tstore%c ", irtyp(m->ctyp));
+				fprintf(of, "\t%s%c ", spfx, tc);
 				psymb(val);
-				fprintf(of, ", %%_clit%d\n", clitnum);
+				fprintf(of, ", %s\n", dst);
 			}
 		}
 
@@ -2754,15 +2803,15 @@ expr(Node *n)
 				/* Zero-initialize first (C11 6.7.9p21: members with no
 				 * explicit initializer are zeroed). */
 				{
-					char zaddr[24];
-					snprintf(zaddr, sizeof zaddr, "%%_clit%d", clitnum);
-					emit_zero_aggr(zaddr, s);
-				}
+					char caddr[24];
+					snprintf(caddr, sizeof caddr, "%%_clit%d", clitnum);
+					emit_zero_aggr(caddr, s);
 
-				/* Initialize members from initlist with designator
-				 * and nested-brace support (see emit_clit_aggr). */
-				(void)i;
-				emit_clit_aggr(clitnum, 0, sidx, init);
+					/* Initialize members from initlist with designator
+					 * and nested-brace support (see emit_clit_aggr). */
+					(void)i;
+					emit_clit_aggr(caddr, 0, sidx, init);
+				}
 
 				/* For structs, load the struct value (like struct variables) */
 				sr.t = Tmp;
@@ -3157,6 +3206,30 @@ expr(Node *n)
 		break;
 
 	case '=':
+		/* Direct compound-literal initialization of an aggregate lvalue:
+		 * `dst = (T){...};` (the desugaring the local-aggregate-init rules
+		 * emit, and any user-written struct-literal assignment).  Fill the
+		 * destination IN PLACE — zero it, then place the members — skipping
+		 * the compound-literal temp slot AND the whole-struct copy.  A
+		 * code-size win (the dominant lever for fitting MicroPython under
+		 * the Victor ceiling) and a far-data correctness win (emit_clit_aggr
+		 * is far-address-correct; the old temp+copy path's near member
+		 * stores truncated the segment under far-data).  Op 'L' with r==0 is
+		 * a compound literal (r!=0 is a left-shift). */
+		if (n->r->op == 'L' && n->r->r == 0
+		    && (KIND((unsigned)n->r->u.n) == STRUCT_T
+			|| KIND((unsigned)n->r->u.n) == UNION_T)) {
+			unsigned ltyp = (unsigned)n->r->u.n;
+			char daddr[NString];
+
+			s1 = lval(n->l);
+			symb_operand(s1, daddr, sizeof daddr);
+			emit_zero_aggr(daddr, SIZE(ltyp));
+			emit_clit_aggr(daddr, 0, DREF(ltyp), n->r->l);
+			sr = s1;
+			break;
+		}
+
 		/* Check for bitfield assignment */
 		if (n->l->op == '.') {
 			/* Get the struct and member info */
@@ -3709,15 +3782,15 @@ lval(Node *n)
 				/* Zero-initialize first (C11 6.7.9p21: members with no
 				 * explicit initializer are zeroed). */
 				{
-					char zaddr[24];
-					snprintf(zaddr, sizeof zaddr, "%%_clit%d", clitnum);
-					emit_zero_aggr(zaddr, s);
-				}
+					char caddr[24];
+					snprintf(caddr, sizeof caddr, "%%_clit%d", clitnum);
+					emit_zero_aggr(caddr, s);
 
-				/* Initialize members from initlist with designator
-				 * and nested-brace support (see emit_clit_aggr). */
-				(void)i;
-				emit_clit_aggr(clitnum, 0, sidx, init);
+					/* Initialize members from initlist with designator
+					 * and nested-brace support (see emit_clit_aggr). */
+					(void)i;
+					emit_clit_aggr(caddr, 0, sidx, init);
+				}
 			} else {
 				/* Scalar initialization */
 				init = n->l;

@@ -16,6 +16,15 @@
  * garbage, so mp_compile raised a bogus exception on the (correct) parse tree of
  * `print(1+2)` (trace reached K3 with compile_error != NULL though nothing set
  * it).  Gated medium + compact + large.
+ *
+ * The §2j follow-up (this file's `init`/`mid`/`desig` value cases): a NON-zero
+ * local aggregate initializer `S s = {a, b, &g, ...};` is now filled directly
+ * into the destination (no compound-literal temp, no struct copy).  Under a
+ * far-data model each member store MUST be `storef%c` at an `=l add` offset; a
+ * near `=w add`/`store%c` truncates the segment of a pointer member written at
+ * offset>0, so the pointer reads back with a garbage segment.  The cases below
+ * DEREF a pointer member written past the first word, so a segment truncation
+ * is bug-loud (wrong value / crash), not merely a NULL miss.
  */
 
 #include <stdio.h>
@@ -33,6 +42,14 @@ typedef struct {
 	int e[4];
 	void *p4;
 } big_t;
+
+/* No array member — positional non-zero init without a braced sub-object. */
+typedef struct {
+	int a;
+	void *p1;
+	long b;
+	void *p2;
+} small_t;
 
 static int all_zero(big_t *s)
 {
@@ -67,6 +84,47 @@ int main(void)
 	if (s.p2 == 0) printf("p2 ok\r\n"); else printf("p2 FAIL\r\n");
 	if (s.p3 == 0) printf("p3 ok\r\n"); else printf("p3 FAIL\r\n");
 	if (s.p4 == 0) printf("p4 ok\r\n"); else printf("p4 FAIL\r\n");
+
+	/* NON-zero POSITIONAL direct-fill, far-correctness guard.  The pointer
+	 * members sit at offsets > 0; point them at known longs and deref
+	 * through the struct so a truncated segment surfaces as a wrong value.
+	 * (small_t has no array member: a braced array sub-object inside a
+	 * compound literal is a separate, pre-existing minic gap, unrelated to
+	 * the direct-fill far-correctness this case guards.) */
+	{
+		long g1 = 1111L;
+		long g2 = 2222L;
+		small_t v = { 11, &g1, 5555L, &g2 };   /* a, p1, b, p2 */
+		int ok = 1;
+		if (v.a != 11 || v.b != 5555L) ok = 0;
+		if (*(long *)v.p1 != 1111L) ok = 0;  /* p1 at offset>0, deref */
+		if (*(long *)v.p2 != 2222L) ok = 0;  /* last member, far offset */
+		printf(ok ? "init ok\r\n" : "init FAIL\r\n");
+	}
+
+	/* Mid-block (stmt-rule) non-zero init — must re-fill on each entry. */
+	{
+		long h = 7777L;
+		int i;
+		int ok = 1;
+		for (i = 0; i < 2; i++) {
+			small_t w = { i, 0, 0, &h };   /* a, p1, b, p2 */
+			if (w.a != i || w.b != 0 || w.p1 != 0) ok = 0;
+			if (*(long *)w.p2 != 7777L) ok = 0;  /* deref far member */
+		}
+		printf(ok ? "mid2 ok\r\n" : "mid2 FAIL\r\n");
+	}
+
+	/* Designated-initializer direct fill into a big_t (a pointer member by
+	 * name, well past the first word; the rest stay zeroed). */
+	{
+		long k = 8888L;
+		big_t z = { .a = 1, .p3 = &k };
+		int ok = 1;
+		if (z.a != 1 || z.b != 0 || z.p1 != 0) ok = 0;
+		if (*(long *)z.p3 != 8888L) ok = 0;
+		printf(ok ? "desig ok\r\n" : "desig FAIL\r\n");
+	}
 
 	return 0;
 }
