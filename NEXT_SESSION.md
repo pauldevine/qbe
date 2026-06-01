@@ -1,4 +1,93 @@
-# Next session (§2k DONE — the mp_compile EMIT-pass HANG is FIXED; it was a QBE i8086 Kw-shift codegen bug corrupting `gc_alloc`, NOT the emitbc jump-offset/size_t hypothesis. DOS gate 164→166, `make check` green. NEW blocker = an uncaught exception DURING `mp_compile` — Victor trace `D0 D1 D2 DE` — so compile now runs on un-corrupted data but raises before D3.)
+# Next session (§2l DONE — the §2k "uncaught exception during mp_compile" blocker is FIXED; it was a QBE i8086 Kl Oand/Oor/Oxor codegen bug (AX/DX not preserved across the op) corrupting the bytecode-prelude encoder. Committed `ed5f35b`. DOS gate 166→168, `make check` green. On the real Victor the trace advanced from `D0 D1 D2 DE` to `C1..C4 D0 D1 D2 D3 D4 C5` — `print(1+2)` now COMPILES AND EXECUTES with NO exception. NEW blocker = `print` emits NO visible output (the `3` never appears) despite the clean D3→D4 return.)
+
+> **§2l (DONE 2026-06-01, committed `ed5f35b`) — the §2k "uncaught exception
+> during mp_compile" is FIXED.  It was a general QBE i8086 BACKEND codegen bug in
+> the Kl (32-bit) bitwise `Oand`/`Oor`/`Oxor` handlers.  DOS gate 166→**168**,
+> `make check` green, amd64/arm64/rv64 byte-identical.  All in `i8086/emit.c` +
+> a new gate probe.**
+>
+> ROOT CAUSE: the Kl `Oand`/`Oor`/`Oxor` handlers used `load32_dxax` + the op,
+> operating in AX/DX, but NEVER preserved the caller's AX/DX — unlike the Kl
+> `Oadd`/`Osub`/`Omul` handlers, which bracket with `kl_save_axdx`/`kl_restore_axdx`
+> ([[i8086-kl-add-sub-mul-r1-alias]]).  rega doesn't model the implicit AX/DX
+> clobber of these ops, so a live SSA value rega parked in AX/DX across a Kl
+> OR/AND/XOR was silently corrupted.  (CLAUDE.md's open [[i8086-kl-shift-clobbers-ax]]
+> note was STALE — the Kl SHIFT handlers already had the save/restore bracket; it
+> was the logical ops that were unfixed.)
+>
+> CANONICAL VICTIM (found by on-target bisection on the real Victor, the decisive
+> method again): MicroPython's `MP_BC_PRELUDE_SIG_ENCODE` (py/bc.h).  `mp_uint_t`
+> is `uintptr_t` = 4 bytes under far-data, so the module prelude's
+> `while (S|E|F|A|K|D)` condition lowers to a chain of Kl ORs.  rega kept the
+> loop-carried byte `z` (the encoded prelude byte, used by both the loop body's
+> `0x80|z` and the post-loop `out_byte(z)`) live in AX across the OR-chain; the
+> OR-chain clobbered AX, so the encoder emitted a bogus multi-byte prelude
+> (`0x82 0x81 0x00` instead of `0x08`).  Decoded back in `mp_setup_code_state`,
+> that read as a module taking 2 positional args + 1 default, so `fun_bc_call`
+> raised TypeError on `mp_call_function_0` of `print(1+2)` — the long-standing
+> "exception during compile/exec" blocker.
+>
+> HOW FOUND (one decisive marker run at a time): instrumented `py/compile.c`
+> (compile COMPLETED — the exception had MOVED to execution), then `py/objfun.c`
+> `fun_bc_call` (raise was between `mp_cstack_check` and `mp_execute_bytecode`,
+> in `INIT_CODESTATE`→`mp_setup_code_state`), then `py/bc.c`
+> `mp_setup_code_state_helper` (decoded `n_pos_args=2, n_def=1` — wrong; raw
+> prelude bytes `0x82 0x81 0x00`), then `py/emitbc.c` `mp_emit_bc_start_pass`
+> (encode INPUTS correct: `num_pos_args=0`, `n_state=2`; but `code_base[0]`
+> written = `0x82`, should be `0x08`).  Then read the generated SSA/asm:
+> `mp_uint_t` ops were typed `l`, the `while`-condition OR-chain (asm lines
+> "mov ax,[slot]; or ax,[slot]; mov [slot],ax", NO push/pop) clobbered the `z`
+> value rega had loaded into AX before the loop.
+>
+> FIX (`i8086/emit.c`): bracket each of Kl `Oand`/`Oor`/`Oxor` with
+> `kl_save_axdx`/`kl_restore_axdx` and handle the dst-in-DX RTmp case, mirroring
+> `Osub` Kl exactly.  Slot operands are bp-relative so the AX/DX push/pop (which
+> move SP, not BP) leaves their offsets valid.  Probe `sigencode_probe.c`
+> (medium + compact) replicates the encode with `unsigned long` (Kl) inputs;
+> bug-loud (`b0=0`) without the fix, `b0=8` with.  Wired into `tools/test-dos.sh`
+> RUNTIME_TESTS.  (Note: the isolated probe needs the Kl-OR-chain `while`
+> condition + a loop-carried value to trigger — a too-minimal probe folds clean.)
+>
+> ON-TARGET RESULT (clean full rebuild, body 823360 B, under the ~824.2KB
+> ceiling): the trace advanced from `C1..C4 D0 D1 D2 DE` to
+> **`C1 C2 C3 C4 D0 D1 D2 D3 D4 C5`** — `mp_compile` returns (D3) AND
+> `mp_call_function_0` returns with NO exception (D4).  Confirmed reproducible.
+>
+> **THE NEW blocker — `print` emits NO VISIBLE OUTPUT.**  `print(1+2)` executes
+> cleanly (D3→D4) but the `3` never appears (raw `od -c` of the serial capture
+> shows ONLY the C/D markers — no `3`, no `\n`).  `print` routes through
+> `mp_plat_print` → `MP_PLAT_PRINT_STRN` → `mp_hal_stdout_tx_strn_cooked` — the
+> SAME path the C/D markers use (and those DO appear) — so EITHER (a) the module
+> bytecode never actually calls `print` (a remaining VM/bytecode miscompile that
+> raises no exception), OR (b) `print` is called but `mp_obj_print_helper(int 3)`
+> / `mp_print_int` produces zero output (a far-data int→string bug).
+>
+> **CAUTION for the next session — razor-thin SIZE margin + instrumentation
+> heisenbugs.**  The clean image body is 823360 B; the Victor ceiling is
+> ~824192 B (loads) / 824512 B (does not) — only ~830 B of headroom.  Worse, a
+> small marker added to `py/modbuiltins.c` (mp_builtin_print entry) regressed the
+> trace to `D2` EVEN THOUGH the image still loaded (823824 B < ceiling) — a
+> LAYOUT-induced compile-path codegen bug, not a load failure.  So: instrument
+> with MINIMAL net size growth, prefer TUs NOT on the compile path, and/or
+> temporarily stub something (e.g. `gc_collect` empty) for headroom; re-confirm
+> the baseline `D3 D4` after any change.  This fragility also hints MORE latent
+> Kl/far-data codegen bugs remain — the D4 success is correct but not robust to
+> layout shifts.
+>
+> NEXT: (1) determine if `print` is CALLED — instrument the VM call dispatch
+> (`fun_builtin_var_call` in py/objfun.c, or the `MP_BC_CALL_FUNCTION` opcode in
+> py/vm.c) with a MINIMAL marker (watch size).  If NOT called → a bytecode/VM
+> miscompile (likely another Kl/far op); bisect the emitted opcodes for the
+> module.  (2) If called → trace `mp_obj_print_helper`→`mp_print_int`/the int
+> formatter for the lost output.  Use 16-bit-only debug printers (no Kl shift).
+> Build: `bash tools/build-micropython.sh --model=compact --keep-going`; run:
+> `tools/run-victor-sasi.sh build/mp-link/mpython.exe 200`.  MicroPython tree
+> (~/projects/micropython, separate repo) is CLEAN except the untracked
+> `ports/dos8086/` port; the C/D phase markers in `main.c::do_str` remain.
+> Finding 3 (raised exc obj far ptr loses its segment) is STILL open but does NOT
+> block (no exception is raised now).
+>
+> ---
 
 > **§2k (DONE 2026-06-01) — the §2j' "mp_compile EMIT-pass hang" is FIXED, and the
 > §2j' emitbc.c jump-offset/size_t-width hypothesis was WRONG.**  The real bug was a
