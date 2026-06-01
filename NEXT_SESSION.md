@@ -1,4 +1,94 @@
-# Next session (§2l DONE — the §2k "uncaught exception during mp_compile" blocker is FIXED; it was a QBE i8086 Kl Oand/Oor/Oxor codegen bug (AX/DX not preserved across the op) corrupting the bytecode-prelude encoder. Committed `ed5f35b`. DOS gate 166→168, `make check` green. On the real Victor the trace advanced from `D0 D1 D2 DE` to `C1..C4 D0 D1 D2 D3 D4 C5` — `print(1+2)` now COMPILES AND EXECUTES with NO exception. NEW blocker = `print` emits NO visible output (the `3` never appears) despite the clean D3→D4 return.)
+# Next session (§2m DONE — the §2l "print emits no visible output" blocker was TWO minic static-data/typing bugs in the int-print SLOT DISPATCH, now FIXED and committed `2fd2f4b`. `make check` green, both proven on the real Victor. NEW blocker = `print(1+2)`'s MODULE BYTECODE never calls `print` at all — a compile/VM bug, NOT an output bug.)
+
+> **§2m (DONE 2026-06-01, committed `2fd2f4b`) — the §2l "print emits no
+> visible output" blocker is RESOLVED.  It was TWO minic bugs in how
+> `mp_obj_print_helper` reaches the int formatter via the type-slot far
+> fn-ptr dispatch.  `make check` green (111 s/r, 0 r/r), amd64/arm64/rv64
+> byte-identical.  Both found by on-target bisection on the real Victor.**
+>
+> HOW FOUND (the decisive method again): added a DISCRIMINATOR in
+> `ports/dos8086/main.c` that called `mp_obj_print_helper(&mp_plat_print,
+> MP_OBJ_NEW_SMALL_INT(3), PRINT_STR)` DIRECTLY (bypassing the VM/bytecode) —
+> it HUNG.  Then instrumented `mp_obj_print_helper` (`Y0`/`Y1`/`Y2`/`Y3`) and
+> `mp_obj_int_print` (`Z0`): trace `Y0 Y1 Y2` then hang, NO `Z0` — so
+> `mp_obj_get_type` returned (Y1), `HAS_SLOT(print)` was true (Y2), but the
+> far slot-dispatch call `MP_OBJ_TYPE_GET_SLOT(type,print)(...)` never reached
+> `mp_obj_int_print`.  A DIRECT call to `mp_obj_int_print` (bypass the slot)
+> printed `3` fine → the formatter is correct; the BUG is the slot load+call.
+> A seg:off dump at the call site showed the returned `type` segment was
+> STACK GARBAGE (`c5ea`) not `&mp_type_int` (`c330`), and the loaded slot fn
+> ptr had segment `0000`.  Reading the generated asm pinned both root causes:
+>
+> BUG 1 — **flexible-array-member initializer emitted ONLY its first element.**
+> `mp_obj_type_t` ends in `const void *slots[]`.  minic's `agg_emit_struct`
+> routed the braced `.slots = {make_new, print, ...}` through
+> `agg_emit_value`→`agg_emit_scalar` (a flex member has `count==0`), emitting
+> just `slots[0]`.  So `slots[1]` (the `print` fn) read past-the-array garbage
+> and the far call jumped wild.  Verified in the emitted data: `_mp_type_int`
+> stopped after `dd _mp_obj_int_make_new` (`; end data`).  FIX (`minic.y`):
+> detect `m->isflex`, count brace elements (new `agg_brace_count`, honours
+> `[k]=v`), emit the whole array via `agg_emit_array`.
+>
+> BUG 2 — **array-of-pointers subscript used the wrong stride.**
+> `mp_obj_get_type` returns `types[(uintptr_t)o & 0xf]` from a static
+> `const mp_obj_type_t *const types[]`.  `array_vartyp` registered the array
+> with the ELEMENT (pointer) type itself, so `types[i]` scaled by
+> `sizeof(*T)` (= 20, `sizeof(mp_obj_type_t)`) instead of `sizeof(T*)` (= 4).
+> The asm showed `mov bx,20; imul bx` — `types[7]` indexed at base+140, way
+> out of the 16×4-byte array → a wrong-segment type ptr.  FIX (`minic.y`):
+> `array_vartyp` always returns `IDIR(elemtyp)` (a C array of T decays to T*;
+> `T *arr[]` decays to `T **`).  Byte-identical for scalar/struct-element
+> arrays; only pointer-element arrays were mistyped.  Asm after the fix:
+> `mov bx,4; imul bx`.
+>
+> VERIFIED on the real Victor: with both fixes the slot dispatch reaches
+> `mp_obj_int_print` and prints `3` (`Y2 c330 c330 5a80 Z0 3 Y3` — returned
+> type seg == &mp_type_int seg, slot fn ptr in a real code segment).  Gate
+> probe `slotarray_probe.c` (compact + far-static, MicroPython's config)
+> exercises BOTH bugs (a flexible fn-ptr-member dispatch + a runtime-indexed
+> `int *` array); passes on the Victor via the MAME/SASI harness.
+> fnptrprobe re-verified unchanged.  **NOTE: DOSBox was UNAVAILABLE in this
+> environment** (even the known-good sigencode_probe produced "no OUT.TXT"
+> via `tools/run-dos-exe.sh`; `open -gjWn -a dosbox.app` never captured), so
+> all probe validation used `tools/run-victor-sasi.sh` / `run-victor-mame.sh`
+> (the authoritative real-hardware path).  The DOS-gate count couldn't be
+> re-measured locally; rerun `tools/test-dos.sh` where DOSBox works.
+>
+> SIZE NOTE: the BUG 1 fix correctly emits all the previously-dropped type
+> slots, so the compact far-data mpython body grew 823360 → **824928 B**,
+> OVER the ~824.2KB Victor load ceiling.  To get a loadable image for the
+> milestone run, `ports/dos8086/mpconfigport.h` `MICROPY_HEAP_SIZE` was
+> reduced 24576 → **22528** (still ample for `print(1+2)` with working
+> gc_collect; print isn't even called yet so heap is moot for now) → body
+> 822880, loads.  This is an UNCOMMITTED micropython-tree change; revisit
+> with a real shrink lever (the ceiling is the recurring wall — see §2b/§1z).
+>
+> **THE NEW blocker — `print(1+2)`'s MODULE BYTECODE never calls `print`.**
+> With both fixes + the smaller heap, the full pipeline runs clean:
+> `C1..C4 D0 D1 D2 D3 D4 C5` (parse, compile, execute all complete, NO
+> exception) — but STILL no `3`.  Since the print OUTPUT path is now PROVEN
+> working (the slot dispatch printed `3` from main.c's direct call), the only
+> remaining explanation is that the compiled module function doesn't call
+> `print`.  CONFIRMED on the Victor: a marker at `mp_call_function_n_kw`
+> (py/runtime.c — the universal call dispatcher the VM's MP_BC_CALL_FUNCTION
+> at py/vm.c:984 routes through) printing `F<n_args>` fired EXACTLY ONCE as
+> `F0` (the outer `mp_call_function_0(module_fun)` from main.c) — there was
+> NO second call (no `F1`).  So the module function executes and returns
+> cleanly but never dispatches a `CALL_FUNCTION` for `print`.  This is a
+> COMPILE or VM bug (the expression statement `print(1+2)` either compiled to
+> bytecode with no working CALL, or the VM exits/mis-dispatches before
+> reaching MP_BC_CALL_FUNCTION).  NEXT: instrument the VM opcode dispatch loop
+> in `py/vm.c` (a minimal per-opcode marker, or specifically the
+> MP_BC_CALL_FUNCTION / MP_BC_LOAD_NAME / MP_BC_LOAD_GLOBAL / MP_BC_RETURN
+> entries) and/or dump the module function's raw bytecode to see whether the
+> CALL opcode is present (compile bug) or present-but-not-executed (VM
+> dispatch bug — likely another Kl/far-data miscompile in the
+> computed-goto/opcode-fetch).  Use 16-bit-only debug printers (no Kl shift).
+> Build: `bash tools/build-micropython.sh --model=compact --keep-going`; run:
+> `tools/run-victor-sasi.sh build/mp-link/mpython.exe 200`.  The
+> micropython tree is CLEAN except the untracked `ports/dos8086/` port (C/D
+> markers in do_str + the 22528 heap).  Finding 3 (raised-exc-obj far ptr
+> loses its segment) is STILL open but does NOT block (no exception raised).
 
 > **§2l (DONE 2026-06-01, committed `ed5f35b`) — the §2k "uncaught exception
 > during mp_compile" is FIXED.  It was a general QBE i8086 BACKEND codegen bug in
