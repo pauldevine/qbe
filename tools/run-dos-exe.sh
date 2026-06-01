@@ -36,6 +36,7 @@ if [ -z "$EXE" ] || [ ! -f "$EXE" ]; then
 fi
 
 # Locate DOSBox.
+DOSBOX_APP=""
 if [ -n "${DOSBOX:-}" ] && [ -x "$DOSBOX" ]; then
 	DOSBOX_BIN="$DOSBOX"
 elif command -v dosbox >/dev/null 2>&1; then
@@ -46,6 +47,12 @@ else
 	echo "run-dos-exe: DOSBox not found (set \$DOSBOX or install dosbox)" >&2
 	exit 77
 fi
+
+# If the resolved binary lives inside a macOS .app bundle, remember the bundle
+# so we can launch it via `open` (see run_dosbox below).
+case "$DOSBOX_BIN" in
+	*.app/Contents/MacOS/*) DOSBOX_APP="${DOSBOX_BIN%.app/Contents/MacOS/*}.app" ;;
+esac
 
 EXE_DIR="$(cd "$(dirname "$EXE")" && pwd)"
 EXE_BASE="$(basename "$EXE")"
@@ -70,15 +77,34 @@ $SHORT_NAME > OUT.TXT
 exit
 EOF
 
-# DOSBox writes copious chatter to its own stdout/stderr.  We don't need
-# any of it for the diff — silence everything except a non-zero exit.
+# Launch DOSBox unobtrusively.  DOSBox writes copious chatter to its own
+# stdout/stderr; we don't need any of it for the diff, so silence everything
+# except a non-zero exit.
 #
-# SDL_VIDEODRIVER=dummy (+ dummy audio) runs DOSBox truly headless: no SDL
-# window is created, so a gate run never opens windows or steals keyboard
-# focus from whatever the user is doing on the same machine.  Output still
-# flows through the OUT.TXT redirect, which is independent of the display.
-if ! SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
-		"$DOSBOX_BIN" -conf "$CONF" -exit >/dev/null 2>&1; then
+# On macOS, route through `open` so the emulator never steals foreground focus
+# or grabs the keyboard from whatever the user is doing on the same machine:
+#   -g  do not bring the application to the foreground
+#   -j  launch it hidden
+#   -W  wait until it exits (and propagate its exit status)
+#   -n  always start a fresh instance (don't reactivate one the user has open)
+#   --args  forward the DOSBox flags to the app
+# (Environment variables do NOT propagate through `open`/launchd, so the SDL
+# dummy-video driver can't be used on this path — `-g -j` is what keeps it
+# from disturbing the user.)  Output still flows through the in-DOS OUT.TXT
+# redirect, which is independent of how the emulator window is presented.
+#
+# Elsewhere (Linux, or $DOSBOX pointing at a raw binary), exec the binary
+# directly with the SDL dummy drivers for a truly headless, windowless run.
+run_dosbox() {
+	if [ -n "$DOSBOX_APP" ]; then
+		open -gjWn -a "$DOSBOX_APP" --args -conf "$CONF" -exit
+	else
+		SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
+			"$DOSBOX_BIN" -conf "$CONF" -exit
+	fi
+}
+
+if ! run_dosbox >/dev/null 2>&1; then
 	echo "run-dos-exe: DOSBox exited non-zero" >&2
 	exit 1
 fi
