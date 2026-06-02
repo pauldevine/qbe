@@ -1,3 +1,163 @@
+# Next session (§2o DONE — 🎉 `print(1+2)` PRINTS `3` ON THE REAL VICTOR. The §2n "hangs inside `mp_arg_parse_all`" blocker was a minic call-ABI bug: a NARROW integer literal (`NULL`/`0`, always `w`) handed to a WIDE far-pointer parameter (`l`) was NOT widened, so the 2-byte push shifted every later stack arg. FIXED in `minic.y::coerce_arg`. DOS gate 169→172 green, `make check` green, 111 s/r 0 r/r. THE FIRST PYTHON STATEMENT RUNS END-TO-END ON 1982 HARDWARE.)
+
+> **§2o (DONE 2026-06-01) — 🎉 MILESTONE: `print(1+2)` → `3` on the real Victor
+> 9000 (MAME/SASI), reproducible.  The §2n "hangs inside `mp_arg_parse_all`"
+> blocker was a minic call-argument-width bug — the REVERSE of the §2h/§2i
+> wide→narrow shift.  DOS gate 169→**172**, `make check` green, 111 s/r 0 r/r
+> (C-action only).  Fix + probe committed.**
+>
+> ROOT CAUSE (found by reading the generated SSA/asm — the static method, no
+> MAME needed to localize it): `mp_builtin_print` calls
+> `mp_arg_parse_all(0, NULL, kw_args, MP_ARRAY_SIZE(allowed_args), allowed_args,
+> u.args)`.  The 2nd parameter `pos` is `const mp_obj_t *` = a far pointer (`l`,
+> 4 bytes under far-data), but minic typed the `NULL` literal as integer `0`
+> (`w`, 2 bytes) and emitted `call $mp_arg_parse_all(w 0, w 0, l %t7, w %t8, ...)`
+> — a 2-byte push where the callee reads 4.  Every later stack arg shifted 2
+> bytes: `n_allowed`, `allowed`, and `out_vals` were all read from the wrong
+> slots, so the arg-parse loop ran wild over the 8-byte `u.args` stack union and
+> corrupted the return frame → hang/reboot, before `3` could print.  (The
+> `n_allowed = MP_ARRAY_SIZE = sizeof/sizeof` was a RED HERRING — it emits
+> `%t8 =w div 16, 8` and the asm `idiv` correctly yields 2.)
+>
+> WHY §2i DIDN'T COVER IT: §2i's `coerce_arg` only fired when BOTH the arg and
+> the param were INTEGER scalars (`arg_int && par_int`), to narrow/widen
+> int<->int.  A pointer param has `KIND==PTR`, so `par_int` was false and the
+> `NULL` arg was left as `w`.  But pointers are integers at the IR level (`w`
+> near / `l` far), so a width mismatch against a pointer param shifts the stack
+> exactly the same way.
+>
+> FIX (`minic.y::coerce_arg`): broaden the scalar test from "is an integer kind"
+> to "is NOT a float and NOT a by-value aggregate" for both arg and param —
+> i.e. treat pointers/functions as width-relevant scalars.  The existing
+> widen (`w`→`l`: Con→retype to LNG, else extuw/sext) and narrow (`l`→`w`)
+> machinery then matches the arg's IR class to the param's.  `NULL`/`0` to a far
+> pointer param now emits `l 0`.  Floats and aggregates still bypass (aggregates
+> cross by pointer via eval_arg/emit_arg; float<->int would be a real conversion,
+> not a width fix).  Verified: the regenerated SSA is now
+> `call $mp_arg_parse_all(w 0, l 0, l %t7, w %t8, ...)`.
+>
+> PROBE: `minic/dos/examples/nullarg_probe.c` (+golden), gated medium + compact +
+> large.  Mirrors the bug shape — `report(0, NULL, 5, 7L)` (NULL as a non-last
+> far-pointer arg, scalars after it) and `fill_one(NULL, 42, &dst)` (out-pointer
+> last must still land).  Medium is a no-op (near pointers are `w`); compact/large
+> are bug-loud without the fix.  This is the reverse companion to
+> `argwiden_probe.c`.  See [[minic-wide-arg-narrow-param]].
+>
+> ON-TARGET RESULT (clean compact far-data build, body 823392 B, under the
+> ~824.2KB Victor ceiling, 106/106 + --gc-sections): the full trace is
+> **`C1 C2 C3 C4 D0 D1 D2 D3 3 D4 C5`** — parse (D2), compile (D3), then the
+> builtin `print` emits **`3`**, then the module call returns clean (D4).
+> Reproducible across runs.  **The first Python statement executes end-to-end on
+> 1982 hardware.**
+>
+> NEXT (no blocker — pick a direction):
+>  - **Broaden the REPL** to multi-statement / arithmetic / variables / `for`
+>    and fix whatever the next latent Kl/far codegen bug is (the fragility notes
+>    below still apply — layout shifts can flip a latent bug).
+>  - **Size headroom** is the recurring wall (~800 B under the ceiling).  A real
+>    shrink lever (dead-code, smaller heap-with-real-gc, code-seg packing) buys
+>    room for a bigger feature set / instrumentation.  See §2b/§1z.
+>  - Finding 3 (raised-exception-object far ptr loses its SEGMENT on the raise
+>    path) is STILL open — needed before any uncaught exception can print
+>    correctly; instrument `mp_raise`→`nlr_raise`→`nlr_jump`.
+>  - MP tree state: `py/parse.c` = the §2n 4-byte-alignment fix (UNCOMMITTED in
+>    the micropython repo, KEEP).  `ports/dos8086/` untracked (main.c C/D phase
+>    markers + heap 20480 + real gc_collect).  All other py/*.c CLEAN.
+>  - Build: `bash tools/build-micropython.sh --model=compact --keep-going`;
+>    run FOREGROUND: `tools/run-victor-sasi.sh build/mp-link/mpython.exe 250`
+>    (re-run on empty serial — MAME flakiness).
+>
+> ---
+>
+# Next session (§2n DONE — the §2m "module bytecode never calls print" blocker was TWO 4-byte-ALIGNMENT root causes. (1) parse-node chunk misalignment → compile emitted garbage; (2) const-object data misalignment (asm_to_omf dropped `.balign`) → call dispatch crashed. Both FIXED. `print(1+2)` now compiles CORRECTLY, the VM dispatches the calls, and `mp_builtin_print` is ENTERED. NEW blocker = hangs INSIDE `mp_arg_parse_all`. DOS gate 169/169 green; asm_to_omf fix committed `3f9f8c1`.)
+
+> **§2n (DONE 2026-06-01) — the §2m "module bytecode never calls print" blocker
+> was TWO independent 4-byte-ALIGNMENT bugs.  MicroPython's tagged pointers
+> (`mp_obj_t` AND parse-node `mp_parse_node_t`) store kind/tag bits in a
+> pointer's low 2 bits and REQUIRE every object & parse-node struct to be
+> >=4-byte aligned (`(p & 3) == 0`).  On 16-bit (size_t=2, far ptr=4) two places
+> violated that; on 32/64-bit the headers/objects are naturally >=4-aligned so
+> upstream never hits it.  DOS gate 169/169 green.**
+>
+> FIX 1 — **parse-chunk header misalignment** (`~/projects/micropython/py/parse.c`,
+> KEPT uncommitted in the MP tree).  `mp_parse_chunk_t` header = `size_t alloc`(2)
+> + `union{size_t used; chunk* next}`(4) = **6 bytes** on i8086, so `chunk->data`
+> — and hence EVERY parse-node struct — landed at offset ≡2 (mod 4).  Every
+> struct node was then misclassified as a LEAF (`MP_PARSE_NODE_IS_STRUCT` =
+> `(pn&3)==0` failed), so `compile_node(scope->pn)` saw the whole `print(1+2)`
+> tree as a single `MP_PARSE_NODE_STRING` leaf → emitted ONE bogus
+> `LOAD_CONST_STRING` (+ the module epilogue), never a CALL.  FIX in
+> `parser_alloc()`: round each request up to a 4-multiple and align the FIRST
+> allocation within each fresh chunk to a 4-byte boundary (subsequent allocs stay
+> aligned since all node requests are 4-multiples; the chunk base from m_new is
+> already GC-block(16)-aligned).
+>
+> FIX 2 — **const-object data misalignment** (qbe `tools/asm_to_omf.py`,
+> COMMITTED `3f9f8c1`).  asm_to_omf DROPPED `.balign`/`.p2align`, so minic's
+> careful 4-/16-byte alignment of file-scope aggregates collapsed to the
+> segment's word(2) alignment.  `_mp_builtin_print_obj` landed at off=0x00DE
+> (`0xDE & 3 == 2`) → `mp_obj_is_obj(&print_obj)` returned false →
+> `mp_obj_get_type` fell to `types[o & 0xf]` and returned the WRONG type →
+> `type->slots[slot_index_call-1]` dispatch crashed before reaching the builtin.
+> FIX: translate `.balign N`/`.p2align k` to NASM `align` in the data/bss/`_HUGE_`
+> buckets (drop only in `.text` — perf-only), and declare the data/bss segments
+> `align=16` so the linker paragraph-aligns them and NASM accepts the in-segment
+> align directives.  After the fix `_mp_builtin_print_obj` is at off=0x00E8
+> (4-aligned).  Gate byte-output unchanged → **169/169 ok**.
+>
+> HOW FOUND (decisive method = read artifacts + minimal markers): instrumented
+> the VM dispatch loop (`py/vm.c`, switch on `*ip`) → executed opcodes were
+> `10 51 63` (LOAD_CONST_STRING + LOAD_CONST_NONE + RETURN), NOT the expected
+> `11..11..83 34 34 59 51 63`.  Dumped the raw module bytecode (`08 02 07 10 81
+> a0 3f 51 63`) and a reference via mpy-cross.  Traced `compile_node` →
+> `compile_node(root)` took the `MP_PARSE_NODE_STRING` LEAF branch (root low
+> nibble 6) → parse-chunk header math (6 bytes) pinned FIX 1.  After FIX 1:
+> `CsCrKK` ×4 (compile correct, both call_function emits) + `F1` (VM dispatches a
+> real CALL_FUNCTION) but a CRASH in the call dispatch → linked map showed
+> `_mp_builtin_print_obj` at off=0xDE (2 mod 4) → asm_to_omf `.balign` drop → FIX 2.
+> After BOTH: trace `C1..D3 FF P0` — compile completes, both calls dispatch, and
+> **`mp_builtin_print` is ENTERED** (P0 marker).
+>
+> **THE NEW blocker — `print(1+2)` hangs INSIDE `mp_arg_parse_all`.**  Trace
+> reaches `P0` (top of `mp_builtin_print` in py/modbuiltins.c) but the very next
+> call, `mp_arg_parse_all(0, NULL, kw_args, n_allowed, allowed_args, u.args)`,
+> never returns (a "Pa" marker right after it never printed; print(3) emits no
+> `3`, and after the 2nd call the machine hangs/reboots).  `mp_map_lookup` on the
+> empty fixed kw map is safe (linear scan, no `%alloc` div-by-zero — it's
+> `is_ordered`).  PRIME SUSPECTS: (a) reading the function-local `static const
+> mp_arg_t allowed_args[]` from far data (alignment / far-load of the struct
+> array), or (b) a miscomputed `n_allowed = MP_ARRAY_SIZE(allowed_args)` =
+> `sizeof(arr)/sizeof(arr[0])` on a local static-const struct array → loop runs
+> wild.  NEXT: add a 16-bit marker just inside `mp_arg_parse_all` and one in the
+> loop (put any `extern void mp_hal_stdout_tx_strn_cooked(const char*, size_t);`
+> at FILE scope — an in-FUNCTION-body prototype made minic parse-error), OR
+> verify `sizeof(allowed_args)` / each `allowed[i].flags` read on-target; print
+> `n_allowed`.  Suspect a remaining far-load/sizeof miscompile.
+>
+> **CAVEATS for next session (the build is fragile):**
+>  - **Heap**: heap=16384 is TOO SMALL — `mp_compile` exhausts it and the trace
+>    STOPS AT D2 (it's OOM, not a codegen bug).  heap=20480 (current
+>    mpconfigport.h) compiles fine.  heap=22528 also works but the alignment-fix
+>    bloat pushes the body to 824816 (> ~824192 ceiling) → won't load.  Keep heap
+>    <= 20480 with the alignment fix.
+>  - **Layout fragility**: tiny instrumentation changes flip a LATENT compile-path
+>    Kl/far codegen bug — symptoms range from D2-stop to EMPTY serial output.
+>    Add markers in MINIMAL increments and re-confirm D3 each time.  (The 3-marker
+>    P0/Pa/P1 build compiled; adding 2 more flipped it to D2.)  This still hints
+>    more latent Kl/far bugs remain (the D3 success is not robust to layout).
+>  - **MAME flakiness**: the SASI harness intermittently produces EMPTY serial
+>    output (exit 0, no C1).  Just RE-RUN.  Run FOREGROUND (background runs seem
+>    to lose serial more often).
+>  - Build: `bash tools/build-micropython.sh --model=compact --keep-going`
+>    (full, ~1min, applies alignment everywhere — REQUIRED after touching any TU
+>    if you want consistent alignment), or `tools/recompile-mp-tu.sh <base> <src>`
+>    (one TU + relink).  Run: `tools/run-victor-sasi.sh build/mp-link/mpython.exe 250`.
+>  - MP tree state: `py/parse.c` = the alignment FIX (uncommitted, KEEP).
+>    `ports/dos8086/` untracked (main.c has C1..D4/DE phase markers, gc_collect is
+>    the real collector, heap 20480).  All other py/*.c reverted CLEAN.
+>
+> ---
+>
 # Next session (§2m DONE — the §2l "print emits no visible output" blocker was TWO minic static-data/typing bugs in the int-print SLOT DISPATCH, now FIXED and committed `2fd2f4b`. `make check` green, both proven on the real Victor. NEW blocker = `print(1+2)`'s MODULE BYTECODE never calls `print` at all — a compile/VM bug, NOT an output bug.)
 
 > **§2m (DONE 2026-06-01, committed `2fd2f4b`) — the §2l "print emits no

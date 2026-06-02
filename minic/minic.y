@@ -2227,10 +2227,16 @@ coerce_arg(Symb s, unsigned ptyp)
 	int arg_int, par_int;
 	char ac, pc;
 
-	arg_int = (KIND(s.ctyp) == INT || KIND(s.ctyp) == CHR || KIND(s.ctyp) == LNG)
-	          && !ISFLOAT(s.ctyp);
-	par_int = (KIND(ptyp) == INT || KIND(ptyp) == CHR || KIND(ptyp) == LNG)
-	          && !ISFLOAT(ptyp);
+	/* Width-coerce any scalar arg whose IR class differs from the declared
+	 * param's: pointers/functions are integers at the IR level (`w' near,
+	 * `l' far), so an integer literal NULL/0 (always `w') handed to a far
+	 * pointer param must widen to `l' or the 2-byte push shifts every later
+	 * stack arg (the mp_arg_parse_all(0, NULL, ...) hang).  Only floats and
+	 * by-value aggregates are excluded (aggregates cross by pointer via
+	 * eval_arg/emit_arg; mixing float<->int here would be a real conversion,
+	 * not a width fix). */
+	arg_int = !ISFLOAT(s.ctyp) && !is_aggr(s.ctyp);
+	par_int = !ISFLOAT(ptyp) && !is_aggr(ptyp);
 	if (!arg_int || !par_int)
 		return s;
 	ac = irtyp_ret(s.ctyp);   /* 'w' or 'l' */
