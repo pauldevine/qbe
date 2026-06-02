@@ -31,11 +31,9 @@
  * correct code segment in every model.  Either way the call-site coercion under
  * test is identical.
  *
- * NOTE: a fn-ptr declared via a TYPEDEF (`typedef int (*F)(...); F fp;') is NOT
- * yet coerced — the typedef name is lost at the variable declaration, so its
- * recorded prototype doesn't transfer.  MicroPython's method tables and plain
- * `T (*fp)(...)' declarators are covered; the typedef-variable form is a noted
- * gap (not exercised by the §2q path).
+ * NOTE: the fn-ptr-via-TYPEDEF form (`typedef int (*F)(...); F fp;') is now
+ * also coerced (§2s) — the proto is recorded on the typedef entry and
+ * transfers to the variable/member.  See typedef_fnptr_probe.c.
  */
 
 #include <stdio.h>

@@ -365,6 +365,11 @@ struct {
 	unsigned ctyp;
 	int arraydim;        /* >0 => array typedef (`typedef int jmp_buf[8]`) */
 	unsigned arrayelem;  /* element ctyp, valid only when arraydim > 0 */
+	int fpid;            /* fn-ptr prototype index into fpproto[] (§2s), or -1,
+	                      * for a `typedef RET (*F)(PARAMS)' typedef.  Surfaced
+	                      * by typhget() into g_td_fpid so a variable/member
+	                      * declared with the typedef name inherits the proto
+	                      * and its indirect-call args are coerced (§2q gap). */
 } typh[NTyp];
 
 /* Set by typhget() (i.e. whenever the lexer resolves a TNAME) to the
@@ -375,6 +380,10 @@ struct {
  * rules, so a stale dim never leaks into a following plain declaration. */
 int g_td_arraydim = 0;
 unsigned g_td_arrayelem = 0;
+int g_td_fpid = -1;  /* fn-ptr proto index of the typedef the lexer last
+                      * resolved to a TNAME (§2s), or -1.  Consumed by the
+                      * var/member declaration rules to inherit the proto;
+                      * reset like g_td_arraydim so it never leaks forward. */
 
 /* Struct/union member */
 enum { NMember = 256 };
@@ -956,6 +965,7 @@ typhadd(char *v, unsigned ctyp)
 			typh[h].ctyp = ctyp;
 			typh[h].arraydim = 0;
 			typh[h].arrayelem = 0;
+			typh[h].fpid = -1;
 			return;
 		}
 		if (strcmp(typh[h].v, v) == 0)
@@ -982,6 +992,7 @@ typhadd_array(char *v, unsigned elemctyp, int dim)
 			typh[h].ctyp = IDIR(elemctyp);
 			typh[h].arraydim = dim;
 			typh[h].arrayelem = elemctyp;
+			typh[h].fpid = -1;
 			return;
 		}
 		if (strcmp(typh[h].v, v) == 0)
@@ -1003,6 +1014,7 @@ typhget(char *v, unsigned *ctyp)
 			*ctyp = typh[h].ctyp;
 			g_td_arraydim = typh[h].arraydim;
 			g_td_arrayelem = typh[h].arrayelem;
+			g_td_fpid = typh[h].fpid;
 			return 1;
 		}
 		if (typh[h].v[0] == 0)
@@ -1010,6 +1022,30 @@ typhget(char *v, unsigned *ctyp)
 		h = (h+1) % NTyp;
 	} while(h != h0);
 	return 0;
+}
+
+/* Record a fn-ptr prototype index on an existing typedef entry (§2s), so a
+ * variable/member later declared with the typedef name inherits it and its
+ * indirect-call arguments are coerced.  Called by the fn-ptr typedef rules
+ * right after typhadd(). */
+void
+typhset_fpid(char *v, int fpid)
+{
+	unsigned h0, h;
+
+	if (fpid < 0)
+		return;
+	h0 = hash(v) % NTyp;
+	h = h0;
+	do {
+		if (strcmp(typh[h].v, v) == 0) {
+			typh[h].fpid = fpid;
+			return;
+		}
+		if (typh[h].v[0] == 0)
+			return;
+		h = (h+1) % NTyp;
+	} while(h != h0);
 }
 
 /* Probe the symbol table for the array flag of a variable.  varh[]
@@ -6235,6 +6271,7 @@ tdcl: TYPEDEF type IDENT ';'
 	/* Function pointer typedef: typedef int (*callback_t)(int, int); */
 	unsigned fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
 	typhadd($5->u.v, fptr_type);
+	typhset_fpid($5->u.v, fpproto_alloc($8));  /* coerce args at `fp(...)' (§2s) */
 }
     ;
 
@@ -6336,8 +6373,13 @@ smembers:
 	 * full array, not a bare pointer. */
 	if (g_td_arraydim > 0)
 		structaddarrmember(curstruct, $3->u.v, g_td_arrayelem, g_td_arraydim);
-	else
+	else {
 		structaddmember(curstruct, $3->u.v, $2);
+		/* fn-ptr typedef member (`F cb;`): inherit the proto so
+		 * `obj->cb(...)' coerces args (§2s). */
+		if (g_td_fpid >= 0)
+			structset_last_fpid(curstruct, g_td_fpid);
+	}
 }
         | smembers type IDENT '[' expr ']' ';'
 {
@@ -7016,6 +7058,10 @@ dcls:
 	} else {
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
+	/* fn-ptr typedef variable (`F fp;` where `typedef RET(*F)(...)`):
+	 * inherit the proto so an indirect call `fp(...)' coerces args (§2s). */
+	if (g_td_fpid >= 0)
+		varsetfpid(v, g_td_fpid);
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), s);
 
 	/* Implicit zero-init only when the struct has a bitfield (see
@@ -7037,6 +7083,10 @@ dcls:
 	v = $3->u.v;
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
+	/* fn-ptr typedef variable with initializer (`F fp = somefunc;`):
+	 * inherit the proto so a later indirect call coerces args (§2s). */
+	if (g_td_fpid >= 0)
+		varsetfpid(v, g_td_fpid);
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), s);
 	/* Evaluate initializer as `IDENT = expr` */
 	init_node = mknode('=', $3, $5);
@@ -7440,6 +7490,7 @@ dcls:
 	 * table, which is fine as long as the name does not clash.  Mirrors
 	 * the file-scope fnptr-typedef rule.  Needed by py stream.c. */
 	typhadd($6->u.v, IDIR(FUNC($3)));
+	typhset_fpid($6->u.v, fpproto_alloc($9));  /* coerce args at `fp(...)' (§2s) */
 }
     ;
 
@@ -7475,11 +7526,11 @@ gival: expr                   { $$ = $1; }
      | gaggr                  { $$ = $1; }
      ;
 
-type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; }
-        | type '*' TFAR              { $$ = IDIR_FAR($1); g_td_arraydim = 0; }
-        | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; }
-        | type '*' CONST             { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; }
-        | type '*' VOLATILE          { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; }
+type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_td_fpid = -1; }
+        | type '*' TFAR              { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_td_fpid = -1; }
+        | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; }
+        | type '*' CONST             { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; }
+        | type '*' VOLATILE          { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; }
         | TFAR type                  { $$ = $2 | FAR; }
         | TCHAR                      { $$ = CHR; }
     | TSHORT                     { $$ = INT | SHORT; }
@@ -8882,6 +8933,7 @@ yylex_inner()
 				 * over from a previous TNAME so it can't leak into
 				 * this declaration. */
 				g_td_arraydim = 0;
+				g_td_fpid = -1;
 				return kwds[i].t;
 			}
 		yylval.n = mknode('V', 0, 0);
@@ -8921,6 +8973,7 @@ yylex_inner()
 				    || prevtok == TBOOL || prevtok == TNAME) {
 					g_td_arraydim = 0;
 					g_td_arrayelem = 0;
+					g_td_fpid = -1;
 					yylval.n = vn;
 					return IDENT;
 				}
