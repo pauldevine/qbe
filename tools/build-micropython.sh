@@ -144,12 +144,17 @@ OBJS=("$OUT_DIR/crt0_exe.obj" "${pass_objs[@]}" "$OUT_DIR/libstub_exe.obj")
 # cross-segment dependency is an OMF fixup).  This is the biggest size lever:
 # print(1+2) touches a small fraction of the curated core, so the whole image
 # drops well under the ~896KB Victor 9000 ceiling.  See NEXT_SESSION.md §2b.
+# --pack-code coalesces the gc-surviving per-function CODE segments back into a
+# few <=64KB buckets, reclaiming the per-function paragraph padding (~5KB on the
+# core subset — see NEXT_SESSION.md §2p).  Safe because every code reference is
+# an offset-aware OMF fixup and near jumps stay intra-function.
 if "$QBE_DIR/tools/omf_link.py" \
 		-o "$OUT_DIR/mpython.exe" \
 		--map "$OUT_DIR/mpython.map" \
 		--entry _start \
 		--stack-size 8192 \
 		--gc-sections \
+		--pack-code \
 		"${OBJS[@]}" 2>"$OUT_DIR/link.err"; then
 	echo "  OK: $OUT_DIR/mpython.exe ($(wc -c <"$OUT_DIR/mpython.exe") bytes)"
 else

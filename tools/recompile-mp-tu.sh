@@ -32,4 +32,4 @@ tools/asm_to_omf.py "--model=$MODEL" --far-static-data "$base" "$OUT_DIR/$base.a
 nasm -w-label-redef-late -f obj "$OUT_DIR/$base.omf.asm" -o "$OUT_DIR/$base.obj" 2>"$OUT_DIR/$base.err" || { echo "NASM_FAIL $base"; cat "$OUT_DIR/$base.err"; exit 1; }
 echo "$base.obj rebuilt"
 OBJS=(); while IFS= read -r l; do OBJS+=("$l"); done < /tmp/mp_objs.txt
-tools/omf_link.py -o "$OUT_DIR/mpython.exe" --map "$OUT_DIR/mpython.map" --entry _start --stack-size 8192 --gc-sections "${OBJS[@]}" 2>&1 | grep -E "image|stripped"
+tools/omf_link.py -o "$OUT_DIR/mpython.exe" --map "$OUT_DIR/mpython.map" --entry _start --stack-size 8192 --gc-sections --pack-code "${OBJS[@]}" 2>&1 | grep -E "image|stripped"

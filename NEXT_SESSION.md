@@ -1,4 +1,69 @@
-# Next session (§2o DONE — 🎉 `print(1+2)` PRINTS `3` ON THE REAL VICTOR. The §2n "hangs inside `mp_arg_parse_all`" blocker was a minic call-ABI bug: a NARROW integer literal (`NULL`/`0`, always `w`) handed to a WIDE far-pointer parameter (`l`) was NOT widened, so the 2-byte push shifted every later stack arg. FIXED in `minic.y::coerce_arg`. DOS gate 169→172 green, `make check` green, 111 s/r 0 r/r. THE FIRST PYTHON STATEMENT RUNS END-TO-END ON 1982 HARDWARE.)
+# Next session (§2p DONE — size shrink lever: `omf_link.py --pack-code` coalesces the gc-surviving per-function CODE segments back into a few <=64KB buckets, reclaiming the per-function paragraph padding. Compact far-data mpython image body 542528→537360 B (−5168), so the ~800 B of Victor headroom becomes ~6 KB. Flag-off is BYTE-IDENTICAL to the prior link (default path unchanged); flag wired into build-micropython.sh + recompile-mp-tu.sh. Packed mpython VERIFIED on the real Victor: full trace `C1 C2 C3 C4 D0 D1 D2 D3 3 D4 C5` — still prints `3`. No minic/qbe-backend change.)
+
+> **§2p (DONE 2026-06-01) — SIZE SHRINK LEVER: `omf_link.py --pack-code`.**
+> The user picked "size headroom" (the recurring wall — §2o shipped with only
+> ~800 B under the ~824 KB Victor load ceiling).  This is a capability-free win
+> (no heap/feature cut) entirely in the linker.
+>
+> ROOT OF THE WASTE: `--gc-sections` strips dead code at PER-FUNCTION
+> granularity, so `asm_to_omf.py` emits one CODE segment per function and the
+> linker placed each at its own paragraph base.  788 surviving CODE segments ×
+> up to 15 B of paragraph padding = **5,855 B of inter-segment padding** in the
+> core-subset image (measured from the map).
+>
+> FIX (`tools/omf_link.py`, opt-in `--pack-code`): after gc-sections decides
+> liveness, greedily coalesce the live CODE segments (in module/SEGDEF order)
+> into <=64 KB buckets (`CODEPACK<n>`), appending each function WORD-aligned
+> instead of paragraph-aligned.  Functions are reached by offset within the
+> bucket, not by their own segment selector, so paragraph alignment is
+> unnecessary; the bucket itself is paragraph-aligned by `_layout_segments`.
+> SOUND because every code reference is an offset-aware OMF fixup —
+> `_resolve_target` returns `(out_idx, base+disp)` from `seg_map`, the 16-bit
+> offset patch computes `tgt_abs_byte - frame_byte` (= the function's offset
+> within its bucket), the SEG selector writes the bucket's `para_base`, and the
+> far-ptr patch uses `tgt_byte_in_out`.  Self-relative (near) jumps stay
+> intra-function, hence intra-bucket, so their displacement is preserved.  The
+> DATA path already coalesces exactly this way (`_place_coalesced`).  Bucket cap
+> `CODE_BUCKET_MAX = 65500` keeps every offset < 65536.
+>
+> RESULT: 788 CODE segs → **7 buckets**; inter-seg padding 5,855 → 341 B;
+> compact far-data mpython image body **542,528 → 537,360 B (−5,168)**.  Headroom
+> under the Victor ceiling goes from ~800 B to ~6 KB.  Relinking the SAME objects
+> with the flag OFF is **byte-identical** to the committed `mpython.exe` (proves
+> the default path is untouched — stronger than re-running the gate, which only
+> ever links flag-off; the DOS gate is therefore green by construction).
+>
+> VERIFIED ON THE REAL VICTOR (MAME/SASI, packed image): full trace
+> `C1 C2 C3 C4 D0 D1 D2 D3 3 D4 C5` — parse, compile, `print` emits `3`, module
+> call returns clean.  Identical behaviour to §2o, 5 KB lighter.  (NB on a
+> harness gotcha — NOT "MAME flakiness": run-victor-sasi.sh is DETERMINISTIC
+> (fixed disk copy + `-seconds_to_run` + `-nothrottle`), so a deterministic
+> emulator can't be intermittently flaky and a fixed boot can't make the guest
+> nondeterministically hang.  My first run produced empty serial because it was
+> auto-BACKGROUNDED by the shell tool and then torn down — the script's
+> `trap cleanup EXIT INT TERM` (line 80) `kill -9`s MAME on any signal, and
+> there was NO `mame` process at all when checked (a hung guest would show a
+> live MAME pinning a core).  Run it in the FOREGROUND with an explicit wait and
+> it completes every time.  If serial is ever empty, debug it for real — inspect
+> the raw `$CAP`, check for the `__V9BEGIN__` sentinel and whether MAME reached
+> `-seconds_to_run` — do not just re-roll.)  Flag wired into
+> `tools/build-micropython.sh` and
+> `tools/recompile-mp-tu.sh`; `tools/test_omf_link.sh` test1 (MZ correctness)
+> passes.
+>
+> FURTHER LEVERS NOT YET TAKEN: the 45 per-module `FAR_DATA` segments are still
+> paragraph-distinct (they carry far-addressed static data, each reached by its
+> own `seg _sym` selector, so they CANNOT be blindly coalesced like CODE — a
+> coalesced one would need every contained symbol re-based, doable but a bigger
+> change).  Other directions from §2o remain open: broaden the REPL
+> (multi-statement / arithmetic / variables / for — next latent Kl/far bug), and
+> Finding 3 (raised-exception-object far ptr loses its SEGMENT on the raise
+> path).  Build: `bash tools/build-micropython.sh --model=compact --keep-going`;
+> run FOREGROUND: `tools/run-victor-sasi.sh build/mp-link/mpython.exe 250`.
+>
+> ---
+>
+# (prior) Next session (§2o DONE — 🎉 `print(1+2)` PRINTS `3` ON THE REAL VICTOR. The §2n "hangs inside `mp_arg_parse_all`" blocker was a minic call-ABI bug: a NARROW integer literal (`NULL`/`0`, always `w`) handed to a WIDE far-pointer parameter (`l`) was NOT widened, so the 2-byte push shifted every later stack arg. FIXED in `minic.y::coerce_arg`. DOS gate 169→172 green, `make check` green, 111 s/r 0 r/r. THE FIRST PYTHON STATEMENT RUNS END-TO-END ON 1982 HARDWARE.)
 
 > **§2o (DONE 2026-06-01) — 🎉 MILESTONE: `print(1+2)` → `3` on the real Victor
 > 9000 (MAME/SASI), reproducible.  The §2n "hangs inside `mp_arg_parse_all`"

@@ -618,11 +618,13 @@ class GlobalSymbol:
 class Linker:
     def __init__(self, modules: List[Module],
                  stack_size: int, entry_symbol: str,
-                 gc_sections: bool = False):
+                 gc_sections: bool = False,
+                 pack_code: bool = False):
         self.modules = modules
         self.stack_size = stack_size
         self.entry_symbol = entry_symbol
         self.gc_sections = gc_sections
+        self.pack_code = pack_code
         # Set of (module_idx, mod_seg_idx) reachable from the entry symbol.
         # None means "no dead-strip" (every segment is live).
         self.live_segs: Optional[set] = None
@@ -796,8 +798,18 @@ class Linker:
         check at _build_image.  They get their own paragraph bases and
         the existing segment-relocation machinery generates the right
         MZ-header fixups for far-pointer references."""
-        # CODE: each module's CODE-class segments stay distinct.
-        # Within a module, segments appear in SEGDEF declaration order.
+        # CODE: each live CODE-class segment normally gets its own paragraph
+        # base.  Under --gc-sections the granularity is per-function (so dead
+        # functions can be stripped), which wastes up to 15 bytes of paragraph
+        # padding per surviving function — thousands of bytes across a large
+        # program.  With --pack-code, coalesce consecutive live CODE segments
+        # into a few <=64KB buckets so functions pack back-to-back with only
+        # word alignment between them.  Far calls still resolve correctly: every
+        # fixup is offset-aware (a symbol's address is its bucket's para_base :
+        # its byte offset within the bucket), and self-relative (near) fixups
+        # stay intra-function, hence intra-bucket.  Within a module, segments
+        # appear in SEGDEF declaration order.
+        live_code: List[Tuple[int, int]] = []
         for mi, m in enumerate(self.modules):
             for si, seg in enumerate(m.segments):
                 if seg is None:
@@ -805,7 +817,12 @@ class Linker:
                 if not self._live(mi, si):
                     continue
                 if seg.cls.upper() == 'CODE':
-                    self._place_distinct(mi, si, seg)
+                    live_code.append((mi, si))
+        if self.pack_code:
+            self._place_packed_code(live_code)
+        else:
+            for mi, si in live_code:
+                self._place_distinct(mi, si, self.modules[mi].segments[si])
 
         # DATA: coalesced by segment NAME across modules.
         coalesced_data: Dict[str, int] = {}
@@ -920,6 +937,41 @@ class Linker:
             self.out_segs.append(out)
             table[seg.name] = idx
             self.seg_map[(mi, si)] = (idx, 0)
+
+    # Hard cap on a packed CODE bucket.  Every offset within a bucket must fit
+    # an unsigned 16-bit field (far-call/ptr offsets, self-relative near jumps),
+    # so the last byte must be < 65536.  Leave a small margin.
+    CODE_BUCKET_MAX = 65500
+
+    def _place_packed_code(self, live_code: List[Tuple[int, int]]) -> None:
+        """Greedily pack live CODE segments into <=64KB output buckets,
+        eliminating the per-function paragraph padding that --gc-sections
+        granularity forces.  Functions are appended word-aligned (8086 favours
+        even instruction starts; they do NOT need paragraph alignment because
+        they are reached by offset within the bucket, not by segment selector —
+        the bucket itself is paragraph-aligned by _layout_segments)."""
+        bucket_idx = -1
+        for mi, si in live_code:
+            seg = self.modules[mi].segments[si]
+            seg_len = len(seg.data)
+            pad = 0
+            if bucket_idx >= 0:
+                out = self.out_segs[bucket_idx]
+                pad = (-len(out.data)) & 1   # word align within the bucket
+                if len(out.data) + pad + seg_len > self.CODE_BUCKET_MAX:
+                    bucket_idx = -1
+                    pad = 0
+            if bucket_idx < 0:
+                bucket_idx = len(self.out_segs)
+                self.out_segs.append(OutSeg(name='CODEPACK%d' % bucket_idx,
+                                            cls='CODE', align=16))
+            out = self.out_segs[bucket_idx]
+            if pad:
+                out.data.extend(b'\x00' * pad)
+            offset = len(out.data)
+            out.data.extend(seg.data)
+            out.length = len(out.data)
+            self.seg_map[(mi, si)] = (bucket_idx, offset)
 
     def _coalesce_groups(self) -> None:
         for m in self.modules:
@@ -1284,6 +1336,9 @@ def main() -> None:
                     help='only "medium" is currently supported')
     ap.add_argument('--gc-sections', dest='gc_sections', action='store_true',
                     help='dead-strip segments unreachable from --entry')
+    ap.add_argument('--pack-code', dest='pack_code', action='store_true',
+                    help='coalesce live CODE segments into <=64KB buckets, '
+                         'removing per-function paragraph padding')
     ap.add_argument('objs', nargs='+', help='input .obj files')
     args = ap.parse_args()
 
@@ -1305,7 +1360,8 @@ def main() -> None:
         modules.append(m)
 
     linker = Linker(modules, args.stack_size, args.entry,
-                    gc_sections=args.gc_sections)
+                    gc_sections=args.gc_sections,
+                    pack_code=args.pack_code)
     linker.link(args.output, args.map_path)
 
 
