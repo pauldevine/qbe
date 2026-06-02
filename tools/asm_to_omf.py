@@ -129,9 +129,16 @@ RUNTIME_SYMS = set()  # populated below if/when needed
 # Skip-list of GAS directives we drop entirely.  Section markers
 # (.text/.data/.bss) and `.section "_HUGE_..."` overrides are handled
 # separately to switch buckets — they are NOT in this list.
+# NOTE: `.balign`/`.p2align` are NOT dropped here — they are translated to
+# NASM `align` in the data/bss buckets (see the line loop).  Dropping them
+# would only word(2)-align data, but minic aligns aggregates to >=4 because
+# MicroPython (and any tagged-pointer scheme) stores tag bits in the low 2
+# bits of an object pointer and requires every aggregate object to be at
+# least 4-byte aligned.  Honoring the directive keeps those objects aligned
+# in the final OMF segment.
 DROP_PREFIXES = (
-    '.balign', '.local', '.type', '.size', '.file',
-    '.ident', '.string', '.p2align', '.model', '.code',
+    '.local', '.type', '.size', '.file',
+    '.ident', '.string', '.model', '.code',
 )
 
 # Largest payload we put inside a single OMF SEGDEF.  NASM emits a valid
@@ -360,6 +367,24 @@ def main():
         if s.startswith('.section'):
             continue
 
+        # Alignment directives.  Honor them in the data/bss/huge buckets so
+        # aggregate objects keep the >=4-byte alignment minic gave them
+        # (tagged-pointer schemes like MicroPython's mp_obj_t store tag bits
+        # in a pointer's low 2 bits, so a const object that lands at a
+        # 2-mod-4 offset is misclassified).  Code (.text) alignment is
+        # perf-only here, so drop it to avoid padding/segment-align fuss.
+        m = re.match(r'\.(?:balign\s+(\d+)|p2align\s+(\d+))', s)
+        if m:
+            if m.group(1) is not None:
+                n = int(m.group(1))
+            else:
+                n = 1 << int(m.group(2))
+            if current in ('data', 'bss'):
+                sections[current].append('align %d' % n)
+            elif current == 'huge':
+                huge_sections[current_huge].append('align %d' % n)
+            continue
+
         # GAS-only directives we drop
         if any(s.startswith(p) for p in DROP_PREFIXES):
             continue
@@ -463,11 +488,15 @@ def main():
     _ = near_code  # reserved for future tiny/small/compact coalescing
     emit_text_segments(out, code_seg, sections['text'], text_func_bounds)
 
-    out.append('segment %s class=%s align=2 use16' % (data_seg, data_cls))
+    # align=16 (paragraph): the linker places each segment at a paragraph
+    # base, so a within-segment NASM `align N` (N<=16) yields an N-aligned
+    # effective offset.  Declaring align=16 also lets NASM accept the
+    # `align 4`/`align 16` directives emitted above without complaint.
+    out.append('segment %s class=%s align=16 use16' % (data_seg, data_cls))
     out.extend(sections['data'])
     out.append('')
 
-    out.append('segment %s class=%s align=2 use16' % (bss_seg, bss_cls))
+    out.append('segment %s class=%s align=16 use16' % (bss_seg, bss_cls))
     out.extend(sections['bss'])
     out.append('')
 
