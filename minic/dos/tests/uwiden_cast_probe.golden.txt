@@ -1,0 +1,4 @@
+zext ok
+shl ok
+min ok
+max ok

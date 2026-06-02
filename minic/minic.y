@@ -3336,14 +3336,20 @@ expr(Node *n)
 		} else {
 			/* Integer/pointer casts.  QBE requires source width to match
 			 * destination class.  When narrowing long -> int the value is
-			 * truncated by `=w copy`; when widening int -> long we must
-			 * sign-extend with `extsw`. */
+			 * truncated by `=w copy`; when widening int -> long the C
+			 * integer-conversion rule preserves the SOURCE value according to
+			 * the SOURCE signedness: an unsigned source zero-extends (`extuw`),
+			 * a signed source sign-extends (`extsw`).  Using extsw for an
+			 * unsigned source (e.g. `(uint32_t)(size_t)`) corrupts the high
+			 * word — bug-loud in MP_OBJ_FUN_MAKE_SIG's `(uint32_t)max << 17`
+			 * packing, which made mp_arg_check_num spuriously fail. */
 			char dst = irtyp_ret(sr.ctyp);
 			char src = irtyp_ret(s0.ctyp);
 			fprintf(of, "\t");
 			psymb(sr);
 			if (dst == 'l' && src == 'w') {
-				fprintf(of, " =l extsw ");
+				fprintf(of, " =l %s ",
+					ISUNSIGNED(s0.ctyp) ? "extuw" : "extsw");
 			} else {
 				fprintf(of, " =%c copy ", dst);
 			}
