@@ -248,6 +248,7 @@ void branch(Node *, int, int);
 int stmt(Stmt *, int, int);
 void emit_struct_copy(Symb, Symb);
 char *call_target_name(char *);
+Node *mknode(char, Node *, Node *);
 
 FILE *of;
 int line;
@@ -313,6 +314,9 @@ struct {
 	                    * scope definition: `static const T x;` with no init.  A
 	                    * later initialized definition of the same name reuses the
 	                    * buffered ini[]/gloname[] slot instead of erroring. */
+	int fpid;          /* fn-ptr prototype index into fpproto[] (§2q), or -1.
+	                    * Set when this var is a `T (*fp)(PARAMS)' declarator;
+	                    * recovered at an indirect call `fp(...)' to coerce args. */
 } varh[NVar];
 
 /* Per-function parameter-type table, for argument coercion at call sites.
@@ -332,6 +336,26 @@ struct {
 	unsigned ptyp[NFnParam];
 	int nparam;  /* fixed params recorded (>=0); entry absent => -1 at lookup */
 } fnproto[NVar];
+
+/* Function-POINTER prototypes (§2q).  An indirect call through a function
+ * pointer (a `(*fp)(...)' variable or a method-table member like MicroPython's
+ * `emit_method_table->local(emit, qst, id->local_num, kind)') loses the
+ * callee's parameter types — the fn-ptr type integer encodes only the return
+ * type — so coerce_arg (which fixes a stack-arg-width mismatch) never fired and
+ * a narrow arg handed to a wide param shifted every later slot (the uint16_t
+ * local_num stayed `w' where the param is mp_uint_t `l', so `kind' was read
+ * from the wrong [bp+off]).  We record each fn-ptr declarator's fixed parameter
+ * types here and stash the table index (fpid) in the declarator's varh/Member
+ * entry, recovering it at the indirect-call site to coerce arguments — the
+ * indirect-call analogue of fnproto/fnproto_find. */
+enum { NFp = 512, NFpParam = 16 };
+struct {
+	int nparam;
+	unsigned ptyp[NFpParam];
+} fpproto[NFp];
+int nfpproto = 0;
+int g_callee_fpid = -1;  /* set by expr() case '.' to a fn-ptr member's fpid
+                          * (or -1), read by the case 'I' indirect-call site */
 
 /* Typedef table.  Sized for real preprocessed TUs (MicroPython headers
  * define well over 128 typedefs); minic is host-compiled so this is cheap. */
@@ -362,6 +386,9 @@ struct Member {
 	int bitoffset;   /* Bit offset within the storage unit */
 	int count;       /* Array element count (0 = not an array OR flexible) */
 	int isflex;      /* 1 = flexible array member `T x[];` (count 0 but decays) */
+	int fpid;        /* fn-ptr prototype index into fpproto[] (§2q), or -1, for
+	                  * a `T (*fn)(PARAMS)' member; recovered at the indirect
+	                  * call `obj->fn(...)' to coerce arguments to PARAMS. */
 };
 
 /* Struct/union definition table.  minic is a host-compiled tool (runs on
@@ -483,6 +510,7 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 			varh[h].isstaticlocal = 0;
 			varh[h].arraybytes = 0;
 			varh[h].istentative = 0;
+			varh[h].fpid = -1;
 			return;
 		}
 		if (strcmp(varh[h].v, v) == 0) {
@@ -737,6 +765,7 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 	m->bitoffset = 0;
 	m->count = 0;       /* Scalar member */
 	m->isflex = 0;
+	m->fpid = -1;       /* Not a fn-ptr member (set by the fn-ptr member rule) */
 
 	if (structh[sidx].isunion) {
 		/* Union: all members at offset 0 */
@@ -2197,6 +2226,79 @@ fnproto_record(char *name, Node *params)
 	/* table full: silently skip (coercion just won't fire for this fn) */
 }
 
+/* Build a one-link node carrying a fn-ptr parameter TYPE (in u.n), chained via
+ * ->r — the fptpar grammar emits these so fpproto_alloc can read the declared
+ * parameter types of a function-pointer declarator (§2q). */
+static Node *
+mkptype(unsigned ty, Node *rest)
+{
+	Node *n = mknode('t', 0, rest);
+	n->u.n = (int)ty;
+	return n;
+}
+
+/* Record a function-pointer declarator's fixed parameter types (the `chain' of
+ * mkptype nodes from fptpar0) into fpproto[] and return its index, or -1 if the
+ * table is full or there are no fixed params to coerce.  A `...' contributes no
+ * node (the chain ends), so nparam counts only the fixed parameters. */
+static int
+fpproto_alloc(Node *chain)
+{
+	Node *n;
+	int i = 0, id;
+
+	if (chain == 0 || nfpproto >= NFp)
+		return -1;
+	id = nfpproto++;
+	for (n = chain; n && i < NFpParam; n = n->r)
+		fpproto[id].ptyp[i++] = (unsigned)n->u.n;
+	fpproto[id].nparam = i;
+	return id;
+}
+
+/* Set the fn-ptr prototype index on an existing varh entry (after varadd). */
+static void
+varsetfpid(char *v, int fpid)
+{
+	unsigned h0, h;
+
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (strcmp(varh[h].v, v) == 0) {
+			varh[h].fpid = fpid;
+			return;
+		}
+		h = (h+1) % NVar;
+	} while (h != h0 && varh[h].v[0] != 0);
+}
+
+/* Return the fn-ptr prototype index recorded for variable `v', or -1. */
+static int
+varfpid(char *v)
+{
+	unsigned h0, h;
+
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (strcmp(varh[h].v, v) == 0)
+			return varh[h].fpid;
+		h = (h+1) % NVar;
+	} while (h != h0 && varh[h].v[0] != 0);
+	return -1;
+}
+
+/* Stamp the fn-ptr prototype index onto the most-recently-added member of
+ * struct/union `sidx' (the one the fn-ptr member rule just created). */
+static void
+structset_last_fpid(int sidx, int fpid)
+{
+	int n = structh[sidx].nmembers;
+	if (n > 0)
+		structh[sidx].members[n-1].fpid = fpid;
+}
+
 /* Look up function `name' in the prototype table.  Returns its index, or -1
  * if no prototype was recorded (e.g. an implicitly-declared or K&R-unspecified
  * function — leave its arguments untouched). */
@@ -2364,9 +2466,21 @@ call(Node *n, Symb *sr)
 			if (sret)
 				sret_slot = alloc_sret_slot(aggr);
 
-			/* Evaluate all arguments */
-			for (a=n->r; a; a=a->r)
-				a->u.s = eval_arg(a);
+			/* Evaluate all arguments, coercing each to the fn-ptr's
+			 * declared parameter type (§2q) — a width mismatch on an
+			 * indirect call shifts every later stack slot just like a
+			 * direct call (fnproto path), but here the prototype comes
+			 * from the fn-ptr variable's recorded fpid, not its name. */
+			{
+				int fpid = varfpid(f);
+				int argi = 0;
+				for (a=n->r; a; a=a->r, argi++) {
+					a->u.s = eval_arg(a);
+					if (fpid >= 0 && argi < fpproto[fpid].nparam)
+						a->u.s = coerce_arg(a->u.s,
+						    fpproto[fpid].ptyp[argi]);
+				}
+			}
 
 			/* Generate indirect call */
 			if (sret) {
@@ -2900,9 +3014,23 @@ expr(Node *n)
 			int sret;
 			unsigned aggr;
 			int sret_slot = 0;
+			int fpid;
 
-			/* Evaluate function pointer expression */
+			/* Evaluate function pointer expression.  Reset the member
+			 * fn-ptr stash first: expr() sets g_callee_fpid when n->l is
+			 * a member access `obj->fn' (case '.'); leave it -1 otherwise
+			 * so a stale id from an earlier statement can't leak (§2q). */
+			g_callee_fpid = -1;
 			fptr = expr(n->l);
+			fpid = g_callee_fpid;
+			/* `(*fp)(...)' / `fp(...)' through a plain fn-ptr variable:
+			 * recover the prototype from the variable's recorded fpid. */
+			if (fpid < 0) {
+				if (n->l->op == '@' && n->l->l->op == 'V')
+					fpid = varfpid(n->l->l->u.v);
+				else if (n->l->op == 'V')
+					fpid = varfpid(n->l->u.v);
+			}
 
 			/* Check it's a function pointer */
 			if (KIND(fptr.ctyp) != PTR || KIND(DREF(fptr.ctyp)) != FUN)
@@ -2919,9 +3047,18 @@ expr(Node *n)
 			if (sret)
 				sret_slot = alloc_sret_slot(aggr);
 
-			/* Evaluate all arguments */
-			for (a=n->r; a; a=a->r)
-				a->u.s = eval_arg(a);
+			/* Evaluate all arguments, coercing each to the fn-ptr's
+			 * declared parameter type (§2q): a width mismatch shifts the
+			 * stack-arg layout exactly as on a direct call. */
+			{
+				int argi = 0;
+				for (a=n->r; a; a=a->r, argi++) {
+					a->u.s = eval_arg(a);
+					if (fpid >= 0 && argi < fpproto[fpid].nparam)
+						a->u.s = coerce_arg(a->u.s,
+						    fpproto[fpid].ptyp[argi]);
+				}
+			}
 
 			/* Generate indirect call */
 			if (sret) {
@@ -3053,6 +3190,10 @@ expr(Node *n)
 			}
 			if (!found)
 				die("struct member not found");
+
+			/* Stash this member's fn-ptr prototype id (or -1) for an
+			 * immediately-following indirect call `obj->fn(...)' (§2q). */
+			g_callee_fpid = m->fpid;
 
 			/* Compute member address: struct_addr + offset.  Under far-
 			 * data models (compact/large/huge), when s0 came through a
@@ -3854,6 +3995,10 @@ lval(Node *n)
 			}
 			if (!found)
 				die("struct member not found");
+
+			/* Stash this member's fn-ptr prototype id (or -1) for an
+			 * immediately-following indirect call `obj->fn(...)' (§2q). */
+			g_callee_fpid = m->fpid;
 
 			/* Compute member address: struct_addr + offset.  Under far-
 			 * data, when s0 came through a far-ptr deref it carries the
@@ -6230,6 +6375,9 @@ smembers:
 	/* A void-returning function pointer member (`void (*close)(void *);`)
 	 * is legal; FUNC(NIL) encodes the void return type. */
 	structaddmember(curstruct, $5->u.v, IDIR(FUNC($2)));
+	/* Record the member's parameter types so an indirect call through it
+	 * (`obj->fn(...)') coerces arguments to the declared widths (§2q). */
+	structset_last_fpid(curstruct, fpproto_alloc($8));
 }
         | smembers attrspec
         | smembers nestedagg
@@ -6828,10 +6976,10 @@ par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
 fptpar0: fptpar1
        |                  { $$ = 0; }
        ;
-fptpar1: type ',' fptpar1        { $$ = 0; }
-       | type                    { $$ = 0; }
-       | type IDENT ',' fptpar1  { $$ = 0; }
-       | type IDENT              { $$ = 0; }
+fptpar1: type ',' fptpar1        { $$ = mkptype($1, $3); }
+       | type                    { $$ = mkptype($1, 0); }
+       | type IDENT ',' fptpar1  { $$ = mkptype($1, $4); }
+       | type IDENT              { $$ = mkptype($1, 0); }
        | ELLIPSIS                { $$ = 0; }
        ;
 
@@ -7235,6 +7383,7 @@ dcls:
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
 	varadd(v, 0, fptr_type, 0);  /* Not an array */
+	varsetfpid(v, fpproto_alloc($8));  /* coerce args at `fp(...)' (§2q) */
 	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
 }
     | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr ';'
@@ -7249,6 +7398,7 @@ dcls:
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));
 	varadd(v, 0, fptr_type, 0);
+	varsetfpid(v, fpproto_alloc($8));  /* coerce args at `fp(...)' (§2q) */
 	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
 	init_node = mknode('=', $5, $11);
 	expr(init_node);

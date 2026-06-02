@@ -1,4 +1,230 @@
-# Next session (§2p DONE — size shrink lever: `omf_link.py --pack-code` coalesces the gc-surviving per-function CODE segments back into a few <=64KB buckets, reclaiming the per-function paragraph padding. Compact far-data mpython image body 542528→537360 B (−5168), so the ~800 B of Victor headroom becomes ~6 KB. Flag-off is BYTE-IDENTICAL to the prior link (default path unchanged); flag wired into build-micropython.sh + recompile-mp-tu.sh. Packed mpython VERIFIED on the real Victor: full trace `C1 C2 C3 C4 D0 D1 D2 D3 3 D4 C5` — still prints `3`. No minic/qbe-backend change.)
+# Next session (§2q' DONE — the §2q `def add(a,b)` HANG is FIXED. NOT a backend arg-passing bug: it was a minic FRONTEND gap — an INDIRECT (function-pointer) call did not coerce arguments to the callee's declared parameter types. MicroPython's body-variable LOAD_FAST goes through the bytecode emitter METHOD TABLE (emitcommon.c:131 `emit_method_table->local(emit, qst, id->local_num, kind)`), an indirect call; minic's coerce_arg only fired on DIRECT (name-keyed fnproto) calls, so `id->local_num` (uint16_t, Kw) stayed `w` where the param is `mp_uint_t` (Kl) — the 2-byte push shifted `kind`, which was then read from the wrong slot (arrived 0xb0). §2q's "static asm looked correct" puzzle was because it inspected the DIRECT call sites (compile.c); the real runtime path is the method-table indirect call. FIX in `minic/minic.y`: record each fn-ptr declarator's parameter types (in a new `fpproto[]` registry, with the index stashed in the declarator's varh/Member entry — type-bit stashing was impossible since the type integer is full and the typedef/member tables are 32-bit) and coerce args at BOTH indirect-call paths (member `obj->fn(...)` via a g_callee_fpid stash set in expr() case '.', and `fp(...)`/`(*fp)(...)` via the variable's recorded fpid). Probe `argmix_probe.c` (medium+compact+large, runtime-filled method table so it needs no --far-static-data) — bug-loud (`m7 FAIL 4300`/`fp9 FAIL 6500`, the trailing int dropped) on the unfixed compiler. `make check` green, 111 s/r 0 r/r (no grammar-structure change, only fptpar actions), DOS gate 174/174 (one flaky-DOSBox for_comma_inc_probe re-confirmed passing standalone). KNOWN GAP (noted, not §2q-blocking): a fn-ptr declared via a TYPEDEF (`typedef int (*F)(...); F fp;`) is still NOT coerced — the typedef name is lost at the variable declaration. NEXT = rebuild MicroPython compact far-data + run `def add(a,b): return a+b; print(add(3,4))` on the real Victor (run-victor-sasi.sh, FOREGROUND) — expect the LOAD_FAST `d4 NN`→`b0/b1` fix to let add() execute; restore heap 20480 + revert the MP-tree debug markers (CLEANUP list in §2q below). See [[project-repl-loadfast-argmix]].)
+
+> **§2q' (DONE 2026-06-02) — the §2q user-function-with-args HANG is FIXED in
+> the minic frontend.  It was NOT an i8086 backend arg-passing bug (the §2q
+> hypothesis) — it was a missing argument coercion on INDIRECT (function-pointer)
+> calls.  `minic/minic.y` only; `make check` green (111 s/r, 0 r/r — only the
+> fptpar semantic actions changed, no grammar-structure change); amd64/arm64/rv64
+> unaffected; DOS gate 174/174.**
+>
+> ROOT CAUSE (the §2q "static-vs-runtime contradiction", resolved): §2q traced
+> the DIRECT call sites in py/compile.c (`EMIT_LOAD_FAST` macro), where the asm
+> looked correct — but MicroPython's bytecode-only port (`MICROPY_EMIT_NATIVE`=0)
+> routes a function body's variable read through `compile_load_id` →
+> `mp_emit_common_id_op` → **emitcommon.c:131** `emit_method_table->local(emit,
+> qst, id->local_num, MP_EMIT_IDOP_LOCAL_FAST)` — an INDIRECT call through the
+> static method table `mp_emit_bc_method_table_load_id_ops`.  The member type is
+> `void (*)(emit_t*, qstr, mp_uint_t local_num, int kind)` = a (l, w, l, w) call;
+> `id->local_num` is a `uint16_t` (Kw), but the param is `mp_uint_t` (Kl, 4 bytes
+> under far-data).  minic's §2i/§2o `coerce_arg` fires only on DIRECT calls
+> (`fnproto`, keyed by the callee NAME); the indirect-call paths (`call()` case
+> 'C' fn-ptr branch and `expr()` case 'I') evaluated args with `eval_arg` and
+> NEVER coerced.  So `local_num` was pushed as 2 bytes where the callee reads 4,
+> shifting `kind` — read from the wrong [bp+off] as 0xb0 — and the LOAD_FAST
+> emitter took the 2-byte `MP_BC_LOAD_FAST_N + kind` branch, emitting `d4 NN`
+> bytecode the VM landed outside add's body → the hang.
+>
+> WHY NOT TYPE-BIT STASHING: the fn-ptr type integer encodes only the RETURN
+> type (no param list), and is full (recursive `<<3` shifts); the typedef/member
+> tables store types as 32-bit `unsigned`, so high proto bits would truncate and
+> shifts would corrupt them.  Instead: a name-free, collision-free registry.
+>
+> FIX (`minic/minic.y`): a new `fpproto[]` table holds each fn-ptr declarator's
+> fixed parameter types; the index (`fpid`) is stamped into the declarator's
+> `varh`/`Member` entry (new fields, init -1).  The `fptpar0/fptpar1` grammar
+> (previously `{ $$ = 0; }`, discarding the params) now builds a `mkptype` type
+> chain — same tokens/reductions, so ZERO new conflicts.  Recorded at the struct
+> fn-ptr member rule and the local `T (*fp)(...)` decl rules.  Recovered at the
+> call: case '.' stashes the member's fpid in `g_callee_fpid` (read by case 'I'
+> right after `expr(n->l)`), and case 'C'/'I' fall back to the variable's fpid
+> via `varfpid`.  Both indirect-call arg loops now run `coerce_arg` per fixed
+> param — the indirect-call analogue of the direct-call fnproto coercion.
+>
+> PROBE `minic/dos/examples/argmix_probe.c` (+golden, gated medium+compact+large):
+> the exact (l, w, l, w) shape with a narrow uint16_t 3rd arg (widened w→l) and a
+> trailing `int k`, via a method-table member call (MP shape) AND a directly-
+> declared `int (*fp)(...)` variable.  Bug-loud on the unfixed compiler
+> (`m7 FAIL 4300`, `fp9 FAIL 6500` — the trailing int read from the wrong slot).
+> The method table is filled at RUNTIME (not `static const`) so the probe needs
+> no `--far-static-data`: a code symbol in a STATIC data initializer is only
+> relocated to a far seg:off under that opt-in (which the MicroPython port
+> enables — that is why MP's static method table works on-target); a plain
+> `dd _fn` left segment 0 and hung.  Orthogonal to the coercion fix.
+>
+> KNOWN GAP (noted, NOT §2q-blocking): a fn-ptr declared through a TYPEDEF
+> (`typedef int (*F)(...); F fp;`) is still not coerced — minic resolves the
+> typedef to its type at the variable declaration, losing the typedef name, so
+> the recorded prototype doesn't transfer to the variable.  MicroPython's method
+> tables and plain `T (*fp)(...)` declarators are covered; the typedef-variable
+> form is left as a documented gap.
+>
+> NEXT: rebuild MicroPython (`bash tools/build-micropython.sh --model=compact
+> --keep-going`) and run `def add(a, b):\n    return a + b\nprint(add(3, 4))` on
+> the real Victor (`tools/run-victor-sasi.sh build/mp-link/mpython.exe 60`,
+> FOREGROUND).  Expect the LOAD_FAST bytecode to now be `b0 b1 f2 63` (not
+> `d4 00 d4 01 ...`) and add() to execute.  BEFORE the run, do the §2q CLEANUP
+> (below): RESTORE `ports/dos8086/mpconfigport.h` heap 16384→**20480**, and
+> revert the MP-tree debug markers in vm.c/objfun.c/bc.c/emitbc.c (KEEP the
+> py/parse.c §2n alignment fix).  See [[project-repl-loadfast-argmix]].
+>
+> ---
+>
+# (prior) Next session (§2q IN PROGRESS — BROADENING THE REPL. Confirmed on the real Victor: arithmetic, variables, multi-statement, while-loop, for/range ALL WORK. NEW BUG (unfixed, root-cause LOCALIZED): a user function with args — `def add(a,b): return a+b; print(add(3,4))` — HANGS during execution because add's body bytecode is MIS-EMITTED: each `LOAD_FAST` (should be 1-byte `0xb0+n`) is emitted as 2-byte `0xd4 NN`. Cause: in `mp_emit_bc_load_local` (py/emitbc.c) the 4th param `kind` (an `int`, passed `w 0`) ARRIVES AS 0xb0 instead of 0 — confirmed on-target (`LFb0 00`/`LFb0 01`). The SSA is CORRECT on BOTH sides (caller `call $f(l,w,l,w 0,...)`, callee `(l %t0,w %t1,l %t2,w %t3)`), so it's an i8086 BACKEND arg-passing or param-read bug for the `(l,w,l,w)` mix where the last `w` arg is misread. STATIC analysis of the caller asm looked correct (kind=0 written, frame OK) — the static-vs-runtime contradiction is UNRESOLVED. NEXT = reproduce as a pure minic/i8086 ABI probe (no MicroPython, DOSBox gate) + dump raw callee param bytes to disambiguate arg-passing vs param-read. See §2q below.)
+
+> **§2q (IN PROGRESS 2026-06-02) — broadening the REPL past `print(1+2)`.
+> Multiple language features VERIFIED on the real Victor; ONE new bug found,
+> root-cause localized but NOT yet fixed.  No qbe/minic/MP code committed this
+> session (all changes are debug instrumentation in the MP tree — see CLEANUP).**
+>
+> WHAT WORKS NOW (all verified end-to-end on the real Victor 9000 via
+> run-victor-sasi.sh, each printing correct results):
+>  - `print(1+2)` → 3 (baseline, re-confirmed)
+>  - arithmetic: `x=10;y=5;print(x*y);print(x-y);print(x+y)` → 50, 5, 15
+>    (exercises 32-bit Kl multiply with >16-bit result, assignment, name lookup,
+>    multi-statement MP_PARSE_FILE_INPUT)
+>  - while loop + comparison: `i=0;while i<3:print(i);i=i+1` → 0,1,2
+>  - for/range + iterator protocol: `for i in range(3):print(i)` → 0,1,2
+>    (range/iterator code was ALREADY linked via the builtins table — no image
+>    growth)
+>  Changing the do_str() test STRING does not change linked code footprint (the
+>  whole parser/compiler/VM is pulled in regardless); only features needing new
+>  runtime fns grow it.
+>
+> **THE NEW BUG — user function with positional args hangs.**
+> `def add(a, b):\n    return a + b\nprint(add(3, 4))` reaches D3 (compile done)
+> then HANGS in execution with NO output (no D4, no exception).  The 0-arg module
+> function runs fine; the new thing is calling a user bytecode function WITH args
+> and a body that uses LOAD_FAST (function locals).  Every earlier test used only
+> module-level globals (LOAD_NAME/STORE_NAME), never LOAD_FAST.
+>
+> ROOT CAUSE (localized by on-target bisection — the decisive method again):
+>  1. Instrumented vm.c MAKE_FUNCTION(M1)/CALL_FUNCTION(C0/C1): trace reached
+>     `M1 C0` then hung — i.e. the call INTO add never returns.
+>  2. Instrumented objfun.c fun_bc_call (F0/Fe/Ff) + bc.c mp_setup_code_state
+>     (S0/S1/S2/S9): `F0 S0 S1 S2 S9 Fe` then hang — setup + ALL arg-binding
+>     complete; hang is inside `mp_execute_bytecode` of add's body.
+>  3. Per-opcode tracer at the vm.c dispatch switch: add's body FIRST opcode
+>     read as **0x14** (one heap size) / **0xd4** (another) — should be **0xb0**
+>     (LOAD_FAST 0).  The landing opcode CHANGED with heap layout → ip pointed
+>     outside add's real bytecode.
+>  4. Dumped add's stored bytecode in bc.c (skhex of self->bytecode[0..15] + the
+>     decoded n_state/n_pos_args/n_info/n_cell + landing offset).  add's bytecode:
+>     `1a 0c | 81 56 81 57 81 58 | d4 00 d4 01 f2 63 ...`
+>       - SIG 0x1a → n_state=4, n_pos_args=2 (CORRECT for add(a,b))
+>       - SIZE 0x0c → n_info=6, n_cell=0 (n_info=6 is CORRECT: the on-target build
+>         encodes the 3 code_info qstrs — simple_name, arg a, arg b — as 2-byte
+>         var-uints each = 6 bytes; the .mpy reference uses a qstr-table window so
+>         its n_info is smaller.  Do NOT chase the n_info difference; it is a
+>         config artifact, not the bug.)
+>       - body at offset 8: `d4 00 d4 01 f2 63` — WRONG.  Reference (mpy-cross
+>         disasm) body is `b0 b1 f2 63` = LOAD_FAST 0; LOAD_FAST 1; BINARY_OP
+>         __add__; RETURN_VALUE.  The `f2 63` tail is right; the two LOAD_FASTs
+>         are each emitted as a 2-byte `d4 NN` instead of the 1-byte `0xb0+n`.
+>  5. emitbc.c `mp_emit_bc_load_local` (line ~514):
+>        if (kind == MP_EMIT_IDOP_LOCAL_FAST && local_num <= 15)
+>            emit 1-byte (MP_BC_LOAD_FAST_MULTI + local_num);   // 0xb0+n
+>        else
+>            emit 2-byte (MP_BC_LOAD_FAST_N + kind, local_num); // 0x24+kind, then n
+>     On-target opcode 0xd4 = MP_BC_LOAD_FAST_N(0x24) + 0xb0, i.e. the else branch
+>     ran with **kind == 0xb0** (not 0).  Added an LF marker printing kind+local_num
+>     at the top of the function: on-target prints **`LFb0 00`** and **`LFb0 01`**
+>     (×3, one per compile pass) — so `kind` ARRIVES as 0xb0, local_num arrives
+>     CORRECTLY as 0/1.  (NB 0xb0 == MP_BC_LOAD_FAST_MULTI — possibly a
+>     coincidence, possibly a clue.)
+>
+> THE PUZZLE (where it stands — UNRESOLVED): the SSA is CORRECT on both sides.
+>   - call (compile.ssa): `call $mp_emit_bc_load_local(l %t131, w %t136, l %t142, w 0, ...)`
+>     — coerce_arg correctly WIDENED local_num (a uint16_t field, Kw) to `l` to
+>     match the `mp_uint_t` param.  kind passed `w 0`.  (`...` is on EVERY minic
+>     call — normal, not variadic-anomalous.)
+>   - callee header (emitbc.ssa): `export function $mp_emit_bc_load_local(l %t0, w %t1, l %t2, w %t3)`.
+>   Types: `qstr`=`size_t`=2B(Kw); `mp_uint_t`=`uintptr_t`=4B(Kl); `int`=2B(Kw);
+>   MP_EMIT_IDOP_LOCAL_FAST=0; id->local_num is uint16_t (2B) → coerced to l.
+>   So the IR is a clean (l,w,l,w) call matching a (l,w,l,w) callee, last arg `w 0`.
+>   The i8086 BACKEND mis-passes/mis-reads the 4th arg (kind) as 0xb0.
+>
+>   STATIC asm trace did NOT reveal the fault (this is the unresolved part):
+>   - Caller site asm 10627 (in _close_over_variables_etc, frame `sub sp, 156`):
+>     writes kind=0 at [bp-152], local_num at [bp-156/-154], qst at [bp-158],
+>     emit at [bp-162/-160].  slot() = `-6 - 2*(fn->slot - s)`; prologue pushes
+>     bx/si/di (6B) AFTER `mov bp,sp` then `sub sp, 2*fn->slot`, so SP = bp-6-156
+>     = bp-162 = arg slot 0 (emit).  Frame is CORRECT (my first "frame too small"
+>     read was an arithmetic error — the -6 reg block).  Callee reads (far code →
+>     4-byte ret addr → first arg at bp+6): emit@[bp+6], qst@[bp+10],
+>     local_num@[bp+12], kind@[bp+16].  Map back: callee kind@[bp+16] == caller
+>     [bp-152] == 0.  So STATICALLY kind should be 0.  Runtime says 0xb0.
+>     CONTRADICTION not yet explained.
+>   - There are TWO call sites: asm 10627 and 41310.  Both look statically correct
+>     (41310: kind=0 @[bp-338], qst=`w 10`, local_num @[bp-342/-340], emit
+>     @[bp-348/-346]).  Did NOT confirm which one actually runs for add's LOAD_FAST
+>     (compile.c:643 EMIT_LOAD_FAST in compile_load_id).
+>
+> **NEXT — two concrete moves (do the probe FIRST, it's the fast path):**
+>  1. **Reproduce as a pure minic/i8086 ABI probe — NO MicroPython, NO Victor.**
+>     The whole point: this is a backend arg-passing bug for a `(l,w,l,w)` call
+>     whose 4th arg is a `w` constant, under compact far-data (far-call → 4-byte
+>     ret addr).  Write `minic/dos/examples/argmix_probe.c`: a function
+>     `int f(void *p, unsigned a, unsigned long n, int k)` that returns/prints
+>     `k`, called as `f(&x, 1, 0, 0)` (also try `f(&x, 1, 0, 7)`), gated
+>     compact+large in tools/test-dos.sh (DOSBox — fast iteration, no SASI loop).
+>     If k arrives wrong → bug reproduced in the gate; iterate there.  Mirror the
+>     exact widths: p=far ptr(l), a=unsigned(w), n=unsigned long(l, forces the Kl
+>     in 3rd position), k=int(w) last.  This is the [[minic-wide-arg-narrow-param]]
+>     family — but here the SSA is already correct, so look at i8086/abi.c
+>     (selpar param-offset assignment + the max_arg_words/arg_slot_top reservation
+>     at i8086_abi line ~358-387) and i8086/emit.c selcall (arg-slot stores) for
+>     the `(l,w,l,w)` offset computation.  Suspect: an off-by-one/size error when
+>     a Kl arg (n) sits between Kw args and the final Kw arg's slot offset is
+>     mis-derived, OR the callee selpar reads the 4th param from a wrong [bp+off].
+>  2. **If the probe does NOT reproduce it**, the fault needs the exact MP context
+>     — then dump the RAW callee param bytes on-target: in mp_emit_bc_load_local
+>     print `*(unsigned char*)((char*)&emit + 16)`-style or, cleaner, read the
+>     param stack directly — to learn whether [bp+16] CONTAINS 0xb0 (arg-passing
+>     bug) or holds 0 but `kind` (%t3) is mis-bound/clobbered (param-read bug).
+>     Also confirm WHICH call site runs (add a distinct marker per site).
+>
+> **CLEANUP REQUIRED before any milestone run / commit (all in the MICROPYTHON
+> tree ~/projects/micropython, uncommitted; the qbe repo has NO changes this
+> session except the pre-existing uncommitted asm_to_omf.py TEXT_SEG_BUDGET
+> env-override scaffolding, which is harmless):**
+>  - `ports/dos8086/mpconfigport.h`: MICROPY_HEAP_SIZE was reduced 20480 → **16384**
+>    for instrumentation headroom — **RESTORE to 20480** before any real run.
+>  - `ports/dos8086/main.c`: do_str() is set to the add() test — restore to
+>    `do_str("print(1+2)", MP_PARSE_SINGLE_INPUT)` (or keep the add test until the
+>    bug is fixed — your call).
+>  - `py/vm.c`: VMK macro + M1/C0/C1 markers + an unused `vmhex` function — remove.
+>  - `py/objfun.c`: FK macro + F0/Fe/Ff markers — remove.
+>  - `py/bc.c`: SK macro + `skhex` fn + S0/S1/S2/S9/" Z"/" Y" markers + the
+>    self->bytecode[0..15] dump loop — remove.
+>  - `py/emitbc.c`: `ebhex` fn + the `LF`+kind+local_num print in
+>    mp_emit_bc_load_local — remove.
+>  - `py/parse.c`: the §2n 4-byte-alignment fix — **KEEP** (uncommitted, load-bearing).
+>  - `mpy-cross/build/mpy-cross` exists; reference disasm recipe:
+>    `printf 'def add(a,b):\n return a+b\n' > /tmp/t.py && mpy-cross/build/mpy-cross /tmp/t.py -o /tmp/t.mpy && python3 tools/mpy-tool.py -d /tmp/t.mpy`
+>
+> **HARNESS NOTES (learned the hard way this session — see
+> [[feedback-victor-harness-deterministic]], updated):**
+>  - Run via the Bash tool's NATIVE `run_in_background:true`, redirect script
+>    stdout to a file (`tools/run-victor-sasi.sh build/mp-link/mpython.exe 60 > /tmp/run.log 2>&1`).
+>    Do NOT wrap in `timeout` and do NOT rely on a long foreground call — the
+>    harness auto-backgrounds those and the teardown fires the script's
+>    `trap cleanup EXIT INT TERM` → `kill -9` MAME before any serial (symptom:
+>    0-byte output file + no mame in `ps`).
+>  - ALWAYS verify with `ps -eo pid,etime,comm | grep -i mame` — do not claim
+>    "it's running" without checking.
+>  - For HANG debugging use a SHORT `-seconds_to_run` (60), not 250: a hanging
+>    guest runs the FULL N guest-seconds under -nothrottle = HOURS of wall time
+>    (a 250s hang ran ~4h).  A successful run halts early.  Read the LIVE serial
+>    capture (`$WORK/serial.txt`, path from `ps -ww` of the mame cmdline) to see
+>    the trace up to the hang before MAME exits; then `kill -9` mame + sweep
+>    orphan `sleep 1120` watchdogs.
+>  - Fast inner loop: `tools/recompile-mp-tu.sh <base> <src>` rebuilds ONE TU and
+>    relinks (reuses every other .obj + /tmp/mp_objs.txt + --pack-code).
+>    Full build: `bash tools/build-micropython.sh --model=compact --keep-going`.
+>
+> ---
+>
+# (prior) Next session (§2p DONE — size shrink lever: `omf_link.py --pack-code` coalesces the gc-surviving per-function CODE segments back into a few <=64KB buckets, reclaiming the per-function paragraph padding. Compact far-data mpython image body 542528→537360 B (−5168), so the ~800 B of Victor headroom becomes ~6 KB. Flag-off is BYTE-IDENTICAL to the prior link (default path unchanged); flag wired into build-micropython.sh + recompile-mp-tu.sh. Packed mpython VERIFIED on the real Victor: full trace `C1 C2 C3 C4 D0 D1 D2 D3 3 D4 C5` — still prints `3`. No minic/qbe-backend change.)
 
 > **§2p (DONE 2026-06-01) — SIZE SHRINK LEVER: `omf_link.py --pack-code`.**
 > The user picked "size headroom" (the recurring wall — §2o shipped with only
