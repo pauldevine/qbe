@@ -71,8 +71,19 @@ fi
 
 # --- Scratch workspace --------------------------------------------------
 WORK="$(mktemp -d -t run-victor-sasi.XXXXXX)"
-cleanup() { rm -rf "$WORK"; }
-trap cleanup EXIT
+# MAME ignores SIGTERM while in its -nothrottle emulation loop, so a foreground
+# run that hangs (or a caller that aborts us) used to ORPHAN the emulator —
+# leaving runaway victor9k processes each pinning a core for hours.  Track the
+# MAME pid and its watchdog and SIGKILL them from the EXIT/INT/TERM trap so we
+# never leak an emulator regardless of how we exit.
+MAME_PID=""
+WATCHDOG_PID=""
+cleanup() {
+	[ -n "$MAME_PID" ] && kill -9 "$MAME_PID" 2>/dev/null || true
+	[ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
+	rm -rf "$WORK"
+}
+trap cleanup EXIT INT TERM
 
 RUN_IMG="$WORK/run.img"
 CAP="$WORK/serial.txt"
@@ -90,6 +101,9 @@ for d in cfg nvram inp sta snap diff comments; do mkdir -p "$WORK/home/$d"; done
 	|| { echo "run-victor-sasi: failed to inject $EXE into image partition 0" >&2; exit 1; }
 
 # --- Run MAME headless (SASI hard disk, NO floppy) ----------------------
+# Launch in the BACKGROUND so we keep its pid; -seconds_to_run is MAME's own
+# (emulated-time) exit bound, and the wall-clock watchdog below is the backstop
+# that SIGKILLs it if it ever hangs past a generous real-time budget.
 SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}" "$MAME_BIN" victor9k \
 	-rompath "$MAME_ROMS" \
 	-homepath "$WORK/home" \
@@ -105,7 +119,22 @@ SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}" "$MAME_BIN" victor9k \
 	-video none -sound none -nothrottle -skip_gameinfo \
 	-seconds_to_run "$RUN_SECS" \
 	-rs232a null_modem -bitbanger "$CAP" \
-	>/dev/null 2>&1 || true   # -seconds_to_run forces a non-zero exit; ignore
+	>/dev/null 2>&1 &
+MAME_PID=$!
+
+# Wall-clock watchdog: MAME ignores SIGTERM, so force-kill (-9) it if it outlives
+# the budget.  Default = a generous multiple of the emulated-seconds bound;
+# override with $VICTOR_WALL_SECS.
+WALL_SECS="${VICTOR_WALL_SECS:-$(( RUN_SECS * 4 + 120 ))}"
+( sleep "$WALL_SECS"; kill -9 "$MAME_PID" 2>/dev/null ) &
+WATCHDOG_PID=$!
+
+wait "$MAME_PID" 2>/dev/null || true   # -seconds_to_run forces a non-zero exit; ignore
+
+# MAME finished on its own (or the watchdog killed it) — retire the watchdog.
+kill "$WATCHDOG_PID" 2>/dev/null || true
+WATCHDOG_PID=""
+MAME_PID=""
 
 if [ ! -s "$CAP" ]; then
 	echo "run-victor-sasi: serial capture is empty (boot failed or no output)" >&2
