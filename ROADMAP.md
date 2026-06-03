@@ -1,6 +1,7 @@
-# QBE C11 8086 Compiler: Implementation Roadmap
+# QBE C11/C17 8086 Compiler: Implementation Roadmap
 
-**Project:** C11 Compiler for 8086 DOS using QBE Backend
+**Project:** C11/C17 + GNU-extensions C Compiler for 8086 DOS using QBE Backend
+**Standard:** C11 feature set + GNU extensions (`__attribute__`, inline `__asm__`, `__far`); equivalently C17-level (C17 added no new language features over C11).  No C23 language features.  C only — no C++.
 **Original Timeline:** 10-12 weeks to production release
 **Actual Progress:** ~97% Complete (as of 2026-05-25)
 **Last Updated:** 2026-05-25

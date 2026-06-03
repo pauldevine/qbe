@@ -1,4 +1,4 @@
-# QBE C11 Compiler for 8086: Complete Architecture Analysis
+# QBE C11/C17 Compiler for 8086: Complete Architecture Analysis
 
 **Date:** 2025-11-21
 **Author:** Claude (Anthropic)
@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-This document provides a comprehensive architectural analysis of building a complete C11 compiler targeting 8086 real-mode DOS binaries using the QBE compiler backend.
+This document provides a comprehensive architectural analysis of building a complete C11/C17 compiler targeting 8086 real-mode DOS binaries using the QBE compiler backend.  ("C11/C17" because C17 introduced no new language features over C11 — a C11-complete frontend is also C17-complete.  C23 language features such as `nullptr`/`constexpr`/`typeof`/`_BitInt`/`[[…]]` attributes are **not** implemented.)
 
 **Critical Finding:** The c2qbe compiler mentioned in initial planning documents does not exist in this repository. The actual situation is:
 

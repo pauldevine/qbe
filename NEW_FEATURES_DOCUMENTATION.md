@@ -312,9 +312,9 @@ main() {
 
 ---
 
-### 6. **C11 Features** ✅
+### 6. **C11 / C17 Features** ✅
 
-Full C11 feature set implemented for modern C development.
+Core C11 feature set implemented for modern C development (also the C17 feature set — C17 added no new language features over C11).
 
 #### _Static_assert
 
@@ -519,6 +519,10 @@ cc test.s -o test
 - **C89/ANSI C**: ~95% compliant (all core features working)
 - **C99**: ~80% compliant (mixed declarations, designated initializers, compound literals)
 - **C11**: ~65% compliant (`_Static_assert`, `_Generic`, `_Alignof`/`_Alignas`, anonymous struct/union)
+- **C17**: same as C11 — C17 added **no new language features** over C11 (defect fixes only), so the C11 feature set above is also the C17 feature set
+- **C23**: **not implemented** — none of `nullptr`, `constexpr`, `typeof`, `_BitInt`, `[[…]]` attributes (only GNU `__attribute__((…))`), single-argument `static_assert`, `bool`/`true`/`false` keywords, binary literals, or `#elifdef`/`__VA_OPT__` are supported
+- **GNU extensions**: `__attribute__((interrupt/weak/…))`, extended inline `__asm__` with operands/clobbers, `__far`/`far` pointers
+- **C++**: not supported (C only; the `minic_cpp` tool is the C *preprocessor*, not a C++ compiler)
 
 ### Supported Target Architectures (via QBE)
 

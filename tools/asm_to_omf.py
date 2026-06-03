@@ -17,6 +17,7 @@ segment so the linker can coalesce multiple modules into a single CS frame.
 Far-code models (medium/large/huge) keep the per-module `<BASE>_TEXT`
 name so each module lands in its own physical 64KB code segment.
 """
+import os
 import re
 import sys
 
@@ -179,7 +180,7 @@ def collect_referenced_syms(line):
 # at TEXT_SEG_BUDGET is really well under 64KB even for denser-than-average
 # code; over-splitting is harmless (just a few more segments).  omf_link
 # hard-rejects any USE16 segment that still slips past 64KB.
-TEXT_SEG_BUDGET = 56000
+TEXT_SEG_BUDGET = int(os.environ.get('QBE_TEXT_SEG_BUDGET', '56000'))
 EST_INSTR_BYTES = 4
 
 
