@@ -140,7 +140,14 @@ selpar(Fn *fn, Ins *i0, Ins *i1)
 				emit(Oload, Kw, i->to, SLOT(s), R);
 				s--;  /* Next parameter is 2 bytes higher */
 			} else if (i->cls == Kl) {
-				/* 32-bit parameter (takes 4 bytes = 2 words) */
+				/* 32-bit parameter (takes 4 bytes = 2 words).  The
+				 * Oload below materializes the param into its temp; on
+				 * i8086 spill.c::spill aliases this temp's slot to the
+				 * incoming ABI slot s so the load becomes an elided
+				 * self-copy (see the "Kl param" pass in spill.c).  We
+				 * must NOT pre-set tmp[].slot here: isel overloads a
+				 * set .slot to mean "fast-local alloca address" and
+				 * would materialize &param instead of the value. */
 				emit(Oload, Kl, i->to, SLOT(s), R);
 				s -= 2;  /* Next parameter is 4 bytes higher */
 			} else if (i->cls == Ks) {

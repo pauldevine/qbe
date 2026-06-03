@@ -1,95 +1,115 @@
-# Next session (§2x — CONTINUE CODEGEN QUALITY: bank the NEXT easy, localized, measurable i8086 size win. WHY: §2w proved the thesis — the young minic+qbe-i8086 backend emits a lot of unnecessary code, and removing it is the only lever for a bigger heap / bigger programs (the image is content-bound; see [[project-mp-heap-ceiling-analysis]]). §2w landed ONE win (dead AX/DX save brackets → -51520 body bytes, heap bumped 19456→49152 = 2.5×, all verified on real Victor). Same discipline applies: pick ONE win, land it green + measured + Victor-verified, then stop. Do NOT attempt a register-allocator rewrite or a general peephole framework.
+# Next session (§2y — CONTINUE CODEGEN QUALITY: bank the NEXT easy, localized, measurable i8086 size win. WHY: §2w + §2x proved the thesis — the young minic+qbe-i8086 backend emits a lot of unnecessary code, and removing it is the lever for a bigger image margin / bigger programs under the ~896KB Victor ceiling (the image is content-bound; see [[project-mp-heap-ceiling-analysis]]). §2w landed dead AX/DX save-bracket elimination (-51520 B); §2x landed Kl-param-copy elimination (-57712 B). Same discipline: pick ONE win, land it green + measured + Victor-verified, then stop. Do NOT attempt a register-allocator rewrite or a general peephole framework.
 
-> **§2x PLAN (next) — pick ONE of the remaining easy wins, same loop as §2w
+> **§2y PLAN (next) — pick ONE remaining easy win, same loop as §2w/§2x
 > (make check green AND DOS gate 184/184 AND a real image-size drop AND
-> unchanged Victor output). The two strongest remaining candidates, both
-> already scoped in §2w's analysis:**
+> unchanged Victor output). The strongest remaining candidate, scoped in
+> §2w's analysis and still un-done after §2x:**
 >
->  1. **Eliminate the param-materialization copy** (highest leverage, but
->     touches spill.c/abi.c so verify carefully).  Every Kl (far-pointer)
->     PARAMETER is currently copied from its incoming ABI stack slot (e.g.
->     `[bp+6]`) into a fresh below-BP forced-Kl slot (`[bp-14]`) at function
->     entry, then read from there.  Root cause: `force_kl_slot` (spill.c)
->     allocates a NEW slot for the incoming-param Kl temp instead of reusing
->     the param's existing 4-byte stack location.  The incoming-param SSA temp
->     is never reassigned (minic stores mutable copies into a separate
->     alloca), so aliasing its slot to the negative incoming-param slot is
->     safe and removes one `mov ax,[bp+6];mov dx,[bp+8];mov [bp-14],ax;mov
->     [bp-12],dx` block from EVERY function with a far-pointer param (ubiqu
->     itous).  EASY-WIN FRAMING: in i8086 abi.c/spill.c, when an incoming Kl
->     `Opar` temp's only def is the ABI load and it is never stored-to, set
->     its `tmp[].slot` to the negative incoming slot so the abi.c
->     `Oload Kl to=param-slot from=param-slot` becomes a self-copy that emit
->     elides.  MEASURE on mphalport `_mp_hal_stdout_tx_str` (the `[bp+6]→
->     [bp-14]` copy should vanish) + full image.  RISK: spill/ABI slot
->     numbering; the DOS gate's structarg/param probes are the net.
+>  1. **Redundant arg re-marshaling across adjacent calls** (the §2w
+>     candidate #2; abi.c selcall / minic.y).  After §2x, `_mp_hal_stdout_
+>     tx_str` reads the param directly from `[bp+6]` but STILL copies it
+>     into the SAME outgoing-arg slot `[bp-20]` separately before each of
+>     the two calls (`mov ax,[bp+6];mov dx,[bp+8];mov [bp-20],ax;mov
+>     [bp-18],dx` appears twice, identical).  When two adjacent calls pass
+>     the identical operand in the identical arg position with no
+>     intervening redefinition of either the source or the dest arg slot,
+>     the second marshal is dead.  EASY-WIN FRAMING: in the call/arg
+>     lowering (i8086/abi.c selcall, where the Oarg→`store …, SLOT(argidx)`
+>     happens), skip re-emitting an arg store whose {source ref, dest arg
+>     slot, width} are unchanged since the previous call in the same block
+>     AND nothing wrote either in between (a call clobbers caller-save regs
+>     but NOT caller-frame slots, and the arg source here is a param slot
+>     that is never rewritten).  Stay surgical; guard so it cannot change
+>     which bytes are pushed/stored.  RISK: proving "nothing wrote in
+>     between" across the intervening call — keep it conservative (bail if
+>     the source ref is anything a callee could alias, e.g. an address-taken
+>     local).  MEASURE on `_mp_hal_stdout_tx_str` (the second 4-instruction
+>     marshal block should vanish) + full image.
 >
->  2. **Redundant arg re-marshaling across adjacent calls** (lower risk,
->     minic.y).  In `_mp_hal_stdout_tx_str` the same `str` slot is copied into
->     the SAME arg slot `[bp-20]` separately before each of the two calls.
->     When two adjacent calls pass the identical operand in the identical arg
->     position with no intervening redefinition, the second marshal is dead.
->     EASY-WIN FRAMING: in the call/arg lowering, skip re-emitting an arg copy
->     whose source slot + dest arg slot + width are unchanged since the
->     previous call and nothing wrote either in between.  Stay surgical; guard
->     so it cannot change which bytes are pushed.
+>  OTHER candidates worth a look if #1 proves thorny: the Kw-param copy
+>  (same shape as §2x but Kw params currently get a register, so aliasing
+>  to a slot may be a WASH or worse — measure before committing); the
+>  div/rem AX/DX save-bracket at the `dst_in_cx` site that §2w left ungated.
 >
-> NON-GOALS (unchanged from §2w): register-allocator rewrite, general
-> peephole framework, near-call conversion, inlining, FAR_DATA/segment-model
-> changes.
+> NON-GOALS (unchanged): register-allocator rewrite, general peephole
+> framework, near-call conversion, inlining, FAR_DATA/segment-model changes.
 >
-> MEASUREMENT LOOP (per win): `make check` green; `bash tools/test-dos.sh`
-> green (**184/184**; the Kl-clobber probes are the safety net); rebuild one
-> TU with `tools/recompile-mp-tu.sh mphalport …` and eyeball the asm; full
-> `tools/build-micropython.sh --model=compact --keep-going` for the body
-> bytes (**§2w left it at body 801760 with heap 49152**, or 772064 with the
-> pre-bump heap 19456 — note which baseline you compare against); then
-> `VICTOR_SRC=build/mp-test.py tools/run-victor-sasi.sh
-> build/mp-link/mpython.exe 90` must still print `[2..37] / 12 / 197 /
-> fib→514229 / 5 / 21`, clean `D4 C5`.  Commit qbe-repo files at the green
-> milestone; the MicroPython port tree is untracked (note port-tree changes
-> in this file).
+> MEASUREMENT LOOP (per win): `make qbe`; `make check` green; `bash
+> tools/test-dos.sh` green (**184/184**; the Kl-clobber + structarg/param
+> probes are the safety net); recompile one TU with
+> `tools/recompile-mp-tu.sh mphalport ~/projects/micropython/ports/dos8086/mphalport.c`
+> and eyeball the asm (NOTE: recompile-mp-tu.sh needs /tmp/mp_objs.txt for
+> the relink step — a full build regenerates the objs but NOT that file, so
+> the relink is skipped; the per-TU asm is still produced and that's what
+> you eyeball); then full `tools/build-micropython.sh --model=compact
+> --keep-going` for the body bytes (**§2x left it at body 744048 with heap
+> 49152**; §2w baseline was 801760 at the same heap); then run on the real
+> Victor:
+>   `VICTOR_SRC=build/mp-test.py tools/run-victor-sasi.sh build/mp-link/mpython.exe 90`
+> must still print `[2..37] / 12 / 197 / fib→514229 / 5 / 21`, clean
+> `D4 C5`.  **Victor harness gotcha (burned again in §2x):** the run is
+> deterministic but EMPTY serial output = a host invocation problem, not
+> MAME flakiness — if the Bash tool *auto-backgrounds* the run (long
+> timeout), the kill -9 EXIT trap fires early and kills MAME before it
+> boots.  Invoke with explicit `run_in_background: true` (managed task) and
+> wait for the completion notification; that keeps MAME alive.  Commit
+> qbe-repo files at the green milestone; the MicroPython port tree is
+> untracked (note port-tree changes in this file).
+>
+> ---
+>
+> **§2x (DONE 2026-06-03) — i8086 Kl-parameter materialization-copy
+> elimination.  ONE codegen win, fully verified.  COMMITTED (i8086/abi.c,
+> i8086/emit.c, spill.c).**
+>
+>  - **The win**: every function with a Kl (far-pointer / `long`) parameter
+>    copied it from its incoming ABI stack slot (`[bp+6]`) into a fresh
+>    below-BP forced-Kl slot (`[bp-14]`) at entry — `mov ax,[bp+6];mov
+>    dx,[bp+8];mov [bp-14],ax;mov [bp-12],dx` — then read it from there.
+>    The copy is dead: a param SSA temp is never reassigned (minic mutates
+>    params through a separate alloca), so `[bp+6]` always holds the passed
+>    value.  Now the param temp is ALIASED to its incoming ABI slot, so the
+>    materialization load becomes a no-op self-copy that emit elides; every
+>    use reads `[bp+6]` directly.
+>  - **Implementation** (3 files): (1) `spill.c` — a pre-pass inside the
+>    existing `force_kl_slot` block scans `fn->start` for the selpar pattern
+>    `%t =l load SLOT(s)` with `s < 0` (a negative slot only ever names a
+>    read-only incoming param) and pre-sets `tmp[%t].slot = s`, so the
+>    following `slot()` loop reuses it instead of carving a fresh below-BP
+>    slot.  (2) `i8086/emit.c` — the Oload Kl handler elides an
+>    `Oload Kl SLOT(s) <- SLOT(s)` when `s < 0` (reading and writing the
+>    same param memory is a no-op; the `s < 0` gate keeps it away from the
+>    spilled-Kl-ptr deref case at slot idx >= arg_slot_top).  (3)
+>    `i8086/abi.c` — comment only.  **KEY GOTCHA (cost a debug cycle):** the
+>    alias MUST be set in spill.c (after isel), NOT in abi.c (before isel).
+>    i8086 isel's `fixarg` (i8086/isel.c:57) overloads a non-(-1)
+>    `tmp[].slot` to mean "this temp is a fast-local alloca whose value is
+>    its slot ADDRESS" and would materialize `addr S-3` (i.e. `&param`,
+>    `lea [bp+6];ss`) instead of the param value.  Setting the slot only
+>    after isel avoids that collision.
+>  - **Results**: `_f`-shaped probe `sub sp,14`→`sub sp,6` and the 4-instr
+>    copy gone; compact image body **801760 → 744048 B (-57712)**.  `make
+>    check` green; DOS gate **184/184** (structarg/param/Kl-clobber probes
+>    green = no ABI/aliasing regression); real-Victor mp-test.py output
+>    unchanged (`[2..37]/12/197/fib→514229/5/21`, clean `D4 C5`).
+>  - **No heap bonus this time**: heap stays 49152 — it is already at the
+>    compact-model ~64 KB single-segment ceiling (NOT the DOS load
+>    ceiling), so freed code bytes become image margin under the ~896KB
+>    Victor limit, not more heap.  See `ports/dos8086/mpconfigport.h:89`.
 >
 > ---
 >
 > **§2w (DONE 2026-06-03) — i8086 dead AX/DX save-bracket elimination via
-> conservative liveness.  ONE codegen win, fully verified.  COMMITTED
-> `9a32707` (i8086/emit.c).**
+> conservative liveness.  COMMITTED `9a32707` (i8086/emit.c).**
 >
 >  - **The win**: the `push ax/push dx … pop dx/pop ax` brackets around every
->    Kl op and 32-bit copy (added to fix the i8086-kl-* clobber bugs) fired
->    UNCONDITIONALLY, even at function/arg boundaries where AX/DX hold nothing
->    live — ~25% of the image was these pushes (64702 `push ax`).  New
->    `compute_axdx_liveafter()` in i8086/emit.c does a per-block backward scan
->    of physical-AX/DX liveness; `i8086_emitfn` sets `g_live_ax_after`/
->    `g_live_dx_after` per instruction; the SIX save-bracket sites
->    (`kl_save_axdx` + the Oadd/Ocopy/Ostorel inlines) gate their push/pop on
->    it.  **STRICT over-approximation so it cannot reintroduce the clobber
->    bugs**: blocks entered with AX/DX assumed live at exit (covers Jretw/
->    Jretl/Jnz + cross-block); USE recorded for every AX/DX operand AND every
->    Kl op with a register operand (high word lives implicitly in DX); KILL
->    only for definite overwrites (result to AX/DX, or a call's caller-save
->    clobber).  Globals default 1 = original always-save behaviour.  (The
->    div/rem bracket at the `dst_in_cx` site was left ungated — rare, more
->    delicate push ordering; revisit if needed.)
->  - **Results**: `_mp_hal_stdout_tx_str` 35→23 instructions (all 3 dead
->    brackets gone); image `push ax` brackets 64702→**28720 (-56%)**; compact
->    image body **823584 → 772064 B (-51520)**.  `make check` green; DOS gate
->    **184/184** (sigencode_probe + the kl probes green = no clobber
->    regression); real-Victor mp-test.py output unchanged.
->  - **Heap bonus** (port tree, untracked): the 51 KB freed let
->    `MICROPY_HEAP_SIZE` go **19456 → 49152 (48 KB, 2.5×)** — bounded by the
->    compact-model 64 KB single-segment limit (main's heap[] is one far
->    segment; >64 KB breaks GC's in-segment pointer math), NOT just the DOS
->    load ceiling.  Rebuilt body 801760 (< the known-loading 823584); loads +
->    runs correctly on the real Victor.  See
->    `ports/dos8086/mpconfigport.h:80`.
->  - **The thesis is proven**: every code byte saved is a heap byte gained.
->    Keep going (§2x).
+>    Kl op and 32-bit copy fired UNCONDITIONALLY, even where AX/DX hold
+>    nothing live.  New `compute_axdx_liveafter()` does a per-block backward
+>    scan of physical-AX/DX liveness; the six save-bracket sites gate
+>    push/pop on it.  STRICT over-approximation (can't reintroduce the
+>    clobber bugs).  `push ax` brackets 64702→28720 (-56%); body 823584 →
+>    772064 B (-51520).  Heap bonus: 19456→49152 (2.5×, segment-bound).
 >
 > ---
->
 
----
-
-_Older session headers (§2u and earlier) were moved to [`SESSION_LOG.md`](./SESSION_LOG.md) to keep this file focused on the current plan + the immediately-preceding session. See there for the full history._
+_Older session headers (§2u and earlier) were moved to [`SESSION_LOG.md`](./SESSION_LOG.md). See there for the full history._

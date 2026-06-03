@@ -1848,6 +1848,18 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 * slot."  Dereference via BX (and ES under far-data).
 			 */
 			{
+			/* Elide a no-op self-copy: an incoming-Kl-param temp that
+			 * selpar aliased to its own ABI slot (see i8086/abi.c)
+			 * lowers to Oload Kl SLOT(s) <- SLOT(s) with s < 0 (the
+			 * param region above BP, a direct-read slot).  Reading and
+			 * writing the same memory is a no-op — emit nothing.  The
+			 * s < 0 gate keeps this away from the spilled-Kl-ptr deref
+			 * case (slot index >= arg_slot_top), which is NOT a no-op. */
+			if (rtype(i->to) == RSlot && rtype(r0) == RSlot
+			 && rsval(i->to) == rsval(r0) && rsval(r0) < 0)
+				return;
+			}
+			{
 			int dst_in_dx_ld = (rtype(i->to) == RTmp && i->to.val == RDX);
 			int dst_in_bx_ld = (rtype(i->to) == RTmp && i->to.val == RBX);
 			int addr_in_bx_ld =

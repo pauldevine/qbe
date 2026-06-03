@@ -375,10 +375,32 @@ spill(Fn *fn)
 	 * load/store paths already in i8086/emit.c.
 	 * See feedback memory: i8086-kl-load-loses-high. */
 	force_kl_slot = (strcmp(T.name, "i8086") == 0);
-	if (force_kl_slot)
+	if (force_kl_slot) {
+		/* Alias each incoming Kl parameter temp to its ABI stack slot.
+		 * selpar (i8086/abi.c) materializes a Kl param via
+		 *   %t =l load SLOT(s)   with s < 0   (the param region above BP)
+		 * and a negative slot only ever names a read-only incoming
+		 * parameter.  Pre-setting tmp[%t].slot = s makes slot() below
+		 * reuse it instead of carving a fresh below-BP slot, so the
+		 * load lowers to a SLOT(s)<-SLOT(s) self-copy that emit elides
+		 * (i8086/emit.c Oload handler) — removing the 4-instruction
+		 * [bp+off]->[bp-N] materialization copy from every function with
+		 * a Kl (far-pointer / long) parameter.  Safe because a param SSA
+		 * temp is never reassigned (minic mutates params through a
+		 * separate alloca), so reading [bp+off] always yields the
+		 * originally-passed value.  Done here (after isel) rather than
+		 * in abi.c because isel overloads a non-(-1) tmp[].slot to mean
+		 * "fast-local alloca address" and would materialize &param. */
+		for (b=fn->start, i=b->ins; i<&b->ins[b->nins]; i++)
+			if (i->op == Oload && i->cls == Kl
+			 && rtype(i->to) == RTmp
+			 && rtype(i->arg[0]) == RSlot
+			 && rsval(i->arg[0]) < 0)
+				tmp[i->to.val].slot = rsval(i->arg[0]);
 		for (t=Tmp0; t<ntmp; t++)
 			if (tmp[t].cls == Kl)
 				slot(t);
+	}
 
 	for (bp=&fn->rpo[fn->nblk]; bp!=fn->rpo;) {
 		b = *--bp;
