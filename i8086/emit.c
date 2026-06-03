@@ -1134,6 +1134,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	 * format-string `lea %=, %M0` template — rega allocates a single
 	 * register and the omap entry is `Ki` (matches both Kw and Kl). */
 	if ((i->cls == Kl && i->op != Oaddr && i->op != Oloadfl) || i->op == Ostorel
+	    || i->op == Ovargp
 	    || INRANGE(i->op, Oceql, Ocultl)) {
 		/*
 		 * 32-bit operations on 16-bit x86 require multi-instruction sequences.
@@ -2311,6 +2312,38 @@ emitins(Ins *i, Fn *fn, FILE *f)
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 			}
 			return;
+
+		case Ovargp: {
+			/* va_start: pointer to the first variadic argument.  The
+			 * caller pushed varargs just past our named params, so the
+			 * first one lives at [bp+fn->vararg_off] in SS.  Far-data:
+			 * the result is a far ptr SS:(bp+off) in DX:AX (seg in DX,
+			 * off in AX), stored to the Kl result slot like Omkfar.
+			 * Near-data (DS==SS): the result is the bare offset
+			 * (bp+off) in AX.  AX/DX are scratch here; bracket with
+			 * kl_save_axdx so a live caller value rega placed in AX/DX
+			 * (e.g. a named param like `count') survives.  See
+			 * [[project-minic-vararg-stub]]. */
+			int vargp_far = (T.memmodel == Mcompact ||
+			                 T.memmodel == Mlarge ||
+			                 T.memmodel == Mhuge);
+			AxDxSave s_va = kl_save_axdx(i->to, f);
+			fprintf(f, "\tlea ax, [bp%+d]\n", fn->vararg_off);
+			if (vargp_far) {
+				fprintf(f, "\tmov dx, ss\n");
+				if (rtype(i->to) == RSlot) {
+					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+					fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
+				} else if (rtype(i->to) == RTmp && i->to.val != RAX)
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			} else if (rtype(i->to) == RTmp) {
+				if (i->to.val != RAX)
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			} else if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			kl_restore_axdx(s_va, f);
+			return;
+		}
 
 		case Oswap:
 			/* rega emits Oswap to resolve parallel moves at block

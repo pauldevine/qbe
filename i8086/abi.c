@@ -169,6 +169,13 @@ selpar(Fn *fn, Ins *i0, Ins *i1)
 			break;
 		}
 	}
+
+	/* Record the BP-relative byte offset of the first variadic argument
+	 * (just past the named params).  SLOT(s) maps to 2*-s, so after the
+	 * loop `s` indexes the next stack slot = the first vararg.  The Ovargp
+	 * op (va_start) materialises SS:(bp+vararg_off).  See
+	 * [[project-minic-vararg-stub]]. */
+	fn->vararg_off = 2 * -s;
 }
 
 static void

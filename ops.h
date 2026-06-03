@@ -152,6 +152,7 @@ O(storefl, T(l,e,e,e, l,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* store 
 O(mkfar,   T(e,w,e,e, e,w,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* make far ptr: (seg, off) -> far */
 O(farseg,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* extract segment from far ptr */
 O(faroff,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* extract offset from far ptr */
+O(vargp,   T(x,x,x,x, x,x,x,x), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* va_start: ptr to first vararg = SS:(bp+vararg_off) */
 
 /****************************************/
 /* INTERNAL OPERATIONS (keep nop first) */

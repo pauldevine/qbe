@@ -2476,6 +2476,24 @@ call(Node *n, Symb *sr)
 	Symb *sv;
 
 	f = n->l->u.v;
+
+	/* va_start: <stdarg.h> expands `va_start(ap, last)` to
+	 * `((ap) = (va_list)__builtin_va_argptr())`.  Emit the i8086 `vargp`
+	 * op, which the backend lowers to a pointer (SS:bp+vararg_off) to the
+	 * first variadic argument of the enclosing variadic function.  The
+	 * subsequent `va_arg(ap, T)` macro is pure pointer arithmetic + a far
+	 * load, so no further builtin is needed.  See
+	 * [[project-minic-vararg-stub]]. */
+	if (strcmp(f, "__builtin_va_argptr") == 0) {
+		sr->t = Tmp;
+		sr->u.n = tmp++;
+		sr->ctyp = IDIR(NIL) | (NEAR_DATA() ? 0 : FAR);  /* void* */
+		fprintf(of, "\t");
+		psymb(*sr);
+		fprintf(of, " =%c vargp\n", DATAPTR_T());
+		return;
+	}
+
 	sv = varget(f);
 	if (sv) {
 		ft = sv->ctyp;

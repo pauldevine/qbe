@@ -473,6 +473,12 @@ struct Fn {
 	                    * Used by i8086/emit.c Ostorel/Oload Kl to
 	                    * pick "direct slot" vs "deref through slot"
 	                    * semantics.  See [[huge-phase-b-storel-gap]]. */
+	int vararg_off;    /* i8086: BP-relative byte offset of the first
+	                    * variadic argument (= just past the named params,
+	                    * recorded by selpar).  Used by the Ovargp op
+	                    * (va_start) to materialise a pointer to the first
+	                    * vararg as SS:(bp+vararg_off).  See
+	                    * [[project-minic-vararg-stub]]. */
 	char vararg;
 	char dynalloc;
 	char leaf;
