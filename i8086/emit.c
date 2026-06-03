@@ -333,13 +333,83 @@ store_ax_to(Ref to, Fn *fn, FILE *f)
 		fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(to, fn));
 }
 
+/* Conservative per-instruction physical-register liveness for AX and DX,
+ * used to suppress the dead `push ax/dx … pop dx/ax` save brackets around
+ * Kl ops and 32-bit copies.  The brackets exist to protect a live value
+ * rega placed in AX/DX from the implicit scratch clobber of these ops (see
+ * the many i8086-kl-* feedback memories); they are only NEEDED when AX/DX
+ * actually hold a value used after the op.  At function/argument boundaries
+ * — which dominate the image — AX/DX hold nothing live, so the bracket is
+ * pure overhead (~25% of the generated MicroPython image is these pushes).
+ *
+ * SAFETY (this MUST NOT reintroduce the clobber bugs): the analysis is a
+ * strict over-approximation of liveness — it never claims a register dead
+ * when it might be live.  (a) Every block is entered (scanning backward)
+ * with AX/DX assumed LIVE at exit, covering Jretw/Jretl return values, Jnz
+ * conditions, and all cross-block liveness.  (b) A USE is recorded for every
+ * appearance of AX/DX as an operand AND for every Kl instruction with a
+ * register operand (a register-resident Kl value carries its high word in
+ * DX implicitly).  (c) A KILL is recorded only for definite overwrites: a
+ * result written to AX/DX, or a call (caller-save clobber).  Extra uses and
+ * missing kills both only ADD liveness, keeping the save in place.  These
+ * globals default to 1 (= always save, the original behaviour) and are set
+ * per-instruction by i8086_emitfn before each emitins call. */
+static int g_live_ax_after = 1;
+static int g_live_dx_after = 1;
+static signed char *la_ax_buf, *la_dx_buf;  /* per-instruction AX/DX live-after */
+static uint la_cap;                          /* capacity of la_*_buf */
+
+static void
+compute_axdx_liveafter(Blk *b, Fn *fn, signed char *la_ax, signed char *la_dx)
+{
+	int n, a, ax, dx;
+	Ins *i;
+	Ref r, bse, idx;
+
+	ax = 1;  /* conservative: AX/DX live at block exit */
+	dx = 1;
+	for (n = b->nins - 1; n >= 0; n--) {
+		la_ax[n] = (signed char)ax;
+		la_dx[n] = (signed char)dx;
+		i = &b->ins[n];
+		/* KILLs — definite overwrites only. */
+		if (rtype(i->to) == RTmp && i->to.val == RAX) ax = 0;
+		if (rtype(i->to) == RTmp && i->to.val == RDX) dx = 0;
+		if (iscall(i->op)) { ax = 0; dx = 0; }
+		/* USEs — every AX/DX operand (register, or memref base/index). */
+		for (a = 0; a < 2; a++) {
+			r = i->arg[a];
+			if (rtype(r) == RTmp) {
+				if (r.val == RAX) ax = 1;
+				if (r.val == RDX) dx = 1;
+			} else if (rtype(r) == RMem) {
+				bse = fn->mem[r.val].base;
+				idx = fn->mem[r.val].index;
+				if (rtype(bse) == RTmp && bse.val == RAX) ax = 1;
+				if (rtype(bse) == RTmp && bse.val == RDX) dx = 1;
+				if (rtype(idx) == RTmp && idx.val == RAX) ax = 1;
+				if (rtype(idx) == RTmp && idx.val == RDX) dx = 1;
+			}
+		}
+		/* Implicit AX:DX read of a register-resident Kl value (its high
+		 * word lives in DX without appearing as an operand). */
+		if (i->cls == Kl
+		 && (rtype(i->to) == RTmp || rtype(i->arg[0]) == RTmp
+		     || rtype(i->arg[1]) == RTmp)) {
+			ax = 1;
+			dx = 1;
+		}
+	}
+}
+
 /* Preserve AX/DX across a Kl op that uses them as scratch.  rega doesn't
  * model the implicit clobber, so we save/restore the caller's AX/DX
  * unless the op's destination is one of them (in which case the op writes
  * it and restoring would overwrite the result).  Push/pop is cheaper than
  * the alternative — letting rega spill via memory — for typical 8086 code
  * pressure.  Skip the save when the destination is the register being
- * saved, since the result must remain there. */
+ * saved, since the result must remain there.  Also skip when the register
+ * is not live across the op (see compute_axdx_liveafter). */
 typedef struct AxDxSave {
 	int save_ax;
 	int save_dx;
@@ -351,8 +421,8 @@ kl_save_axdx(Ref to, FILE *f)
 	AxDxSave s;
 	int dst_in_ax = (rtype(to) == RTmp && to.val == RAX);
 	int dst_in_dx = (rtype(to) == RTmp && to.val == RDX);
-	s.save_ax = !dst_in_ax;
-	s.save_dx = !dst_in_dx;
+	s.save_ax = !dst_in_ax && g_live_ax_after;
+	s.save_dx = !dst_in_dx && g_live_dx_after;
 	if (s.save_ax) fprintf(f, "\tpush ax\n");
 	if (s.save_dx) fprintf(f, "\tpush dx\n");
 	return s;
@@ -1161,8 +1231,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			{
 			int dst_in_ax = (rtype(i->to) == RTmp && i->to.val == RAX);
 			int dst_in_dx = (rtype(i->to) == RTmp && i->to.val == RDX);
-			int save_ax = !dst_in_ax;
-			int save_dx = !dst_in_dx;
+			int save_ax = !dst_in_ax && g_live_ax_after;
+			int save_dx = !dst_in_dx && g_live_dx_after;
 			ArgStage r1s = kl_stage_arg(r1, r0, i->to, f);
 			if (save_ax) fprintf(f, "\tpush ax\n");
 			if (save_dx) fprintf(f, "\tpush dx\n");
@@ -1725,8 +1795,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			int src_in_dx = (rtype(r0) == RTmp && r0.val == RDX);
 			int dst_in_ax = (rtype(i->to) == RTmp && i->to.val == RAX);
 			int dst_in_dx = (rtype(i->to) == RTmp && i->to.val == RDX);
-			int save_ax = !src_in_ax && !dst_in_ax;
-			int save_dx = !src_in_dx && !dst_in_dx;
+			int save_ax = !src_in_ax && !dst_in_ax && g_live_ax_after;
+			int save_dx = !src_in_dx && !dst_in_dx && g_live_dx_after;
 			if (save_ax) fprintf(f, "\tpush ax\n");
 			if (save_dx) fprintf(f, "\tpush dx\n");
 
@@ -1953,8 +2023,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			 * a 4-byte far pointer; segment goes to ES so the
 			 * dereference is `es:[bx]`. */
 			int needs_es = slot_dest_deref && far_data;
-			int save_ax = !src_in_ax;
-			int save_dx = !src_in_dx;
+			int save_ax = !src_in_ax && g_live_ax_after;
+			int save_dx = !src_in_dx && g_live_dx_after;
 			/* BX is used as the destination-address scratch register; if
 			 * rega placed any live tmp in BX (and r1's reg isn't BX
 			 * itself), we must save/restore it.  Skip if the source IS
@@ -4426,8 +4496,26 @@ i8086_emitfn(Fn *fn, FILE *f)
 		if (b != fn->start && b->name[0] != 0)
 			fprintf(f, "%s:\n", b->name);
 
-		for (i = b->ins; i < &b->ins[b->nins]; i++)
+		/* Precompute AX/DX live-after for each instruction so the save
+		 * brackets can be dropped where the register is dead (see
+		 * compute_axdx_liveafter).  Buffers grow as needed across blocks. */
+		if (b->nins > la_cap) {
+			la_cap = b->nins;
+			la_ax_buf = realloc(la_ax_buf, la_cap);
+			la_dx_buf = realloc(la_dx_buf, la_cap);
+			if (!la_ax_buf || !la_dx_buf)
+				die("emit: out of memory for liveness buffers");
+		}
+		compute_axdx_liveafter(b, fn, la_ax_buf, la_dx_buf);
+
+		for (i = b->ins; i < &b->ins[b->nins]; i++) {
+			int idx = (int)(i - b->ins);
+			g_live_ax_after = la_ax_buf[idx];
+			g_live_dx_after = la_dx_buf[idx];
 			emitins(i, fn, f);
+		}
+		g_live_ax_after = 1;
+		g_live_dx_after = 1;
 
 		/* Emit jump */
 		switch (b->jmp.type) {
