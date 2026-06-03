@@ -100,6 +100,14 @@ for d in cfg nvram inp sta snap diff comments; do mkdir -p "$WORK/home/$d"; done
 "$VTG" copy "$EXE" "$RUN_IMG:0:\\PROG.EXE" >/dev/null 2>&1 \
 	|| { echo "run-victor-sasi: failed to inject $EXE into image partition 0" >&2; exit 1; }
 
+# Optional Python source: inject it as PROG.PY so the program can read it from
+# the boot drive (INT 21h) instead of embedding the source in the image.
+if [ -n "${VICTOR_SRC:-}" ]; then
+	[ -f "$VICTOR_SRC" ] || { echo "run-victor-sasi: VICTOR_SRC not found: $VICTOR_SRC" >&2; exit 2; }
+	"$VTG" copy "$VICTOR_SRC" "$RUN_IMG:0:\\PROG.PY" >/dev/null 2>&1 \
+		|| { echo "run-victor-sasi: failed to inject $VICTOR_SRC as PROG.PY" >&2; exit 1; }
+fi
+
 # --- Run MAME headless (SASI hard disk, NO floppy) ----------------------
 # Launch in the BACKGROUND so we keep its pid; -seconds_to_run is MAME's own
 # (emulated-time) exit bound, and the wall-clock watchdog below is the backstop
