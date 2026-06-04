@@ -1,5 +1,27 @@
-# Next session (§3f — the MicroPython language surface is now SOUND on real Victor: int arith, classes+inheritance, str slice/methods, lists+comprehension, generators, AND exceptions (function-frame `except` now catches runtime errors — §3e).  No known correctness bug remains in the verified surface.  Pick a NEW direction:  (A) BROADEN real-program validation — write a non-trivial PROG.PY (a small algorithm using dicts/classes/exceptions/comprehensions together, e.g. a tokenizer or a tiny state machine) and run it on Victor; this is where any remaining latent codegen bug will surface, and it is the highest-value use of the now-working surface.  (B) ENABLE more builtins — min/max/abs/sorted/enumerate are OFF at MINIMUM ROM (`NameError`).  Flip `MICROPY_PY_BUILTINS_MIN_MAX` (+ check the sorted/enumerate flags) in the UNTRACKED `ports/dos8086/mpconfigport.h`; image has ~111 KB headroom (784800 B total under ~896 KB).  MEASURE the image after.  Cheap, makes the feature probe print all-OK.  (C) PROPER `volatile` — minic still DISCARDS the `volatile` qualifier on variables (the type productions `VOLATILE TINT → INT` drop it; `isvolatile` in varh is only for inline-asm).  §3e's setjmp-gate covers the setjmp/longjmp case conservatively, but a TRUE `volatile` (needed for memory-mapped I/O, or any non-setjmp use) is still unimplemented — a real local would be register-cached.  Low priority for MicroPython (no MMIO), but it is a real C-conformance gap; doing it right = thread `volatile` into varh + force those allocs non-promotable + emit a per-access load/store QBE won't elide.  (D) the 211-commit upstream-qbe rebase (still deferred).  NOTE: §3e's alias.c change is TARGET-GENERAL (helps amd64/arm64/rv64 too — `make check` green), a genuine upstream-worthy QBE correctness fix.  HARNESS: feature/exception probes need a ≥200 s Victor budget (slow parse, NOT a hang); host minimal port (slice enabled) for GRAMMAR only.  Reproducers: `build/exc-min.py`, `build/exc{,2,3,4}-probe.py`, `build/nlr_mock_probe.c` (the fast DOSBox setjmp/longjmp repro that cracked §3e).)
+# Next session (§3g — the MicroPython language surface is SOUND on real Victor AND validated end-to-end by a non-trivial integration program (§3f(A) — RPN calculator + OOP/inheritance + dicts + comprehensions + generators + custom AND VM-raised exceptions caught in functions, `build/mp-integ.py`, ran byte-identical to host, clean `D4 C5`).  No known correctness bug remains.  Remaining OPTIONAL directions:  (B) ENABLE more builtins — min/max/abs/sorted/enumerate are OFF at MINIMUM ROM (`NameError`).  Flip `MICROPY_PY_BUILTINS_MIN_MAX` (+ check the sorted/enumerate flags) in the UNTRACKED `ports/dos8086/mpconfigport.h`; image has ~111 KB headroom (784800 B total under ~896 KB).  MEASURE the image after.  Cheap, makes the feature probe print all-OK.  (C) PROPER `volatile` — minic still DISCARDS the `volatile` qualifier on variables (the type productions `VOLATILE TINT → INT` drop it; `isvolatile` in varh is only for inline-asm).  §3e's setjmp-gate covers the setjmp/longjmp case conservatively, but a TRUE `volatile` (needed for memory-mapped I/O, or any non-setjmp use) is still unimplemented — a real local would be register-cached.  Low priority for MicroPython (no MMIO), but it is a real C-conformance gap; doing it right = thread `volatile` into varh + force those allocs non-promotable + emit a per-access load/store QBE won't elide.  (D) the 211-commit upstream-qbe rebase (still deferred).  NOTE: §3e's alias.c change is TARGET-GENERAL (helps amd64/arm64/rv64 too — `make check` green), a genuine upstream-worthy QBE correctness fix.  HARNESS: feature/exception probes need a ≥200 s Victor budget (slow parse, NOT a hang); host minimal port (slice enabled) for GRAMMAR only.  Reproducers: `build/exc-min.py`, `build/exc{,2,3,4}-probe.py`, `build/nlr_mock_probe.c` (the fast DOSBox setjmp/longjmp repro that cracked §3e).)
 
+> ---
+>
+> **§3f(A) (DONE 2026-06-04) — END-TO-END VALIDATION of the language surface
+> with a real program.  NO CODE CHANGE (validation); reproducer
+> `build/mp-integ.py` (untracked, build/).**
+>
+>  - Wrote a non-trivial 1.5 KB integration program: an RPN calculator
+>    (tokenize via `str.split`, eval on a list-stack, `apply_op` helper) +
+>    `dict` operator table + a `Shape→Square→Box` class hierarchy with
+>    `super`-style `Square.area(self)` calls + a list comprehension + a
+>    generator + a dict word-frequency counter.  Exceptions exercised
+>    REALISTICALLY: `7 0 /` raises a custom `CalcError` and `2 3 bad` raises
+>    a VM-internal `ValueError` (`int("bad")`), BOTH caught by `run()`'s
+>    function-frame `try/except` (the §3e fix in a real program).
+>  - **Ran byte-identical to host on the real Victor** (240 s budget): `7 /
+>    14 / 5 / CALCERR / EXC / areas 41 / sq [0,1,4,9,16,25,36] / gen 55 /
+>    the 3 / cat 2 / DONE`, clean `D4 C5`.  NO latent codegen bug surfaced —
+>    §3d (Kl fold) + §3e (setjmp locals) are robustly confirmed together.
+>  - Used the §3e-fixed mpython.exe (784800 B).  Avoided MINIMUM-ROM-absent
+>    builtins (min/max/sum/sorted/enumerate) — manual loops instead; see
+>    §3g(B) to enable them.
+>
 > ---
 >
 > **§3e-fix (DONE 2026-06-04) — FIXED the function-frame VM-raise exception
