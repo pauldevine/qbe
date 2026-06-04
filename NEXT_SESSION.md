@@ -1,27 +1,32 @@
-# Next session (§2z — CONTINUE CODEGEN QUALITY: bank the NEXT easy, localized, measurable i8086 size win. WHY: §2w + §2x + §2y proved the thesis — the young minic+qbe-i8086 backend emits a lot of unnecessary code, and removing it is the lever for a bigger image margin / bigger programs under the ~896KB Victor ceiling (the image is content-bound; see [[project-mp-heap-ceiling-analysis]]). §2w landed dead AX/DX save-bracket elimination (-51520 B); §2x landed Kl-param-copy elimination (-57712 B); §2y landed redundant-arg-marshal elimination (-1952 B). Same discipline: pick ONE win, land it green + measured + Victor-verified, then stop. Do NOT attempt a register-allocator rewrite or a general peephole framework.
+# Next session (§3a — CONTINUE CODEGEN QUALITY: bank the NEXT easy, localized, measurable i8086 size win. WHY: §2w + §2x + §2y + §2z proved the thesis — the young minic+qbe-i8086 backend emits a lot of unnecessary code, and removing it is the lever for a bigger image margin / bigger programs under the ~896KB Victor ceiling (the image is content-bound; see [[project-mp-heap-ceiling-analysis]]). §2w landed dead AX/DX save-bracket elimination (-51520 B); §2x landed Kl-param-copy elimination (-57712 B); §2y landed redundant-arg-marshal elimination (-1952 B); §2z landed div/rem AX/DX bracket liveness gating (-272 B). Same discipline: pick ONE win, land it green + measured + Victor-verified, then stop. Do NOT attempt a register-allocator rewrite or a general peephole framework.
 
-> **§2z PLAN (next) — pick ONE remaining easy win, same loop as
-> §2w/§2x/§2y (make check green AND DOS gate 184/184 AND a real image-size
-> drop AND unchanged Victor output). Candidates, in rough order of
-> expected payoff (MEASURE before committing — §2y's headline pattern was
-> real but only -1952 B total, far smaller than the AX/DX/param wins, so
-> don't assume a visible idiom is a big aggregate win):**
+> **NOTE ON DIMINISHING RETURNS: the two big levers (§2w AX/DX brackets,
+> §2x Kl-param copy) are spent.  §2y/§2z were each sub-2KB.  Before
+> investing a session, MEASURE the candidate's aggregate payoff early
+> (recompile a couple of representative TUs, eyeball how often the idiom
+> actually fires) — if it's only a few hundred bytes it may not be worth
+> a full Victor cycle.  Consider whether the session is better spent on a
+> NEW capability (the image is content-bound, so a genuinely smaller
+> codegen lever beats nothing, but a feature that lets a real program run
+> may matter more).**
+
+> **§3a PLAN (next) — pick ONE remaining easy win, same loop as
+> §2w/§2x/§2y/§2z (make check green AND DOS gate 184/184 AND a real
+> image-size drop AND unchanged Victor output). Candidates:**
 >
->  1. **div/rem AX/DX save-bracket liveness gating** (i8086/emit.c
->     Odiv/Oudiv/Orem/Ourem, ~line 2463).  This site still gates its
->     `push ax/cx/dx` brackets ONLY on `dst_in_*`, NOT on the §2w
->     `g_live_ax_after`/`g_live_dx_after` liveness flags.  Mirror §2w:
->     `save_ax &= g_live_ax_after; save_dx &= g_live_dx_after`.  (CX has
->     no liveness tracker — §2w only tracks AX/DX — so leave `save_cx`
->     as-is unless you extend compute_axdx_liveafter to CX, which is a
->     bigger change.)  CLEARLY SOUND (same strict over-approximation as
->     §2w).  362 div/rem call sites in the image, so bounded but real.
->     The Oextsw/Oextuw site just below (~line 2522) already uses
->     kl_save_axdx (liveness-gated) — good reference.
->
->  2. **Kw-param copy** (same shape as §2x but for Kw params).  Kw params
+>  1. **Kw-param copy** (same shape as §2x but for Kw params).  Kw params
 >     currently get a register, so aliasing to a slot may be a WASH or
 >     worse — MEASURE before committing.
+>
+>  2. **CX liveness for div/rem `save_cx`** — extend compute_axdx_liveafter
+>     to also track CX, then gate §2z's `save_cx` on it.  Bigger change
+>     (the tracker currently models only AX/DX); the div/rem site is the
+>     only `save_cx` consumer, so payoff is bounded by div/rem frequency
+>     (same population §2z's -272 B came from — likely small).
+>
+>  3. **Survey for other unconditional save brackets** that could be
+>     liveness-gated the way §2w/§2z did — grep emit.c for `push ax`/
+>     `push dx` sites not already going through kl_save_axdx.
 >
 > NON-GOALS (unchanged): register-allocator rewrite, general peephole
 > framework, near-call conversion, inlining, FAR_DATA/segment-model changes.
@@ -50,6 +55,37 @@
 > (not the monitor) and read the file.  Commit qbe-repo files at the green
 > milestone; the MicroPython port tree is untracked (note port-tree
 > changes in this file).
+>
+> ---
+>
+> **§2z (DONE 2026-06-03) — i8086 div/rem AX/DX save-bracket liveness
+> gating.  ONE codegen win, fully verified.  COMMITTED `ec4adb0`
+> (i8086/emit.c).**
+>
+>  - **The win**: the Odiv/Oudiv/Orem/Ourem handler (~line 2463) bracketed
+>    its libstub soft-divide call (`call _qbe_{div,rem}32{s,u}`) with
+>    `push ax/cx/dx … pop dx/cx/ax`, gated ONLY on whether the dst lived
+>    in that reg (`!dst_in_ax`, etc.).  Now `save_ax`/`save_dx` are also
+>    ANDed with §2w's `g_live_ax_after`/`g_live_dx_after`, so the bracket
+>    is dropped where rega has no live temp in AX/DX after the op.  Slot
+>    destinations with no other live AX/DX value drop their `push ax`
+>    (verified in objint.c's base-conversion loop: rem32u/div32u sites now
+>    push only `cx`+`dx`).
+>  - **CX left dst-gated**: §2w's tracker models only AX/DX, so `save_cx`
+>    stays `!dst_in_cx` (candidate §3a.2 to extend).
+>  - **SOUNDNESS**: strict over-approximation, identical to §2w — the
+>    liveness flags can only ever say "more live than reality", never
+>    less, so a needed save is never dropped.
+>  - **Results**: compact image body **742096 → 741824 B (-272)**; heap
+>    stays 49152 (segment-bound).  `make check` green; DOS gate
+>    **184/184**; real-Victor mp-test.py output unchanged
+>    (`[2..37]/12/197/fib→514229/5/21`, clean `D4 C5`) — the rem-heavy
+>    `is_prime` (`n % i == 0`) path confirms no regression.
+>  - **Honest note**: smallest win of the series.  Most div/rem sites keep
+>    AX live (the DX:AX result is often consumed immediately), so the
+>    bracket only drops at slot-dest sites with no competing live AX/DX.
+>    Green/sound/measured, so banked — but the easy size levers are now
+>    largely spent (see the diminishing-returns note above).
 >
 > ---
 >
