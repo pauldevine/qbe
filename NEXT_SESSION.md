@@ -1,5 +1,50 @@
-# Next session (§3e — ROOT-CAUSE + FIX the function-frame VM-raise exception bug PRECISELY CHARACTERIZED below.  THE BUG (bisected over 5 Victor runs, §3e-diag): an exception raised INTERNALLY BY THE C RUNTIME (via `mp_raise`/`nlr_jump`/`longjmp` — e.g. `NameError` from a failed `LOAD_GLOBAL` of an undefined name, or any TypeError/KeyError/ZeroDivisionError) is NOT caught by an `except` handler located in a FUNCTION frame.  It IS caught (a) at MODULE level (any except-type), and (b) at function level IF the exception came from a Python-level `raise` (which vm.c handles via the DIRECT-GOTO `RAISE(o)` macro = `nlr_pop(); goto exception_handler`, NOT a longjmp — vm.c:267).  MINIMAL REPRO (`build/exc-min.py`, prints `caught`+`END` on host, only `END`… actually only the DE traceback on Victor): `def f():\n  try:\n    undefined_xyz\n  except Exception:\n    print("caught")\nf()`.  WHY IT MATTERS: any real Python program doing `try: work() except SomeError:` where `work()` triggers a RUNTIME error (not a literal `raise`) fails to catch — a serious correctness hole.  WHAT'S RULED OUT: it is NOT `except Exception` base-type matching (f1 caught `except Exception`+`raise ValueError` at function level), NOT the subclass walk, NOT NLR nesting depth per se (t_exc = function-frame same-frame `raise` was caught), NOT cumulative heap/GC state (the 6-line repro fails immediately).  The discriminator is purely: VM-internal-raise (→ `longjmp` into THIS frame's `nlr_push` at vm.c:301, falling through to `exception_handler:` at vm.c:1397) vs Python-`raise` (→ direct `goto`).  The C/asm logic was VERIFIED CORRECT BY INSPECTION this session — nlr chaining (nlr.c MP_NLR_JUMP_HEAD sets nlr_top=prev before longjmp), `exc_stack`/`exc_sp` (volatile) recovery at exception_handler, and the FAR_SETJMP_EXE asm (libstub_to_exe.py:2272, saves/restores BP/SP/SI/DI/BX/CS:IP) all look right.  So the bug is a SUBTLE codegen or setjmp/longjmp edge case that only manifests for a NESTED (function) `mp_execute_bytecode` invocation when control returns via longjmp — NEEDS ON-TARGET DEBUGGING (instrument the exception_handler path: print `exc_sp` vs `exc_stack` and `exc_sp->handler` vs `code_state->ip` right after a longjmp-return in a function frame, vs the module frame where it works; compare the longjmp-restored SP/BP/BX to setjmp-saved).  LIKELY SUSPECTS: (1) minic/qbe compiling `mp_execute_bytecode`'s `volatile`-vs-non-volatile locals across the setjmp boundary differently than expected (a non-volatile local the handler needs, clobbered only at the deeper stack depth); (2) a FAR_SETJMP_EXE corner that only bites when the saved SP/BP are deeper (the [[minic-setjmp-longjmp]] BX-restore lineage).  FAST LOOP: host (`~/projects/micropython/ports/minimal`, slice enabled) CANNOT reproduce (64-bit, no far/longjmp issue) — real Victor only (≥200 s budget; the probe is slow to parse, NOT hung).  (B) SIDE NOTE — builtins min/max/abs/sorted/enumerate are OFF at MINIMUM ROM (`NameError`); flip `MICROPY_PY_BUILTINS_MIN_MAX` etc. in the UNTRACKED `ports/dos8086/mpconfigport.h` if wanted, image has a few KB headroom (757 KB body / 779 KB total under ~896 KB).  Reproducers saved: `build/exc-min.py` (minimal), `build/exc{,2,3,4}-probe.py` (the bisection ladder).)
+# Next session (§3f — the MicroPython language surface is now SOUND on real Victor: int arith, classes+inheritance, str slice/methods, lists+comprehension, generators, AND exceptions (function-frame `except` now catches runtime errors — §3e).  No known correctness bug remains in the verified surface.  Pick a NEW direction:  (A) BROADEN real-program validation — write a non-trivial PROG.PY (a small algorithm using dicts/classes/exceptions/comprehensions together, e.g. a tokenizer or a tiny state machine) and run it on Victor; this is where any remaining latent codegen bug will surface, and it is the highest-value use of the now-working surface.  (B) ENABLE more builtins — min/max/abs/sorted/enumerate are OFF at MINIMUM ROM (`NameError`).  Flip `MICROPY_PY_BUILTINS_MIN_MAX` (+ check the sorted/enumerate flags) in the UNTRACKED `ports/dos8086/mpconfigport.h`; image has ~111 KB headroom (784800 B total under ~896 KB).  MEASURE the image after.  Cheap, makes the feature probe print all-OK.  (C) PROPER `volatile` — minic still DISCARDS the `volatile` qualifier on variables (the type productions `VOLATILE TINT → INT` drop it; `isvolatile` in varh is only for inline-asm).  §3e's setjmp-gate covers the setjmp/longjmp case conservatively, but a TRUE `volatile` (needed for memory-mapped I/O, or any non-setjmp use) is still unimplemented — a real local would be register-cached.  Low priority for MicroPython (no MMIO), but it is a real C-conformance gap; doing it right = thread `volatile` into varh + force those allocs non-promotable + emit a per-access load/store QBE won't elide.  (D) the 211-commit upstream-qbe rebase (still deferred).  NOTE: §3e's alias.c change is TARGET-GENERAL (helps amd64/arm64/rv64 too — `make check` green), a genuine upstream-worthy QBE correctness fix.  HARNESS: feature/exception probes need a ≥200 s Victor budget (slow parse, NOT a hang); host minimal port (slice enabled) for GRAMMAR only.  Reproducers: `build/exc-min.py`, `build/exc{,2,3,4}-probe.py`, `build/nlr_mock_probe.c` (the fast DOSBox setjmp/longjmp repro that cracked §3e).)
 
+> ---
+>
+> **§3e-fix (DONE 2026-06-04) — FIXED the function-frame VM-raise exception
+> bug.  COMMITTED `b618fbf` (alias.c, mem.c, all.h, setjmp_clobber_probe +
+> golden, tools/test-dos.sh).**
+>
+>  - **Root cause** (cracked via a FAST DOSBox repro, not Victor cycles):
+>    QBE treated a non-escaping local alloca as invisible to a `setjmp` call,
+>    so `promote` (mem2reg) hoisted it into a callee-saved register AND
+>    GCM/store-motion reordered its stores across the setjmp.  `setjmp` is a
+>    "returns twice" fn: `longjmp` restores callee-saved regs to their
+>    setjmp-time values, so a local modified AFTER the setjmp reverted on the
+>    longjmp-return.  MicroPython's VM `exc_sp` (volatile, advanced by
+>    SETUP_EXCEPT) thus reverted to its empty pre-push value → the
+>    exception_handler saw an empty exc_stack → a C-runtime-raised exception
+>    (NameError/etc.) escaped any FUNCTION-frame `except`.  (minic DISCARDS
+>    the `volatile` qualifier — see §3f(C) — so even the volatile guarantee
+>    was absent.)
+>  - **THE FAST REPRO that cracked it** (`build/nlr_mock_probe.c`, seconds in
+>    DOSBox vs 7-min Victor cycles): a faithful mock — real setjmp-macro
+>    `nlr_push` (`nlr_push_tail(n), setjmp(n->jb)`), `nlr_jump` writing
+>    ret_val + longjmp, nested frames, and a `volatile`-style local
+>    INCREMENTED between setjmp and the raise (mirroring SETUP_EXCEPT's
+>    `++exc_sp`).  Host → CAUGHT; DOSBox → `ESCAPED (exc_sp stale)`.  KEY
+>    LESSON: the first mock used a FUNCTION-wrapped setjmp (UB — frame dies on
+>    return) and gave a false negative; MicroPython's `nlr_push` is a MACRO so
+>    setjmp is at the call site.  And the bug only appeared once the local was
+>    MODIFIED between setjmp and longjmp (a value merely set before setjmp
+>    survives — that path passed and misled the first two mock iterations).
+>  - **THE FIX**: `calls_setjmp(fn)` (alias.c) scans for a call to a
+>    "setjmp"-named symbol; `fillalias` then forces EVERY stack slot `AEsc`
+>    (escaped) in such a function, so loadopt/GCM/store-motion treat the
+>    slots as call-clobbered (no reordering across the setjmp); `promote`
+>    bails explicitly (it does not consult escape).  Conservative, like a
+>    real compiler — gives the C11 7.13.2.1p3 guarantee to ALL locals in a
+>    setjmp fn.  TARGET-GENERAL (not gated on wordsz): a real QBE correctness
+>    fix for amd64/arm64/rv64 too.
+>  - **Verified**: real-Victor feature probe now reaches `DONE` matching host
+>    (`t_bi`'s NameError CAUGHT by `run()`'s function-frame `except Exception`
+>    → `ER bi`, was escaping to `DE`).  `make check` green; DOS gate
+>    **188→190** (`setjmp_clobber_probe` medium+compact, bug-loud against the
+>    pre-fix qbe: `pushed FAIL 0`).  mpython image **779296→784800 B** (+5.5KB
+>    from un-promoted setjmp fns; the size fear was overblown — only
+>    mp_execute_bytecode + a few nlr users lose promotion).
+>
 > ---
 >
 > **§3e-diag (DONE 2026-06-04) — BISECTED the function-frame VM-raise
