@@ -292,6 +292,100 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 	}
 }
 
+/* Width, in 16-bit words, that an arg-slot store op occupies. */
+static int
+argstore_words(int op)
+{
+	switch (op) {
+	case Ostoreb:
+	case Ostoreh:
+	case Ostorew: return 1;
+	case Ostorel: return 2;  /* 32-bit long / far pointer */
+	case Ostores: return 2;  /* float */
+	case Ostored: return 4;  /* double */
+	default:      return 0;
+	}
+}
+
+/* §2y: eliminate a redundant outgoing-argument marshal.
+ *
+ * selcall writes each call's arguments into the shared arg-slot region at
+ * the bottom of the frame (slot indices [0, fn->arg_slot_top)).  When two
+ * calls in the same block pass the IDENTICAL value (same ref) at the
+ * IDENTICAL slot+width with no other store touching those words in
+ * between, the second marshal is dead — the slot already holds the value:
+ *
+ *      mov ax,[bp+6]; mov dx,[bp+8]; mov [bp-12],ax; mov [bp-10],dx
+ *      call far _far_strlen
+ *      mov [bp-8], ax                 ; <- other arg, different slot
+ *      mov ax,[bp+6]; mov dx,[bp+8]; mov [bp-12],ax; mov [bp-10],dx  <- DEAD
+ *      call far _mp_hal_stdout_tx_strn_cooked
+ *
+ * SOUNDNESS rests on one closed-world invariant: an intervening call does
+ * NOT write the arg slots passed to it.  This holds for every callee in
+ * this toolchain — minic copies each incoming parameter into a fresh local
+ * alloca and never writes the incoming [bp+N] slot (see the %str=alloc4 +
+ * storel %t0,%str shape minic emits), so a compiled callee leaves the
+ * caller's arg slots intact; the hand-written libstub helpers read their
+ * stack args into registers without writing them back.  A call therefore
+ * clobbers caller-save REGISTERS but never caller-frame arg-slot MEMORY,
+ * so we deliberately do NOT invalidate tracking on a call.  A FUTURE
+ * libstub helper that modifies an incoming arg slot in place would break
+ * this — see the warning in minic/dos/libstub.asm.
+ *
+ * Tracking is per word and reset at each block head (a slot value from a
+ * predecessor block is never assumed).  Any store to a tracked word —
+ * whether an arg store of a different value or any other store — overwrites
+ * the tracked (op,src) and thereby defeats a later spurious match.  Runs at
+ * abi1 time (still SSA: an RTmp source is single-assignment, hence stable
+ * across the block once defined), before isel/spill/rega. */
+static void
+dedup_arg_stores(Fn *fn)
+{
+	Blk *b;
+	Ins *i, *o;
+	int top, w, s, k, redundant;
+	int *tw_op;
+	Ref *tw_src;
+
+	top = fn->arg_slot_top;
+	if (top <= 0)
+		return;
+	tw_op = alloc(top * sizeof tw_op[0]);
+	tw_src = alloc(top * sizeof tw_src[0]);
+
+	for (b = fn->start; b; b = b->link) {
+		for (k = 0; k < top; k++) {
+			tw_op[k] = Onop;  /* no live store tracked for this word */
+			tw_src[k] = R;
+		}
+		o = b->ins;
+		for (i = b->ins; i < &b->ins[b->nins]; i++) {
+			if (isstore(i->op)
+			 && rtype(i->arg[1]) == RSlot
+			 && (s = rsval(i->arg[1])) >= 0 && s < top
+			 && (w = argstore_words(i->op)) > 0
+			 && s + w <= top) {
+				redundant = 1;
+				for (k = 0; k < w; k++)
+					if (tw_op[s+k] != i->op
+					 || !req(tw_src[s+k], i->arg[0])) {
+						redundant = 0;
+						break;
+					}
+				if (redundant)
+					continue;  /* drop the dead re-marshal */
+				for (k = 0; k < w; k++) {
+					tw_op[s+k] = i->op;
+					tw_src[s+k] = i->arg[0];
+				}
+			}
+			*o++ = *i;
+		}
+		b->nins = o - b->ins;
+	}
+}
+
 static void
 selret(Blk *b, Fn *fn)
 {
@@ -462,4 +556,7 @@ i8086_abi(Fn *fn)
 		icpy(b->ins, curi, n0);
 		b->nins = n0;
 	}
+
+	/* §2y: drop redundant outgoing-arg re-marshals across adjacent calls. */
+	dedup_arg_stores(fn);
 }

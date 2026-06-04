@@ -3,6 +3,15 @@
 ; These are placeholder implementations that allow the binary to link.
 ; A real port needs proper printf/fopen/malloc on top of the doslib DOS
 ; INT 21h wrappers.  For now we just want a successful link.
+;
+; ⚠ ABI INVARIANT (relied on by i8086/abi.c dedup_arg_stores, §2y):
+;   A helper MUST NOT write its incoming stack-argument slots ([bp+4]..)
+;   in place.  Read each arg into a register and leave the caller's
+;   arg memory untouched.  The compiler reuses one caller arg-slot region
+;   across adjacent calls and elides a re-marshal when the value is
+;   unchanged, ASSUMING the previous callee left those slots intact.
+;   Mutating an incoming arg slot here would silently corrupt the next
+;   call's arguments in any caller that passes the same value twice.
 
 ; void *malloc(size_t sz) — pointer arg is l (32-bit), but size_t is w.
 ; Stack: [bp+4] = sz (w).  Returns DX:AX where AX=offset, DX=0 (DS-rel).
