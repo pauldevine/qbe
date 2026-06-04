@@ -1,5 +1,41 @@
-# Next session (§3e — TWO narrow follow-ups surfaced by §3d's surface map; both OPTIONAL / lower-stakes than §3d's win.  (A) **`except Exception` does NOT catch a VM-INTERNALLY-raised builtin exception on Victor.**  §3d's probe: `t_exc` (Python-level `raise E()` with `except E`, custom subclass) is CAUGHT fine (`OK exc`), but `t_bi`'s `NameError` (raised by the C runtime's `mp_raise`, not by a Python `raise`) ESCAPED `run()`'s `except Exception` → top-level `DE` traceback, whereas the HOST caught it (`ER bi`).  Same source, same ROM level → a real target gap.  HYPOTHESIS (verify, don't trust): the exception OBJECT's far pointer loses its SEGMENT when raised from deep C (the §2h "exc obj far ptr loses SEGMENT on raise" gap that §2r only proved closed for the Python-`raise` path).  Repro cheaply: a 3-line PROG.PY `try:\n  undefined_name\nexcept Exception:\n  print("caught")` on Victor — if it prints the traceback instead of `caught`, it's confirmed.  Then bisect in objexcept.c / runtime.c mp_raise + nlr (the exception instance handed to nlr_jump vs. what `mp_obj_exception_match` reads).  (B) **builtins min/max/abs/sorted/enumerate are OFF at MINIMUM ROM** (`NameError`, EXPECTED — matches host `ER bi`).  Flip `MICROPY_PY_BUILTINS_MIN_MAX` (+ check sorted/enumerate flags) in `ports/dos8086/mpconfigport.h` IF wanted; image is content-bound (757 KB body / 779 KB total under the ~896 KB Victor ceiling) so a few KB of headroom exists — MEASURE the image after enabling.  NOTE the port tree (`mpconfigport.h`) is UNTRACKED.  Neither (A) nor (B) blocks anything; the whole rest of the surface (int arith, classes+inheritance, str slice/methods, lists+comprehension, generators, custom exceptions) WORKS on real Victor as of §3d.  HARNESS NOTE: the feature probe needs a ≥200 s Victor budget — at 90 s it only reaches `D1` (parse is slow on the 1.8 KB source); that is NOT a hang.  FAST LOOP for grammar: host `~/projects/micropython/ports/minimal` `make CROSS=0` + `do_str(stdin, MP_PARSE_FILE_INPUT)` — but ENABLE `MICROPY_PY_BUILTINS_SLICE` in its mpconfigport.h to match dos8086 grammar (already done this session), and host has 64-bit obj_t so use it for GRAMMAR ONLY, real Victor for int-range/runtime.)
+# Next session (§3e — ROOT-CAUSE + FIX the function-frame VM-raise exception bug PRECISELY CHARACTERIZED below.  THE BUG (bisected over 5 Victor runs, §3e-diag): an exception raised INTERNALLY BY THE C RUNTIME (via `mp_raise`/`nlr_jump`/`longjmp` — e.g. `NameError` from a failed `LOAD_GLOBAL` of an undefined name, or any TypeError/KeyError/ZeroDivisionError) is NOT caught by an `except` handler located in a FUNCTION frame.  It IS caught (a) at MODULE level (any except-type), and (b) at function level IF the exception came from a Python-level `raise` (which vm.c handles via the DIRECT-GOTO `RAISE(o)` macro = `nlr_pop(); goto exception_handler`, NOT a longjmp — vm.c:267).  MINIMAL REPRO (`build/exc-min.py`, prints `caught`+`END` on host, only `END`… actually only the DE traceback on Victor): `def f():\n  try:\n    undefined_xyz\n  except Exception:\n    print("caught")\nf()`.  WHY IT MATTERS: any real Python program doing `try: work() except SomeError:` where `work()` triggers a RUNTIME error (not a literal `raise`) fails to catch — a serious correctness hole.  WHAT'S RULED OUT: it is NOT `except Exception` base-type matching (f1 caught `except Exception`+`raise ValueError` at function level), NOT the subclass walk, NOT NLR nesting depth per se (t_exc = function-frame same-frame `raise` was caught), NOT cumulative heap/GC state (the 6-line repro fails immediately).  The discriminator is purely: VM-internal-raise (→ `longjmp` into THIS frame's `nlr_push` at vm.c:301, falling through to `exception_handler:` at vm.c:1397) vs Python-`raise` (→ direct `goto`).  The C/asm logic was VERIFIED CORRECT BY INSPECTION this session — nlr chaining (nlr.c MP_NLR_JUMP_HEAD sets nlr_top=prev before longjmp), `exc_stack`/`exc_sp` (volatile) recovery at exception_handler, and the FAR_SETJMP_EXE asm (libstub_to_exe.py:2272, saves/restores BP/SP/SI/DI/BX/CS:IP) all look right.  So the bug is a SUBTLE codegen or setjmp/longjmp edge case that only manifests for a NESTED (function) `mp_execute_bytecode` invocation when control returns via longjmp — NEEDS ON-TARGET DEBUGGING (instrument the exception_handler path: print `exc_sp` vs `exc_stack` and `exc_sp->handler` vs `code_state->ip` right after a longjmp-return in a function frame, vs the module frame where it works; compare the longjmp-restored SP/BP/BX to setjmp-saved).  LIKELY SUSPECTS: (1) minic/qbe compiling `mp_execute_bytecode`'s `volatile`-vs-non-volatile locals across the setjmp boundary differently than expected (a non-volatile local the handler needs, clobbered only at the deeper stack depth); (2) a FAR_SETJMP_EXE corner that only bites when the saved SP/BP are deeper (the [[minic-setjmp-longjmp]] BX-restore lineage).  FAST LOOP: host (`~/projects/micropython/ports/minimal`, slice enabled) CANNOT reproduce (64-bit, no far/longjmp issue) — real Victor only (≥200 s budget; the probe is slow to parse, NOT hung).  (B) SIDE NOTE — builtins min/max/abs/sorted/enumerate are OFF at MINIMUM ROM (`NameError`); flip `MICROPY_PY_BUILTINS_MIN_MAX` etc. in the UNTRACKED `ports/dos8086/mpconfigport.h` if wanted, image has a few KB headroom (757 KB body / 779 KB total under ~896 KB).  Reproducers saved: `build/exc-min.py` (minimal), `build/exc{,2,3,4}-probe.py` (the bisection ladder).)
 
+> ---
+>
+> **§3e-diag (DONE 2026-06-04) — BISECTED the function-frame VM-raise
+> exception bug.  NO CODE CHANGE (diagnosis only); the §3e header above has
+> the full characterization + next steps.  This block records the evidence.**
+>
+>  - **Started from §3d's wrong framing** ("`except Exception` doesn't catch
+>    a builtin raise").  Disproved it: 5 targeted Victor probes
+>    (`build/exc{,2,3,4}-probe.py`, each host-verified to print all-pass
+>    first) bisected the real trigger.
+>  - **Reproducer ladder + results (real Victor, fixed §3d build):**
+>    - exc-probe (all `try` at MODULE level): T1 `except Exception`+Py-raise,
+>      T2 `except Exception`+VM-NameError, T3 same across `boom()` call,
+>      T4 `except NameError`+VM, T5 `except Exception`+Py-raise across call —
+>      **ALL PASS**.
+>    - exc2/exc3 (function-level `try`): the FIRST function-frame +
+>      VM-NameError case (even SAME-FRAME, no call) **ESCAPED** both its own
+>      `except Exception` and a module-level guard `try` → top-level `DE`.
+>    - exc4 (function-level, splitting axes): f1 `except Exception`+
+>      `raise ValueError` **PASS**, f2 `except ValueError`+raise **PASS**,
+>      f3 `except Exception`+VM-NameError **FAIL** (`undefined_xyz`).
+>  - **Conclusion**: the discriminator is VM-internal-raise (C `mp_raise` →
+>    `nlr_jump`/`longjmp`) vs Python-`raise` (vm.c:267 `RAISE` macro =
+>    `nlr_pop(); goto exception_handler`, no longjmp), AND the catching frame
+>    being a FUNCTION (nested `mp_execute_bytecode`) rather than the module
+>    (outermost).  Module+VM-raise works; function+Py-raise works;
+>    function+VM-raise fails.
+>  - **Verified-correct-by-inspection** (so the bug is subtle / on-target):
+>    nlr_top chaining (nlr.c), exception_handler `exc_sp`/`exc_stack`
+>    recovery (vm.c:1397/1464), FAR_SETJMP_EXE asm
+>    (libstub_to_exe.py:2272 — BP/SP/SI/DI/BX/CS:IP all saved+restored).
+>  - **Bonus confirmation**: `except Exception` + subclass-walk WORKS at
+>    function level (f1), so §2h's "exc-obj far-ptr loses segment" is NOT the
+>    cause here.  Next session = on-target instrument the longjmp-return path
+>    in a function frame (see §3e header).
+>
 > ---
 >
 > **§3d (DONE 2026-06-04) — MAPPED THE FEATURE SURFACE + landed a real QBE
