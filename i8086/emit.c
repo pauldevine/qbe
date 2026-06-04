@@ -2464,9 +2464,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			int dst_in_ax = (rtype(i->to) == RTmp && i->to.val == RAX);
 			int dst_in_dx = (rtype(i->to) == RTmp && i->to.val == RDX);
 			int dst_in_cx = (rtype(i->to) == RTmp && i->to.val == RCX);
-			int save_ax = !dst_in_ax;
+			/* Gate AX/DX save brackets on physical-reg liveness, same
+			 * conservative over-approximation as §2w / kl_save_axdx: if
+			 * AX (resp. DX) holds nothing live after this op, the
+			 * push/pop pair is dead.  CX has no liveness tracker (§2w
+			 * only models AX/DX), so leave save_cx gated on dst only. */
+			int save_ax = !dst_in_ax && g_live_ax_after;
 			int save_cx = !dst_in_cx;
-			int save_dx = !dst_in_dx;
+			int save_dx = !dst_in_dx && g_live_dx_after;
 			const char *helper =
 			    i->op == Odiv  ? "_qbe_div32s" :
 			    i->op == Oudiv ? "_qbe_div32u" :
