@@ -1,5 +1,59 @@
-# Next session (§3d — MAP THE FEATURE SURFACE now that slicing landed.  WHY: slicing was the last *known* grammar gate, and the broad `build/mp-feature-probe.py` (1818 B) was written but NEVER run past the slice SyntaxError.  Run it on the real Victor to map which of classes / inheritance / str-methods (upper/split/join/find/replace) / list-comprehensions / generators / exceptions actually work at the current MINIMUM ROM level, and which raise (the probe wraps each group in `run()` → prints `OK <name>`, `XX <name> got want`, or `ER <name>` on exception, so one run classifies the whole surface).  CAUTION: many str/list METHODS are gated by ROM level / per-method config flags, not grammar — a missing method is an AttributeError → `ER <group>`, which is EXPECTED, not a minic bug.  For each `ER`/`XX`, decide: (a) flip a config flag (cheap, like §3c's `MICROPY_PY_BUILTINS_SLICE`), (b) a real minic frontend gap (write a focused repro the way §3c bisected build_slice — DON'T trust the probe's group-level error), or (c) genuinely out of scope at MINIMUM.  The image is content-bound (779 KB body, under the ~896 KB Victor ceiling) so there's headroom for a few more flags.  FAST LOOP for grammar/parse gates: the host `~/projects/micropython/ports/minimal` `make CROSS=0` build + `do_str(stdin, MP_PARSE_FILE_INPUT)` reproduces parse errors in ms (host config ≠ dos8086 RUNTIME though — host has 64-bit obj_t/longint, so use host for GRAMMAR ONLY, real Victor for int-range/runtime).  `MP_SRC_MAX=2048` caps PROG.PY at 2 KB.  Per-TU minic repro of a dos8086 build: preprocess with `clang -E -P -nostdinc -DDOS -D__TURBOC__ -DDOS_FAR_DATA=1 -DFAR_DATA=1 -I<dosport> -I<stub> -Iminic/include -I<mp> -I<genhdr>` then `tr -d '\r\032' | sed "$NORMALIZE"` then `minic/minic -m compact` — exactly what build-micropython.sh does per TU.)
+# Next session (§3e — TWO narrow follow-ups surfaced by §3d's surface map; both OPTIONAL / lower-stakes than §3d's win.  (A) **`except Exception` does NOT catch a VM-INTERNALLY-raised builtin exception on Victor.**  §3d's probe: `t_exc` (Python-level `raise E()` with `except E`, custom subclass) is CAUGHT fine (`OK exc`), but `t_bi`'s `NameError` (raised by the C runtime's `mp_raise`, not by a Python `raise`) ESCAPED `run()`'s `except Exception` → top-level `DE` traceback, whereas the HOST caught it (`ER bi`).  Same source, same ROM level → a real target gap.  HYPOTHESIS (verify, don't trust): the exception OBJECT's far pointer loses its SEGMENT when raised from deep C (the §2h "exc obj far ptr loses SEGMENT on raise" gap that §2r only proved closed for the Python-`raise` path).  Repro cheaply: a 3-line PROG.PY `try:\n  undefined_name\nexcept Exception:\n  print("caught")` on Victor — if it prints the traceback instead of `caught`, it's confirmed.  Then bisect in objexcept.c / runtime.c mp_raise + nlr (the exception instance handed to nlr_jump vs. what `mp_obj_exception_match` reads).  (B) **builtins min/max/abs/sorted/enumerate are OFF at MINIMUM ROM** (`NameError`, EXPECTED — matches host `ER bi`).  Flip `MICROPY_PY_BUILTINS_MIN_MAX` (+ check sorted/enumerate flags) in `ports/dos8086/mpconfigport.h` IF wanted; image is content-bound (757 KB body / 779 KB total under the ~896 KB Victor ceiling) so a few KB of headroom exists — MEASURE the image after enabling.  NOTE the port tree (`mpconfigport.h`) is UNTRACKED.  Neither (A) nor (B) blocks anything; the whole rest of the surface (int arith, classes+inheritance, str slice/methods, lists+comprehension, generators, custom exceptions) WORKS on real Victor as of §3d.  HARNESS NOTE: the feature probe needs a ≥200 s Victor budget — at 90 s it only reaches `D1` (parse is slow on the 1.8 KB source); that is NOT a hang.  FAST LOOP for grammar: host `~/projects/micropython/ports/minimal` `make CROSS=0` + `do_str(stdin, MP_PARSE_FILE_INPUT)` — but ENABLE `MICROPY_PY_BUILTINS_SLICE` in its mpconfigport.h to match dos8086 grammar (already done this session), and host has 64-bit obj_t so use it for GRAMMAR ONLY, real Victor for int-range/runtime.)
 
+> ---
+>
+> **§3d (DONE 2026-06-04) — MAPPED THE FEATURE SURFACE + landed a real QBE
+> codegen fix that unlocked it.  COMMITTED (fold.c, shift_fold_probe + golden,
+> tools/test-dos.sh).**
+>
+>  - **The headline**: a one-line `fold.c` fix unlocked the ENTIRE feature
+>    surface on the real Victor.  `build/mp-feature-probe.py` (run via
+>    `VICTOR_SRC=… run-victor-sasi.sh … 220`) now reports: `OK` for int
+>    (mul/pow/mod/bit/shl), class+inheritance (inst/inh), str
+>    (slice/neg/upper/split/join/find/replace), list (sort/comp),
+>    generators (gen), exceptions (exc) — i.e. EVERYTHING except `t_bi`
+>    (builtins min/max/abs/sorted/enumerate = `NameError`, OFF at MINIMUM
+>    ROM, expected).
+>  - **THE BUG (QBE core, not minic)**: `fold.c::opfold` called
+>    `foldint(…, w = cls==Kl, …)` where `w` means "fold as a 64-bit op".
+>    On i8086 **Kl is 32-bit** (`long` / far ptr = 4 bytes), so a Kl
+>    constant shift folded with 64-bit semantics: `(int32_t)0x80000000 >> 1`
+>    (a `sar`) saw 0x80000000 as the POSITIVE 64-bit 2147483648 and gave
+>    0x40000000 instead of the 32-bit-correct (sign-extended) 0xC0000000.
+>    That corrupted MicroPython's `MP_SMALL_INT_MAX` (= `~((mp_int_t)((mp_uint_t)1<<31) >> 1)`),
+>    which came out NEGATIVE, so the small-int overflow check
+>    `lhs_val > (MP_SMALL_INT_MAX >> rhs_val)` (runtime.c lshift) tripped on
+>    EVERY `1 << n` → spurious `OverflowError` → `t_int` aborted the whole
+>    probe at the FIRST run.  (REPR_A here = 32-bit `mp_obj_t`=`void*`=far
+>    ptr, so small ints are 31-bit, NOT the 15-bit the config comment
+>    claims — `1000000` etc. all fit; the "overflow" was pure codegen.)
+>  - **THE FIX** (fold.c:220): `foldint(&c, op, cls == Kl && T.wordsz != 2, …)`.
+>    Gating `w` on `T.wordsz != 2` makes Kl fold with 32-bit semantics on
+>    i8086 across ALL of foldint's width-sensitive ops (shifts + div/rem +
+>    int conversions — all genuinely 32-bit for a 32-bit Kl), and is a
+>    NO-OP on amd64/host (`wordsz==4`), so `make check` is byte-identical.
+>    The fold's 32-bit input casts (`(int32_t)`/`(uint32_t)`) also fix the
+>    secondary symptom that minic stores an `unsigned long 0x80000000`
+>    literal sign-extended (`storel -2147483648`) — harmless now since the
+>    fold truncates inputs to 32 bits.
+>  - **Probe**: `shift_fold_probe.c` (+ golden), gate medium+compact.
+>    Bug-loud verified: against the pre-fix qbe it FAILS 3/4 incl. the exact
+>    `noovf FAIL ovf=1` MicroPython trip; `sar` alone passes (that operand
+>    was stored sign-extended so the 64-bit sar's low 32 happen to match).
+>    Gate **186 → 188**.  `make check` green; mpython.exe rebuilt 106/106
+>    (779296 B, unchanged).
+>  - **METHOD LESSON**: the §3d "use Victor for int-range" warning was
+>    literal — a 90 s run looked like a parse HANG (stuck at `D1`) but was
+>    just slow parse of the 1.8 KB source; 200 s reached the run and
+>    exposed the overflow.  Host (64-bit obj_t) ran the probe to `DONE`, so
+>    the bug was target-only; bisected via two tiny DOSBox C probes
+>    (`build/{shift,sar}_probe.c`) that print each subexpression, NOT more
+>    multi-minute Victor cycles.  The .ssa was CORRECT (`sar`/`shr` chosen
+>    right by signedness) — the swap was in QBE's constant FOLD, found by
+>    reading the folded printf-arg immediates in the .asm.
+>  - Two narrow follow-ups (the `except Exception`-escapes-builtin-raise gap
+>    and the builtins ROM flag) are written up in the §3e header above.
+>
 > ---
 >
 > **§3c (DONE 2026-06-03) — LANDED SEQUENCE SLICING.  Two minic frontend

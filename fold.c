@@ -209,7 +209,15 @@ opfold(int op, int cls, Con *cl, Con *cr, Fn *fn)
 	Con c;
 
 	if (cls == Kw || cls == Kl) {
-		if (foldint(&c, op, cls == Kl, cl, cr))
+		/* `w` means "fold as a 64-bit op".  On i8086 (T.wordsz==2) Kl is
+		 * 32-bit (`long` / far ptr = 4 bytes), so Kl must fold with 32-bit
+		 * semantics — otherwise e.g. (int32_t)0x80000000 >> 1 folds as the
+		 * positive 64-bit 2147483648 (=> 0x40000000) instead of the 32-bit
+		 * sign-extended 0xC0000000.  That broke MicroPython's
+		 * MP_SMALL_INT_MAX (= ~((mp_int_t)MSBIT_HIGH >> 1)), making every
+		 * `1 << n` falsely trip the small-int overflow check.  Gated on
+		 * wordsz so non-i8086 targets are byte-identical. */
+		if (foldint(&c, op, cls == Kl && T.wordsz != 2, cl, cr))
 			return R;
 	} else
 		foldflt(&c, op, cls == Kd, cl, cr);

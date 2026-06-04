@@ -180,6 +180,8 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/farstruct_ptr_probe.c:minic/dos/tests/farstruct_ptr_probe.golden.txt:large"
 	"minic/dos/examples/longconst_probe.c:minic/dos/tests/longconst_probe.golden.txt:medium"
 	"minic/dos/examples/longconst_probe.c:minic/dos/tests/longconst_probe.golden.txt:large"
+	"minic/dos/examples/shift_fold_probe.c:minic/dos/tests/shift_fold_probe.golden.txt:medium"
+	"minic/dos/examples/shift_fold_probe.c:minic/dos/tests/shift_fold_probe.golden.txt:compact"
 	"minic/dos/examples/local_typedef_probe.c:minic/dos/tests/local_typedef_probe.golden.txt:medium"
 	"minic/dos/examples/local_typedef_probe.c:minic/dos/tests/local_typedef_probe.golden.txt:large"
 	"minic/dos/examples/array_designate_probe.c:minic/dos/tests/array_designate_probe.golden.txt:medium"
