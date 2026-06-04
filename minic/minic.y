@@ -5311,19 +5311,33 @@ agg_emit_struct(int sidx, int isunion, Node *agg, char *buf, int *bl, int *first
 {
 	int cursor = 0, memidx = 0;
 	int structsize = structh[sidx].size;
+	int nmembers = structh[sidx].nmembers;
+	Node **memval;
 	Node *ln;
+	int mi;
 
 	if (!agg || agg->op != '{')
 		die("struct/union initializer must be braced");
+
+	/* Pass 1: bind each initializer item to a member slot following C99
+	 * cursor semantics (a positional item lands at the running cursor; a
+	 * `.field =` designator sets the cursor to that member — both then
+	 * advance it).  Buffering into member-indexed slots lets designated
+	 * items appear in any order (e.g. MicroPython's mp_obj_type_t inits,
+	 * whose `.slot_index_*` designators aren't in offset order).  Pass 2
+	 * walks members in declaration order (= ascending offset), so the
+	 * emitted layout is correct regardless of item order, and a
+	 * fully/in-order-initialized struct emits byte-for-byte as before. */
+	memval = alloc(nmembers * sizeof *memval);
+	for (mi = 0; mi < nmembers; mi++)
+		memval[mi] = 0;
 	for (ln = agg->l; ln; ln = ln->r) {
 		Node *item = ln->l;
 		Node *val;
-		struct Member *m;
-		int msize;
 
 		if (item->op == 'D') {         /* .field = val */
 			int k, found = -1;
-			for (k = 0; k < structh[sidx].nmembers; k++)
+			for (k = 0; k < nmembers; k++)
 				if (strcmp(structh[sidx].members[k].name,
 				           item->r->u.v) == 0) {
 					found = k;
@@ -5338,102 +5352,89 @@ agg_emit_struct(int sidx, int isunion, Node *agg, char *buf, int *bl, int *first
 		} else {
 			val = item;
 		}
-		if (memidx >= structh[sidx].nmembers)
+		if (memidx >= nmembers)
 			die("too many initializers for struct");
-		m = &structh[sidx].members[memidx];
+		memval[memidx] = val;
+		memidx++;
+		if (isunion)
+			break;                 /* one initialized member */
+	}
+
+	/* Pass 2: emit members in declaration order.  Uninitialized members
+	 * (and bitfield units with no initialized field) are skipped so they
+	 * fold into the next member's gap-fill (or the trailing zero-fill),
+	 * coalescing exactly as the old single-pass emitter did. */
+	for (mi = 0; mi < nmembers; ) {
+		struct Member *m = &structh[sidx].members[mi];
+		int msize;
+
 		if (m->bitwidth) {
 			/* Pack a run of bitfield members that share one storage
-			 * unit (same m->offset) into a single scalar data item.
-			 * Each loop iteration consumes one initializer item
-			 * (sequential or `.field =` designated); accumulate and
-			 * flush when the next member leaves the unit (different
-			 * offset / not a bitfield / end). */
+			 * unit (same m->offset) into a single scalar data item. */
 			unsigned bfctyp = m->ctyp;
 			int bfunit = SIZE(bfctyp);
 			int bfbase = m->offset;
 			unsigned long accum = 0;
 			unsigned long unitmask =
 			    bfunit >= 8 ? ~0UL : ((1UL << (bfunit * 8)) - 1);
+			int j, any = 0;
 
-			if (!isunion) {
-				if (bfbase < cursor)
-					die("out-of-order designated initializer unsupported");
-				agg_zfill(bfbase - cursor, buf, bl, first);
-				cursor = bfbase;
+			for (j = mi; j < nmembers; j++) {
+				struct Member *bm = &structh[sidx].members[j];
+				if (!bm->bitwidth || bm->offset != bfbase)
+					break;
+				if (memval[j])
+					any = 1;
 			}
-			for (;;) {
+			if (!any) {            /* whole unit unset — fold into gap */
+				mi = j;
+				continue;
+			}
+			agg_zfill(bfbase - cursor, buf, bl, first);
+			cursor = bfbase;
+			for (j = mi; j < nmembers; j++) {
+				struct Member *bm = &structh[sidx].members[j];
 				unsigned long fv, fmask;
-				Node *fval = agg_unwrap_scalar(val);
-				Node *nitem;
-				struct Member *nm;
-				int nidx;
+				Node *fval;
 
+				if (!bm->bitwidth || bm->offset != bfbase)
+					break;
+				fval = agg_unwrap_scalar(memval[j]);
 				fv = fval ? (unsigned long)const_eval(fval) : 0;
-				fmask = m->bitwidth >= 64 ? ~0UL
-				    : ((1UL << m->bitwidth) - 1);
-				accum |= (fv & fmask) << m->bitoffset;
-				memidx++;
-				if (isunion || !ln->r)
-					break;
-				/* peek the next initializer item */
-				nitem = ln->r->l;
-				if (nitem->op == 'D') {
-					int k;
-					nidx = -1;
-					for (k = 0; k < structh[sidx].nmembers; k++)
-						if (strcmp(structh[sidx].members[k].name,
-						           nitem->r->u.v) == 0) {
-							nidx = k;
-							break;
-						}
-					if (nidx < 0)
-						die("unknown member in designated initializer");
-				} else if (nitem->op == 'd') {
-					break;
-				} else {
-					nidx = memidx;
-					if (nidx >= structh[sidx].nmembers)
-						break;
-				}
-				nm = &structh[sidx].members[nidx];
-				if (!nm->bitwidth || nm->offset != bfbase)
-					break;
-				ln = ln->r;
-				m = nm;
-				memidx = nidx;
-				val = nitem->op == 'D' ? nitem->l : nitem;
+				fmask = bm->bitwidth >= 64 ? ~0UL
+				    : ((1UL << bm->bitwidth) - 1);
+				accum |= (fv & fmask) << bm->bitoffset;
 			}
 			agg_sep(buf, bl, first);
 			*bl += sprintf(buf + *bl, " %c %lu",
 			    irtyp(bfctyp), accum & unitmask);
 			cursor += bfunit;
-			if (isunion)
-				break;
+			mi = j;
 			continue;
 		}
-		if (!isunion) {
-			if (m->offset < cursor)
-				die("out-of-order designated initializer unsupported");
-			agg_zfill(m->offset - cursor, buf, bl, first);
-			cursor = m->offset;
+
+		if (!memval[mi]) {             /* unset — fold into next gap */
+			mi++;
+			continue;
 		}
+
+		agg_zfill(m->offset - cursor, buf, bl, first);
+		cursor = m->offset;
 		if (m->isflex) {
 			/* Flexible array member `T x[];` — its length is implied by
 			 * the initializer's element count, not declared.  Emit ALL
 			 * brace elements (a scalar emit would drop all but the
 			 * first); the member contributes 0 to structsize, so the
 			 * extra bytes legitimately push cursor past structsize. */
-			int nflex = agg_brace_count(val);
-			agg_emit_array(m->ctyp, nflex, val, buf, bl, first);
+			int nflex = agg_brace_count(memval[mi]);
+			agg_emit_array(m->ctyp, nflex, memval[mi], buf, bl, first);
 			msize = SIZE(m->ctyp) * nflex;
 		} else {
-			agg_emit_value(m->ctyp, m->count, val, buf, bl, first);
+			agg_emit_value(m->ctyp, m->count, memval[mi], buf, bl, first);
 			msize = m->count ? SIZE(m->ctyp) * m->count : SIZE(m->ctyp);
 		}
 		cursor += msize;
-		memidx++;
-		if (isunion)
-			break;                 /* one initialized member */
+		mi++;
 	}
 	if (cursor < structsize)
 		agg_zfill(structsize - cursor, buf, bl, first);
@@ -6073,6 +6074,16 @@ attr_kfunc: attrspec storageopt inlineopt init_attr prot_knr '{' dcls stmts '}'
 attr_typed_decl: attrspec type_and_ident_noattr typed_decl_rest
 {
 	/* __attribute__((xxx)) type ident ... - attributes already set by attrspec */
+}
+               | attrspec STATIC type_and_ident_noattr typed_decl_rest
+{
+	/* `__attribute__((xxx)) static type ident ...` — the mirror of the
+	 * `STATIC attrspec ...` form in typed_decl; MicroPython spells the
+	 * slice helper `MP_NOINLINE static mp_obj_t *build_slice_…(…)`, i.e.
+	 * attribute BEFORE the storage class.  attrspec set the attribute
+	 * flags; type_and_ident_noattr does NOT reset them.  The lexer's
+	 * pending_static flag (set on STATIC at brace_depth 0 regardless of a
+	 * preceding ATTRIBUTE) already gives the function internal linkage. */
 };
 
 attrspec: ATTRIBUTE '(' '(' attrreset attrlist ')' ')';

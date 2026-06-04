@@ -1,11 +1,57 @@
-# Next session (§3c — LAND SLICING: enable `MICROPY_PY_BUILTINS_SLICE` (1) in ports/dos8086/mpconfigport.h, which requires fixing TWO minic frontend bugs (below). WHY: §3b ("stress a real program", chosen by the user) found that sequence slicing — `s[a:b]`, `lst[a:b:c]` — is a SyntaxError on the Victor build: the slice grammar (py/grammar.h `subscript_3`) is gated behind `MICROPY_PY_BUILTINS_SLICE`, which defaults to CORE level while dos8086 is at MINIMUM. Enabling the one flag IS sufficient for the grammar (verified on a host ports/minimal build), and objslice.c is already in the curated `py/*.c` build glob — but rebuilding `mpython.exe` with it ON fails minic on two TUs:
+# Next session (§3d — MAP THE FEATURE SURFACE now that slicing landed.  WHY: slicing was the last *known* grammar gate, and the broad `build/mp-feature-probe.py` (1818 B) was written but NEVER run past the slice SyntaxError.  Run it on the real Victor to map which of classes / inheritance / str-methods (upper/split/join/find/replace) / list-comprehensions / generators / exceptions actually work at the current MINIMUM ROM level, and which raise (the probe wraps each group in `run()` → prints `OK <name>`, `XX <name> got want`, or `ER <name>` on exception, so one run classifies the whole surface).  CAUTION: many str/list METHODS are gated by ROM level / per-method config flags, not grammar — a missing method is an AttributeError → `ER <group>`, which is EXPECTED, not a minic bug.  For each `ER`/`XX`, decide: (a) flip a config flag (cheap, like §3c's `MICROPY_PY_BUILTINS_SLICE`), (b) a real minic frontend gap (write a focused repro the way §3c bisected build_slice — DON'T trust the probe's group-level error), or (c) genuinely out of scope at MINIMUM.  The image is content-bound (779 KB body, under the ~896 KB Victor ceiling) so there's headroom for a few more flags.  FAST LOOP for grammar/parse gates: the host `~/projects/micropython/ports/minimal` `make CROSS=0` build + `do_str(stdin, MP_PARSE_FILE_INPUT)` reproduces parse errors in ms (host config ≠ dos8086 RUNTIME though — host has 64-bit obj_t/longint, so use host for GRAMMAR ONLY, real Victor for int-range/runtime).  `MP_SRC_MAX=2048` caps PROG.PY at 2 KB.  Per-TU minic repro of a dos8086 build: preprocess with `clang -E -P -nostdinc -DDOS -D__TURBOC__ -DDOS_FAR_DATA=1 -DFAR_DATA=1 -I<dosport> -I<stub> -Iminic/include -I<mp> -I<genhdr>` then `tr -d '\r\032' | sed "$NORMALIZE"` then `minic/minic -m compact` — exactly what build-micropython.sh does per TU.)
 
->  - **BUG 1 — objslice.c (`error:1178: out-of-order designated initializer unsupported`)**: the file-scope `const mp_obj_type_t mp_type_slice = { .base=…, .flags=…, .name=…, .slot_index_unary_op=1, .slot_index_print=2, .slots=… }` lists struct members in NON-ascending offset order (`slot_index_print` is declared BEFORE `slot_index_unary_op` in `mp_obj_type_t`, but the init sets unary_op first). minic's struct designated-init emitter (minic.y ~5409: `if (m->offset < cursor) die(...)`) streams members in order and rejects a backwards offset. **FIX shape**: same as the §1k out-of-order ARRAY designator fix (`agg_emit_array` buffered into index-addressed slots) but for struct members — collect (offset,value) pairs, emit in offset order with gap-fill. Bitfield-run packing (minic.y ~5339) complicates it; mixed positional+designated items need C99 cursor semantics. There are TWO dies (minic.y:5355 bitfield path, :5411 normal path).
->  - **BUG 2 — vm.c (`error:1357: parse error`)**: a LOCAL struct init with a NESTED designator — `mp_obj_slice_t slice = { .base = { .type = &mp_type_slice }, .start=start, .stop=stop, .step=step };` — parse-errors. Different machinery from Bug 1 (local aggregate init / `emit_clit_aggr` / `mk_local_array_init`), a grammar gap on `.member = { .nested = … }` in a local initializer.
+> ---
 >
-> Both are real frontend features, ~a session each. FAST LOOP DISCOVERED THIS SESSION: a host repro of the minimal grammar/parse path lives at `~/projects/micropython/ports/minimal` — `make CROSS=0` builds a host binary, and main.c was patched (behind `#if 1`, untracked port tree) to read ALL of stdin and `do_str(src, MP_PARSE_FILE_INPUT)` (faithful to the Victor `do_str` path, NOT line-by-line REPL). Pipe a `.py` to `build/firmware.elf` and grammar gates reproduce in milliseconds instead of a ~5-min MAME run. NOTE: host config ≠ dos8086 config for RUNTIME (host has longint/64-bit obj_t), so use host for GRAMMAR/parse gates only; use the real Victor for int-range / runtime behavior. Also note `MP_SRC_MAX=2048` in ports/dos8086/main.c caps a PROG.PY at 2KB — a >2KB program is truncated mid-token → SyntaxError (burned one Victor run on this; the feature probe is now 1818B). Probe lives at `build/mp-feature-probe.py` (slice lines will only pass once slicing lands). After landing: run it on Victor to map classes/generators/exceptions/str-methods/builtins/int-range in one shot (all currently UNVERIFIED past the slice SyntaxError).
+> **§3c (DONE 2026-06-03) — LANDED SEQUENCE SLICING.  Two minic frontend
+> fixes + one config flag; slicing verified on the real Victor.
+> COMMITTED (minic/minic.y, tools/test-dos.sh, oo_designate_probe).**
+>
+>  - **The win**: `MICROPY_PY_BUILTINS_SLICE (1)` in
+>    `ports/dos8086/mpconfigport.h` (port tree, UNTRACKED) now builds.
+>    On the real Victor, `s[0:5]`→`Hello`, `s[7:]`/`s[-5:]`→`World`,
+>    `lst[1:3]`→`[20,30]`, `lst[2:]`→`[30,40,50]`, `lst[:2]`→`[10,20]`,
+>    `1+2`→`3`, clean `D4 C5`.  Full compact build **106/106 TUs, 0 fail**;
+>    image body 757040 / 779296 total (under the ceiling).
+>  - **BUG 1 (objslice.c — out-of-order struct designators), as predicted**:
+>    `mp_type_slice` lists `.slot_index_unary_op=1` BEFORE `.slot_index_print=2`
+>    but print is declared first (lower offset) → the single-pass emitter
+>    die()d ("out-of-order designated initializer unsupported").  **FIX**:
+>    rewrote `agg_emit_struct` (minic.y) to **two passes** — pass 1 binds
+>    each initializer item to a member-indexed slot via C99 cursor semantics
+>    (positional advances; `.field=` sets the cursor); pass 2 walks members
+>    in declaration order (= ascending offset), gap-coalescing uninitialized
+>    members and packing bitfield runs.  In-order inits stay byte-identical
+>    (verified: gate 184/184, all existing struct-init probes green).  Both
+>    old dies removed.
+>  - **BUG 2 (vm.c) — the NEXT_SESSION hypothesis was WRONG**.  It is NOT a
+>    nested-designator gap (`mp_obj_slice_t slice = { .base={.type=…}, … }`
+>    parses fine, in-order).  Bisected the real trigger to the function
+>    *declarator*: `MP_NOINLINE static mp_obj_t *build_slice_…(…)` i.e.
+>    `__attribute__((noinline)) static …` — the ATTRIBUTE comes BEFORE the
+>    storage class.  minic had `STATIC attrspec …` and bare `attrspec …`
+>    but not `attrspec STATIC …`.  **FIX**: added
+>    `attr_typed_decl: attrspec STATIC type_and_ident_noattr typed_decl_rest`
+>    (the lexer's `pending_static` already gives internal linkage regardless
+>    of token order).  111 s/r 0 r/r (no new conflicts).
+>  - **METHOD LESSON (cost ~half the session, worth recording)**: do NOT
+>    trust the failing-TU + a hand-typed repro of the "obvious" construct.
+>    My faithful repro of build_slice (real types, full body) COMPILED — the
+>    trigger only appeared with the `__attribute__((noinline)) static`
+>    prefix, which the NEXT_SESSION framing never mentioned.  Bisecting
+>    needs the EXACT preprocessed token stream: regenerate the `.pp.c` with
+>    the real flags, isolate by feature (slice-on vs slice-off diff under
+>    matched FAR_DATA), then shrink the failing fragment line-by-line.  minic
+>    error line numbers LAG / point near the recovery state, not the faulty
+>    token — don't read them literally.
+>  - **Probe**: `oo_designate_probe.c` (compact+large): file-scope
+>    out-of-order designators, out-of-order bitfield run, partial-init
+>    gap-zero, and an attr-before-static pointer-returning fn.  Gate
+>    **184→186**.  Port-tree change (`mpconfigport.h`) is UNTRACKED — re-add
+>    the one `#define` if the port tree is reset.
 >
 > ---
+>
+> # (Prior framing) §3b — DECISION POINT: the i8086 codegen size-shrink vein is now MINED OUT for easy wins. WHY: §2w + §2x were the two big levers (-51520 B, -57712 B). Everything since — §2y (-1952), §2z (-272), §3a (-592) — has been sub-2KB and shrinking. §3a (far-handler `push bx` liveness gating) dropped only ~5% of its target population (25/446 in vm.asm) because BX is CALLEE-SAVE, so a value placed there is almost always live across the far access. The remaining unconditional save brackets are all similarly low-yield or unsafe to gate (see §3a honest-note below). Recommendation for §3b: STOP chasing codegen bytes and spend the session on a NEW capability (the image is content-bound under the ~896KB Victor ceiling — a feature that lets a real program run is worth more than another few hundred bytes). If you still want a codegen win, the only sizeable lever left is `push es` in the 8 far handlers (446 in vm.asm vs the 446 push bx) — but it is NOT a §2w-style localized change: ES must equal DGROUP at every libstub call site (stosb writes ES:DI), so dropping `push es` needs a real "is ES restored to DGROUP before the next call/return" dataflow analysis with high blast radius (ES corruption = silent wrong far writes). That is explicitly a NON-GOAL under the §2w discipline.
 >
 > # (Prior framing) §3b — DECISION POINT: the i8086 codegen size-shrink vein is now MINED OUT for easy wins. WHY: §2w + §2x were the two big levers (-51520 B, -57712 B). Everything since — §2y (-1952), §2z (-272), §3a (-592) — has been sub-2KB and shrinking. §3a (far-handler `push bx` liveness gating) dropped only ~5% of its target population (25/446 in vm.asm) because BX is CALLEE-SAVE, so a value placed there is almost always live across the far access. The remaining unconditional save brackets are all similarly low-yield or unsafe to gate (see §3a honest-note below). Recommendation for §3b: STOP chasing codegen bytes and spend the session on a NEW capability (the image is content-bound under the ~896KB Victor ceiling — a feature that lets a real program run is worth more than another few hundred bytes). If you still want a codegen win, the only sizeable lever left is `push es` in the 8 far handlers (446 in vm.asm vs the 446 push bx) — but it is NOT a §2w-style localized change: ES must equal DGROUP at every libstub call site (stosb writes ES:DI), so dropping `push es` needs a real "is ES restored to DGROUP before the next call/return" dataflow analysis with high blast radius (ES corruption = silent wrong far writes). That is explicitly a NON-GOAL under the §2w discipline.
 
