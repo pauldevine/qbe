@@ -1,5 +1,36 @@
-# Next session (§3g — the MicroPython language surface is SOUND on real Victor AND validated end-to-end by a non-trivial integration program (§3f(A) — RPN calculator + OOP/inheritance + dicts + comprehensions + generators + custom AND VM-raised exceptions caught in functions, `build/mp-integ.py`, ran byte-identical to host, clean `D4 C5`).  No known correctness bug remains.  Remaining OPTIONAL directions:  (B) ENABLE more builtins — min/max/abs/sorted/enumerate are OFF at MINIMUM ROM (`NameError`).  Flip `MICROPY_PY_BUILTINS_MIN_MAX` (+ check the sorted/enumerate flags) in the UNTRACKED `ports/dos8086/mpconfigport.h`; image has ~111 KB headroom (784800 B total under ~896 KB).  MEASURE the image after.  Cheap, makes the feature probe print all-OK.  (C) PROPER `volatile` — minic still DISCARDS the `volatile` qualifier on variables (the type productions `VOLATILE TINT → INT` drop it; `isvolatile` in varh is only for inline-asm).  §3e's setjmp-gate covers the setjmp/longjmp case conservatively, but a TRUE `volatile` (needed for memory-mapped I/O, or any non-setjmp use) is still unimplemented — a real local would be register-cached.  Low priority for MicroPython (no MMIO), but it is a real C-conformance gap; doing it right = thread `volatile` into varh + force those allocs non-promotable + emit a per-access load/store QBE won't elide.  (D) the 211-commit upstream-qbe rebase (still deferred).  NOTE: §3e's alias.c change is TARGET-GENERAL (helps amd64/arm64/rv64 too — `make check` green), a genuine upstream-worthy QBE correctness fix.  HARNESS: feature/exception probes need a ≥200 s Victor budget (slow parse, NOT a hang); host minimal port (slice enabled) for GRAMMAR only.  Reproducers: `build/exc-min.py`, `build/exc{,2,3,4}-probe.py`, `build/nlr_mock_probe.c` (the fast DOSBox setjmp/longjmp repro that cracked §3e).)
+# Next session (§3h — the MicroPython language surface is SOUND + integration-validated on real Victor (§3d/§3e/§3f).  §3g(B) tried to enable min/max/enumerate but it is NOT a cheap flag flip — it exposed TWO REAL minic frontend bugs (see §3g(B) block below).  PRIMARY next task = FIX those two minic bugs, §3c-style, bisecting from the EXACT preprocessed TUs (SAVED: `build/saved-modbuiltins-minmax.pp.c` line ~1525 "undefined variable" in `mp_builtin_min_max`'s sibling `if/else` blocks each declaring `mp_obj_t best_key, best_obj`; `build/saved-objenumerate.pp.c` line ~1178 "undefined identifier in static initializer" = `mp_type_enumerate.slots={(const void*)(mp_make_new_fun_t)enumerate_make_new,(const void*)(const void*)enumerate_iternext}` taking `&enumerate_iternext`, a fn forward-DECLARED before the type but DEFINED after).  WARNING/DEAD-END ALREADY TRIED: the OBVIOUS hand repros do NOT reproduce — a flat `const struct{void*a,*b;} g={(void*)f_def,(void*)f_later};` with a fwd-decl `f_later` COMPILES CLEAN (so objenumerate's trigger is subtler — likely the NESTED `.slots={…}` sub-aggregate + the double-cast `(const void*)(fntype)fn`), and `int bk=0,bo=0;` in sibling blocks hits the UNRELATED §1j multi-declarator-init parse gap, not the min_max "undefined variable" (which is name-resolution, separate).  So bisect from the saved .pp.c by SHRINKING the real fragment, per the §3c lesson (minic err line numbers LAG).  To drive the fix re-add `#define MICROPY_PY_BUILTINS_MIN_MAX (1)` + `MICROPY_PY_BUILTINS_ENUMERATE (1)` to the UNTRACKED `ports/dos8086/mpconfigport.h` (reverted this session so the build stays green; abs/sorted/sum are unconditional, already present).  Payoff: feature probe prints all-OK (no more `ER bi`).  LOWER-priority alternatives:  (C) PROPER `volatile` — minic still DISCARDS the `volatile` qualifier on variables (the type productions `VOLATILE TINT → INT` drop it; `isvolatile` in varh is only for inline-asm).  §3e's setjmp-gate covers the setjmp/longjmp case conservatively, but a TRUE `volatile` (needed for memory-mapped I/O, or any non-setjmp use) is still unimplemented — a real local would be register-cached.  Low priority for MicroPython (no MMIO), but it is a real C-conformance gap; doing it right = thread `volatile` into varh + force those allocs non-promotable + emit a per-access load/store QBE won't elide.  (D) the 211-commit upstream-qbe rebase (still deferred).  NOTE: §3e's alias.c change is TARGET-GENERAL (helps amd64/arm64/rv64 too — `make check` green), a genuine upstream-worthy QBE correctness fix.  HARNESS: feature/exception probes need a ≥200 s Victor budget (slow parse, NOT a hang); host minimal port (slice enabled) for GRAMMAR only.  Reproducers: `build/exc-min.py`, `build/exc{,2,3,4}-probe.py`, `build/nlr_mock_probe.c` (the fast DOSBox setjmp/longjmp repro that cracked §3e).)
 
+> ---
+>
+> **§3g(B)-attempt (2026-06-04) — tried to enable min/max/enumerate; FOUND
+> TWO MINIC BUGS instead.  NO CODE SHIPPED; config reverted so the build
+> stays green.  Repros saved (see §3h header above).**
+>
+>  - Added `MICROPY_PY_BUILTINS_MIN_MAX (1)` + `MICROPY_PY_BUILTINS_ENUMERATE
+>    (1)` to mpconfigport.h.  Rebuild: **104/106 OK, 2 FAIL (minic)** —
+>    `modbuiltins` (pulls in `mp_builtin_min_max`) and `objenumerate` (pulls
+>    in the enumerate type+iternext).  abs/sorted/sum were already on
+>    (unconditional), so only these two TUs were newly compiled.
+>  - **BUG A — modbuiltins** `error: undefined variable` in `mp_builtin_min_max`:
+>    an `if (n_args==1){ … } else { … }` where BOTH sibling blocks declare
+>    `mp_obj_t best_key;` and `mp_obj_t best_obj;` (SAME type, separate
+>    statements — not multi-declarator).  §1k block-scope name resolution
+>    edge.  My `int bk=0,bo=0;` repro hit the UNRELATED §1j
+>    multi-declarator-init parse gap — NOT a faithful repro.
+>  - **BUG B — objenumerate** `error: undefined identifier in static
+>    initializer`: `const mp_obj_type_t mp_type_enumerate = { … .slots = {
+>    (const void*)(mp_make_new_fun_t)enumerate_make_new,
+>    (const void*)(const void*)enumerate_iternext } };` — `enumerate_iternext`
+>    is forward-DECLARED above the type but DEFINED below.  cival_eval can't
+>    resolve `&fwd_declared_fn` in this NESTED `.slots={…}` sub-aggregate
+>    init.  My flat-struct + single-cast repro COMPILED clean → the trigger
+>    needs the nested sub-aggregate and/or the double cast.  (Contrast:
+>    objslice.c's `mp_type_slice` slots work — its slot fns are DEFINED
+>    before the type, or single-cast; diff the two.)
+>  - Both need §3c-style bisection from the SAVED `build/saved-*.pp.c`.  The
+>    good `mpython.exe` (784800 B, §3e/§3f) is INTACT (the link failure never
+>    overwrote it).
+>
 > ---
 >
 > **§3f(A) (DONE 2026-06-04) — END-TO-END VALIDATION of the language surface
