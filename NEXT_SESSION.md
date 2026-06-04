@@ -2,6 +2,43 @@
 
 > ---
 >
+> **§3h-investigation (2026-06-04) — chased the min/max-iterable bug; did
+> NOT crack it, but FOUND A TANGENTIAL static-far-data-pointer bug.  NO CODE
+> SHIPPED.  min/max-iterable still needs ON-TARGET instrumentation.**
+>
+>  - Built up `build/iterbuf{,2,3,4}_probe.c` modeling the
+>    `min_max → mp_getiter → … → list-iterator` stack-iter_buf round-trip.
+>    1-/3-layer + non-entry-block + compare-the-type-ptr ALL WORK.  The first
+>    DIFFERENCE that broke: `iterbuf3` DEREFERENCES the read-back type ptr to
+>    read a `const char *name` field → came back EMPTY.
+>  - **But that's a SEPARATE bug**: `build/staticptr_probe.c` /
+>    `staticptr2_probe.c` show a file-scope `static const struct { …; const
+>    char *p; int *q; }` with `p="literal"`/`q=&global` reads the POINTER
+>    fields as GARBAGE under **compact** (wrong SEGMENT — offset is right) but
+>    CORRECT under **medium**.  This is the known §1g "far static-data-ptr
+>    relocation gap" (asm_to_omf/omf_link emit the offset but not a seg:off
+>    data relocation for a pointer-valued static initializer).
+>  - **Why it's almost certainly NOT the min/max cause**: the real
+>    `mp_obj_type_t` has `uint16_t name`(qstr) + uint8 slot_index + a
+>    FUNCTION-pointer `slots[]` (code far ptrs, which static-init FINE via
+>    §1z) — NO `const char*`/`&data` field.  And MicroPython's pervasive
+>    `MP_ROM_PTR(&type)` tables clearly WORK (builtins resolve), so its
+>    actual far-data config (FARSTORAGE opt-in via `--far-static-data`)
+>    must handle static data-ptrs that build-example's far-everything flags
+>    do not.  So the staticptr bug reproduces under build-example but may not
+>    bite the real mpython build.
+>  - **NEXT for min/max-iterable**: stop hand-repro'ing — INSTRUMENT
+>    on-target.  Add to `mp_builtin_min_max`'s `n_args==1` branch (real
+>    modbuiltins.c) a print of `iterable`'s far ptr seg:off right after
+>    `mp_getiter`, and of the type ptr `mp_iternext` reads; one Victor run
+>    shows whether the iter_buf pointer or the type/slot read is wrong.
+>    (Image has ~105KB headroom for a couple of mp_printf calls.)  Also
+>    re-examine whether the §1g static-data-ptr gap is worth a general fix
+>    (asm_to_omf/omf_link far data relocation) — it would harden any
+>    pointer-valued static table under far-data.
+>
+> ---
+>
 > **§3g(B) (2026-06-04) — enabled builtins; the "2 minic bugs" were actually
 > ONE qstr-pool SYNC issue (FIXED via config+regen, NOT minic).  4 of 5
 > builtins work on Victor; min/max-iterable has a separate far-data bug
