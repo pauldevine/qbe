@@ -1,35 +1,35 @@
-# Next session (§3a — CONTINUE CODEGEN QUALITY: bank the NEXT easy, localized, measurable i8086 size win. WHY: §2w + §2x + §2y + §2z proved the thesis — the young minic+qbe-i8086 backend emits a lot of unnecessary code, and removing it is the lever for a bigger image margin / bigger programs under the ~896KB Victor ceiling (the image is content-bound; see [[project-mp-heap-ceiling-analysis]]). §2w landed dead AX/DX save-bracket elimination (-51520 B); §2x landed Kl-param-copy elimination (-57712 B); §2y landed redundant-arg-marshal elimination (-1952 B); §2z landed div/rem AX/DX bracket liveness gating (-272 B). Same discipline: pick ONE win, land it green + measured + Victor-verified, then stop. Do NOT attempt a register-allocator rewrite or a general peephole framework.
+# Next session (§3b — DECISION POINT: the i8086 codegen size-shrink vein is now MINED OUT for easy wins. WHY: §2w + §2x were the two big levers (-51520 B, -57712 B). Everything since — §2y (-1952), §2z (-272), §3a (-592) — has been sub-2KB and shrinking. §3a (far-handler `push bx` liveness gating) dropped only ~5% of its target population (25/446 in vm.asm) because BX is CALLEE-SAVE, so a value placed there is almost always live across the far access. The remaining unconditional save brackets are all similarly low-yield or unsafe to gate (see §3a honest-note below). Recommendation for §3b: STOP chasing codegen bytes and spend the session on a NEW capability (the image is content-bound under the ~896KB Victor ceiling — a feature that lets a real program run is worth more than another few hundred bytes). If you still want a codegen win, the only sizeable lever left is `push es` in the 8 far handlers (446 in vm.asm vs the 446 push bx) — but it is NOT a §2w-style localized change: ES must equal DGROUP at every libstub call site (stosb writes ES:DI), so dropping `push es` needs a real "is ES restored to DGROUP before the next call/return" dataflow analysis with high blast radius (ES corruption = silent wrong far writes). That is explicitly a NON-GOAL under the §2w discipline.
 
-> **NOTE ON DIMINISHING RETURNS: the two big levers (§2w AX/DX brackets,
-> §2x Kl-param copy) are spent.  §2y/§2z were each sub-2KB.  Before
-> investing a session, MEASURE the candidate's aggregate payoff early
-> (recompile a couple of representative TUs, eyeball how often the idiom
-> actually fires) — if it's only a few hundred bytes it may not be worth
-> a full Victor cycle.  Consider whether the session is better spent on a
-> NEW capability (the image is content-bound, so a genuinely smaller
-> codegen lever beats nothing, but a feature that lets a real program run
-> may matter more).**
+> **NOTE ON DIMINISHING RETURNS (now CONFIRMED EXHAUSTED): the two big
+> levers (§2w AX/DX brackets, §2x Kl-param copy) are spent.  §2y/§2z/§3a
+> were each sub-2KB and the trend is down.  The MEASURE-FIRST rule paid
+> off in §3a: recompiling vm.c showed only 25/549 push bx dropped BEFORE a
+> full build was spent, correctly predicting a small (~-592 B) aggregate.
+> Apply the same gate to any future candidate — if the representative-TU
+> drop rate is in the single-digit-percent range, it is not worth a full
+> Victor cycle.  Strongly prefer a NEW capability for §3b.**
 
-> **§3a PLAN (next) — pick ONE remaining easy win, same loop as
-> §2w/§2x/§2y/§2z (make check green AND DOS gate 184/184 AND a real
-> image-size drop AND unchanged Victor output). Candidates:**
+> **§3b PLAN (next) — prefer a NEW capability over more codegen bytes.
+> If codegen is still pursued, the ONLY remaining low-yield-but-safe
+> candidates are below; none is expected to beat §3a's -592 B:**
 >
 >  1. **Kw-param copy** (same shape as §2x but for Kw params).  Kw params
 >     currently get a register, so aliasing to a slot may be a WASH or
->     worse — MEASURE before committing.
+>     worse — MEASURE before committing.  UNTRIED.
 >
->  2. **CX liveness for div/rem `save_cx`** — extend compute_axdx_liveafter
->     to also track CX, then gate §2z's `save_cx` on it.  Bigger change
->     (the tracker currently models only AX/DX); the div/rem site is the
->     only `save_cx` consumer, so payoff is bounded by div/rem frequency
->     (same population §2z's -272 B came from — likely small).
+>  2. **CX liveness for div/rem `save_cx`** — extend the now-AX/DX/BX
+>     tracker to also track CX, then gate §2z's `save_cx` on it.  CX is
+>     caller-save (like AX/DX), so the tracker addition mirrors AX/DX
+>     exactly (kill on call).  Payoff bounded by div/rem frequency — same
+>     population §2z's -272 B came from, so likely <300 B.  UNTRIED.
 >
->  3. **Survey for other unconditional save brackets** that could be
->     liveness-gated the way §2w/§2z did — grep emit.c for `push ax`/
->     `push dx` sites not already going through kl_save_axdx.
+>  3. **`push es` far-handler analysis** — the big-but-unsafe lever above.
+>     Only attempt with a proper ES-reaches-call dataflow pass; out of
+>     scope for a localized win.
 >
 > NON-GOALS (unchanged): register-allocator rewrite, general peephole
-> framework, near-call conversion, inlining, FAR_DATA/segment-model changes.
+> framework, near-call conversion, inlining, FAR_DATA/segment-model changes,
+> and (NEW) any `push es` drop without a real ES-liveness/reachability pass.
 >
 > MEASUREMENT LOOP (per win): `make qbe`; `make check` green; `bash
 > tools/test-dos.sh` green (**184/184**; the Kl-clobber + structarg/param
@@ -55,6 +55,39 @@
 > (not the monitor) and read the file.  Commit qbe-repo files at the green
 > milestone; the MicroPython port tree is untracked (note port-tree
 > changes in this file).
+>
+> ---
+>
+> **§3a (DONE 2026-06-03) — i8086 far-handler `push bx` liveness gating.
+> ONE codegen win, fully verified.  COMMITTED (i8086/emit.c).**
+>
+>  - **The win**: the 8 far load/store handlers (`Oloadf{b,h,w,l}`,
+>    `Ostoref{b,h,w,l}`) bracket their ES:BX access with `push bx … pop bx`
+>    because BX is the offset scratch and rega doesn't model that clobber
+>    ([[i8086-farptr-bx-clobber]]).  That bracket fired UNCONDITIONALLY.
+>    Now it is gated on BX-liveness-after (and skipped when the load's `to`
+>    IS BX, since the handler writes the result there after the restore).
+>  - **Implementation** (i8086/emit.c only): extended `compute_axdx_liveafter`
+>    to also fill a `la_bx` buffer + new `g_live_bx_after` global, driven
+>    the same way as AX/DX.  **KEY DIFFERENCE: BX is callee-save**
+>    (`i8086_rclob`), so a value in BX SURVIVES a call — the tracker does
+>    NOT kill BX on `iscall` (it does kill AX/DX).  New helpers
+>    `farptr_save_bx`/`farptr_restore_bx` replace the raw `push bx`/`pop bx`
+>    in all 8 handlers.  STRICT over-approximation, same safety class as
+>    §2w (can never drop a needed save).
+>  - **Results**: compact image body **741824 → 741232 B (-592)**; heap
+>    stays 49152 (segment-bound).  `make check` green; DOS gate
+>    **184/184**; real-Victor mp-test.py output unchanged
+>    (`[2..37]/12/197/fib→514229/5/21`, clean `D4 C5`).
+>  - **Honest note (drives the §3b STOP recommendation)**: only **25 of
+>    549** `push bx` in vm.asm dropped (~5%), because BX is callee-save and
+>    therefore almost always live across a far access (it holds long-lived
+>    loop/temp values precisely because rega chose a callee-save reg).  The
+>    MEASURE-FIRST rule flagged this before the full build was spent.
+>    Green/sound/measured, so banked — but this confirms the easy-codegen
+>    vein is mined out.  The bigger neighbouring lever (`push es`, equal
+>    population) is unsafe to gate without a real ES-reaches-call pass
+>    (ES must be DGROUP at libstub call sites; stosb writes ES:DI).
 >
 > ---
 >

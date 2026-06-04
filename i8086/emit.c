@@ -356,43 +356,54 @@ store_ax_to(Ref to, Fn *fn, FILE *f)
  * per-instruction by i8086_emitfn before each emitins call. */
 static int g_live_ax_after = 1;
 static int g_live_dx_after = 1;
-static signed char *la_ax_buf, *la_dx_buf;  /* per-instruction AX/DX live-after */
+static int g_live_bx_after = 1;
+static signed char *la_ax_buf, *la_dx_buf, *la_bx_buf;  /* per-instruction AX/DX/BX live-after */
 static uint la_cap;                          /* capacity of la_*_buf */
 
 static void
-compute_axdx_liveafter(Blk *b, Fn *fn, signed char *la_ax, signed char *la_dx)
+compute_axdx_liveafter(Blk *b, Fn *fn, signed char *la_ax, signed char *la_dx, signed char *la_bx)
 {
-	int n, a, ax, dx;
+	int n, a, ax, dx, bx;
 	Ins *i;
 	Ref r, bse, idx;
 
-	ax = 1;  /* conservative: AX/DX live at block exit */
+	ax = 1;  /* conservative: AX/DX/BX live at block exit */
 	dx = 1;
+	bx = 1;
 	for (n = b->nins - 1; n >= 0; n--) {
 		la_ax[n] = (signed char)ax;
 		la_dx[n] = (signed char)dx;
+		la_bx[n] = (signed char)bx;
 		i = &b->ins[n];
 		/* KILLs — definite overwrites only. */
 		if (rtype(i->to) == RTmp && i->to.val == RAX) ax = 0;
 		if (rtype(i->to) == RTmp && i->to.val == RDX) dx = 0;
+		if (rtype(i->to) == RTmp && i->to.val == RBX) bx = 0;
+		/* AX/DX are caller-save, so a call kills any value there; BX is
+		 * callee-save (i8086_rclob) — a value placed in BX SURVIVES the
+		 * call, so it must NOT be killed here. */
 		if (iscall(i->op)) { ax = 0; dx = 0; }
-		/* USEs — every AX/DX operand (register, or memref base/index). */
+		/* USEs — every AX/DX/BX operand (register, or memref base/index). */
 		for (a = 0; a < 2; a++) {
 			r = i->arg[a];
 			if (rtype(r) == RTmp) {
 				if (r.val == RAX) ax = 1;
 				if (r.val == RDX) dx = 1;
+				if (r.val == RBX) bx = 1;
 			} else if (rtype(r) == RMem) {
 				bse = fn->mem[r.val].base;
 				idx = fn->mem[r.val].index;
 				if (rtype(bse) == RTmp && bse.val == RAX) ax = 1;
 				if (rtype(bse) == RTmp && bse.val == RDX) dx = 1;
+				if (rtype(bse) == RTmp && bse.val == RBX) bx = 1;
 				if (rtype(idx) == RTmp && idx.val == RAX) ax = 1;
 				if (rtype(idx) == RTmp && idx.val == RDX) dx = 1;
+				if (rtype(idx) == RTmp && idx.val == RBX) bx = 1;
 			}
 		}
 		/* Implicit AX:DX read of a register-resident Kl value (its high
-		 * word lives in DX without appearing as an operand). */
+		 * word lives in DX without appearing as an operand).  BX is not
+		 * part of any register pair, so it is not affected. */
 		if (i->cls == Kl
 		 && (rtype(i->to) == RTmp || rtype(i->arg[0]) == RTmp
 		     || rtype(i->arg[1]) == RTmp)) {
@@ -400,6 +411,29 @@ compute_axdx_liveafter(Blk *b, Fn *fn, signed char *la_ax, signed char *la_dx)
 			dx = 1;
 		}
 	}
+}
+
+/* Far load/store handlers use BX as the offset scratch for the ES:BX
+ * access (see [[i8086-farptr-bx-clobber]]).  rega doesn't model that
+ * clobber, so the body is wrapped with push/pop bx to preserve any live
+ * SSA temp rega placed in BX.  Drop the save when BX holds nothing live
+ * across the op (g_live_bx_after, computed conservatively above) or when
+ * `to` IS BX (the handler writes the result there after the restore, so
+ * the saved value would be overwritten anyway).  Returns whether a
+ * `push bx` was emitted; pass that to farptr_restore_bx. */
+static int
+farptr_save_bx(Ref to, FILE *f)
+{
+	int dst_in_bx = (rtype(to) == RTmp && to.val == RBX);
+	int save = !dst_in_bx && g_live_bx_after;
+	if (save) fprintf(f, "\tpush bx\n");
+	return save;
+}
+
+static void
+farptr_restore_bx(int saved, FILE *f)
+{
+	if (saved) fprintf(f, "\tpop bx\n");
 }
 
 /* Preserve AX/DX across a Kl op that uses them as scratch.  rega doesn't
@@ -3247,8 +3281,9 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		r0 = i->arg[0];
 		{
 		AxDxSave s_loadfb = kl_save_axdx(i->to, f);
+		int bxsv_loadfb;
 		fprintf(f, "\tpush es\n");
-		fprintf(f, "\tpush bx\n");
+		bxsv_loadfb = farptr_save_bx(i->to, f);
 		/* Load far pointer components into ES:BX */
 		if (rtype(r0) == RSlot) {
 			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r0, fn));      /* offset */
@@ -3263,7 +3298,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		/* Load byte through ES:BX */
 		fprintf(f, "\tmov al, byte ptr es:[bx]\n");
 		fprintf(f, "\txor ah, ah\n");  /* zero-extend to word */
-		fprintf(f, "\tpop bx\n");
+		farptr_restore_bx(bxsv_loadfb, f);
 		fprintf(f, "\tpop es\n");
 		/* Store result */
 		if (rtype(i->to) == RTmp)
@@ -3288,8 +3323,9 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		r0 = i->arg[0];
 		{
 		AxDxSave s_loadfw = kl_save_axdx(i->to, f);
+		int bxsv_loadfw;
 		fprintf(f, "\tpush es\n");
-		fprintf(f, "\tpush bx\n");
+		bxsv_loadfw = farptr_save_bx(i->to, f);
 		/* Load far pointer components into ES:BX */
 		if (rtype(r0) == RSlot) {
 			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r0, fn));      /* offset */
@@ -3303,7 +3339,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		/* Load word through ES:BX */
 		fprintf(f, "\tmov ax, word ptr es:[bx]\n");
-		fprintf(f, "\tpop bx\n");
+		farptr_restore_bx(bxsv_loadfw, f);
 		fprintf(f, "\tpop es\n");
 		/* Store result */
 		if (rtype(i->to) == RTmp)
@@ -3330,8 +3366,9 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		r0 = i->arg[0];
 		{
 		AxDxSave s_loadfl = kl_save_axdx(i->to, f);
+		int bxsv_loadfl;
 		fprintf(f, "\tpush es\n");
-		fprintf(f, "\tpush bx\n");
+		bxsv_loadfl = farptr_save_bx(i->to, f);
 		/* Load far pointer components into ES:BX */
 		if (rtype(r0) == RSlot) {
 			fprintf(f, "\tmov bx, word [bp%+ld]\n", (long)slot(r0, fn));      /* offset */
@@ -3347,7 +3384,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		/* Load 32-bit value through ES:BX */
 		fprintf(f, "\tmov ax, word ptr es:[bx]\n");
 		fprintf(f, "\tmov dx, word ptr es:[bx+2]\n");
-		fprintf(f, "\tpop bx\n");
+		farptr_restore_bx(bxsv_loadfl, f);
 		fprintf(f, "\tpop es\n");
 		/* Store result into destination */
 		if (rtype(i->to) == RSlot) {
@@ -3390,8 +3427,9 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		r1 = i->arg[1];  /* far pointer */
 		{
 		AxDxSave s_storefb = kl_save_axdx(i->to, f);
+		int bxsv_storefb;
 		fprintf(f, "\tpush es\n");
-		fprintf(f, "\tpush bx\n");
+		bxsv_storefb = farptr_save_bx(i->to, f);
 		fprintf(f, "\tpush cx\n");
 		/* Load value to store into CL (to preserve AX for far pointer).
 		 * Only AX/CX/DX/BX have 8-bit subregister names; for SI/DI/BP/SP
@@ -3422,7 +3460,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		/* Store byte through ES:BX */
 		fprintf(f, "\tmov byte ptr es:[bx], cl\n");
 		fprintf(f, "\tpop cx\n");
-		fprintf(f, "\tpop bx\n");
+		farptr_restore_bx(bxsv_storefb, f);
 		fprintf(f, "\tpop es\n");
 		kl_restore_axdx(s_storefb, f);
 		}
@@ -3446,8 +3484,9 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		r1 = i->arg[1];  /* far pointer */
 		{
 		AxDxSave s_storefw = kl_save_axdx(i->to, f);
+		int bxsv_storefw;
 		fprintf(f, "\tpush es\n");
-		fprintf(f, "\tpush bx\n");
+		bxsv_storefw = farptr_save_bx(i->to, f);
 		fprintf(f, "\tpush cx\n");
 		/* Load value to store into CX (preserve AX for segment load) */
 		if (rtype(r0) == RTmp)
@@ -3470,7 +3509,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		/* Store word through ES:BX */
 		fprintf(f, "\tmov word ptr es:[bx], cx\n");
 		fprintf(f, "\tpop cx\n");
-		fprintf(f, "\tpop bx\n");
+		farptr_restore_bx(bxsv_storefw, f);
 		fprintf(f, "\tpop es\n");
 		kl_restore_axdx(s_storefw, f);
 		}
@@ -3493,10 +3532,12 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 */
 		r0 = i->arg[0];  /* value */
 		r1 = i->arg[1];  /* far pointer */
+		{
+		int bxsv_storefl;
 		fprintf(f, "\tpush ax\n");
 		fprintf(f, "\tpush dx\n");
 		fprintf(f, "\tpush es\n");
-		fprintf(f, "\tpush bx\n");
+		bxsv_storefl = farptr_save_bx(i->to, f);
 		/* Stage value into DX:AX (read source BEFORE far-ptr load may
 		 * clobber AX as scratch). */
 		if (rtype(r0) == RSlot) {
@@ -3532,10 +3573,11 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		/* Store 32-bit value through ES:BX */
 		fprintf(f, "\tmov word ptr es:[bx], ax\n");
 		fprintf(f, "\tmov word ptr es:[bx+2], dx\n");
-		fprintf(f, "\tpop bx\n");
+		farptr_restore_bx(bxsv_storefl, f);
 		fprintf(f, "\tpop es\n");
 		fprintf(f, "\tpop dx\n");
 		fprintf(f, "\tpop ax\n");
+		}
 		return;
 
 	case Ofarseg:
@@ -4520,19 +4562,22 @@ i8086_emitfn(Fn *fn, FILE *f)
 			la_cap = b->nins;
 			la_ax_buf = realloc(la_ax_buf, la_cap);
 			la_dx_buf = realloc(la_dx_buf, la_cap);
-			if (!la_ax_buf || !la_dx_buf)
+			la_bx_buf = realloc(la_bx_buf, la_cap);
+			if (!la_ax_buf || !la_dx_buf || !la_bx_buf)
 				die("emit: out of memory for liveness buffers");
 		}
-		compute_axdx_liveafter(b, fn, la_ax_buf, la_dx_buf);
+		compute_axdx_liveafter(b, fn, la_ax_buf, la_dx_buf, la_bx_buf);
 
 		for (i = b->ins; i < &b->ins[b->nins]; i++) {
 			int idx = (int)(i - b->ins);
 			g_live_ax_after = la_ax_buf[idx];
 			g_live_dx_after = la_dx_buf[idx];
+			g_live_bx_after = la_bx_buf[idx];
 			emitins(i, fn, f);
 		}
 		g_live_ax_after = 1;
 		g_live_dx_after = 1;
+		g_live_bx_after = 1;
 
 		/* Emit jump */
 		switch (b->jmp.type) {
