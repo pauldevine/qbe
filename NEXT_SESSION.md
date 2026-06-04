@@ -1,35 +1,43 @@
-# Next session (§3h — the MicroPython language surface is SOUND + integration-validated on real Victor (§3d/§3e/§3f).  §3g(B) tried to enable min/max/enumerate but it is NOT a cheap flag flip — it exposed TWO REAL minic frontend bugs (see §3g(B) block below).  PRIMARY next task = FIX those two minic bugs, §3c-style, bisecting from the EXACT preprocessed TUs (SAVED: `build/saved-modbuiltins-minmax.pp.c` line ~1525 "undefined variable" in `mp_builtin_min_max`'s sibling `if/else` blocks each declaring `mp_obj_t best_key, best_obj`; `build/saved-objenumerate.pp.c` line ~1178 "undefined identifier in static initializer" = `mp_type_enumerate.slots={(const void*)(mp_make_new_fun_t)enumerate_make_new,(const void*)(const void*)enumerate_iternext}` taking `&enumerate_iternext`, a fn forward-DECLARED before the type but DEFINED after).  WARNING/DEAD-END ALREADY TRIED: the OBVIOUS hand repros do NOT reproduce — THREE hand repros all COMPILE CLEAN for BUG B: (1) flat `const struct{void*a,*b;} g={(void*)f_def,(void*)f_later};`; (2) + nested `const struct{void*base;const void*slots[2];} g={0,{(const void*)(fnp)f_def,(const void*)(const void*)f_later}};` with fwd-decl `f_later`; (3) same with a `typedef fnp`.  So the trigger is NOT just fwd-decl-fn-in-init nor the nested sub-aggregate/double-cast — it needs MORE of objenumerate's actual type init (the FULL designated form: `.base={&mp_type_type}, .flags=…, .name=MP_QSTR_…, .slot_index_make_new=1, .slot_index_iter=2, .slots={…}` — designators INTERLEAVED with the slots sub-aggregate).  And for BUG A, `int bk=0,bo=0;` in sibling blocks hits the UNRELATED §1j multi-declarator-init parse gap, not the min_max "undefined variable" (which is name-resolution).  DO NOT hand-type — SHRINK the saved .pp.c.  So bisect from the saved .pp.c by SHRINKING the real fragment, per the §3c lesson (minic err line numbers LAG).  To drive the fix re-add `#define MICROPY_PY_BUILTINS_MIN_MAX (1)` + `MICROPY_PY_BUILTINS_ENUMERATE (1)` to the UNTRACKED `ports/dos8086/mpconfigport.h` (reverted this session so the build stays green; abs/sorted/sum are unconditional, already present).  Payoff: feature probe prints all-OK (no more `ER bi`).  LOWER-priority alternatives:  (C) PROPER `volatile` — minic still DISCARDS the `volatile` qualifier on variables (the type productions `VOLATILE TINT → INT` drop it; `isvolatile` in varh is only for inline-asm).  §3e's setjmp-gate covers the setjmp/longjmp case conservatively, but a TRUE `volatile` (needed for memory-mapped I/O, or any non-setjmp use) is still unimplemented — a real local would be register-cached.  Low priority for MicroPython (no MMIO), but it is a real C-conformance gap; doing it right = thread `volatile` into varh + force those allocs non-promotable + emit a per-access load/store QBE won't elide.  (D) the 211-commit upstream-qbe rebase (still deferred).  NOTE: §3e's alias.c change is TARGET-GENERAL (helps amd64/arm64/rv64 too — `make check` green), a genuine upstream-worthy QBE correctness fix.  HARNESS: feature/exception probes need a ≥200 s Victor budget (slow parse, NOT a hang); host minimal port (slice enabled) for GRAMMAR only.  Reproducers: `build/exc-min.py`, `build/exc{,2,3,4}-probe.py`, `build/nlr_mock_probe.c` (the fast DOSBox setjmp/longjmp repro that cracked §3e).)
+# Next session (§3h — the MicroPython language surface is SOUND + integration-validated on real Victor (§3d/§3e/§3f), and §3g(B) found the "2 minic bugs" were actually ONE qstr-pool sync issue (NOW FIXED — see §3g(B) block).  builtins min/max/abs/sorted/enumerate are now ENABLED; abs/sorted/enumerate + min/max-VARARGS all work on real Victor.  ONE narrow bug remains:  PRIMARY next task = FIX `min([..])`/`max([..])` (the single-ITERABLE-arg path) which raises `TypeError: object not an iterator` on Victor while varargs `min(1,2,3)` and `sorted([..])`/`enumerate` all work.  ROOT: `mp_builtin_min_max`'s `if (n_args==1)` branch declares a STACK `mp_obj_iter_buf_t iter_buf;` and passes `&iter_buf` down THREE call layers (`min_max → mp_getiter → list_getiter → list-iterator-new`); the iterator's type is written into that stack buffer through the far pointer and read back via the returned `mp_obj_t` (= a far ptr to the stack buf).  `mp_iternext` then reads a WRONG type → "object not an iterator".  So it's a FAR-DATA codegen bug in the multi-layer `&stack_aggregate` round-trip (sorted/enumerate avoid it — they don't pass a caller stack iter_buf through getiter the same way).  A ONE-layer DOSBox repro (`build/iterbuf_probe.c`: fn writes through `&stack_struct` + returns it, caller derefs) WORKS — so build a faithful repro with the 3-layer chain passing the SAME `&iter_buf` down, OR on-target instrument.  EXACT exception captured: `min_lst ERR object not an iterator` (`build/bi2-probe.py`).  Per-builtin status pinned by `build/bi-probe.py` (min_var/max_var/abs/sorted/enum OK; min_lst/max_lst ERR).  LOWER-priority alternatives:  (C) PROPER `volatile` — minic still DISCARDS the `volatile` qualifier on variables (the type productions `VOLATILE TINT → INT` drop it; `isvolatile` in varh is only for inline-asm).  §3e's setjmp-gate covers the setjmp/longjmp case conservatively, but a TRUE `volatile` (needed for memory-mapped I/O, or any non-setjmp use) is still unimplemented — a real local would be register-cached.  Low priority for MicroPython (no MMIO), but it is a real C-conformance gap; doing it right = thread `volatile` into varh + force those allocs non-promotable + emit a per-access load/store QBE won't elide.  (D) the 211-commit upstream-qbe rebase (still deferred).  NOTE: §3e's alias.c change is TARGET-GENERAL (helps amd64/arm64/rv64 too — `make check` green), a genuine upstream-worthy QBE correctness fix.  HARNESS: feature/exception probes need a ≥200 s Victor budget (slow parse, NOT a hang); host minimal port (slice enabled) for GRAMMAR only.  Reproducers: `build/exc-min.py`, `build/exc{,2,3,4}-probe.py`, `build/nlr_mock_probe.c` (the fast DOSBox setjmp/longjmp repro that cracked §3e).)
 
 > ---
 >
-> **§3g(B)-attempt (2026-06-04) — tried to enable min/max/enumerate; FOUND
-> TWO MINIC BUGS instead.  NO CODE SHIPPED; config reverted so the build
-> stays green.  Repros saved (see §3h header above).**
+> **§3g(B) (2026-06-04) — enabled builtins; the "2 minic bugs" were actually
+> ONE qstr-pool SYNC issue (FIXED via config+regen, NOT minic).  4 of 5
+> builtins work on Victor; min/max-iterable has a separate far-data bug
+> (→ §3h).  No qbe-repo code change (port-tree config + qstr regen only).**
 >
->  - Added `MICROPY_PY_BUILTINS_MIN_MAX (1)` + `MICROPY_PY_BUILTINS_ENUMERATE
->    (1)` to mpconfigport.h.  Rebuild: **104/106 OK, 2 FAIL (minic)** —
->    `modbuiltins` (pulls in `mp_builtin_min_max`) and `objenumerate` (pulls
->    in the enumerate type+iternext).  abs/sorted/sum were already on
->    (unconditional), so only these two TUs were newly compiled.
->  - **BUG A — modbuiltins** `error: undefined variable` in `mp_builtin_min_max`:
->    an `if (n_args==1){ … } else { … }` where BOTH sibling blocks declare
->    `mp_obj_t best_key;` and `mp_obj_t best_obj;` (SAME type, separate
->    statements — not multi-declarator).  §1k block-scope name resolution
->    edge.  My `int bk=0,bo=0;` repro hit the UNRELATED §1j
->    multi-declarator-init parse gap — NOT a faithful repro.
->  - **BUG B — objenumerate** `error: undefined identifier in static
->    initializer`: `const mp_obj_type_t mp_type_enumerate = { … .slots = {
->    (const void*)(mp_make_new_fun_t)enumerate_make_new,
->    (const void*)(const void*)enumerate_iternext } };` — `enumerate_iternext`
->    is forward-DECLARED above the type but DEFINED below.  cival_eval can't
->    resolve `&fwd_declared_fn` in this NESTED `.slots={…}` sub-aggregate
->    init.  My flat-struct + single-cast repro COMPILED clean → the trigger
->    needs the nested sub-aggregate and/or the double cast.  (Contrast:
->    objslice.c's `mp_type_slice` slots work — its slot fns are DEFINED
->    before the type, or single-cast; diff the two.)
->  - Both need §3c-style bisection from the SAVED `build/saved-*.pp.c`.  The
->    good `mpython.exe` (784800 B, §3e/§3f) is INTACT (the link failure never
->    overwrote it).
+>  - Enabling `MICROPY_PY_BUILTINS_MIN_MAX`+`ENUMERATE` first gave 104/106 OK,
+>    2 minic FAILs (`modbuiltins`, `objenumerate`).  Both errors —
+>    `modbuiltins` "undefined variable" and `objenumerate` "undefined
+>    identifier in static initializer" — turned out to be the SAME thing:
+>    **a MISSING qstr in the genhdr pool**.  `MP_QSTR_default` (used by
+>    `mp_builtin_min_max`) and `MP_QSTR_enumerate` (used by the enumerate
+>    type init) appeared ONLY at their use site in the `.pp.c`, NOT in the
+>    qstr enum — because the genhdr (`ports/minimal/build/genhdr/
+>    qstrdefs.generated.h`) is generated by the HOST MINIMAL PORT, which did
+>    NOT have these flags on, so its qstr scan never collected those names.
+>    minic CORRECTLY reported them undefined (like §1m's `stream`/SEEK_SET —
+>    a build/include artifact, not a frontend gap).  THE FOUR HAND-REPROS
+>    that "didn't reproduce" were a red herring: the real construct compiles
+>    fine; only the missing qstr broke it.
+>  - **FIX**: enable `MICROPY_PY_BUILTINS_MIN_MAX (1)` + `ENUMERATE (1)` in
+>    BOTH `ports/minimal/mpconfigport.h` (the genhdr source) AND
+>    `ports/dos8086/mpconfigport.h`, then `make CROSS=0` in ports/minimal to
+>    regenerate qstrdefs (now has QDEF `MP_QSTR_default`,`MP_QSTR_enumerate`).
+>    Rebuild mpython: **106/106 OK**, image **791216 B** (+6.4KB, under the
+>    ~896KB ceiling).  All UNTRACKED port-tree changes.
+>  - **Verified on Victor** (feature + per-builtin probes): abs, sorted,
+>    enumerate, and min/max-VARARGS all work; the rest of the surface is
+>    UNREGRESSED (mul..exc still all OK at 791216).  ONLY `min([..])`/
+>    `max([..])` (single-iterable path) raises `object not an iterator` — a
+>    far-data codegen bug, see §3h header.
+>  - LESSON: when enabling a config flag pulls in a TU that fails with
+>    "undefined identifier/variable" on an `MP_QSTR_*`, CHECK THE GENHDR
+>    QSTR POOL FIRST (grep the .pp.c for the qstr's definition) before
+>    suspecting minic — the genhdr is config-gated and must be regenerated
+>    with the same flags.  (Saved `build/saved-{modbuiltins-minmax,
+>    objenumerate}.pp.c` are now obsolete — the bug wasn't in them.)
 >
 > ---
 >
