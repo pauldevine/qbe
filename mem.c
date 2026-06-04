@@ -14,6 +14,14 @@ promote(Fn *fn)
 	Use *u, *ue;
 	int s, k;
 
+	/* A setjmp in this function makes register-promoting its stack slots
+	 * unsound: longjmp restores callee-saved regs to their setjmp-time
+	 * values, reverting any promoted local modified after the setjmp.
+	 * fillalias already forces every slot AEsc here, but promote does not
+	 * consult escape, so gate it explicitly.  See calls_setjmp (alias.c). */
+	if (calls_setjmp(fn))
+		return;
+
 	/* promote uniform stack slots to temporaries */
 	b = fn->start;
 	for (i=b->ins; i<&b->ins[b->nins]; i++) {

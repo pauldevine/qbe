@@ -219,4 +219,49 @@ fillalias(Fn *fn)
 		for (p=b->phi; p; p=p->link)
 			for (n=0; n<p->narg; n++)
 				esc(p->arg[n], fn);
+
+	/* setjmp is a "returns twice" function: control re-enters its caller
+	 * via longjmp, which restores callee-saved registers to their
+	 * setjmp-time values.  A local cached in a register (or whose store is
+	 * sunk past the setjmp by code motion) and modified between the setjmp
+	 * and a later longjmp would silently revert — C11 7.13.2.1p3 makes only
+	 * `volatile` locals well-defined across this.  minic does not yet thread
+	 * `volatile` to the backend, so be conservative like a real compiler:
+	 * force EVERY stack slot to AEsc in a setjmp-calling function.  An
+	 * escaped slot is treated as clobbered by every call, so loadopt/GCM/
+	 * store-motion will not reorder its accesses across the setjmp, and it
+	 * stays memory-backed (promote also bails — see mem.c).  Fixes
+	 * MicroPython's VM `exc_sp` (volatile, pushed by SETUP_EXCEPT) reverting
+	 * across a VM-internal-raise longjmp, which let a function-frame
+	 * `except` miss its handler. */
+	if (calls_setjmp(fn))
+		for (t=0; t<fn->ntmp; t++) {
+			a = &fn->tmp[t].alias;
+			if (astack(a->type))
+				a->slot->type = AEsc;
+		}
+}
+
+/* True if `fn` calls a setjmp-family function (setjmp / _setjmp /
+ * __builtin_setjmp / the i8086 far-data _far_setjmp): any symbol whose name
+ * contains "setjmp".  Conservative — a false positive only forgoes some
+ * stack-slot optimization, never miscompiles. */
+int
+calls_setjmp(Fn *fn)
+{
+	Blk *b;
+	Ins *i;
+	Con *c;
+
+	for (b=fn->start; b; b=b->link)
+		for (i=b->ins; i<&b->ins[b->nins]; i++) {
+			if (i->op != Ocall)
+				continue;
+			if (rtype(i->arg[0]) != RCon)
+				continue;
+			c = &fn->con[i->arg[0].val];
+			if (c->type == CAddr && strstr(str(c->sym.id), "setjmp"))
+				return 1;
+		}
+	return 0;
 }
