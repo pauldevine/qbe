@@ -68,6 +68,20 @@ int memmodel = MSmall;
 #define UNSIGNED  (1 << 17)  /* Unsigned flag for types */
 #define FLOAT     (1 << 18)  /* Float flag for types (float=INT|FLOAT, double=LNG|FLOAT) */
 #define FAR       (1 << 24)  /* Far pointer flag (32-bit segment:offset) */
+/* QVOLATILE: a `volatile`-qualified type.  (Named QVOLATILE, not VOLATILE,
+ * because VOLATILE is already a grammar TOKEN — yacc emits its own
+ * `#define VOLATILE <tok>` that would shadow a same-named macro in the
+ * actions, silently OR-ing the token number into the type.)  Unlike the
+ * named-object volatile (varh[].isvolatile + the QBE `volatile` keyword via
+ * symb_isvolatile), this rides INSIDE the type encoding so it survives the
+ * IDIR->DREF round-trip: `volatile T *p` builds IDIR(T|QVOLATILE), where the
+ * pointee's QVOLATILE bit is shifted up by IDIR and recovered by DREF when
+ * `*p` is dereferenced — so the DEREF's load/store gets the keyword while p
+ * itself stays non-volatile.  This is the pointer-to-volatile / MMIO case
+ * (`volatile uint8_t *reg; *reg = x;`).  Set on a scalar type directly
+ * (`volatile int v` -> INT|QVOLATILE) it is the OUTER qualifier, which varadd
+ * strips into varh[].isvolatile.  See [[minic-volatile]]. */
+#define QVOLATILE (1 << 25)  /* volatile-qualified type */
 /* IDIR builds a pointer-to-x type.  In far-data memory models
  * (compact/large/huge), default data pointers are 32-bit segment:offset
  * (FAR), so dereferences route through loadfX/storefX.  Code pointers,
@@ -90,11 +104,19 @@ int memmodel = MSmall;
  * position 24 after DREF, so nested far ptrs (e.g. `int **` in compact)
  * still round-trip.  Reported via stevie alloc.c crashing minic under
  * --model=compact. */
-#define DREF(x) (((x) & ~FAR) >> 3)
+/* DREF also strips the OUTER QVOLATILE qualifier (bit 25) before the shift,
+ * mirroring the FAR mask: when unpacking a pointer type, any volatile on the
+ * pointer OBJECT itself (normally absent — varadd consumes it) must not
+ * pollute the recovered pointee, while the pointee's OWN volatile (encoded
+ * one level up at bit 28) survives the shift down to bit 25.  It also makes
+ * DREF-as-struct-index-extraction (structh[DREF(structtype)]) strip a
+ * volatile-qualified struct type's bit so the index stays clean. */
+#define DREF(x) (((x) & ~FAR & ~QVOLATILE) >> 3)
 #define KIND(x) ((x) & 7)
 #define ISUNSIGNED(x) ((x) & UNSIGNED)
 #define ISFLOAT(x) ((x) & FLOAT)
 #define ISFAR(x) ((x) & FAR)
+#define ISVOLATILE(x) ((x) & QVOLATILE)
 /* FARSTORAGE(s): true when Symb `s` denotes a file-scope/external symbol
  * whose STORAGE must be reached with a far (segment:offset) access under a
  * far-data model.  Unlike ISFAR (a property of the *value* type — "this is
@@ -522,9 +544,16 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 	int vol;
 
 	/* Consume the pending `volatile` qualifier exactly once per declarator
-	 * (reset so a non-volatile sibling/next declaration can't inherit it). */
-	vol = g_decl_volatile;
+	 * (reset so a non-volatile sibling/next declaration can't inherit it).
+	 * The OUTER QVOLATILE bit on the type (a directly volatile-qualified
+	 * scalar like `volatile int v`) marks the object too; strip it from the
+	 * STORED type so the varh[].ctyp `==` redeclaration checks and all
+	 * downstream type comparisons stay byte-identical.  A pointer-to-volatile
+	 * (`volatile T *p`) carries its qualifier on the INNER pointee bit, which
+	 * this mask leaves intact so a later `*p` deref recovers it. */
+	vol = g_decl_volatile || (ISVOLATILE(ctyp) ? 1 : 0);
 	g_decl_volatile = 0;
+	ctyp &= ~QVOLATILE;
 
 	h0 = hash(v);
 	h = h0;
@@ -649,9 +678,12 @@ varaddextern(char *v, unsigned ctyp, int isarray)
 
 	/* Consume the pending `volatile` qualifier (set by the VOLATILE type
 	 * productions) just like varadd, so `extern volatile int g;` marks the
-	 * symbol and its loads/stores get the QBE keyword via symb_isvolatile. */
-	vol = g_decl_volatile;
+	 * symbol and its loads/stores get the QBE keyword via symb_isvolatile.
+	 * Like varadd, also honor an outer QVOLATILE type bit and strip it from
+	 * the stored type (keeps inner pointee volatile for pointer externs). */
+	vol = g_decl_volatile || (ISVOLATILE(ctyp) ? 1 : 0);
 	g_decl_volatile = 0;
+	ctyp &= ~QVOLATILE;
 
 	h0 = hash(v);
 	h = h0;
@@ -1932,11 +1964,14 @@ load(Symb d, Symb s)
 	} else {
 		fprintf(of, " =%c load%c ", t, t);
 	}
-	/* A volatile global must re-read memory every time: emit the QBE
+	/* A volatile access must re-read memory every time: emit the QBE
 	 * `volatile` keyword between the load opcode and its address operand
 	 * so loadopt won't forward a prior store and gcm won't elide/reorder
-	 * it.  No-op (byte-identical) for non-volatile or non-global `s`. */
-	fprintf(of, "%s", symb_isvolatile(s) ? "volatile " : "");
+	 * it.  Two triggers: a volatile global/extern NAMED symbol (`s`), or a
+	 * volatile-qualified VALUE TYPE — the pointee of a `volatile T *`
+	 * recovered by DREF, carried on d.ctyp.  No-op (byte-identical) when
+	 * neither holds. */
+	fprintf(of, "%s", (symb_isvolatile(s) || ISVOLATILE(d.ctyp)) ? "volatile " : "");
 	psymb(s);
 	fprintf(of, "\n");
 }
@@ -1968,9 +2003,10 @@ loadfar(Symb d, Symb s)
 	} else {
 		fprintf(of, " =w loadfw ");  /* Word (16-bit) load through far ptr */
 	}
-	/* Volatile global through the far path (far-data model): same as
-	 * load() — keep the access (see that note). */
-	fprintf(of, "%s", symb_isvolatile(s) ? "volatile " : "");
+	/* Volatile through the far path (far-data model): keep the access for
+	 * a volatile global/extern OR a volatile-qualified pointee (d.ctyp) —
+	 * same as load() (see that note). */
+	fprintf(of, "%s", (symb_isvolatile(s) || ISVOLATILE(d.ctyp)) ? "volatile " : "");
 	psymb(s);
 	fprintf(of, "\n");
 }
@@ -2000,10 +2036,9 @@ storefar(Symb d, Symb s)
 	} else {
 		fprintf(of, "storefw ");  /* Word (16-bit) store through far ptr */
 	}
-	/* If the destination is a volatile global, keep the store (the named
-	 * scalar global path emits storef* inline below, not here — but a
-	 * volatile far destination is handled robustly all the same). */
-	fprintf(of, "%s", symb_isvolatile(s) ? "volatile " : "");
+	/* Keep the store for a volatile far destination (named global/extern)
+	 * OR a volatile-qualified value type (d.ctyp — a volatile pointee). */
+	fprintf(of, "%s", (symb_isvolatile(s) || ISVOLATILE(d.ctyp)) ? "volatile " : "");
 	psymb(d);  /* value to store */
 	fprintf(of, ", ");
 	psymb(s);  /* far pointer address */
@@ -3300,12 +3335,19 @@ expr(Node *n)
 			sr = s0;
 			break;
 		}
-		/* Check if dereferencing a far pointer */
+		/* Check if dereferencing a far pointer.  sr.ctyp carries the
+		 * pointee's QVOLATILE qualifier (if any) so load()/loadfar() emit
+		 * the `volatile` keyword for this access. */
 		if (ISFAR(s0.ctyp)) {
 			loadfar(sr, s0);
 		} else {
 			load(sr, s0);
 		}
+		/* The RESULT of a volatile lvalue read is an ordinary unqualified
+		 * rvalue (C11 6.3.2.1): strip QVOLATILE so it never propagates into
+		 * the expression/type-comparison machinery (raw `ctyp == LNG/NIL`
+		 * sites that mask only FAR). */
+		sr.ctyp &= ~QVOLATILE;
 		break;
 
 	case 'A':
@@ -3779,8 +3821,11 @@ expr(Node *n)
 		if (KIND(s1.ctyp) == PTR && s0.t == Con && s0.u.n == 0 && !ISFLOAT(s0.ctyp)) {
 			s0.ctyp = s1.ctyp;  /* coerce so the type-equality test below passes */
 		}
-		/* Allow assignment between signed/unsigned variants and float types */
-		if ((s1.ctyp & ~FAR) != (s0.ctyp & ~FAR)
+		/* Allow assignment between signed/unsigned variants and float types.
+		 * Mask QVOLATILE too: a `volatile T *` lvalue (s1) carries the
+		 * pointee qualifier, but it must not make this exact-type test
+		 * spuriously differ from an unqualified RHS of the same T. */
+		if ((s1.ctyp & ~FAR & ~QVOLATILE) != (s0.ctyp & ~FAR & ~QVOLATILE)
 		    && !(KIND(s1.ctyp) == CHR && KIND(s0.ctyp) == INT)
 		    && !((KIND(s1.ctyp) == KIND(s0.ctyp)) ||
 		         ((KIND(s1.ctyp) & ~UNSIGNED) == (KIND(s0.ctyp) & ~UNSIGNED))
@@ -3804,9 +3849,11 @@ expr(Node *n)
 		} else {
 			fprintf(of, "\tstore%c ", irtyp(s1.ctyp));
 		}
-		/* Volatile global lvalue: keep the store (no dead-store kill /
-		 * forward / reorder).  s1 is the lvalue address. */
-		fprintf(of, "%s", symb_isvolatile(s1) ? "volatile " : "");
+		/* Volatile lvalue: keep the store (no dead-store kill / forward /
+		 * reorder).  s1 is the lvalue: a volatile global/extern NAMED
+		 * symbol, or a volatile-qualified deref (`*p` with p a
+		 * `volatile T *`, whose pointee QVOLATILE rides on s1.ctyp). */
+		fprintf(of, "%s", (symb_isvolatile(s1) || ISVOLATILE(s1.ctyp)) ? "volatile " : "");
 		goto Args;
 
 	case 'p':
@@ -3836,6 +3883,9 @@ expr(Node *n)
 		} else {
 			load(s0, sl);
 		}
+		/* The loaded value is a plain rvalue for the +/- arithmetic; drop
+		 * the pointee QVOLATILE (the store-back below keys off sl.ctyp). */
+		s0.ctyp &= ~QVOLATILE;
 		s1.t = Con;
 		s1.u.n = 1;
 		s1.ctyp = INT;
@@ -3864,8 +3914,9 @@ expr(Node *n)
 		} else {
 			fprintf(of, "\tstore%c ", irtyp(sl.ctyp));
 		}
-		/* Volatile global lvalue: keep the store. */
-		fprintf(of, "%s", symb_isvolatile(sl) ? "volatile " : "");
+		/* Volatile lvalue: keep the store (named global/extern or a
+		 * volatile-qualified deref carried on sl.ctyp). */
+		fprintf(of, "%s", (symb_isvolatile(sl) || ISVOLATILE(sl.ctyp)) ? "volatile " : "");
 		psymb(sr);
 		fprintf(of, ", ");
 		psymb(sl);
@@ -3891,6 +3942,9 @@ expr(Node *n)
 		} else {
 			load(s0, sl);
 		}
+		/* The loaded value is a plain rvalue for the +/- arithmetic; drop
+		 * the pointee QVOLATILE (the store-back below keys off sl.ctyp). */
+		s0.ctyp &= ~QVOLATILE;
 		s1.t = Con;
 		s1.u.n = 1;
 		s1.ctyp = INT;
@@ -4025,8 +4079,9 @@ expr(Node *n)
 		} else {
 			fprintf(of, "\tstore%c ", irtyp(sl.ctyp));
 		}
-		/* Volatile global lvalue: keep the store. */
-		fprintf(of, "%s", symb_isvolatile(sl) ? "volatile " : "");
+		/* Volatile lvalue: keep the store (named global/extern or a
+		 * volatile-qualified deref carried on sl.ctyp). */
+		fprintf(of, "%s", (symb_isvolatile(sl) || ISVOLATILE(sl.ctyp)) ? "volatile " : "");
 		psymb(sr);
 		fprintf(of, ", ");
 		psymb(sl);
@@ -7653,10 +7708,10 @@ gival: expr                   { $$ = $1; }
      | gaggr                  { $$ = $1; }
      ;
 
-type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_td_fpid = -1; }
-        | type '*' TFAR              { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_td_fpid = -1; }
-        | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; }
-        | type '*' CONST             { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; }
+type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; /* forming a pointer consumes any pending pointee-volatile (now in the type bit via IDIR) so the pointer OBJECT stays non-volatile; the trailing-VOLATILE rule re-sets it for the volatile-pointer case. */ }
+        | type '*' TFAR              { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; }
+        | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; }
+        | type '*' CONST             { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; }
         | type '*' VOLATILE          { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 1; }
         | TFAR type                  { $$ = $2 | FAR; }
         | TCHAR                      { $$ = CHR; }
@@ -7701,20 +7756,20 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
     | CONST TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
     | CONST TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
     | CONST TUNSIGNED          { $$ = INT | UNSIGNED; }
-    | VOLATILE TVOID        { $$ = NIL; g_decl_volatile = 1; }
-    | VOLATILE TCHAR        { $$ = CHR; g_decl_volatile = 1; }
-    | VOLATILE TSHORT       { $$ = INT | SHORT; g_decl_volatile = 1; }
-    | VOLATILE TINT         { $$ = INT; g_decl_volatile = 1; }
-    | VOLATILE TLNG         { $$ = LNG; g_decl_volatile = 1; }
-    | VOLATILE TLNGLNG      { $$ = LNG; g_decl_volatile = 1; }
-    | VOLATILE TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; g_decl_volatile = 1; }
-    | VOLATILE TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; g_decl_volatile = 1; }
-    | VOLATILE TUNSIGNED TINT     { $$ = INT | UNSIGNED; g_decl_volatile = 1; }
-    | VOLATILE TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; g_decl_volatile = 1; }
-    | VOLATILE TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; g_decl_volatile = 1; }
-    | VOLATILE TUNSIGNED          { $$ = INT | UNSIGNED; g_decl_volatile = 1; }
+    | VOLATILE TVOID        { $$ = NIL | QVOLATILE; g_decl_volatile = 1; }
+    | VOLATILE TCHAR        { $$ = CHR | QVOLATILE; g_decl_volatile = 1; }
+    | VOLATILE TSHORT       { $$ = INT | SHORT | QVOLATILE; g_decl_volatile = 1; }
+    | VOLATILE TINT         { $$ = INT | QVOLATILE; g_decl_volatile = 1; }
+    | VOLATILE TLNG         { $$ = LNG | QVOLATILE; g_decl_volatile = 1; }
+    | VOLATILE TLNGLNG      { $$ = LNG | QVOLATILE; g_decl_volatile = 1; }
+    | VOLATILE TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
+    | VOLATILE TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
+    | VOLATILE TUNSIGNED TINT     { $$ = INT | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
+    | VOLATILE TUNSIGNED TLNG     { $$ = LNG | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
+    | VOLATILE TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
+    | VOLATILE TUNSIGNED          { $$ = INT | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
     | CONST TNAME    { $$ = $2; }
-    | VOLATILE TNAME { $$ = $2; g_decl_volatile = 1; }
+    | VOLATILE TNAME { $$ = $2 | QVOLATILE; g_decl_volatile = 1; }
     | STRUCT IDENT {
         /* An undefined tag here is an incomplete type — legal when only
          * referenced through a pointer or extern decl (e.g.

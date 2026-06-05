@@ -383,6 +383,37 @@ run_volatile_global_asm_probe() {
 	echo "volatile globals=$volsum mem ops (kept), non-volatile=$nonvolsum (folded)" >&2
 }
 
+# Compile-time probe for POINTER-TO-VOLATILE / MMIO (`volatile T *p`), the
+# §3l extend phase.  The qualifier rides on the POINTEE (a QVOLATILE bit in
+# the pointer type, recovered by DREF), so the deref `*p` gets the QBE
+# `volatile` keyword while p itself stays a plain pointer.  Checked at MEDIUM
+# (near deref via loadw/storew that loadopt forwards/CSEs — the discriminating
+# model).  Each volatile fn must keep STRICTLY MORE memory ops than its
+# identical-bodied plain twin.
+run_volatile_ptr_asm_probe() {
+	src="$QBE_DIR/minic/dos/examples/volatile_ptr_probe.c"
+	ssa=/tmp/volatile_ptr_probe.ssa
+	asm=/tmp/volatile_ptr_probe.asm
+	"$QBE_DIR/minic/minic" -m medium < "$src" > "$ssa" 2>/tmp/volatile_ptr_probe.err \
+		|| { echo "minic failed:"; cat /tmp/volatile_ptr_probe.err; return 1; }
+	"$QBE_DIR/qbe" -t i8086 -m medium "$ssa" > "$asm" 2>/tmp/volatile_ptr_probe.err \
+		|| { echo "qbe failed:"; cat /tmp/volatile_ptr_probe.err; return 1; }
+	fnops() {
+		awk -v fn="^_$1:" '$0~fn{p=1;next} /^_[A-Za-z]/{p=0} /^\.section/{p=0} p' "$asm" | grep -c 'word \['
+	}
+	vread=$(fnops vp_read); nread=$(fnops np_read)
+	vfwd=$(fnops vp_fwd);   nfwd=$(fnops np_fwd)
+	if [ "$vread" -le "$nread" ]; then
+		echo "vp_read kept $vread mem ops, np_read $nread (want vp_read>np_read: CSE prevented) — pointee volatile not honored" >&2
+		return 1
+	fi
+	if [ "$vfwd" -le "$nfwd" ]; then
+		echo "vp_fwd kept $vfwd mem ops, np_fwd $nfwd (want vp_fwd>np_fwd: forward prevented) — pointee volatile not honored" >&2
+		return 1
+	fi
+	echo "vp_read=$vread/np_read=$nread, vp_fwd=$vfwd/np_fwd=$nfwd (volatile deref kept, plain folded)" >&2
+}
+
 # Same as run_runtime_probe but for .COM via tools/build-com-test.sh.
 run_com_runtime_probe() {
 	src="$1"
@@ -431,6 +462,9 @@ run "volatile asm (named local)" \
 
 run "volatile asm (named global)" \
 	run_volatile_global_asm_probe
+
+run "volatile asm (pointer-to-volatile)" \
+	run_volatile_ptr_asm_probe
 
 run "stevie.exe size (<= ${STEVIE_BUDGET}B)" \
 	run_stevie_size "$STEVIE_BUDGET"
