@@ -833,6 +833,13 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 	m = &structh[sidx].members[structh[sidx].nmembers];
 	strcpy(m->name, name);
 	m->ctyp = ctyp;
+	/* A `volatile` member captures its qualifier in m->ctyp's QVOLATILE
+	 * bit (from the `VOLATILE T` type production), so the g_decl_volatile
+	 * flag has served its purpose here.  Clear it so it does NOT leak into
+	 * a following file-scope declaration (`struct{volatile int x;}; int g;`
+	 * — g must stay non-volatile); varadd only consumes the flag for plain
+	 * variable decls, never for struct members. */
+	g_decl_volatile = 0;
 	m->bitwidth = 0;    /* Not a bitfield */
 	m->bitoffset = 0;
 	m->count = 0;       /* Scalar member */
@@ -873,6 +880,7 @@ structaddarrmember(int sidx, char *name, unsigned ctyp, int count)
 	m = &structh[sidx].members[structh[sidx].nmembers];
 	strcpy(m->name, name);
 	m->ctyp = ctyp;       /* Element type — accesses through s.arr[i] use this */
+	g_decl_volatile = 0;  /* see structaddmember: don't leak to the next decl */
 	m->bitwidth = 0;
 	m->bitoffset = 0;
 	m->count = count;
@@ -928,6 +936,7 @@ structaddbitfield(int sidx, char *name, unsigned ctyp, int width)
 	m = &structh[sidx].members[structh[sidx].nmembers];
 	strcpy(m->name, name);
 	m->ctyp = ctyp;
+	g_decl_volatile = 0;  /* see structaddmember: don't leak to the next decl */
 	m->offset = structh[sidx].curbfbase;  /* Points to storage unit base */
 	m->bitwidth = width;
 	m->bitoffset = structh[sidx].curbfoffset;
@@ -3425,10 +3434,15 @@ expr(Node *n)
 				break;
 			}
 
-			/* Load value from member address */
+			/* Load value from member address.  The access is volatile
+			 * if EITHER the member is itself volatile-qualified (QVOLATILE
+			 * already in m->ctyp) OR the containing aggregate is volatile
+			 * (`volatile struct S *p` — QVOLATILE on s0.ctyp, recovered
+			 * through the deref); OR them onto the value type so
+			 * load()/loadfar() emit the QBE `volatile` keyword. */
 			sr.t = Tmp;
 			sr.u.n = tmp++;
-			sr.ctyp = m->ctyp;
+			sr.ctyp = m->ctyp | ISVOLATILE(s0.ctyp);
 			if (ISFAR(addr.ctyp))
 				loadfar(sr, addr);
 			else
@@ -3464,6 +3478,11 @@ expr(Node *n)
 				fprintf(of, ", %lu\n", bitmask);
 				sr = masked;
 			}
+			/* The result of reading a volatile lvalue is an ordinary
+			 * unqualified rvalue (C11 6.3.2.1): strip QVOLATILE (from a
+			 * volatile member m->ctyp or a volatile aggregate s0) so it
+			 * never propagates into downstream raw ctyp comparisons. */
+			sr.ctyp &= ~QVOLATILE;
 		}
 		break;
 
@@ -4231,10 +4250,15 @@ lval(Node *n)
 			 * pointer member of a far struct. */
 			lval_storage_far = base_far ? 1 : 0;
 			}
+			/* Volatile lvalue if the member is volatile-qualified
+			 * (QVOLATILE in m->ctyp) OR the aggregate is volatile
+			 * (`volatile struct S *p`, QVOLATILE on s0.ctyp); carry it on
+			 * the lvalue value-type so the assignment / inc-dec store
+			 * sites (which check ISVOLATILE(sl.ctyp)) keep the store. */
 			if (m->offset > 0) {
 				sr.t = Tmp;
 				sr.u.n = tmp++;
-				sr.ctyp = m->ctyp | far_flag;
+				sr.ctyp = m->ctyp | far_flag | ISVOLATILE(s0.ctyp);
 				fprintf(of, "\t");
 				psymb(sr);
 				fprintf(of, " =%c add ", klass);
@@ -4243,7 +4267,7 @@ lval(Node *n)
 			} else {
 				/* Offset 0, just use struct address */
 				sr = s0;
-				sr.ctyp = m->ctyp | far_flag;
+				sr.ctyp = m->ctyp | far_flag | ISVOLATILE(s0.ctyp);
 			}
 		}
 		break;
@@ -7793,10 +7817,19 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
         $$ = (idx << 3) + STRUCT_T;
     }
     | VOLATILE STRUCT IDENT {
+        /* `volatile struct S` — the WHOLE aggregate is volatile, so every
+         * member access through it (incl. via a `volatile struct S *p`
+         * deref) must be a volatile load/store.  Encode QVOLATILE on the
+         * struct type so it rides up through IDIR and back down through
+         * DREF (the pointee bit at position 28 shifts to 25); the member-
+         * access sites (case '.') OR it onto each member's value type.
+         * g_decl_volatile is still set for the direct-var path, and the
+         * `type '*'` rule clears it when a pointer is formed (the qualifier
+         * then lives in the type bit, pointer OBJECT stays non-volatile). */
         int idx = structfind($3->u.v);
         if (idx < 0)
             idx = structadd_forward($3->u.v, 0);
-        $$ = (idx << 3) + STRUCT_T;
+        $$ = ((idx << 3) + STRUCT_T) | QVOLATILE;
         g_decl_volatile = 1;
     }
     | CONST UNION IDENT {
@@ -7806,10 +7839,11 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
         $$ = (idx << 3) + UNION_T;
     }
     | VOLATILE UNION IDENT {
+        /* `volatile union U` — see VOLATILE STRUCT above. */
         int idx = structfind($3->u.v);
         if (idx < 0)
             idx = structadd_forward($3->u.v, 1);
-        $$ = (idx << 3) + UNION_T;
+        $$ = ((idx << 3) + UNION_T) | QVOLATILE;
         g_decl_volatile = 1;
     }
     | nested_s_begin smembers '}' {
