@@ -438,19 +438,59 @@ i8086_isel(Fn *fn)
 	 * the GC heap by the frontend (MICROPY_NO_ALLOCA), so a non-constant
 	 * size here is left in place (it would die at emit) rather than
 	 * dynamically lowered. */
+	/* Pre-scan: bound the final slot count so the 4-byte-align bitmap can
+	 * be sized once.  Each fast alloc consumes ceil(size/align)/2 slots,
+	 * plus an extra padding slot for >=4-byte allocs (see below). */
+	{
+		int64_t bound = fn->slot;
+		for (al = Oalloc, n = 4; al <= Oalloc1; al++, n *= 2)
+			for (b = fn->start; b; b = b->link)
+				for (i = b->ins; i < &b->ins[b->nins]; i++)
+					if (i->op == al && rtype(i->arg[0]) == RCon) {
+						int64_t z = fn->con[i->arg[0].val].bits.i;
+						if (z < 0)
+							z = 0;
+						z = (z + n-1) & -n;
+						bound += z/2 + 1;
+					}
+		if (bound > 0 && bound < (1<<28)) {
+			fn->nsalign4 = (int)bound;
+			fn->salign4 = alloc(fn->nsalign4); /* calloc-backed: zeroed */
+		} else {
+			fn->nsalign4 = 0;
+			fn->salign4 = 0;
+		}
+	}
+
 	for (al = Oalloc, n = 4; al <= Oalloc1; al++, n *= 2)
 		for (b = fn->start; b; b = b->link)
 			for (i = b->ins; i < &b->ins[b->nins]; i++)
 				if (i->op == al) {
+					int needalign;
+
 					if (rtype(i->arg[0]) != RCon)
 						continue;
 					sz = fn->con[i->arg[0].val].bits.i;
 					if (sz < 0 || sz >= INT_MAX-15)
 						err("invalid alloc size %"PRId64, sz);
+					/* A >=4-byte stack object may have its address used
+					 * as a tagged pointer (MicroPython mp_obj_t requires
+					 * 4-byte-aligned object pointers, low 2 tag bits 0).
+					 * BP is only 2-byte aligned on 8086, so flag this
+					 * slot for runtime address rounding in emit.  A
+					 * 2-byte object can never be a 4-byte mp_obj_t, so
+					 * gate on the ORIGINAL (pre-round) size to avoid
+					 * over-aligning plain 2-byte ints. */
+					needalign = sz >= 4;
 					sz = (sz + n-1) & -n;
 					sz /= 2;  /* 2-byte slots on i8086 */
+					if (needalign)
+						sz += 1;  /* headroom for round-up by <=2 bytes */
 					if (sz > INT_MAX - fn->slot)
 						die("alloc too large");
+					if (needalign && fn->salign4
+					    && fn->slot < fn->nsalign4)
+						fn->salign4[fn->slot] = 1;
 					fn->tmp[i->to.val].slot = fn->slot;
 					fn->slot += sz;
 					fn->salign = 2 + al - Oalloc;

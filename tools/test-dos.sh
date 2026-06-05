@@ -240,6 +240,9 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/ftell_null_probe.c:minic/dos/tests/ftell_null_probe.golden.txt:huge"
 	"minic/dos/examples/oo_designate_probe.c:minic/dos/tests/oo_designate_probe.golden.txt:compact"
 	"minic/dos/examples/oo_designate_probe.c:minic/dos/tests/oo_designate_probe.golden.txt:large"
+	"minic/dos/examples/objalign_probe.c:minic/dos/tests/objalign_probe.golden.txt:medium"
+	"minic/dos/examples/objalign_probe.c:minic/dos/tests/objalign_probe.golden.txt:compact"
+	"minic/dos/examples/objalign_probe.c:minic/dos/tests/objalign_probe.golden.txt:large"
 )
 
 # --- Stevie size budget ----------------------------------------------------

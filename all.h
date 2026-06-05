@@ -479,6 +479,14 @@ struct Fn {
 	                    * (va_start) to materialise a pointer to the first
 	                    * vararg as SS:(bp+vararg_off).  See
 	                    * [[project-minic-vararg-stub]]. */
+	char *salign4;     /* i8086: per-slot-index flag, 1 = this fast-alloc
+	                    * slot must be 4-byte aligned at runtime (it holds
+	                    * a >=4-byte object whose address may be used as a
+	                    * tagged pointer, e.g. a MicroPython mp_obj_t).  The
+	                    * 8086 frame base (BP) is only 2-byte aligned, so
+	                    * emit rounds the materialised address up to a
+	                    * 4-byte boundary; see i8086/emit.c Oaddr. */
+	int nsalign4;      /* allocated length of salign4 */
 	char vararg;
 	char dynalloc;
 	char leaf;

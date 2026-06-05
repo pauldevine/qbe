@@ -1196,6 +1196,21 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		fprintf(f, "\tlea ax, ");
 		emit_memref(i->arg[0], fn, f);
 		fputc('\n', f);
+		/* Round a >=4-byte fast-alloc address up to a 4-byte boundary so
+		 * its low 2 bits are clear — required when the address is used as
+		 * a tagged pointer (MicroPython mp_obj_t).  BP is only 2-byte
+		 * aligned, so the bare lea offset can land at &3==2.  The slot was
+		 * reserved with 2 bytes of headroom in isel.  Rounding is
+		 * deterministic (BP fixed within the call), so every
+		 * materialisation of this address agrees. */
+		if (rtype(i->arg[0]) == RSlot) {
+			int sa = rsval(i->arg[0]);
+			if (sa >= 0 && sa < fn->nsalign4 && fn->salign4
+			    && fn->salign4[sa]) {
+				fprintf(f, "\tadd ax, 3\n");
+				fprintf(f, "\tand ax, 0xFFFC\n");
+			}
+		}
 		fprintf(f, "\tmov word [bp%+d], ax\n", dst_lo);
 		if (far_data) {
 			fprintf(f, "\tmov ax, ss\n");
@@ -1205,6 +1220,27 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		fprintf(f, "\tpop ax\n");
 		return;
+	}
+
+	/* Oaddr of a >=4-byte fast-alloc whose address materialises into a
+	 * register (near pointer: medium model, or a far address narrowed back
+	 * to Kw because it feeds a near deref).  Same 4-byte rounding as the
+	 * Kl->slot case above so a self-deref and an escaped tagged pointer to
+	 * the SAME slot address agree.  Falls through to the generic
+	 * `lea %=, %M0` template when the slot is not align-flagged. */
+	if (i->op == Oaddr && rtype(i->to) == RTmp && isreg(i->to)
+	    && rtype(i->arg[0]) == RSlot) {
+		int sa = rsval(i->arg[0]);
+		if (sa >= 0 && sa < fn->nsalign4 && fn->salign4
+		    && fn->salign4[sa]) {
+			const char *dr = rname[i->to.val];
+			fprintf(f, "\tlea %s, ", dr);
+			emit_memref(i->arg[0], fn, f);
+			fputc('\n', f);
+			fprintf(f, "\tadd %s, 3\n", dr);
+			fprintf(f, "\tand %s, 0xFFFC\n", dr);
+			return;
+		}
 	}
 
 	/* Ocopy Kw with an immediate source into a memory (slot) destination.

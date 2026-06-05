@@ -1,0 +1,8 @@
+a is_obj OK
+a type OK
+a buf0 OK
+a buf1 OK
+b is_obj OK
+b type OK
+b buf0 OK
+b buf1 OK
