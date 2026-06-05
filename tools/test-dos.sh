@@ -444,6 +444,36 @@ run_volatile_struct_asm_probe() {
 	echo "volatile struct members + aggregate-via-ptr kept; plain twins folded" >&2
 }
 
+# §volatile-direct: C `volatile` on a DIRECT (non-pointer) `volatile struct S s`
+# object accessed at an OFFSET>0 member (§3m limitation (a)).  Before the fix a
+# directly-declared volatile aggregate honored volatile only for its offset-0
+# member; an offset>0 member became a computed `$s+off` address whose load/store
+# carried no volatile keyword and was CSE'd / store-forwarded.  Same asm-only,
+# MEDIUM-only discrimination as the other volatile probes.  The GLOBAL pairs
+# (vg_read/vg_fwd) are the bug-loud guards (fold to match plain pre-fix); the
+# local pair adds coverage of a direct volatile LOCAL struct.
+run_volatile_direct_asm_probe() {
+	src="$QBE_DIR/minic/dos/examples/volatile_direct_probe.c"
+	ssa=/tmp/volatile_direct_probe.ssa
+	asm=/tmp/volatile_direct_probe.asm
+	"$QBE_DIR/minic/minic" -m medium < "$src" > "$ssa" 2>/tmp/volatile_direct_probe.err \
+		|| { echo "minic failed:"; cat /tmp/volatile_direct_probe.err; return 1; }
+	"$QBE_DIR/qbe" -t i8086 -m medium "$ssa" > "$asm" 2>/tmp/volatile_direct_probe.err \
+		|| { echo "qbe failed:"; cat /tmp/volatile_direct_probe.err; return 1; }
+	fnops() {
+		awk -v fn="^_$1:" '$0~fn{p=1;next} /^_[A-Za-z]/{p=0} /^\.section/{p=0} p' "$asm" | grep -c 'word \['
+	}
+	for pair in vg_read:ng_read vg_fwd:ng_fwd vl_read:nl_read; do
+		v="${pair%%:*}"; n="${pair##*:}"
+		vc=$(fnops "$v"); nc=$(fnops "$n")
+		if [ "$vc" -le "$nc" ]; then
+			echo "$v kept $vc mem ops, $n $nc (want $v>$n) — direct-struct member volatile not honored" >&2
+			return 1
+		fi
+	done
+	echo "direct volatile struct offset>0 members kept; plain twins folded" >&2
+}
+
 # Same as run_runtime_probe but for .COM via tools/build-com-test.sh.
 run_com_runtime_probe() {
 	src="$1"
@@ -498,6 +528,9 @@ run "volatile asm (pointer-to-volatile)" \
 
 run "volatile asm (struct members + aggregate)" \
 	run_volatile_struct_asm_probe
+
+run "volatile asm (direct struct offset>0)" \
+	run_volatile_direct_asm_probe
 
 run "stevie.exe size (<= ${STEVIE_BUDGET}B)" \
 	run_stevie_size "$STEVIE_BUDGET"

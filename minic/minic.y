@@ -3361,7 +3361,14 @@ expr(Node *n)
 
 	case 'A':
 		sr = lval(n->l);
-		sr.ctyp = IDIR(sr.ctyp);
+		/* &volatile_struct: the address-of result is a plain (non-volatile-
+		 * pointee) pointer — strip the QVOLATILE the lval may now carry on a
+		 * direct volatile aggregate before IDIR, so pointer types stay
+		 * byte-identical and no raw pointer `ctyp ==` site sees the bit.
+		 * Code needing volatile through the pointer declares it
+		 * `volatile T *p` (whose pointee bit is set independently by the
+		 * VOLATILE type rules).  Mirrors §3l's `&named_volatile` behavior. */
+		sr.ctyp = IDIR(sr.ctyp & ~QVOLATILE);
 		break;
 
 	case '.':
@@ -4139,6 +4146,18 @@ lval(Node *n)
 		/* A far global variable lives in far storage; a local/near one
 		 * does not (even if its value type is a far pointer). */
 		lval_storage_far = FARSTORAGE(sr) ? 1 : 0;
+		/* A directly-declared `volatile` struct/union OBJECT: re-derive its
+		 * QVOLATILE qualifier (varadd stripped it from the stored type into
+		 * varh[].isvolatile) and carry it on the aggregate lvalue, so EVERY
+		 * member access — offset 0 AND offset>0 — sees ISVOLATILE(s0.ctyp)
+		 * and emits a volatile load/store (the member-access paths OR it onto
+		 * the member value type; the lval `.` path propagates it so nested
+		 * `s.inner.x` composes).  Restricted to STRUCT_T/UNION_T so scalar
+		 * volatile locals/globals stay byte-identical — those are handled by
+		 * markvol (volatile alloc) / symb_isvolatile (named global). */
+		if ((KIND(sr.ctyp) == STRUCT_T || KIND(sr.ctyp) == UNION_T) &&
+		    var_isvolatile(n->u.v))
+			sr.ctyp |= QVOLATILE;
 		break;
 	case 'L':
 		/* Compound literal as lvalue - allocate and initialize, return address */
