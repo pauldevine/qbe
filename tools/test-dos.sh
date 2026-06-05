@@ -351,6 +351,38 @@ run_volatile_asm_probe() {
 	echo "volf=$voln mem ops (kept), nonvolf=$nonvoln (folded)" >&2
 }
 
+# Compile-time probe for `volatile` on file-scope GLOBALS (§3j extend phase).
+# A global has no alloc, so markvol can't reach it; minic emits the QBE
+# `volatile` keyword directly on the global's load/store.  Checked at MEDIUM
+# (near-data: globals use loadw/storew that loadopt forwards/CSEs — the
+# discriminating model).  Volatile funcs must keep every access; the
+# identical-bodied non-volatile funcs must optimize.
+run_volatile_global_asm_probe() {
+	src="$QBE_DIR/minic/dos/examples/volatile_global_probe.c"
+	ssa=/tmp/volatile_global_probe.ssa
+	asm=/tmp/volatile_global_probe.asm
+	"$QBE_DIR/minic/minic" -m medium < "$src" > "$ssa" 2>/tmp/volatile_global_probe.err \
+		|| { echo "minic failed:"; cat /tmp/volatile_global_probe.err; return 1; }
+	"$QBE_DIR/qbe" -t i8086 -m medium "$ssa" > "$asm" 2>/tmp/volatile_global_probe.err \
+		|| { echo "qbe failed:"; cat /tmp/volatile_global_probe.err; return 1; }
+	fnops() {
+		awk -v fn="^_$1:" '$0~fn{p=1;next} /^_[A-Za-z]/{p=0} /^\.section/{p=0} p' "$asm" | grep -c 'word \['
+	}
+	# vg_load=2 loads, vg_fwd=store+reload(2), evg_load=2 loads -> 6 word ops.
+	volsum=$(( $(fnops vg_load) + $(fnops vg_fwd) + $(fnops evg_load) ))
+	# each non-volatile folds (CSE'd load / forwarded store) to 1 word op -> 3.
+	nonvolsum=$(( $(fnops ng_load) + $(fnops ng_fwd) + $(fnops eng_load) ))
+	if [ "$volsum" -lt 6 ]; then
+		echo "volatile globals kept only $volsum mem ops (want >=6) — volatile not honored" >&2
+		return 1
+	fi
+	if [ "$nonvolsum" -ne 3 ]; then
+		echo "non-volatile globals kept $nonvolsum mem ops (want 3: each should fold)" >&2
+		return 1
+	fi
+	echo "volatile globals=$volsum mem ops (kept), non-volatile=$nonvolsum (folded)" >&2
+}
+
 # Same as run_runtime_probe but for .COM via tools/build-com-test.sh.
 run_com_runtime_probe() {
 	src="$1"
@@ -396,6 +428,9 @@ done
 
 run "volatile asm (named local)" \
 	run_volatile_asm_probe
+
+run "volatile asm (named global)" \
+	run_volatile_global_asm_probe
 
 run "stevie.exe size (<= ${STEVIE_BUDGET}B)" \
 	run_stevie_size "$STEVIE_BUDGET"

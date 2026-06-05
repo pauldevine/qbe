@@ -645,6 +645,13 @@ void
 varaddextern(char *v, unsigned ctyp, int isarray)
 {
 	unsigned h0, h;
+	int vol;
+
+	/* Consume the pending `volatile` qualifier (set by the VOLATILE type
+	 * productions) just like varadd, so `extern volatile int g;` marks the
+	 * symbol and its loads/stores get the QBE keyword via symb_isvolatile. */
+	vol = g_decl_volatile;
+	g_decl_volatile = 0;
 
 	h0 = hash(v);
 	h = h0;
@@ -657,12 +664,15 @@ varaddextern(char *v, unsigned ctyp, int isarray)
 			varh[h].isarray = isarray;
 			varh[h].isextern = 1;  /* Mark as extern */
 			varh[h].isstaticlocal = 0;
+			varh[h].isvolatile = vol;
 			return;
 		}
 		if (strcmp(varh[h].v, v) == 0) {
 			/* Allow multiple extern declarations, or extern after definition */
-			if (varh[h].isextern || varh[h].glo == 1)
+			if (varh[h].isextern || varh[h].glo == 1) {
+				varh[h].isvolatile |= vol;  /* upgrade if any decl is volatile */
 				return;  /* Already declared/defined */
+			}
 			die("double definition");
 		}
 		h = (h+1) % NVar;
@@ -1240,6 +1250,25 @@ var_isvolatile(char *v)
 			return varh[h].isvolatile;
 		h = (h+1) % NVar;
 	} while (h != h0 && varh[h].v[0] != 0);
+	return 0;
+}
+
+/* Return 1 if the address Symb `s` names a `volatile`-qualified scalar
+ * GLOBAL/extern object.  Globals have no `alloc`, so markvol() (which
+ * propagates the bit from a volatile alloc to its loads/stores) cannot
+ * reach them — instead the scalar load()/loadfar()/store sites call this
+ * and emit the QBE `volatile` keyword directly on the access.  Locals
+ * (s.t == Var) return 0: their accesses are already marked by markvol via
+ * their volatile alloc, so adding the keyword here would be redundant and
+ * would change codegen.  Pointer-to-volatile / volatile members / arrays
+ * are out of scope (named scalar object subset).  See [[minic-volatile]]. */
+int
+symb_isvolatile(Symb s)
+{
+	if (s.t == Glo && s.u.n > 0 && s.u.n < NGlo && gloname[s.u.n][0] != 0)
+		return var_isvolatile(gloname[s.u.n]);
+	if (s.t == Ext)
+		return var_isvolatile(s.u.v);
 	return 0;
 }
 
@@ -1903,6 +1932,11 @@ load(Symb d, Symb s)
 	} else {
 		fprintf(of, " =%c load%c ", t, t);
 	}
+	/* A volatile global must re-read memory every time: emit the QBE
+	 * `volatile` keyword between the load opcode and its address operand
+	 * so loadopt won't forward a prior store and gcm won't elide/reorder
+	 * it.  No-op (byte-identical) for non-volatile or non-global `s`. */
+	fprintf(of, "%s", symb_isvolatile(s) ? "volatile " : "");
 	psymb(s);
 	fprintf(of, "\n");
 }
@@ -1934,6 +1968,9 @@ loadfar(Symb d, Symb s)
 	} else {
 		fprintf(of, " =w loadfw ");  /* Word (16-bit) load through far ptr */
 	}
+	/* Volatile global through the far path (far-data model): same as
+	 * load() — keep the access (see that note). */
+	fprintf(of, "%s", symb_isvolatile(s) ? "volatile " : "");
 	psymb(s);
 	fprintf(of, "\n");
 }
@@ -1963,6 +2000,10 @@ storefar(Symb d, Symb s)
 	} else {
 		fprintf(of, "storefw ");  /* Word (16-bit) store through far ptr */
 	}
+	/* If the destination is a volatile global, keep the store (the named
+	 * scalar global path emits storef* inline below, not here — but a
+	 * volatile far destination is handled robustly all the same). */
+	fprintf(of, "%s", symb_isvolatile(s) ? "volatile " : "");
 	psymb(d);  /* value to store */
 	fprintf(of, ", ");
 	psymb(s);  /* far pointer address */
@@ -3763,6 +3804,9 @@ expr(Node *n)
 		} else {
 			fprintf(of, "\tstore%c ", irtyp(s1.ctyp));
 		}
+		/* Volatile global lvalue: keep the store (no dead-store kill /
+		 * forward / reorder).  s1 is the lvalue address. */
+		fprintf(of, "%s", symb_isvolatile(s1) ? "volatile " : "");
 		goto Args;
 
 	case 'p':
@@ -3820,6 +3864,8 @@ expr(Node *n)
 		} else {
 			fprintf(of, "\tstore%c ", irtyp(sl.ctyp));
 		}
+		/* Volatile global lvalue: keep the store. */
+		fprintf(of, "%s", symb_isvolatile(sl) ? "volatile " : "");
 		psymb(sr);
 		fprintf(of, ", ");
 		psymb(sl);
@@ -3979,6 +4025,8 @@ expr(Node *n)
 		} else {
 			fprintf(of, "\tstore%c ", irtyp(sl.ctyp));
 		}
+		/* Volatile global lvalue: keep the store. */
+		fprintf(of, "%s", symb_isvolatile(sl) ? "volatile " : "");
 		psymb(sr);
 		fprintf(of, ", ");
 		psymb(sl);
