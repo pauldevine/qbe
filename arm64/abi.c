@@ -352,7 +352,7 @@ stkblob(Ref r, Class *c, Fn *fn, Insl **ilp)
 	if (al < 0)
 		al = 0;
 	sz = c->class & Cptr ? c->t->size : c->size;
-	il->i = (Ins){Oalloc+al, Kl, r, {getcon(sz, fn)}};
+	il->i = (Ins){.op=Oalloc+al, .cls=Kl, .to=r, .arg={getcon(sz, fn)}};
 	il->link = *ilp;
 	*ilp = il;
 }

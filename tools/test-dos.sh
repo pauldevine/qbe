@@ -323,6 +323,34 @@ run_runtime_probe() {
 	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
 }
 
+# Compile-time probe for C `volatile` on named locals.  volatile is a codegen
+# property (not runtime-observable in a self-contained program), so this
+# inspects the emitted i8086 asm: volf() must KEEP its volatile loads/stores
+# and nonvolf() must fold them away.  No DOSBox needed.  Bug-loud against a
+# QBE without the volatile gates (volf would fold to `mov ax, 20`).
+run_volatile_asm_probe() {
+	src="$QBE_DIR/minic/dos/examples/volatile_probe.c"
+	ssa=/tmp/volatile_probe.ssa
+	asm=/tmp/volatile_probe.asm
+	"$QBE_DIR/minic/minic" -m medium < "$src" > "$ssa" 2>/tmp/volatile_probe.err \
+		|| { echo "minic failed:"; cat /tmp/volatile_probe.err; return 1; }
+	"$QBE_DIR/qbe" -t i8086 -m medium "$ssa" > "$asm" 2>/tmp/volatile_probe.err \
+		|| { echo "qbe failed:"; cat /tmp/volatile_probe.err; return 1; }
+	# Slice each function body (between its `_name:` label and the next
+	# top-level label) and count word-sized memory accesses.
+	voln=$(awk '/^_volf:/{p=1;next} /^_[A-Za-z]/{p=0} /^\.section/{p=0} p' "$asm" | grep -c 'word \[')
+	nonvoln=$(awk '/^_nonvolf:/{p=1;next} /^_[A-Za-z]/{p=0} /^\.section/{p=0} p' "$asm" | grep -c 'word \[')
+	if [ "$voln" -lt 4 ]; then
+		echo "volf kept only $voln memory ops (want >=4: 2 stores + 2 loads) — volatile not honored" >&2
+		return 1
+	fi
+	if [ "$nonvoln" -ne 0 ]; then
+		echo "nonvolf kept $nonvoln memory ops (should fold to a constant)" >&2
+		return 1
+	fi
+	echo "volf=$voln mem ops (kept), nonvolf=$nonvoln (folded)" >&2
+}
+
 # Same as run_runtime_probe but for .COM via tools/build-com-test.sh.
 run_com_runtime_probe() {
 	src="$1"
@@ -365,6 +393,9 @@ for entry in "${RUNTIME_TESTS[@]}"; do
 	desc="$model runtime ($(basename "$src" .c))"
 	run "$desc" run_runtime_probe "$src" "$golden" "$model"
 done
+
+run "volatile asm (named local)" \
+	run_volatile_asm_probe
 
 run "stevie.exe size (<= ${STEVIE_BUDGET}B)" \
 	run_stevie_size "$STEVIE_BUDGET"

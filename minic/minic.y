@@ -220,6 +220,16 @@ int pending_static = 0;  /* a top-level `static` storage class is in effect for 
                           * emit sites via fn_export_kw(). */
 unsigned forinit_basetyp = 0;  /* base type of the current C99 for-init declarator(s) */
 
+/* C `volatile`: set to 1 by the VOLATILE *type* productions (NOT the `asm
+ * volatile` productions, which are separate), it carries the qualifier from
+ * a type-specifier reduction to the declarator's varadd, which consumes it
+ * into varh[].isvolatile and resets it to 0.  A volatile local/param's alloc
+ * is then emitted with the QBE `volatile` keyword (emit_local_alloc), so the
+ * backend's markvol pass keeps every load/store of it.  Scope: named scalar
+ * local/param objects; volatile globals, arrays, struct members and
+ * pointer-to-volatile are not yet covered.  See [[minic-volatile]]. */
+int g_decl_volatile = 0;
+
 /* Inner-block scope via alpha-renaming.  minic has a single flat local
  * symbol table and emits function bodies lazily (uses are resolved by
  * name at emit time via varget), so a name reused across distinct blocks
@@ -317,6 +327,10 @@ struct {
 	int fpid;          /* fn-ptr prototype index into fpproto[] (§2q), or -1.
 	                    * Set when this var is a `T (*fp)(PARAMS)' declarator;
 	                    * recovered at an indirect call `fp(...)' to coerce args. */
+	int isvolatile;    /* 1 if declared `volatile`.  A volatile local/param's
+	                    * alloc is emitted with the QBE `volatile` keyword, so
+	                    * the backend's markvol pass keeps all its loads/stores
+	                    * (no promote/forward/elide/reorder).  See [[minic-volatile]]. */
 } varh[NVar];
 
 /* Per-function parameter-type table, for argument coercion at call sites.
@@ -505,6 +519,12 @@ void
 varadd(char *v, int glo, unsigned ctyp, int isarray)
 {
 	unsigned h0, h;
+	int vol;
+
+	/* Consume the pending `volatile` qualifier exactly once per declarator
+	 * (reset so a non-volatile sibling/next declaration can't inherit it). */
+	vol = g_decl_volatile;
+	g_decl_volatile = 0;
 
 	h0 = hash(v);
 	h = h0;
@@ -520,6 +540,7 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 			varh[h].arraybytes = 0;
 			varh[h].istentative = 0;
 			varh[h].fpid = -1;
+			varh[h].isvolatile = vol;
 			return;
 		}
 		if (strcmp(varh[h].v, v) == 0) {
@@ -1204,6 +1225,35 @@ varget(char *v)
 		h = (h+1) % NVar;
 	} while (h != h0 && varh[h].v[0] != 0);
 	return 0;
+}
+
+/* Return 1 if the local/param named `v` was declared `volatile`. */
+int
+var_isvolatile(char *v)
+{
+	unsigned h0, h;
+
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (strcmp(varh[h].v, v) == 0)
+			return varh[h].isvolatile;
+		h = (h+1) % NVar;
+	} while (h != h0 && varh[h].v[0] != 0);
+	return 0;
+}
+
+/* Emit a local variable's `alloc`, appending the QBE `volatile` keyword when
+ * the variable was declared volatile so markvol() keeps all its accesses.
+ * Replaces the inline `fprintf(of, "\t%%%s =%c alloc%d %d\n", ...)` at the
+ * scalar local/param decl sites. */
+void
+emit_local_alloc(char *v, char klass, int align, int size)
+{
+	/* The `volatile` keyword goes between the opcode and its size operand
+	 * (`alloc4 volatile 2`), where the QBE parser peeks for it. */
+	fprintf(of, "\t%%%s =%c alloc%d%s %d\n", v, klass, align,
+		var_isvolatile(v) ? " volatile" : "", size);
 }
 
 /* Evaluate a constant expression - returns the integer value */
@@ -5682,7 +5732,7 @@ emit_local_init(unsigned ctyp, Node *ident, Node *initexpr)
 	v = ident->u.v;
 	s = SIZE(ctyp);
 	varadd(v, 0, ctyp, 0);
-	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(ctyp), s);
+	emit_local_alloc(v, ALLOC_T(), iralign(ctyp), s);
 	if (initexpr) {
 		init_node = mknode('=', ident, initexpr);
 		expr(init_node);
@@ -6983,7 +7033,7 @@ prot_knr: IDENT '(' par0 ')'
 	for (t=0, n=$3; n; t++, n=n->r) {
 		s = varget(n->u.v);
 		m = SIZE(s->ctyp);
-		fprintf(of, "\t%%%s =%c alloc%d %d\n", n->u.v, ALLOC_T(), iralign(s->ctyp), m);
+		emit_local_alloc(n->u.v, ALLOC_T(), iralign(s->ctyp), m);
 		fprintf(of, "\tstore%c %%t%d", irtyp(s->ctyp), t);
 		fprintf(of, ", %%%s\n", n->u.v);
 	}
@@ -7091,7 +7141,7 @@ dcls:
 	 * inherit the proto so an indirect call `fp(...)' coerces args (§2s). */
 	if (g_td_fpid >= 0)
 		varsetfpid(v, g_td_fpid);
-	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), s);
+	emit_local_alloc(v, ALLOC_T(), iralign($2), s);
 
 	/* Implicit zero-init only when the struct has a bitfield (see
 	 * struct_has_bitfield); an explicit `= {0}` zeroes via the rule above. */
@@ -7116,7 +7166,7 @@ dcls:
 	 * inherit the proto so a later indirect call coerces args (§2s). */
 	if (g_td_fpid >= 0)
 		varsetfpid(v, g_td_fpid);
-	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), s);
+	emit_local_alloc(v, ALLOC_T(), iralign($2), s);
 	/* Evaluate initializer as `IDENT = expr` */
 	init_node = mknode('=', $3, $5);
 	expr(init_node);
@@ -7559,7 +7609,7 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
         | type '*' TFAR              { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_td_fpid = -1; }
         | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; }
         | type '*' CONST             { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; }
-        | type '*' VOLATILE          { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; }
+        | type '*' VOLATILE          { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 1; }
         | TFAR type                  { $$ = $2 | FAR; }
         | TCHAR                      { $$ = CHR; }
     | TSHORT                     { $$ = INT | SHORT; }
@@ -7603,20 +7653,20 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
     | CONST TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
     | CONST TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
     | CONST TUNSIGNED          { $$ = INT | UNSIGNED; }
-    | VOLATILE TVOID        { $$ = NIL; /* volatile void (e.g. volatile void *) */ }
-    | VOLATILE TCHAR        { $$ = CHR; }
-    | VOLATILE TSHORT       { $$ = INT | SHORT; }
-    | VOLATILE TINT         { $$ = INT; }
-    | VOLATILE TLNG         { $$ = LNG; }
-    | VOLATILE TLNGLNG      { $$ = LNG; }
-    | VOLATILE TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
-    | VOLATILE TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }
-    | VOLATILE TUNSIGNED TINT     { $$ = INT | UNSIGNED; }
-    | VOLATILE TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
-    | VOLATILE TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
-    | VOLATILE TUNSIGNED          { $$ = INT | UNSIGNED; }
+    | VOLATILE TVOID        { $$ = NIL; g_decl_volatile = 1; }
+    | VOLATILE TCHAR        { $$ = CHR; g_decl_volatile = 1; }
+    | VOLATILE TSHORT       { $$ = INT | SHORT; g_decl_volatile = 1; }
+    | VOLATILE TINT         { $$ = INT; g_decl_volatile = 1; }
+    | VOLATILE TLNG         { $$ = LNG; g_decl_volatile = 1; }
+    | VOLATILE TLNGLNG      { $$ = LNG; g_decl_volatile = 1; }
+    | VOLATILE TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; g_decl_volatile = 1; }
+    | VOLATILE TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; g_decl_volatile = 1; }
+    | VOLATILE TUNSIGNED TINT     { $$ = INT | UNSIGNED; g_decl_volatile = 1; }
+    | VOLATILE TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; g_decl_volatile = 1; }
+    | VOLATILE TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; g_decl_volatile = 1; }
+    | VOLATILE TUNSIGNED          { $$ = INT | UNSIGNED; g_decl_volatile = 1; }
     | CONST TNAME    { $$ = $2; }
-    | VOLATILE TNAME { $$ = $2; }
+    | VOLATILE TNAME { $$ = $2; g_decl_volatile = 1; }
     | STRUCT IDENT {
         /* An undefined tag here is an incomplete type — legal when only
          * referenced through a pointer or extern decl (e.g.
@@ -7644,6 +7694,7 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
         if (idx < 0)
             idx = structadd_forward($3->u.v, 0);
         $$ = (idx << 3) + STRUCT_T;
+        g_decl_volatile = 1;
     }
     | CONST UNION IDENT {
         int idx = structfind($3->u.v);
@@ -7656,6 +7707,7 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
         if (idx < 0)
             idx = structadd_forward($3->u.v, 1);
         $$ = (idx << 3) + UNION_T;
+        g_decl_volatile = 1;
     }
     | nested_s_begin smembers '}' {
         /* Anonymous struct used directly as a type: `struct { ... }`
@@ -7676,7 +7728,7 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
     }
     | ENUM IDENT           { $$ = INT; /* enum Tag: an enumeration value is an int */ }
     | CONST ENUM IDENT     { $$ = INT; }
-    | VOLATILE ENUM IDENT  { $$ = INT; }
+    | VOLATILE ENUM IDENT  { $$ = INT; g_decl_volatile = 1; }
     | TNAME    { $$ = $1; }
     ;
 
@@ -7702,7 +7754,7 @@ stmt: ';'                            { $$ = 0; }
         v = block_scope_decl($2, $1);
         s = SIZE($1);
         varadd(v, 0, $1, 0);
-        fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), s);
+        emit_local_alloc(v, ALLOC_T(), iralign($1), s);
         $$ = 0;
     }
     | type IDENT '=' expr ';'        {
@@ -7720,7 +7772,7 @@ stmt: ';'                            { $$ = 0; }
         v = block_scope_decl($2, $1);
         s = SIZE($1);
         varadd(v, 0, $1, 0);
-        fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), s);
+        emit_local_alloc(v, ALLOC_T(), iralign($1), s);
         init_node = mknode('=', $2, $4);
         $$ = mkstmt(Expr, init_node, 0, 0);
     }
@@ -8002,7 +8054,7 @@ forinit_var: type IDENT '='
     v = block_scope_decl($2, $1);
     s = SIZE($1);
     varadd(v, 0, $1, 0);
-    fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), s);
+    emit_local_alloc(v, ALLOC_T(), iralign($1), s);
     $$ = $2;
 }
     ;

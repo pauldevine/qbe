@@ -457,7 +457,7 @@ emitins(Ins i, E *e)
 		/* we have to use the negation trick to handle
 		 * some 3-address subtractions */
 		if (req(i.to, i.arg[1]) && !req(i.arg[0], i.to)) {
-			ineg = (Ins){Oneg, i.cls, i.to, {i.to}};
+			ineg = (Ins){.op=Oneg, .cls=i.cls, .to=i.to, .arg={i.to}};
 			emitins(ineg, e);
 			emitf("add%k %0, %=", &i, e);
 			break;

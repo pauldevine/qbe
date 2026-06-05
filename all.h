@@ -281,7 +281,14 @@ struct Op {
 };
 
 struct Ins {
-	uint op:30;
+	uint op:29;
+	uint vol:1;  /* C `volatile`: this load/store/alloc must not be
+	              * forwarded, eliminated, reordered, or promoted.  QBE has
+	              * no native volatile, so minic emits a `volatile` keyword
+	              * the parser sets here, markvol() propagates it from a
+	              * volatile alloc to its loads/stores, and promote/loadopt/
+	              * coalesce/gcm all gate on it.  op narrowed 30->29 to make
+	              * room (zero struct growth; opcodes fit in 29 bits). */
 	uint cls:2;
 	Ref to;
 	Ref arg[2];
@@ -645,6 +652,7 @@ void simplcfg(Fn *);
 /* mem.c */
 void promote(Fn *);
 void coalesce(Fn *);
+void markvol(Fn *);
 
 /* alias.c */
 void fillalias(Fn *);

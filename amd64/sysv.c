@@ -363,7 +363,7 @@ selcall(Fn *fn, Ins *i0, Ins *i1, RAlloc **rap)
 		ra = alloc(sizeof *ra);
 		/* specific to NAlign == 3 */
 		al = aret.align >= 2 ? aret.align - 2 : 0;
-		ra->i = (Ins){Oalloc+al, Kl, r1, {getcon(aret.size, fn)}};
+		ra->i = (Ins){.op=Oalloc+al, .cls=Kl, .to=r1, .arg={getcon(aret.size, fn)}};
 		ra->link = (*rap);
 		*rap = ra;
 	} else {

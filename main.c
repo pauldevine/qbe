@@ -84,6 +84,7 @@ func(Fn *fn)
 	T.abi0(fn);
 	fillcfg(fn);
 	filluse(fn);
+	markvol(fn);  /* propagate C volatile from allocs to their loads/stores */
 	promote(fn);
 	filluse(fn);
 	ssa(fn);

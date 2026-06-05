@@ -76,6 +76,7 @@ enum Token {
 	Td,
 	Ts,
 	Tz,
+	Tvol,
 
 	Tint,
 	Tflts,
@@ -136,6 +137,7 @@ static char *kwmap[Ntok] = {
 	[Ts] = "s",
 	[Td] = "d",
 	[Tz] = "z",
+	[Tvol] = "volatile",
 	[Tdots] = "...",
 };
 
@@ -550,24 +552,24 @@ parserefl(int arg)
 			err("invalid function parameter");
 		if (env)
 			if (arg)
-				*curi = (Ins){Oarge, k, R, {r}};
+				*curi = (Ins){.op=Oarge, .cls=k, .to=R, .arg={r}};
 			else
-				*curi = (Ins){Opare, k, r, {R}};
+				*curi = (Ins){.op=Opare, .cls=k, .to=r, .arg={R}};
 		else if (k == Kc)
 			if (arg)
-				*curi = (Ins){Oargc, Kl, R, {TYPE(ty), r}};
+				*curi = (Ins){.op=Oargc, .cls=Kl, .to=R, .arg={TYPE(ty), r}};
 			else
-				*curi = (Ins){Oparc, Kl, r, {TYPE(ty)}};
+				*curi = (Ins){.op=Oparc, .cls=Kl, .to=r, .arg={TYPE(ty)}};
 		else if (k >= Ksb)
 			if (arg)
-				*curi = (Ins){Oargsb+(k-Ksb), Kw, R, {r}};
+				*curi = (Ins){.op=Oargsb+(k-Ksb), .cls=Kw, .to=R, .arg={r}};
 			else
-				*curi = (Ins){Oparsb+(k-Ksb), Kw, r, {R}};
+				*curi = (Ins){.op=Oparsb+(k-Ksb), .cls=Kw, .to=r, .arg={R}};
 		else
 			if (arg)
-				*curi = (Ins){Oarg, k, R, {r}};
+				*curi = (Ins){.op=Oarg, .cls=k, .to=R, .arg={r}};
 			else
-				*curi = (Ins){Opar, k, r, {R}};
+				*curi = (Ins){.op=Opar, .cls=k, .to=r, .arg={R}};
 		curi++;
 	Next:
 		if (peek() == Trparen)
@@ -613,8 +615,9 @@ parseline(PState ps)
 	Ref r;
 	Blk *b;
 	Con *c;
-	int t, op, i, k, ty;
+	int t, op, i, k, ty, vol;
 
+	vol = 0;
 	t = nextnl();
 	if (ps == PLbl && t != Tlbl && t != Trbrace)
 		err("label or } expected");
@@ -757,6 +760,14 @@ parseline(PState ps)
 		err("cannot use vastart in non-variadic function");
 	if (k >= Ksb)
 		err("size class must be w, l, s, or d");
+	/* Optional `volatile` qualifier after a load/store/alloc opcode and
+	 * before its operands (e.g. `%v =w loadw volatile %a`, `storew volatile
+	 * %x, %a`, `%a =l alloc4 volatile 4`).  Emitted by minic for C volatile
+	 * objects; recorded on the Ins below so the optimizer leaves it alone. */
+	if (peek() == Tvol) {
+		next();
+		vol = 1;
+	}
 	i = 0;
 	if (peek() != Tnl)
 		for (;;) {
@@ -821,6 +832,7 @@ parseline(PState ps)
 			err("too many instructions");
 		curi->op = op;
 		curi->cls = k;
+		curi->vol = vol;
 		curi->to = r;
 		curi->arg[0] = arg[0];
 		curi->arg[1] = arg[1];

@@ -79,7 +79,7 @@ iins(int cls, int op, Ref a0, Ref a1, Loc *l)
 	ist->num = inum++;
 	ist->bid = l->blk->id;
 	ist->off = l->off;
-	ist->new.ins = (Ins){op, cls, R, {a0, a1}};
+	ist->new.ins = (Ins){.op=op, .cls=cls, .to=R, .arg={a0, a1}};
 	return ist->new.ins.to = newtmp("ld", cls, curf);
 }
 
@@ -260,6 +260,11 @@ def(Slice sl, bits msk, Blk *b, Ins *i, Loc *il)
 		--i;
 		if (killsl(i->to, sl)
 		|| (iscall(i->op) && escapes(sl.ref, curf)))
+			goto Load;
+		/* A volatile access is a barrier: do not resolve a load by
+		 * reading a value across it (a volatile store's value must not
+		 * be forwarded, and an aliasing load must re-read memory). */
+		if (i->vol)
 			goto Load;
 		ld = isload(i->op);
 		if (ld) {
@@ -452,6 +457,10 @@ loadopt(Fn *fn)
 	for (b=fn->start; b; b=b->link)
 		for (i=b->ins; i<&b->ins[b->nins]; ++i) {
 			if (!isload(i->op))
+				continue;
+			/* A volatile load must re-read memory: never forward a
+			 * prior store's value into it. */
+			if (i->vol)
 				continue;
 			sz = loadsz(i);
 			sl = (Slice){i->arg[0], 0, sz, i->cls};
