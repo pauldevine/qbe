@@ -474,6 +474,59 @@ run_volatile_direct_asm_probe() {
 	echo "direct volatile struct offset>0 members kept; plain twins folded" >&2
 }
 
+# §volatile-copy: C `volatile` on a struct-to-struct COPY `*d = *s` / `d = s`
+# (§3m limitation (b)).  Before the fix emit_struct_copy emitted plain
+# loadw/storew regardless of either operand's volatility, so a volatile struct
+# copy (e.g. MMIO register-block snapshot/program) was treated as ordinary
+# memory.  Unlike the scalar volatile probes this checks the IR, not an asm
+# op-count: QBE does not fold a multi-word aggregate copy (no CSE / dead-store
+# across the copy's own stores), so there is no asm fold to prevent — the fix
+# lives in minic's emit_struct_copy and is bug-loud at the .ssa level (pre-fix:
+# no `volatile` keyword on the copy; post-fix: present on the right side).
+# SRC volatile -> volatile LOADS; DST volatile -> volatile STORES.  Checked
+# under MEDIUM (near loadw/storew); far-data rides the same keyword on
+# loadfw/storefw.
+run_volatile_copy_asm_probe() {
+	src="$QBE_DIR/minic/dos/examples/volatile_copy_probe.c"
+	ssa=/tmp/volatile_copy_probe.ssa
+	asm=/tmp/volatile_copy_probe.asm
+	"$QBE_DIR/minic/minic" -m medium < "$src" > "$ssa" 2>/tmp/volatile_copy_probe.err \
+		|| { echo "minic failed:"; cat /tmp/volatile_copy_probe.err; return 1; }
+	# qbe must still accept + lower the volatile copy (no crash, no reorder).
+	"$QBE_DIR/qbe" -t i8086 -m medium "$ssa" > "$asm" 2>/tmp/volatile_copy_probe.err \
+		|| { echo "qbe failed:"; cat /tmp/volatile_copy_probe.err; return 1; }
+	# Extract a function body from the .ssa by name (literal "$NAME(" match).
+	fnbody() {
+		awk -v fn="\$$1(" 'index($0,fn){p=1} p{print} p&&/^}/{exit}' "$ssa"
+	}
+	# Count `volatile` keywords on load vs store lines within a function body.
+	vload()  { fnbody "$1" | grep -E 'load[a-z]* volatile' | wc -l | tr -d ' '; }
+	vstore() { fnbody "$1" | grep -E 'store[a-z]* volatile' | wc -l | tr -d ' '; }
+	vall()   { fnbody "$1" | grep -c 'volatile'; }
+	# Volatile-SOURCE copies: loads volatile, stores plain.
+	for f in vcsrc vpcopy_src; do
+		if [ "$(vload "$f")" -lt 1 ] || [ "$(vstore "$f")" -ne 0 ]; then
+			echo "$f: want volatile LOADS only, got loads=$(vload "$f") stores=$(vstore "$f")" >&2
+			return 1
+		fi
+	done
+	# Volatile-DEST copies: stores volatile, loads plain.
+	for f in vcdst vpcopy_dst; do
+		if [ "$(vstore "$f")" -lt 1 ] || [ "$(vload "$f")" -ne 0 ]; then
+			echo "$f: want volatile STORES only, got loads=$(vload "$f") stores=$(vstore "$f")" >&2
+			return 1
+		fi
+	done
+	# Plain twins: NO volatile keyword anywhere in the copy.
+	for f in ncsrc ncdst; do
+		if [ "$(vall "$f")" -ne 0 ]; then
+			echo "$f: plain copy unexpectedly carries volatile ($(vall "$f"))" >&2
+			return 1
+		fi
+	done
+	echo "volatile struct copy honors src->loads / dst->stores; plain twins clean" >&2
+}
+
 # Same as run_runtime_probe but for .COM via tools/build-com-test.sh.
 run_com_runtime_probe() {
 	src="$1"
@@ -531,6 +584,9 @@ run "volatile asm (struct members + aggregate)" \
 
 run "volatile asm (direct struct offset>0)" \
 	run_volatile_direct_asm_probe
+
+run "volatile asm (struct copy)" \
+	run_volatile_copy_asm_probe
 
 run "stevie.exe size (<= ${STEVIE_BUDGET}B)" \
 	run_stevie_size "$STEVIE_BUDGET"

@@ -2082,6 +2082,17 @@ emit_struct_copy(Symb dst, Symb src)
 	 * aggregate's own ctyp carries no FAR bit. */
 	int src_far = ISFAR(src.ctyp) || FARSTORAGE(src);
 	int dst_far = ISFAR(dst.ctyp) || FARSTORAGE(dst);
+	/* §3m(b): a volatile struct-to-struct copy `*d = *s`.  If either operand
+	 * is volatile-qualified the corresponding word/byte accesses must carry
+	 * the QBE `volatile` keyword so loadopt/gcm don't forward, CSE, or elide
+	 * them.  The qualifier reaches here two ways: as the QVOLATILE bit on the
+	 * aggregate lvalue's value type (the deref of a `volatile struct S *`
+	 * shifts the pointee bit down via DREF; lval `case 'V'` re-derives it for
+	 * a directly-declared volatile object), or via the NAMED symbol for a
+	 * volatile global/extern aggregate.  src governs the LOADS, dst the STORES.
+	 * No-op (byte-identical) when neither side is volatile. */
+	int src_vol = symb_isvolatile(src) || ISVOLATILE(src.ctyp);
+	int dst_vol = symb_isvolatile(dst) || ISVOLATILE(dst.ctyp);
 	char src_klass = src_far ? 'l' : 'w';
 	char dst_klass = dst_far ? 'l' : 'w';
 	unsigned src_ptyp = src_far ? IDIR_FAR(INT) : IDIR(INT);
@@ -2107,6 +2118,7 @@ emit_struct_copy(Symb dst, Symb src)
 		fprintf(of, "\t");
 		psymb(val);
 		fprintf(of, src_far ? " =w loadfw " : " =w loadw ");
+		fprintf(of, "%s", src_vol ? "volatile " : "");
 		psymb(off_addr);
 		fprintf(of, "\n");
 
@@ -2123,6 +2135,7 @@ emit_struct_copy(Symb dst, Symb src)
 			off_addr = dst;
 		}
 		fprintf(of, dst_far ? "\tstorefw " : "\tstorew ");
+		fprintf(of, "%s", dst_vol ? "volatile " : "");
 		psymb(val);
 		fprintf(of, ", ");
 		psymb(off_addr);
@@ -2150,6 +2163,7 @@ emit_struct_copy(Symb dst, Symb src)
 		fprintf(of, "\t");
 		psymb(val);
 		fprintf(of, src_far ? " =w loadfb " : " =w loadub ");
+		fprintf(of, "%s", src_vol ? "volatile " : "");
 		psymb(off_addr);
 		fprintf(of, "\n");
 
@@ -2166,6 +2180,7 @@ emit_struct_copy(Symb dst, Symb src)
 			off_addr = dst;
 		}
 		fprintf(of, dst_far ? "\tstorefb " : "\tstoreb ");
+		fprintf(of, "%s", dst_vol ? "volatile " : "");
 		psymb(val);
 		fprintf(of, ", ");
 		psymb(off_addr);
