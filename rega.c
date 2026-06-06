@@ -15,13 +15,17 @@ struct RMap {
 	int n;
 };
 
+enum {
+	NPm = 64,      /* max copies in a parallel move */
+};
+
 static bits regu;      /* registers used */
 static Tmp *tmp;       /* function temporaries */
 static Mem *mem;       /* function mem references */
 static struct {
 	Ref src, dst;
 	int cls;
-} pm[Tmp0];            /* parallel move constructed */
+} pm[NPm];             /* parallel move constructed */
 static int npm;        /* size of pm */
 static int loop;       /* current loop level */
 
@@ -115,10 +119,19 @@ ralloctry(RMap *m, int t, int try)
 		assert(r != -1);
 		return TMP(r);
 	}
+	{
+	int fallback = 0;
+	bits avoid = tmp[phicls(t, tmp)].hint.m;
 	r = tmp[t].visit;
-	if (r == -1 || bshas(m->b, r))
+	/* Reject visit/hint.r if it conflicts with the avoid mask.
+	 * Otherwise a value previously placed in a caller-save reg (e.g.
+	 * a malloc result that the ABI returns in RAX) sticks there even
+	 * when the temp is live across a subsequent call — the call
+	 * clobbers the reg and post-call uses read garbage.  spill.c
+	 * sets the avoid mask for exactly this case. */
+	if (r == -1 || bshas(m->b, r) || (avoid & BIT(r)))
 		r = *hint(t);
-	if (r == -1 || bshas(m->b, r)) {
+	if (r == -1 || bshas(m->b, r) || (avoid & BIT(r))) {
 		if (try)
 			return R;
 		regs = tmp[phicls(t, tmp)].hint.m;
@@ -134,18 +147,28 @@ ralloctry(RMap *m, int t, int try)
 			if (!(regs & BIT(r)))
 				goto Found;
 		for (r=r0; r<r1; r++)
-			if (!bshas(m->b, r))
+			if (!bshas(m->b, r)) {
+				fallback = 1;
 				goto Found;
+			}
 		die("no more regs");
 	}
 Found:
 	radd(m, t, r);
-	sethint(t, r);
-	tmp[t].visit = r;
+	/* Only propagate this allocation as a preference if we picked
+	 * a reg consistent with the avoid mask.  Fallback picks (a
+	 * forced caller-save reg in a high-pressure block) must not
+	 * pin t to that reg in subsequent, lower-pressure blocks —
+	 * otherwise a call in one of those blocks clobbers the value. */
+	if (!fallback) {
+		sethint(t, r);
+		tmp[t].visit = r;
+	}
 	h = *hint(t);
 	if (h != -1 && h != r)
 		m->w[h] = t;
 	return TMP(r);
+	}
 }
 
 static inline Ref
@@ -157,20 +180,51 @@ ralloc(RMap *m, int t)
 static int
 rfree(RMap *m, int t)
 {
-	int i, r;
+	int i, r, ut;
 
 	assert(t >= Tmp0 || !(BIT(t) & T.rglob));
 	if (!bshas(m->b, t))
 		return -1;
-	for (i=0; m->t[i] != t; i++)
-		assert(i+1 < m->n);
+	/* Lookup convention: m->t[]/m->r[] is keyed by user temp.  When `t`
+	 * is a user temp (t >= Tmp0), find it directly in m->t.  When `t`
+	 * is a physical register (t < Tmp0), there are two cases:
+	 *
+	 *   1. A fixed (t, t) self-mapping was added via radd — search m->t.
+	 *   2. The register is currently allocated to a user temp `ut` —
+	 *      search m->r and free that user temp's mapping.
+	 *
+	 * Case 2 arises whenever rfree is called on a register ID directly,
+	 * which the Ocall caller-save loop (T.rsave) and the def-of-fixed-reg
+	 * paths (`Ocopy TMP(RAX), <ssa-temp>`) both do.  Without this branch
+	 * the user-temp side of the mapping is left dangling: m->t still
+	 * names `ut` but its register bit is cleared, so a later ralloc can
+	 * hand the same physical register out twice. */
+	for (i=0; i < m->n && m->t[i] != t; i++)
+		;
+	if (i >= m->n && t < Tmp0) {
+		for (i=0; i < m->n && m->r[i] != t; i++)
+			;
+	}
+	if (i >= m->n) {
+		/* Genuinely unmapped — clear the stale bset bit defensively. */
+		if (debug['R']) {
+			int j;
+			fprintf(stderr, "rfree: t=%d in bset, no array entry (n=%d):", t, m->n);
+			for (j = 0; j < m->n; j++)
+				fprintf(stderr, " (t=%d,r=%d)", m->t[j], m->r[j]);
+			fputc('\n', stderr);
+		}
+		bsclr(m->b, t);
+		return -1;
+	}
+	ut = m->t[i];
 	r = m->r[i];
-	bsclr(m->b, t);
+	bsclr(m->b, ut);
 	bsclr(m->b, r);
 	m->n--;
 	memmove(&m->t[i], &m->t[i+1], (m->n-i) * sizeof m->t[0]);
 	memmove(&m->r[i], &m->r[i+1], (m->n-i) * sizeof m->r[0]);
-	assert(t >= Tmp0 || t == r);
+	assert(t >= Tmp0 || t == r || t == ut);
 	return r;
 }
 
@@ -190,8 +244,8 @@ mdump(RMap *m)
 static void
 pmadd(Ref src, Ref dst, int k)
 {
-	if (npm == Tmp0)
-		die("cannot have more moves than registers");
+	if (npm == NPm)
+		die("no more pm slots");
 	pm[npm].src = src;
 	pm[npm].dst = dst;
 	pm[npm].cls = k;
@@ -389,6 +443,13 @@ doblk(Blk *b, RMap *cur)
 			/* fall through */
 		default:
 			if (!req(i->to, R)) {
+				if (rtype(i->to) == RSlot) {
+					/* i8086 Kl temps are forced to be
+					 * slot-resident in spill.c; the dest
+					 * already names a stack slot, so no
+					 * register allocation is needed. */
+					break;
+				}
 				assert(rtype(i->to) == RTmp);
 				r = i->to.val;
 				if (r < Tmp0 && (BIT(r) & T.rglob))
@@ -425,6 +486,7 @@ doblk(Blk *b, RMap *cur)
 		 * temporary if rf is available */
 		if (rf != -1 && (t = cur->w[rf]) != 0)
 		if (!bshas(cur->b, rf) && *hint(t) == rf
+		&& !(tmp[phicls(t, tmp)].hint.m & BIT(rf))
 		&& (rt = rfree(cur, t)) != -1) {
 			tmp[t].visit = -1;
 			ralloc(cur, t);
@@ -670,7 +732,7 @@ rega(Fn *fn)
 			b1->link = blist;
 			blist = b1;
 			fn->nblk++;
-			strf(b1->name, "%s_%s", b->name, s->name);
+			b1->name = strf(PFn, "%s_%s", b->name, s->name);
 			stmov += &insb[NIns]-curi;
 			stblk += 1;
 			idup(b1, curi, &insb[NIns]-curi);

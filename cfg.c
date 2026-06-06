@@ -16,19 +16,22 @@ newblk()
 static void
 fixphis(Fn *f)
 {
-	Blk *b;
+	Blk *b, *bp;
 	Phi *p;
 	uint n, n0;
 
 	for (b=f->start; b; b=b->link) {
 		assert(b->id < f->nblk);
 		for (p=b->phi; p; p=p->link) {
-			for (n=n0=0; n<p->narg; n++)
-				if (p->blk[n]->id != -1u) {
-					p->blk[n0] = p->blk[n];
+			for (n=n0=0; n<p->narg; n++) {
+				bp = p->blk[n];
+				if (bp->id != -1u)
+				if (bp->s1 == b || bp->s2 == b) {
+					p->blk[n0] = bp;
 					p->arg[n0] = p->arg[n];
 					n0++;
 				}
+			}
 			assert(n0 > 0);
 			p->narg = n0;
 		}
@@ -326,10 +329,20 @@ simpljmp(Fn *fn)
 
 	Blk **uf; /* union-find */
 	Blk **p, *b, *ret;
+	int n;
 
 	ret = newblk();
 	ret->id = fn->nblk++;
 	ret->jmp.type = Jret0;
+	/* Give the synthetic ret block a name.  Targets whose emit relies
+	 * on b->name (e.g. i8086) skip label/jmp emission for unnamed blocks,
+	 * which silently drops `jmp <ret>` from every non-final return path
+	 * and lets control fall through into adjacent block bodies.  Use a
+	 * non-local prefix so NASM scoping doesn't tie it to whichever
+	 * label happens to precede the epilogue. */
+	n = snprintf(0, 0, "ret_%s", fn->name) + 1;
+	ret->name = alloc(n);
+	snprintf(ret->name, n, "ret_%s", fn->name);
 	uf = emalloc(fn->nblk * sizeof uf[0]);
 	for (b=fn->start; b; b=b->link) {
 		assert(!b->phi);
@@ -395,4 +408,170 @@ reachesnotvia(Fn *fn, Blk *b, Blk *to, Blk *excl)
 {
 	excl->visit = 1;
 	return reaches(fn, b, to);
+}
+
+int
+ifgraph(Blk *ifb, Blk **pthenb, Blk **pelseb, Blk **pjoinb)
+{
+	Blk *s1, *s2, **t;
+
+	if (ifb->jmp.type != Jjnz)
+		return 0;
+
+	s1 = ifb->s1;
+	s2 = ifb->s2;
+	if (s1->id > s2->id) {
+		s1 = ifb->s2;
+		s2 = ifb->s1;
+		t = pthenb;
+		pthenb = pelseb;
+		pelseb = t;
+	}
+	if (s1 == s2)
+		return 0;
+
+	if (s1->jmp.type != Jjmp || s1->npred != 1)
+		return 0;
+
+	if (s1->s1 == s2) {
+		/* if-then / if-else */
+		if (s2->npred != 2)
+			return 0;
+		*pthenb = s1;
+		*pelseb = ifb;
+		*pjoinb = s2;
+		return 1;
+	}
+
+	if (s2->jmp.type != Jjmp || s2->npred != 1)
+		return 0;
+	if (s1->s1 != s2->s1 || s1->s1->npred != 2)
+		return 0;
+
+	assert(s1->s1 != ifb);
+	*pthenb = s1;
+	*pelseb = s2;
+	*pjoinb = s1->s1;
+	return 1;
+}
+
+typedef struct Jmp Jmp;
+
+struct Jmp {
+	int type;
+	Ref arg;
+	Blk *s1, *s2;
+};
+
+static int
+jmpeq(Jmp *a, Jmp *b)
+{
+	return a->type == b->type && req(a->arg, b->arg)
+		&& a->s1 == b->s1 && a->s2 == b->s2;
+}
+
+static int
+jmpnophi(Jmp *j)
+{
+	if (j->s1 && j->s1->phi)
+		return 0;
+	if (j->s2 && j->s2->phi)
+		return 0;
+	return 1;
+}
+
+/* require cfg rpo, breaks use */
+void
+simplcfg(Fn *fn)
+{
+	Ins cpy, *i;
+	Blk *b, *bb, **pb;
+	Jmp *jmp, *j, *jj;
+	Phi *p;
+	int *empty, done;
+	uint n;
+
+	if (debug['C']) {
+		fprintf(stderr, "\n> Before CFG simplification:\n");
+		printfn(fn, stderr);
+	}
+
+	cpy = (Ins){.op = Ocopy};
+	for (b=fn->start; b; b=b->link)
+		if (b->npred == 1) {
+			bb = b->pred[0];
+			for (p=b->phi; p; p=p->link) {
+				cpy.cls = p->cls;
+				cpy.to = p->to;
+				cpy.arg[0] = phiarg(p, bb);
+				addins(&bb->ins, &bb->nins, &cpy);
+			}
+			b->phi = 0;
+		}
+
+	jmp = emalloc(fn->nblk * sizeof jmp[0]);
+	empty = emalloc(fn->nblk * sizeof empty[0]);
+	for (b=fn->start; b; b=b->link) {
+		jmp[b->id].type = b->jmp.type;
+		jmp[b->id].arg = b->jmp.arg;
+		jmp[b->id].s1 = b->s1;
+		jmp[b->id].s2 = b->s2;
+		empty[b->id] = !b->phi;
+		for (i=b->ins; i<&b->ins[b->nins]; i++)
+			if (i->op != Onop && i->op != Odbgloc) {
+				empty[b->id] = 0;
+				break;
+			}
+	}
+
+	do {
+		done = 1;
+		for (b=fn->start; b; b=b->link) {
+			if (b->id == -1u)
+				continue;
+			j = &jmp[b->id];
+			if (j->type == Jjmp && j->s1->npred == 1) {
+				assert(!j->s1->phi);
+				addbins(&b->ins, &b->nins, j->s1);
+				empty[b->id] &= empty[j->s1->id];
+				jj = &jmp[j->s1->id];
+				pb = (Blk*[]){jj->s1, jj->s2, 0};
+				for (; (bb=*pb); pb++)
+					for (p=bb->phi; p; p=p->link) {
+						n = phiargn(p, j->s1);
+						p->blk[n] = b;
+					}
+				j->s1->id = -1u;
+				*j = *jj;
+				done = 0;
+			}
+			else if (j->type == Jjnz
+			&& empty[j->s1->id] && empty[j->s2->id]
+			&& jmpeq(&jmp[j->s1->id], &jmp[j->s2->id])
+			&& jmpnophi(&jmp[j->s1->id])) {
+				*j = jmp[j->s1->id];
+				done = 0;
+			}
+		}
+	} while (!done);
+
+	for (b=fn->start; b; b=b->link)
+		if (b->id != -1u) {
+			j = &jmp[b->id];
+			b->jmp.type = j->type;
+			b->jmp.arg = j->arg;
+			b->s1 = j->s1;
+			b->s2 = j->s2;
+			assert(!j->s1 || j->s1->id != -1u);
+			assert(!j->s2 || j->s2->id != -1u);
+		}
+
+	fillcfg(fn);
+	free(empty);
+	free(jmp);
+
+	if (debug['C']) {
+		fprintf(stderr, "\n> After CFG simplification:\n");
+		printfn(fn, stderr);
+	}
 }

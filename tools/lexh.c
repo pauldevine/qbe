@@ -24,14 +24,14 @@ char *tok[] = {
 	"cnes", "ceqs", "cos", "cuos", "cled", "cltd",
 	"cgtd", "cged", "cned", "ceqd", "cod", "cuod",
 	"vaarg", "vastart", "...", "env", "dbgloc",
-	"loadfb", "loadfh", "loadfw", "storefb", "storefh", "storefw",
+	"loadfb", "loadfh", "loadfw", "loadfl", "storefb", "storefh", "storefw", "storefl",
 	"mkfar", "farseg", "faroff",
 
 	"call", "phi", "jmp", "jnz", "ret", "hlt", "export",
 	"function", "type", "data", "section", "align", "dbgfile",
 	"blit", "l", "w", "sh", "uh", "h", "sb", "ub", "b",
 	"d", "s", "z", "loadw", "loadl", "loads", "loadd",
-	"alloc1", "alloc2", "thread", "common",
+	"alloc1", "alloc2", "thread", "extern", "common", "volatile",
 
 };
 enum {

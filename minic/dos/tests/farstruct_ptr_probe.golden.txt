@@ -1,0 +1,6 @@
+a ok
+p ok
+tag ok
+next ok
+q ok
+wr ok

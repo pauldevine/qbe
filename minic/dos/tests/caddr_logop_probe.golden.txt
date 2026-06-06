@@ -1,0 +1,5 @@
+or_sym ok
+xor_sym ok
+and_sym ok
+xor_sym2 ok
+xor_roundtrip ok

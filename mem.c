@@ -4,6 +4,39 @@ typedef struct Range Range;
 typedef struct Store Store;
 typedef struct Slot Slot;
 
+/* C volatile: minic marks only the `alloc` of a volatile object with the
+ * vol bit.  Propagate it to every load/store that addresses the alloc slot
+ * directly, so the optimizer (promote/loadopt/coalesce/gcm) sees each access
+ * as volatile.  Direct-address only (named scalar objects); an access through
+ * a derived pointer (alloc+offset) is intentionally not marked — that is the
+ * pointer-to-volatile case, out of scope for the named-object subset.
+ * Requires use info: run after filluse, before promote. */
+void
+markvol(Fn *fn)
+{
+	Blk *b;
+	Ins *i, *ui;
+	Tmp *t;
+	Use *u;
+
+	for (b=fn->start; b; b=b->link)
+		for (i=b->ins; i<&b->ins[b->nins]; i++) {
+			if (!i->vol || !isalloc(i->op) || rtype(i->to) != RTmp)
+				continue;
+			t = &fn->tmp[i->to.val];
+			for (u=t->use; u<&t->use[t->nuse]; u++) {
+				if (u->type != UIns)
+					continue;
+				ui = u->u.ins;
+				if ((isload(ui->op) || isloadfar(ui->op))
+				&& req(ui->arg[0], i->to))
+					ui->vol = 1;
+				else if (isstore(ui->op) && req(ui->arg[1], i->to))
+					ui->vol = 1;
+			}
+		}
+}
+
 /* require use, maintains use counts */
 void
 promote(Fn *fn)
@@ -14,10 +47,22 @@ promote(Fn *fn)
 	Use *u, *ue;
 	int s, k;
 
+	/* A setjmp in this function makes register-promoting its stack slots
+	 * unsound: longjmp restores callee-saved regs to their setjmp-time
+	 * values, reverting any promoted local modified after the setjmp.
+	 * fillalias already forces every slot AEsc here, but promote does not
+	 * consult escape, so gate it explicitly.  See calls_setjmp (alias.c). */
+	if (calls_setjmp(fn))
+		return;
+
 	/* promote uniform stack slots to temporaries */
 	b = fn->start;
 	for (i=b->ins; i<&b->ins[b->nins]; i++) {
 		if (Oalloc > i->op || i->op > Oalloc1)
+			continue;
+		/* A volatile object must stay in memory: promoting it to an SSA
+		 * temp (register) would erase its loads/stores entirely. */
+		if (i->vol)
 			continue;
 		/* specific to NAlign == 3 */
 		assert(rtype(i->to) == RTmp);
@@ -225,6 +270,10 @@ coalesce(Fn *fn)
 	for (n=Tmp0; n<fn->ntmp; n++) {
 		t = &fn->tmp[n];
 		t->visit = -1;
+		/* A volatile slot must not be coalesced with another slot nor
+		 * have its "dead" stores killed — every access must survive. */
+		if (t->def && t->def->vol)
+			continue;
 		if (t->alias.type == ALoc)
 		if (t->alias.slot == &t->alias)
 		if (t->bid == fn->start->id)

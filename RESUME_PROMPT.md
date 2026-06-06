@@ -1,4 +1,4 @@
-# Resume Prompt: QBE C11 8086 Compiler Implementation
+# Resume Prompt: QBE C11/C17 8086 Compiler Implementation
 
 **Session Type:** Implementation (Resume from Architectural Analysis)
 **Date:** 2025-11-21

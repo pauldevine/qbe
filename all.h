@@ -39,7 +39,6 @@ typedef struct Lnk Lnk;
 typedef struct Target Target;
 
 enum {
-	NString = 80,
 	NIns    = 1 << 20,
 	NAlign  = 3,
 	NField  = 32,
@@ -80,7 +79,16 @@ enum MemModel {
 struct Target {
 	char name[16];
 	char apple;
+	char windows;
 	enum MemModel memmodel; /* Memory model (for 8086) */
+	int wordsz; /* byte width of Kw on this target (4 for 32/64-bit
+	             * targets; 2 for i8086, where the backend emits
+	             * `storew`/`loadw` as 16-bit `mov word`) */
+	bits divclob; /* regs clobbered by integer div/mul/rem that the
+	               * backend emits in-place (not modeled via precolored
+	               * temps in isel).  i8086 sets BIT(RAX)|BIT(RDX) so
+	               * spill.c keeps live-across temps out of AX/DX; 0
+	               * elsewhere (amd64 decomposes div/mul in isel). */
 	int gpr0;   /* first general purpose reg */
 	int ngpr;
 	int fpr0;   /* first floating point reg */
@@ -99,6 +107,7 @@ struct Target {
 	void (*emitfin)(FILE *);
 	char asloc[4];
 	char assym[4];
+	uint cansel:1;
 };
 
 #define BIT(n) ((bits)1 << (n))
@@ -222,15 +231,17 @@ enum {
 	Oalloc1 = Oalloc16,
 	Oflag = Oflagieq,
 	Oflag1 = Oflagfuo,
+	Oxsel = Oxselieq,
+	Oxsel1 = Oxselfuo,
 	NPubOp = Onop,
 	Jjf = Jjfieq,
 	Jjf1 = Jjffuo,
 };
 
 #define INRANGE(x, l, u) ((unsigned)(x) - l <= u - l) /* linear in x */
-#define isstore(o) (INRANGE(o, Ostoreb, Ostored) || INRANGE(o, Ostorefb, Ostorefw))
+#define isstore(o) (INRANGE(o, Ostoreb, Ostored) || INRANGE(o, Ostorefb, Ostorefl))
 #define isload(o) INRANGE(o, Oloadsb, Oload)
-#define isloadfar(o) INRANGE(o, Oloadfb, Oloadfw)
+#define isloadfar(o) INRANGE(o, Oloadfb, Oloadfl)
 #define isalloc(o) INRANGE(o, Oalloc4, Oalloc16)
 #define isext(o) INRANGE(o, Oextsb, Oextuw)
 #define ispar(o) INRANGE(o, Opar, Opare)
@@ -240,6 +251,7 @@ enum {
 #define isparbh(o) INRANGE(o, Oparsb, Oparuh)
 #define isargbh(o) INRANGE(o, Oargsb, Oarguh)
 #define isretbh(j) INRANGE(j, Jretsb, Jretuh)
+#define isxsel(o) INRANGE(o, Oxsel, Oxsel1)
 #define iscall(o) ((o) == Ocall || (o) == Ocallfar)  /* near or far call */
 
 enum {
@@ -269,7 +281,14 @@ struct Op {
 };
 
 struct Ins {
-	uint op:30;
+	uint op:29;
+	uint vol:1;  /* C `volatile`: this load/store/alloc must not be
+	              * forwarded, eliminated, reordered, or promoted.  QBE has
+	              * no native volatile, so minic emits a `volatile` keyword
+	              * the parser sets here, markvol() propagates it from a
+	              * volatile alloc to its loads/stores, and promote/loadopt/
+	              * coalesce/gcm all gate on it.  op narrowed 30->29 to make
+	              * room (zero struct growth; opcodes fit in 29 bits). */
 	uint cls:2;
 	Ref to;
 	Ref arg[2];
@@ -277,11 +296,11 @@ struct Ins {
 
 struct Phi {
 	Ref to;
+	short cls;
+	int visit;
+	uint narg;
 	Ref *arg;
 	Blk **blk;
-	uint narg;
-	short cls;
-	uint visit:1;
 	Phi *link;
 };
 
@@ -311,7 +330,7 @@ struct Blk {
 	BSet in[1], out[1], gen[1];
 	int nlive[2];
 	int loop;
-	char name[NString];
+	char *name;
 };
 
 struct Use {
@@ -330,8 +349,10 @@ struct Use {
 
 struct Sym {
 	enum {
-		SGlo,
-		SThr,
+		SGlo  = 0, /* direct access */
+		SThr  = 1, /* local-exec TLS */
+		SExt  = 2, /* GOT/PLT access */
+		SExtThr = SExt|SThr, /* initial-exec TLS */
 	} type;
 	uint32_t id;
 };
@@ -371,7 +392,7 @@ struct Alias {
 };
 
 struct Tmp {
-	char name[NString];
+	char *name;
 	Ins *def;
 	Use *use;
 	uint ndef, nuse;
@@ -447,10 +468,36 @@ struct Fn {
 	bits reg;
 	int slot;
 	int salign;
+	int arg_slot_top;  /* i8086: # of slot indices at the bottom of the
+	                    * frame reserved for outgoing call args (set by
+	                    * i8086_abi).  Slot indices in [0, arg_slot_top)
+	                    * are ABI call-arg slots (selcall writes the
+	                    * call arg DIRECTLY into the slot — the slot IS
+	                    * the destination memory).  Slot indices >=
+	                    * arg_slot_top come from isel alloca + spill.c
+	                    * tmp evictions; for a Kl tmp these slots HOLD
+	                    * a pointer VALUE that needs dereferencing.
+	                    * Used by i8086/emit.c Ostorel/Oload Kl to
+	                    * pick "direct slot" vs "deref through slot"
+	                    * semantics.  See [[huge-phase-b-storel-gap]]. */
+	int vararg_off;    /* i8086: BP-relative byte offset of the first
+	                    * variadic argument (= just past the named params,
+	                    * recorded by selpar).  Used by the Ovargp op
+	                    * (va_start) to materialise a pointer to the first
+	                    * vararg as SS:(bp+vararg_off).  See
+	                    * [[project-minic-vararg-stub]]. */
+	char *salign4;     /* i8086: per-slot-index flag, 1 = this fast-alloc
+	                    * slot must be 4-byte aligned at runtime (it holds
+	                    * a >=4-byte object whose address may be used as a
+	                    * tagged pointer, e.g. a MicroPython mp_obj_t).  The
+	                    * 8086 frame base (BP) is only 2-byte aligned, so
+	                    * emit rounds the materialised address up to a
+	                    * 4-byte boundary; see i8086/emit.c Oaddr. */
+	int nsalign4;      /* allocated length of salign4 */
 	char vararg;
 	char dynalloc;
 	char leaf;
-	char name[NString];
+	char *name;
 	Lnk lnk;
 	/* Inline assembly support */
 	char **asmstr;   /* array of inline asm strings */
@@ -458,7 +505,7 @@ struct Fn {
 };
 
 struct Typ {
-	char name[NString];
+	char *name;
 	char isdark;
 	char isunion;
 	int align;
@@ -527,8 +574,8 @@ void *vnew(ulong, size_t, Pool);
 void vfree(void *);
 void vgrow(void *, ulong);
 void addins(Ins **, uint *, Ins *);
-void addbins(Blk *, Ins **, uint *);
-void strf(char[NString], char *, ...);
+void addbins(Ins **, uint *, Blk *);
+char *strf(Pool, char *, ...);
 uint32_t intern(char *);
 char *str(uint32_t);
 int argcls(Ins *, int);
@@ -540,7 +587,6 @@ void emiti(Ins);
 void idup(Blk *, Ins *, ulong);
 Ins *icpy(Ins *, Ins *, ulong);
 int cmpop(int);
-int cmpneg(int);
 int cmpwlneg(int);
 int clsmerge(short *, short);
 int phicls(int, Tmp *);
@@ -600,16 +646,20 @@ void fillloop(Fn *);
 void simpljmp(Fn *);
 int reaches(Fn *, Blk *, Blk *);
 int reachesnotvia(Fn *, Blk *, Blk *, Blk *);
+int ifgraph(Blk *, Blk **, Blk **, Blk **);
+void simplcfg(Fn *);
 
 /* mem.c */
 void promote(Fn *);
 void coalesce(Fn *);
+void markvol(Fn *);
 
 /* alias.c */
 void fillalias(Fn *);
 void getalias(Alias *, Ref, Fn *);
 int alias(Ref, int, int, Ref, int, int *, Fn *);
 int escapes(Ref, Fn *);
+int calls_setjmp(Fn *);
 
 /* load.c */
 int loadsz(Ins *);
@@ -640,6 +690,9 @@ void gvn(Fn *);
 int pinned(Ins *);
 void gcm(Fn *);
 
+/* ifopt.c */
+void ifconvert(Fn *fn);
+
 /* simpl.c */
 void simpl(Fn *);
 
@@ -663,3 +716,4 @@ int stashbits(bits, int);
 void elf_emitfnfin(char *, FILE *);
 void elf_emitfin(FILE *);
 void macho_emitfin(FILE *);
+void pe_emitfin(FILE *);

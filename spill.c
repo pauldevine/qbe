@@ -216,10 +216,21 @@ limit2(BSet *b1, int k1, int k2, BSet *f)
 static void
 sethint(BSet *u, bits r)
 {
-	int t;
+	int t, hr;
+	Tmp *p;
 
-	for (t=Tmp0; bsiter(u, &t); t++)
-		tmp[phicls(t, tmp)].hint.m |= r;
+	for (t=Tmp0; bsiter(u, &t); t++) {
+		p = &tmp[phicls(t, tmp)];
+		p->hint.m |= r;
+		/* If a previous pass set hint.r (preferred single register)
+		 * to a register now in the avoid mask, clear it.  Otherwise
+		 * rega's `r = *hint(t)` path uses the preferred register
+		 * directly and bypasses hint.m, causing live-across-call
+		 * temps to land in caller-save regs and get clobbered. */
+		hr = p->hint.r;
+		if (hr != -1 && (r & BIT(hr)))
+			p->hint.r = -1;
+	}
 }
 
 /* reloads temporaries in u that are
@@ -281,7 +292,9 @@ dopm(Blk *b, Ins *i, BSet *v)
 	bscopy(u, v);
 	if (i != b->ins && iscall((i-1)->op)) {
 		v->t[0] &= ~T.retregs((i-1)->arg[1], 0);
-		limit2(v, T.nrsave[0], T.nrsave[1], 0);
+		/* Same callee-save fit as the main-loop iscall path.
+		 * See feedback memory qbe-gcm-sinks-load-past-call. */
+		limit2(v, T.nrsave[0] + T.nrglob, T.nrsave[1], 0);
 		for (n=0, r=0; T.rsave[n]>=0; n++)
 			r |= BIT(T.rsave[n]);
 		v->t[0] |= T.argregs((i-1)->arg[1], 0);
@@ -333,6 +346,7 @@ spill(Fn *fn)
 	Phi *p;
 	Mem *m;
 	bits r;
+	int force_kl_slot;
 
 	tmp = fn->tmp;
 	ntmp = fn->ntmp;
@@ -351,6 +365,41 @@ spill(Fn *fn)
 		if (t >= Tmp0)
 			k = KBASE(tmp[t].cls);
 		bsset(mask[k], t);
+	}
+
+	/* On i8086, Kl (32-bit) values straddle two 16-bit registers (the
+	 * DX:AX pair).  rega has no register-pair concept and assigns a Kl
+	 * temp to a single 16-bit reg, silently dropping the high half on
+	 * load/store/arith.  Force every Kl temp to be slot-resident so
+	 * every Kl op reads/writes its slot directly via the two-word
+	 * load/store paths already in i8086/emit.c.
+	 * See feedback memory: i8086-kl-load-loses-high. */
+	force_kl_slot = (strcmp(T.name, "i8086") == 0);
+	if (force_kl_slot) {
+		/* Alias each incoming Kl parameter temp to its ABI stack slot.
+		 * selpar (i8086/abi.c) materializes a Kl param via
+		 *   %t =l load SLOT(s)   with s < 0   (the param region above BP)
+		 * and a negative slot only ever names a read-only incoming
+		 * parameter.  Pre-setting tmp[%t].slot = s makes slot() below
+		 * reuse it instead of carving a fresh below-BP slot, so the
+		 * load lowers to a SLOT(s)<-SLOT(s) self-copy that emit elides
+		 * (i8086/emit.c Oload handler) — removing the 4-instruction
+		 * [bp+off]->[bp-N] materialization copy from every function with
+		 * a Kl (far-pointer / long) parameter.  Safe because a param SSA
+		 * temp is never reassigned (minic mutates params through a
+		 * separate alloca), so reading [bp+off] always yields the
+		 * originally-passed value.  Done here (after isel) rather than
+		 * in abi.c because isel overloads a non-(-1) tmp[].slot to mean
+		 * "fast-local alloca address" and would materialize &param. */
+		for (b=fn->start, i=b->ins; i<&b->ins[b->nins]; i++)
+			if (i->op == Oload && i->cls == Kl
+			 && rtype(i->to) == RTmp
+			 && rtype(i->arg[0]) == RSlot
+			 && rsval(i->arg[0]) < 0)
+				tmp[i->to.val].slot = rsval(i->arg[0]);
+		for (t=Tmp0; t<ntmp; t++)
+			if (tmp[t].cls == Kl)
+				slot(t);
 	}
 
 	for (bp=&fn->rpo[fn->nblk]; bp!=fn->rpo;) {
@@ -406,26 +455,34 @@ spill(Fn *fn)
 			if (rtype(b->jmp.arg) == RCall)
 				v->t[0] |= T.retregs(b->jmp.arg, 0);
 		}
+		if (rtype(b->jmp.arg) == RTmp) {
+			t = b->jmp.arg.val;
+			assert(KBASE(tmp[t].cls) == 0);
+			bsset(v, t);
+			limit2(v, 0, 0, NULL);
+			if (!bshas(v, t))
+				b->jmp.arg = slot(t);
+		}
+		/* i8086: evict Kl temps from v before it becomes b->out.
+		 * Otherwise rega's block-entry loop sees Kl temps in
+		 * b->out and allocates registers for them — defeating
+		 * the slot-resident-Kl invariant. */
+		if (force_kl_slot) {
+			int kt = Tmp0;
+			while (bsiter(v, &kt)) {
+				if (tmp[kt].cls == Kl) {
+					bsclr(v, kt);
+					slot(kt);
+				}
+				kt++;
+			}
+		}
 		for (t=Tmp0; bsiter(b->out, &t); t++)
 			if (!bshas(v, t))
 				slot(t);
 		bscopy(b->out, v);
 
 		/* 2. process the block instructions */
-		if (rtype(b->jmp.arg) == RTmp) {
-			t = b->jmp.arg.val;
-			assert(KBASE(tmp[t].cls) == 0);
-			lvarg[0] = bshas(v, t);
-			bsset(v, t);
-			bscopy(u, v);
-			limit2(v, 0, 0, NULL);
-			if (!bshas(v, t)) {
-				if (!lvarg[0])
-					bsclr(u, t);
-				b->jmp.arg = slot(t);
-			}
-			reloads(u, v);
-		}
 		curi = &insb[NIns];
 		for (i=&b->ins[b->nins]; i!=b->ins;) {
 			i--;
@@ -474,7 +531,42 @@ spill(Fn *fn)
 					break;
 				}
 			bscopy(u, v);
-			limit2(v, 0, 0, w);
+			if (iscall(i->op)
+			&& (i+1 == &b->ins[b->nins] || !regcpy(i+1)))
+				/* Void call (no following Ocopy register-to-temp
+				 * already processed by dopm) — live-across-call
+				 * temps must fit in actual callee-saves
+				 * (ngpr - nrsave - nrglob).  Without this, rega's
+				 * fallback bypasses the sethint() avoid mask when
+				 * callee-saves are exhausted and a live temp lands
+				 * in a caller-save register that the call clobbers.
+				 * See feedback memory qbe-gcm-sinks-load-past-call. */
+				limit2(v, T.nrsave[0] + T.nrglob, T.nrsave[1], w);
+			else
+				limit2(v, 0, 0, w);
+			/* i8086: evict Kl temps from v and u so they never get
+			 * register-allocated.  arg-rewrite below will turn Kl
+			 * arg refs to RSlot, and reloads(u, v) will skip them
+			 * (so no Oload Kl ?, slot, ? is inserted that would
+			 * recreate a Kl RTmp).  slot() ensures the slot exists
+			 * for the arg-rewrite. */
+			if (force_kl_slot) {
+				int kt;
+				kt = Tmp0;
+				while (bsiter(v, &kt)) {
+					if (tmp[kt].cls == Kl) {
+						bsclr(v, kt);
+						slot(kt);
+					}
+					kt++;
+				}
+				kt = Tmp0;
+				while (bsiter(u, &kt)) {
+					if (tmp[kt].cls == Kl)
+						bsclr(u, kt);
+					kt++;
+				}
+			}
 			for (n=0; n<2; n++)
 				if (rtype(i->arg[n]) == RTmp) {
 					t = i->arg[n].val;
@@ -490,7 +582,16 @@ spill(Fn *fn)
 			reloads(u, v);
 			if (!req(i->to, R)) {
 				t = i->to.val;
-				store(i->to, tmp[t].slot);
+				/* i8086: rewrite Kl dest directly to its slot.
+				 * The emit handler writes both AX and DX to
+				 * slot+0/slot+2 via the two-word path, so we
+				 * skip the lossy Ostorel RTmp→RSlot. */
+				if (force_kl_slot && t >= Tmp0
+				 && tmp[t].cls == Kl) {
+					i->to = slot(t);
+				} else {
+					store(i->to, tmp[t].slot);
+				}
 				if (t >= Tmp0)
 					/* in case i->to was a
 					 * dead temporary */
@@ -498,6 +599,33 @@ spill(Fn *fn)
 			}
 			emiti(*i);
 			r = v->t[0]; /* Tmp0 is NBit */
+			/* For Call instructions not handled via dopm (e.g.,
+			 * void-returning calls with no following Ocopy), tell
+			 * the live-across-call temps to AVOID caller-save
+			 * registers — those will be clobbered by the call.
+			 * Without this, rega may pick AX/CX/DX for a temp
+			 * needed after the call, producing wild writes when
+			 * the post-call code reads garbage from the clobbered
+			 * register. */
+			if (iscall(i->op)) {
+				int rs;
+				for (rs=0; T.rsave[rs]>=0; rs++)
+					r |= BIT(T.rsave[rs]);
+			}
+			/* Integer div/mul/rem that the backend emits in-place
+			 * (i8086 idiv/imul/div) clobber a fixed reg pair (AX:DX)
+			 * without isel modeling it.  Force temps live ACROSS
+			 * such an op to avoid those regs, mirroring the call
+			 * case above; otherwise a nested div/mul in one operand
+			 * silently destroys a value the surrounding op still
+			 * needs.  T.divclob is 0 on targets that decompose
+			 * div/mul in isel (amd64/arm64/rv64), so this is inert
+			 * there. */
+			if (T.divclob
+			 && (i->op == Odiv || i->op == Oudiv
+			  || i->op == Orem || i->op == Ourem
+			  || i->op == Omul))
+				r |= T.divclob;
 			if (r)
 				sethint(v, r);
 		}

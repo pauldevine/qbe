@@ -1,0 +1,4 @@
+fp=105 (want 105)
+cc=90 (want 90)
+an=42 (want 42)
+mix=1,2,3 (want 1,2,3)

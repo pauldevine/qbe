@@ -12,24 +12,22 @@ struct E {
 };
 
 #define CMP(X) \
-	X(Ciule,      "be") \
-	X(Ciult,      "b")  \
-	X(Cisle,      "le") \
-	X(Cislt,      "l")  \
-	X(Cisgt,      "g")  \
-	X(Cisge,      "ge") \
-	X(Ciugt,      "a")  \
-	X(Ciuge,      "ae") \
-	X(Cieq,       "z")  \
-	X(Cine,       "nz") \
-	X(NCmpI+Cfle, "be") \
-	X(NCmpI+Cflt, "b")  \
-	X(NCmpI+Cfgt, "a")  \
-	X(NCmpI+Cfge, "ae") \
-	X(NCmpI+Cfeq, "z")  \
-	X(NCmpI+Cfne, "nz") \
-	X(NCmpI+Cfo,  "np") \
-	X(NCmpI+Cfuo, "p")
+	X(Ciule,      "be", "a") \
+	X(Ciult,      "b", "ae") \
+	X(Cisle,      "le", "g") \
+	X(Cislt,      "l", "ge") \
+	X(Cisgt,      "g", "le") \
+	X(Cisge,      "ge", "l") \
+	X(Ciugt,      "a", "be") \
+	X(Ciuge,      "ae", "b") \
+	X(Cieq,       "z", "nz") \
+	X(Cine,       "nz", "z") \
+	X(NCmpI+Cfle, "?" , "?") \
+	X(NCmpI+Cflt, "?",  "?") \
+	X(NCmpI+Cfgt, "a", "be") \
+	X(NCmpI+Cfge, "ae", "b") \
+	X(NCmpI+Cfo,  "np", "p") \
+	X(NCmpI+Cfuo, "p", "np")
 
 enum {
 	SLong = 0,
@@ -72,63 +70,75 @@ static struct {
 	short cls;
 	char *fmt;
 } omap[] = {
-	{ Oadd,    Ka, "+add%k %1, %=" },
-	{ Osub,    Ka, "-sub%k %1, %=" },
-	{ Oand,    Ki, "+and%k %1, %=" },
-	{ Oor,     Ki, "+or%k %1, %=" },
-	{ Oxor,    Ki, "+xor%k %1, %=" },
-	{ Osar,    Ki, "-sar%k %B1, %=" },
-	{ Oshr,    Ki, "-shr%k %B1, %=" },
-	{ Oshl,    Ki, "-shl%k %B1, %=" },
-	{ Omul,    Ki, "+imul%k %1, %=" },
-	{ Omul,    Ks, "+mulss %1, %=" },
-	{ Omul,    Kd, "+mulsd %1, %=" },
-	{ Odiv,    Ka, "-div%k %1, %=" },
-	{ Ostorel, Ka, "movq %L0, %M1" },
-	{ Ostorew, Ka, "movl %W0, %M1" },
-	{ Ostoreh, Ka, "movw %H0, %M1" },
-	{ Ostoreb, Ka, "movb %B0, %M1" },
-	{ Ostores, Ka, "movss %S0, %M1" },
-	{ Ostored, Ka, "movsd %D0, %M1" },
-	{ Oload,   Ka, "mov%k %M0, %=" },
-	{ Oloadsw, Kl, "movslq %M0, %L=" },
-	{ Oloadsw, Kw, "movl %M0, %W=" },
-	{ Oloaduw, Ki, "movl %M0, %W=" },
-	{ Oloadsh, Ki, "movsw%k %M0, %=" },
-	{ Oloaduh, Ki, "movzw%k %M0, %=" },
-	{ Oloadsb, Ki, "movsb%k %M0, %=" },
-	{ Oloadub, Ki, "movzb%k %M0, %=" },
-	{ Oextsw,  Kl, "movslq %W0, %L=" },
-	{ Oextuw,  Kl, "movl %W0, %W=" },
-	{ Oextsh,  Ki, "movsw%k %H0, %=" },
-	{ Oextuh,  Ki, "movzw%k %H0, %=" },
-	{ Oextsb,  Ki, "movsb%k %B0, %=" },
-	{ Oextub,  Ki, "movzb%k %B0, %=" },
+	{ Oadd,     Ka, "+add%k %1, %=" },
+	{ Osub,     Ka, "-sub%k %1, %=" },
+	{ Oand,     Ki, "+and%k %1, %=" },
+	{ Oor,      Ki, "+or%k %1, %=" },
+	{ Oxor,     Ki, "+xor%k %1, %=" },
+	{ Osar,     Ki, "-sar%k %B1, %=" },
+	{ Oshr,     Ki, "-shr%k %B1, %=" },
+	{ Oshl,     Ki, "-shl%k %B1, %=" },
+	{ Omul,     Ki, "+imul%k %1, %=" },
+	{ Omul,     Ks, "+mulss %1, %=" },
+	{ Omul,     Kd, "+mulsd %1, %=" },
+	{ Odiv,     Ka, "-div%k %1, %=" },
+	{ Ostorel,  Ka, "movq %L0, %M1" },
+	{ Ostorew,  Ka, "movl %W0, %M1" },
+	{ Ostoreh,  Ka, "movw %H0, %M1" },
+	{ Ostoreb,  Ka, "movb %B0, %M1" },
+	{ Ostores,  Ka, "movss %S0, %M1" },
+	{ Ostored,  Ka, "movsd %D0, %M1" },
+	{ Oload,    Ka, "mov%k %M0, %=" },
+	{ Oloadsw,  Kl, "movslq %M0, %L=" },
+	{ Oloadsw,  Kw, "movl %M0, %W=" },
+	{ Oloaduw,  Ki, "movl %M0, %W=" },
+	{ Oloadsh,  Ki, "movsw%k %M0, %=" },
+	{ Oloaduh,  Ki, "movzw%k %M0, %=" },
+	{ Oloadsb,  Ki, "movsb%k %M0, %=" },
+	{ Oloadub,  Ki, "movzb%k %M0, %=" },
+	{ Oextsw,   Kl, "movslq %W0, %L=" },
+	{ Oextuw,   Kl, "movl %W0, %W=" },
+	{ Oextsh,   Ki, "movsw%k %H0, %=" },
+	{ Oextuh,   Ki, "movzw%k %H0, %=" },
+	{ Oextsb,   Ki, "movsb%k %B0, %=" },
+	{ Oextub,   Ki, "movzb%k %B0, %=" },
 
-	{ Oexts,   Kd, "cvtss2sd %0, %=" },
-	{ Otruncd, Ks, "cvtsd2ss %0, %=" },
-	{ Ostosi,  Ki, "cvttss2si%k %0, %=" },
-	{ Odtosi,  Ki, "cvttsd2si%k %0, %=" },
-	{ Oswtof,  Ka, "cvtsi2%k %W0, %=" },
-	{ Osltof,  Ka, "cvtsi2%k %L0, %=" },
-	{ Ocast,   Ki, "movq %D0, %L=" },
-	{ Ocast,   Ka, "movq %L0, %D=" },
+	{ Oexts,    Kd, "cvtss2sd %0, %=" },
+	{ Otruncd,  Ks, "cvtsd2ss %0, %=" },
+	{ Ostosi,   Ki, "cvttss2si%k %0, %=" },
+	{ Odtosi,   Ki, "cvttsd2si%k %0, %=" },
+	{ Oswtof,   Ka, "cvtsi2%k %W0, %=" },
+	{ Osltof,   Ka, "cvtsi2%k %L0, %=" },
+	{ Ocast,    Ki, "movq %D0, %L=" },
+	{ Ocast,    Ka, "movq %L0, %D=" },
 
-	{ Oaddr,   Ki, "lea%k %M0, %=" },
-	{ Oswap,   Ki, "xchg%k %0, %1" },
-	{ Osign,   Kl, "cqto" },
-	{ Osign,   Kw, "cltd" },
-	{ Oxdiv,   Ki, "div%k %0" },
-	{ Oxidiv,  Ki, "idiv%k %0" },
-	{ Oxcmp,   Ks, "ucomiss %S0, %S1" },
-	{ Oxcmp,   Kd, "ucomisd %D0, %D1" },
-	{ Oxcmp,   Ki, "cmp%k %0, %1" },
-	{ Oxtest,  Ki, "test%k %0, %1" },
-#define X(c, s) \
-	{ Oflag+c, Ki, "set" s " %B=\n\tmovzb%k %B=, %=" },
+	{ Oaddr,    Ki, "lea%k %M0, %=" },
+	{ Oswap,    Ki, "xchg%k %0, %1" },
+	{ Osign,    Kl, "cqto" },
+	{ Osign,    Kw, "cltd" },
+	{ Oxdiv,    Ki, "div%k %0" },
+	{ Oxidiv,   Ki, "idiv%k %0" },
+	{ Oxcmp,    Ks, "ucomiss %S0, %S1" },
+	{ Oxcmp,    Kd, "ucomisd %D0, %D1" },
+	{ Oxcmp,    Ki, "cmp%k %0, %1" },
+	{ Oxtest,   Ki, "test%k %0, %1" },
+#define X(c, s, _) \
+	{ Oflag+c,  Ki, "set" s " %B=\n\tmovzb%k %B=, %=" },
 	CMP(X)
 #undef X
+	{ Oflagfeq, Ki, "setz %B=\n\tmovzb%k %B=, %=" },
+	{ Oflagfne, Ki, "setnz %B=\n\tmovzb%k %B=, %=" },
 	{ NOp, 0, 0 }
+};
+
+static char cmov[][2][16] = {
+#define X(c, s0, s1) \
+	[c] = { \
+		"cmov" s0 " %0, %=", \
+		"cmov" s1 " %1, %=", \
+	},
+	CMP(X)
+#undef X
 };
 
 static char *rname[][4] = {
@@ -167,9 +177,12 @@ slot(Ref r, E *e)
 	}
 	else if (e->fp == RSP)
 		return 4*s + e->nclob*8;
-	else if (e->fn->vararg)
-		return -176 + -4 * (e->fn->slot - s);
-	else
+	else if (e->fn->vararg) {
+		if (T.windows)
+			return -4 * (e->fn->slot - s);
+		else
+			return -176 + -4 * (e->fn->slot - s);
+	} else
 		return -4 * (e->fn->slot - s);
 }
 
@@ -183,12 +196,12 @@ emitcon(Con *con, E *e)
 		l = str(con->sym.id);
 		p = l[0] == '"' ? "" : T.assym;
 		if (con->sym.type == SThr) {
-			if (T.apple)
-				fprintf(e->f, "%s%s@TLVP", p, l);
-			else
-				fprintf(e->f, "%%fs:%s%s@tpoff", p, l);
-		} else
+			assert(!T.apple);
+			fprintf(e->f, "%%fs:%s%s@tpoff", p, l);
+		} else {
+			assert((con->sym.type & ~SExt) == SGlo);
 			fprintf(e->f, "%s%s", p, l);
+		}
 		if (con->bits.i)
 			fprintf(e->f, "%+"PRId64, con->bits.i);
 		break;
@@ -367,7 +380,7 @@ Next:
 			off = e->fn->con[ref.val];
 			emitcon(&off, e);
 			if (off.type == CAddr)
-			if (off.sym.type != SThr || T.apple)
+			if (off.sym.type != SThr)
 				fprintf(e->f, "(%%rip)");
 			break;
 		case RTmp:
@@ -401,6 +414,8 @@ emitins(Ins i, E *e)
 
 	switch (i.op) {
 	default:
+		if (isxsel(i.op))
+			goto case_Oxsel;
 	Table:
 		/* most instructions are just pulled out of
 		 * the table omap[], some special cases are
@@ -442,7 +457,7 @@ emitins(Ins i, E *e)
 		/* we have to use the negation trick to handle
 		 * some 3-address subtractions */
 		if (req(i.to, i.arg[1]) && !req(i.arg[0], i.to)) {
-			ineg = (Ins){Oneg, i.cls, i.to, {i.to}};
+			ineg = (Ins){.op=Oneg, .cls=i.cls, .to=i.to, .arg={i.to}};
 			emitins(ineg, e);
 			emitf("add%k %0, %=", &i, e);
 			break;
@@ -517,14 +532,24 @@ emitins(Ins i, E *e)
 		emitf("mov%k %0, %=", &i, e);
 		break;
 	case Oaddr:
-		if (!T.apple
-		&& rtype(i.arg[0]) == RCon
-		&& e->fn->con[i.arg[0].val].sym.type == SThr) {
+		if (rtype(i.arg[0]) != RCon)
+			goto Table;
+		con = &e->fn->con[i.arg[0].val];
+		assert(isreg(i.to) && con->type == CAddr);
+		sym = str(con->sym.id);
+		if (T.apple && (con->sym.type & SThr)) {
+			fprintf(e->f,
+				"\tmovq %s%s@tlvp(%%rip), %%%s\n",
+				sym[0] == '"' ? "" : T.assym, sym,
+				regtoa(i.to.val, SLong));
+			break;
+		}
+		if (T.windows && con->sym.type != SGlo)
+			die("extern/thread unsupported on amd64_win");
+		switch (con->sym.type) {
+		case SThr:
 			/* derive the symbol address from the TCB
 			 * address at offset 0 of %fs */
-			assert(isreg(i.to));
-			con = &e->fn->con[i.arg[0].val];
-			sym = str(con->sym.id);
 			emitf("movq %%fs:0, %L=", &i, e);
 			fprintf(e->f, "\tleaq %s%s@tpoff",
 				sym[0] == '"' ? "" : T.assym, sym);
@@ -535,15 +560,40 @@ emitins(Ins i, E *e)
 				regtoa(i.to.val, SLong),
 				regtoa(i.to.val, SLong));
 			break;
+		case SExtThr:
+			/* initial-exec TLS: load offset from
+			 * GOT, add to thread-base register */
+			assert(!con->bits.i);
+			emitf("movq %%fs:0, %L=", &i, e);
+			fprintf(e->f,
+				"\taddq %s%s@gottpoff(%%rip), %%%s\n",
+				sym[0] == '"' ? "" : T.assym, sym,
+				regtoa(i.to.val, SLong));
+			break;
+		case SExt:
+			/* load address from the GOT */
+			assert(!con->bits.i);
+			fprintf(e->f,
+				"\tmovq %s%s@gotpcrel(%%rip), %%%s\n",
+				sym[0] == '"' ? "" : T.assym, sym,
+				regtoa(i.to.val, SLong));
+			break;
+		default:
+			goto Table;
 		}
-		goto Table;
+		break;
 	case Ocall:
 		/* calls simply have a weird syntax in AT&T
 		 * assembly... */
 		switch (rtype(i.arg[0])) {
 		case RCon:
+			con = &e->fn->con[i.arg[0].val];
 			fprintf(e->f, "\tcallq ");
-			emitcon(&e->fn->con[i.arg[0].val], e);
+			emitcon(con, e);
+			if (con->type == CAddr
+			&& (con->sym.type & SExt)
+			&& !T.apple)
+				fprintf(e->f, "@plt");
 			fprintf(e->f, "\n");
 			break;
 		case RTmp:
@@ -576,18 +626,27 @@ emitins(Ins i, E *e)
 	case Odbgloc:
 		emitdbgloc(i.arg[0].val, i.arg[1].val, e->f);
 		break;
+	case_Oxsel:
+		if (req(i.to, i.arg[1]))
+			emitf(cmov[i.op-Oxsel][0], &i, e);
+		else {
+			if (!req(i.to, i.arg[0]))
+				emitf("mov %0, %=", &i, e);
+			emitf(cmov[i.op-Oxsel][1], &i, e);
+		}
+		break;
 	}
 }
 
 static void
-framesz(E *e)
+sysv_framesz(E *e)
 {
 	uint64_t i, o, f;
 
 	/* specific to NAlign == 3 */
 	o = 0;
 	if (!e->fn->leaf) {
-		for (i=0, o=0; i<NCLR; i++)
+		for (i=0, o=0; i<NCLR_SYSV; i++)
 			o ^= e->fn->reg >> amd64_sysv_rclob[i];
 		o &= 1;
 	}
@@ -601,10 +660,10 @@ framesz(E *e)
 }
 
 void
-amd64_emitfn(Fn *fn, FILE *f)
+amd64_sysv_emitfn(Fn *fn, FILE *f)
 {
-	static char *ctoa[] = {
-	#define X(c, s) [c] = s,
+	static char *ctoa[][2] = {
+	#define X(c, s, n) [c] = {s, n},
 		CMP(X)
 	#undef X
 	};
@@ -623,7 +682,7 @@ amd64_emitfn(Fn *fn, FILE *f)
 		fputs("\tpushq %rbp\n\tmovq %rsp, %rbp\n", f);
 	} else
 		e->fp = RSP;
-	framesz(e);
+	sysv_framesz(e);
 	if (e->fsz)
 		fprintf(f, "\tsubq $%"PRIu64", %%rsp\n", e->fsz);
 	if (fn->vararg) {
@@ -633,7 +692,7 @@ amd64_emitfn(Fn *fn, FILE *f)
 		for (n=0; n<8; ++n, o+=16)
 			fprintf(f, "\tmovaps %%xmm%d, %d(%%rbp)\n", n, o);
 	}
-	for (r=amd64_sysv_rclob; r<&amd64_sysv_rclob[NCLR]; r++)
+	for (r=amd64_sysv_rclob; r<&amd64_sysv_rclob[NCLR_SYSV]; r++)
 		if (fn->reg & BIT(*r)) {
 			itmp.arg[0] = TMP(*r);
 			emitf("pushq %L0", &itmp, e);
@@ -662,7 +721,7 @@ amd64_emitfn(Fn *fn, FILE *f)
 					"\tmovq %%rbp, %%rsp\n"
 					"\tsubq $%"PRIu64", %%rsp\n",
 					e->fsz + e->nclob * 8);
-			for (r=&amd64_sysv_rclob[NCLR]; r>amd64_sysv_rclob;)
+			for (r=&amd64_sysv_rclob[NCLR_SYSV]; r>amd64_sysv_rclob;)
 				if (fn->reg & BIT(*--r)) {
 					itmp.arg[0] = TMP(*r);
 					emitf("popq %L0", &itmp, e);
@@ -690,9 +749,10 @@ amd64_emitfn(Fn *fn, FILE *f)
 					s = b->s1;
 					b->s1 = b->s2;
 					b->s2 = s;
+					n = 0;
 				} else
-					c = cmpneg(c);
-				fprintf(f, "\tj%s %sbb%d\n", ctoa[c],
+					n = 1;
+				fprintf(f, "\tj%s %sbb%d\n", ctoa[c][n],
 					T.asloc, id0+b->s2->id);
 				goto Jmp;
 			}
@@ -702,4 +762,120 @@ amd64_emitfn(Fn *fn, FILE *f)
 	id0 += fn->nblk;
 	if (!T.apple)
 		elf_emitfnfin(fn->name, f);
+}
+
+static void
+winabi_framesz(E *e)
+{
+	uint64_t i, o, f;
+
+	/* specific to NAlign == 3 */
+	o = 0;
+	if (!e->fn->leaf) {
+		for (i=0, o=0; i<NCLR_WIN; i++)
+			o ^= e->fn->reg >> amd64_winabi_rclob[i];
+		o &= 1;
+	}
+	f = e->fn->slot;
+	f = (f + 3) & -4;
+	if (f > 0
+	&& e->fp == RSP
+	&& e->fn->salign == 4)
+		f += 2;
+	e->fsz = 4*f + 8*o;
+}
+
+void
+amd64_winabi_emitfn(Fn *fn, FILE *f)
+{
+	static char *ctoa[][2] = {
+	#define X(c, s, n) [c] = {s, n},
+		CMP(X)
+	#undef X
+	};
+	static int id0;
+	Blk *b, *s;
+	Ins *i, itmp;
+	int *r, c, n, lbl;
+	E *e;
+
+	e = &(E){.f = f, .fn = fn};
+	emitfnlnk(fn->name, &fn->lnk, f);
+	fputs("\tendbr64\n", f);
+	if (fn->vararg) {
+		fprintf(f, "\tmovq %%rcx, 0x8(%%rsp)\n");
+		fprintf(f, "\tmovq %%rdx, 0x10(%%rsp)\n");
+		fprintf(f, "\tmovq %%r8, 0x18(%%rsp)\n");
+		fprintf(f, "\tmovq %%r9, 0x20(%%rsp)\n");
+	}
+	if (!fn->leaf || fn->vararg || fn->dynalloc) {
+		e->fp = RBP;
+		fputs("\tpushq %rbp\n\tmovq %rsp, %rbp\n", f);
+	} else
+		e->fp = RSP;
+	winabi_framesz(e);
+	if (e->fsz)
+		fprintf(f, "\tsubq $%"PRIu64", %%rsp\n", e->fsz);
+	for (r=amd64_winabi_rclob; r<&amd64_winabi_rclob[NCLR_WIN]; r++)
+		if (fn->reg & BIT(*r)) {
+			itmp.arg[0] = TMP(*r);
+			emitf("pushq %L0", &itmp, e);
+			e->nclob++;
+		}
+
+	for (lbl=0, b=fn->start; b; b=b->link) {
+		if (lbl || b->npred > 1)
+			fprintf(f, "%sbb%d:\n", T.asloc, id0+b->id);
+		for (i=b->ins; i!=&b->ins[b->nins]; i++)
+			emitins(*i, e);
+		lbl = 1;
+		switch (b->jmp.type) {
+		case Jhlt:
+			fprintf(f, "\tud2\n");
+			break;
+		case Jret0:
+			if (fn->dynalloc)
+				fprintf(f,
+					"\tmovq %%rbp, %%rsp\n"
+					"\tsubq $%"PRIu64", %%rsp\n",
+					e->fsz + e->nclob * 8);
+			for (r=&amd64_winabi_rclob[NCLR_WIN]; r>amd64_winabi_rclob;)
+				if (fn->reg & BIT(*--r)) {
+					itmp.arg[0] = TMP(*r);
+					emitf("popq %L0", &itmp, e);
+				}
+			if (e->fp == RBP)
+				fputs("\tleave\n", f);
+			else if (e->fsz)
+				fprintf(f,
+					"\taddq $%"PRIu64", %%rsp\n",
+					e->fsz);
+			fputs("\tret\n", f);
+			break;
+		case Jjmp:
+		Jmp:
+			if (b->s1 != b->link)
+				fprintf(f, "\tjmp %sbb%d\n",
+					T.asloc, id0+b->s1->id);
+			else
+				lbl = 0;
+			break;
+		default:
+			c = b->jmp.type - Jjf;
+			if (0 <= c && c <= NCmp) {
+				if (b->link == b->s2 || c >= NCmpI) {
+					s = b->s1;
+					b->s1 = b->s2;
+					b->s2 = s;
+					n = 0;
+				} else
+					n = 1;
+				fprintf(f, "\tj%s %sbb%d\n", ctoa[c][n],
+					T.asloc, id0+b->s2->id);
+				goto Jmp;
+			}
+			die("unhandled jump %d", b->jmp.type);
+		}
+	}
+	id0 += fn->nblk;
 }

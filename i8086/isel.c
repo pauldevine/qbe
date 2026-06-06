@@ -6,13 +6,43 @@
  * It needs significant expansion to handle all QBE IR operations.
  */
 
+static int
+is_addr_arg(Ins *i, Ref *r)
+{
+	/* Returns 1 if r is the pointer-position operand of a non-far
+	 * load or store.  Fast-local alloc addresses used in this slot
+	 * can be safely narrowed to Kw — the SS-relative offset is the
+	 * direct stack location and the high half (SS segment) is
+	 * implicit from [bp+X] addressing. */
+	if (!i)
+		return 0;
+	switch (i->op) {
+	case Ostoreb:
+	case Ostoreh:
+	case Ostorew:
+	case Ostorel:
+	case Ostores:
+	case Ostored:
+		return r == &i->arg[1];
+	case Oload:
+	case Oloadsb:
+	case Oloadub:
+	case Oloadsh:
+	case Oloaduh:
+	case Oloadsw:
+	case Oloaduw:
+		return r == &i->arg[0];
+	default:
+		return 0;
+	}
+}
+
 static void
 fixarg(Ref *r, int k, Ins *i, Fn *fn)
 {
 	Ref r0, r1;
 	int s;
 
-	(void)i; /* unused for now */
 	r0 = r1 = *r;
 
 	switch (rtype(r0)) {
@@ -26,8 +56,35 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 			break;
 		s = fn->tmp[r0.val].slot;
 		if (s != -1) {
-			/* Stack slot addressing */
-			r1 = SLOT(s);
+			/* Fast local: this temp's "value" is the address of a
+			 * stack slot allocated by Oalloc4/8/16.  Materialize
+			 * the address into a fresh temp via Oaddr (lea bp+off)
+			 * before each use — mirrors amd64/isel.c.
+			 *
+			 * Use the ORIGINAL temp's class for the materialized
+			 * address.  alloc4 results have class Kw on i8086
+			 * (medium-model near pointers are 16-bit), so this keeps
+			 * the address temp register-resident — important since
+			 * spill.c forces Kl temps to be slot-resident, and a Kl
+			 * address temp would become an RSlot that storew/loadw
+			 * would write/read directly instead of dereferencing.
+			 *
+			 * In compact/large/huge the original alloc tmp has class
+			 * Kl (default pointers are 32-bit far) so the synthesized
+			 * address is normally lowered through the Oaddr Kl→Slot
+			 * handler that writes SS:off into a 4-byte spill slot.
+			 * But when the address is consumed directly by a near
+			 * load/store (`storew %v, %x`), narrowing back to Kw
+			 * avoids that spill: the load/store dereferences the
+			 * stack slot using BP-relative addressing, and SS is
+			 * implicit.  Escape uses (passing &x to a function,
+			 * storing &x into a pointer variable) still materialize
+			 * the synthesized far pointer via the Kl path. */
+			int ak = fn->tmp[r0.val].cls;
+			if (ak == Kl && is_addr_arg(i, r))
+				ak = Kw;
+			r1 = newtmp("isel", ak, fn);
+			emit(Oaddr, ak, r1, SLOT(s), R);
 			break;
 		}
 		/* Check class compatibility */
@@ -49,31 +106,99 @@ selcmp(Ins i, int k, int cmp, Fn *fn)
 	 * 1. cmp arg0, arg1  (sets flags)
 	 * 2. setCC dest      (sets dest based on flags)
 	 *
-	 * We emit the comparison operation with the QBE cmp opcode,
-	 * and the emit phase will translate it to cmp + setCC
+	 * setCC needs an 8-bit-capable register (AX/BX/CX/DX low/high).
+	 * The register allocator doesn't currently know about this; for
+	 * non-byte-capable destinations the emit phase emits an `al`
+	 * fallback (with comment).  TODO: hint or constraint mechanism.
 	 */
 
-	/* Map QBE comparison to x86 comparison operation */
-	switch (cmp) {
-	case Cieq:  i.op = Oceqw; break;
-	case Cine:  i.op = Ocnew; break;
-	case Cislt: i.op = Ocsltw; break;
-	case Cisgt: i.op = Ocsgtw; break;
-	case Cisle: i.op = Ocslew; break;
-	case Cisge: i.op = Ocsgew; break;
-	case Ciult: i.op = Ocultw; break;
-	case Ciugt: i.op = Ocugtw; break;
-	case Ciule: i.op = Oculew; break;
-	case Ciuge: i.op = Ocugew; break;
-	default:
-		/* Unsupported comparison */
-		die("unsupported comparison %d", cmp);
+	/* 32-bit comparisons use the Oc*l ops; emit.c has multi-step
+	 * handlers (compare high then low, branch on flags) that handle
+	 * RSlot, RCon, and RTmp arg combinations.  16-bit comparisons stay
+	 * with the Oc*w ops and the format-string template. */
+
+	/* 8086 cmp requires reg/mem on the left and immediate on the right;
+	 * `cmp imm, reg` is illegal.  If the operands are flipped, swap them
+	 * and invert the comparison so the flag-test semantics are preserved.
+	 * (Equality/inequality are swap-symmetric; ordering relations need
+	 * the operator inverted: a < b ↔ b > a, etc.) */
+	if (rtype(i.arg[0]) == RCon && rtype(i.arg[1]) != RCon) {
+		Ref tmp = i.arg[0]; i.arg[0] = i.arg[1]; i.arg[1] = tmp;
+		switch (cmp) {
+		case Cislt: cmp = Cisgt; break;
+		case Cisgt: cmp = Cislt; break;
+		case Cisle: cmp = Cisge; break;
+		case Cisge: cmp = Cisle; break;
+		case Ciult: cmp = Ciugt; break;
+		case Ciugt: cmp = Ciult; break;
+		case Ciule: cmp = Ciuge; break;
+		case Ciuge: cmp = Ciule; break;
+		/* Cieq, Cine: swap-symmetric */
+		}
+	}
+	/* Two-constant cmp (`cmp imm, imm`) is illegal in any register/memory
+	 * combination 8086 supports.  Hoist arg[0] into a fresh temp so the
+	 * generated form becomes `cmp reg, imm`.  The Ocopy must execute
+	 * before the cmp, so emit it AFTER emiti() — QBE's instruction buffer
+	 * fills backwards (last emit() runs first at runtime). */
+	Ref hoist_src = R;
+	Ref hoist_dst = R;
+	if (rtype(i.arg[0]) == RCon && rtype(i.arg[1]) == RCon) {
+		hoist_src = i.arg[0];
+		hoist_dst = newtmp("isel", k, fn);
+		i.arg[0] = hoist_dst;
+	}
+
+	if (k == Kl) {
+		switch (cmp) {
+		case Cieq:  i.op = Oceql; break;
+		case Cine:  i.op = Ocnel; break;
+		case Cislt: i.op = Ocsltl; break;
+		case Cisgt: i.op = Ocsgtl; break;
+		case Cisle: i.op = Ocslel; break;
+		case Cisge: i.op = Ocsgel; break;
+		case Ciult: i.op = Ocultl; break;
+		case Ciugt: i.op = Ocugtl; break;
+		case Ciule: i.op = Oculel; break;
+		case Ciuge: i.op = Ocugel; break;
+		default:
+			die("unsupported comparison %d", cmp);
+		}
+	} else {
+		switch (cmp) {
+		case Cieq:  i.op = Oceqw; break;
+		case Cine:  i.op = Ocnew; break;
+		case Cislt: i.op = Ocsltw; break;
+		case Cisgt: i.op = Ocsgtw; break;
+		case Cisle: i.op = Ocslew; break;
+		case Cisge: i.op = Ocsgew; break;
+		case Ciult: i.op = Ocultw; break;
+		case Ciugt: i.op = Ocugtw; break;
+		case Ciule: i.op = Oculew; break;
+		case Ciuge: i.op = Ocugew; break;
+		default:
+			die("unsupported comparison %d", cmp);
+		}
 	}
 
 	emiti(i);
+	if (!req(hoist_dst, R))
+		emit(Ocopy, k, hoist_dst, hoist_src, R);
 	i0 = curi;
 	fixarg(&i0->arg[0], k, i0, fn);
 	fixarg(&i0->arg[1], k, i0, fn);
+	/* Hint the register allocator to avoid SI/DI/BP/SP/ES/DS for the
+	 * result.  setCC needs an 8-bit-capable register and these have none.
+	 * hint.m is consulted only under register pressure (after exhausting
+	 * the per-temp hint.r preference), so this is a soft preference, not
+	 * a hard constraint.  When rega ignores it the emit phase falls back
+	 * to a setCC al + movzx <dst>, al sequence (correct codegen, but it
+	 * clobbers AL silently). */
+	if (rtype(i0->to) == RTmp && i0->to.val >= Tmp0) {
+		fn->tmp[i0->to.val].hint.m
+		    |= BIT(RSI) | BIT(RDI) | BIT(RBP) | BIT(RSP)
+		    |  BIT(RES) | BIT(RDS);
+	}
 }
 
 static void
@@ -152,6 +277,35 @@ selfp(Ins i, Fn *fn)
 	fixarg(&i0->arg[1], argcls(&i, 1), i0, fn);
 }
 
+/* 8086 [reg] addressing is restricted to BX/BP/SI/DI.  rega doesn't
+ * know that, so by default a pointer can land in AX/CX/DX and emit.c
+ * pays a 2x `xchg bx, <reg>` + 1-byte clobber per load/store to work
+ * around it ([[i8086-codegen-bugs]] family).  Steer near-pointer
+ * address temps away from AX/CX/DX so they land in BX/SI/DI/BP
+ * directly.  hint.m is a soft preference: under register pressure
+ * rega still falls back to AX/CX/DX and the existing xchg-bx fixup
+ * keeps codegen correct.
+ *
+ * Skip far-pointer ops (Oloadf[bhw], Ostoref[bhw]) -- their operand
+ * is the far pointer itself, loaded into ES:BX or DX:AX explicitly,
+ * so the hint would be wrong. */
+static void
+hint_addr_avoid_clobber(Ref r, Fn *fn)
+{
+	bits avoid = BIT(RAX) | BIT(RCX) | BIT(RDX);
+	Mem *m;
+
+	if (rtype(r) == RTmp && r.val >= Tmp0) {
+		fn->tmp[r.val].hint.m |= avoid;
+	} else if (rtype(r) == RMem) {
+		m = &fn->mem[r.val];
+		if (rtype(m->base) == RTmp && m->base.val >= Tmp0)
+			fn->tmp[m->base.val].hint.m |= avoid;
+		if (rtype(m->index) == RTmp && m->index.val >= Tmp0)
+			fn->tmp[m->index.val].hint.m |= avoid;
+	}
+}
+
 static void
 sel(Ins i, Fn *fn)
 {
@@ -224,6 +378,29 @@ sel(Ins i, Fn *fn)
 		i0 = curi; /* fixarg() can change curi */
 		fixarg(&i0->arg[0], argcls(&i, 0), i0, fn);
 		fixarg(&i0->arg[1], argcls(&i, 1), i0, fn);
+
+		/* Steer address temps away from AX/CX/DX for near load/store
+		 * ops (see hint_addr_avoid_clobber for rationale).  Loads
+		 * carry the address in arg[0]; stores carry it in arg[1]. */
+		switch (i0->op) {
+		case Oload:
+		case Oloadsb:
+		case Oloadub:
+		case Oloadsh:
+		case Oloaduh:
+		case Oloadsw:
+		case Oloaduw:
+			hint_addr_avoid_clobber(i0->arg[0], fn);
+			break;
+		case Ostoreb:
+		case Ostoreh:
+		case Ostorew:
+		case Ostorel:
+			hint_addr_avoid_clobber(i0->arg[1], fn);
+			break;
+		default:
+			break;
+		}
 	}
 }
 
@@ -234,6 +411,91 @@ i8086_isel(Fn *fn)
 	Ins *i;
 	Phi *p;
 	uint n;
+	int al;
+	int64_t sz;
+
+	/* Assign slots to "fast" allocs — constant-size Oalloc4/8/16 in
+	 * ANY block.  Mirrors amd64/isel.c, but slots are 2 bytes here
+	 * (vs. 4 on amd64), so divide by 2 instead of 4.  After this pass
+	 * the alloc instruction is a Onop and the result temp's `slot`
+	 * field holds its slot index; fixarg() then turns each use into an
+	 * explicit `lea reg, [bp+offset]` (Oaddr).  Without this,
+	 * Oalloc4/8/16 with class Kl falls through to the unhandled-32-bit
+	 * arm of emitins() and dies ("unsupported 32-bit op 81 (cls Kl)"),
+	 * so the alloc'd region is never addressable.
+	 *
+	 * amd64 only fast-slots allocs in fn->start and routes the rest
+	 * through salloc()/Osalloc (dynamic stack growth).  We instead
+	 * slot constant allocs in every block: minic emits a fixed-size
+	 * `alloc` at the C declaration point of a block-scoped local, which
+	 * can be inside a loop or `if` body (e.g. py/bc.c's
+	 * mp_bytecode_get_source_line allocates its lineinfo buffer inside
+	 * the decode loop).  A C block-scoped local reuses one frame slot
+	 * across iterations (its address must not escape the block — that
+	 * would be UB), so a single fixed slot is correct.  This also dodges
+	 * the far-pointer-to-SS:sp complications a dynamic Osalloc would
+	 * carry under compact/large.  True variable-size alloca is routed to
+	 * the GC heap by the frontend (MICROPY_NO_ALLOCA), so a non-constant
+	 * size here is left in place (it would die at emit) rather than
+	 * dynamically lowered. */
+	/* Pre-scan: bound the final slot count so the 4-byte-align bitmap can
+	 * be sized once.  Each fast alloc consumes ceil(size/align)/2 slots,
+	 * plus an extra padding slot for >=4-byte allocs (see below). */
+	{
+		int64_t bound = fn->slot;
+		for (al = Oalloc, n = 4; al <= Oalloc1; al++, n *= 2)
+			for (b = fn->start; b; b = b->link)
+				for (i = b->ins; i < &b->ins[b->nins]; i++)
+					if (i->op == al && rtype(i->arg[0]) == RCon) {
+						int64_t z = fn->con[i->arg[0].val].bits.i;
+						if (z < 0)
+							z = 0;
+						z = (z + n-1) & -n;
+						bound += z/2 + 1;
+					}
+		if (bound > 0 && bound < (1<<28)) {
+			fn->nsalign4 = (int)bound;
+			fn->salign4 = alloc(fn->nsalign4); /* calloc-backed: zeroed */
+		} else {
+			fn->nsalign4 = 0;
+			fn->salign4 = 0;
+		}
+	}
+
+	for (al = Oalloc, n = 4; al <= Oalloc1; al++, n *= 2)
+		for (b = fn->start; b; b = b->link)
+			for (i = b->ins; i < &b->ins[b->nins]; i++)
+				if (i->op == al) {
+					int needalign;
+
+					if (rtype(i->arg[0]) != RCon)
+						continue;
+					sz = fn->con[i->arg[0].val].bits.i;
+					if (sz < 0 || sz >= INT_MAX-15)
+						err("invalid alloc size %"PRId64, sz);
+					/* A >=4-byte stack object may have its address used
+					 * as a tagged pointer (MicroPython mp_obj_t requires
+					 * 4-byte-aligned object pointers, low 2 tag bits 0).
+					 * BP is only 2-byte aligned on 8086, so flag this
+					 * slot for runtime address rounding in emit.  A
+					 * 2-byte object can never be a 4-byte mp_obj_t, so
+					 * gate on the ORIGINAL (pre-round) size to avoid
+					 * over-aligning plain 2-byte ints. */
+					needalign = sz >= 4;
+					sz = (sz + n-1) & -n;
+					sz /= 2;  /* 2-byte slots on i8086 */
+					if (needalign)
+						sz += 1;  /* headroom for round-up by <=2 bytes */
+					if (sz > INT_MAX - fn->slot)
+						die("alloc too large");
+					if (needalign && fn->salign4
+					    && fn->slot < fn->nsalign4)
+						fn->salign4[fn->slot] = 1;
+					fn->tmp[i->to.val].slot = fn->slot;
+					fn->slot += sz;
+					fn->salign = 2 + al - Oalloc;
+					*i = (Ins){.op = Onop};
+				}
 
 	/* Process blocks in forward order */
 	for (b = fn->start; b; b = b->link) {

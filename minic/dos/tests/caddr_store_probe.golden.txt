@@ -1,0 +1,9 @@
+ret_w ok
+ret_b ok
+ret_many ok
+w0 ok
+b0 ok
+w1 ok
+w2 ok
+b1 ok
+b2 ok

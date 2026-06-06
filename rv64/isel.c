@@ -31,6 +31,7 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 		c = &fn->con[r0.val];
 		if (c->type == CAddr && memarg(r, op, i))
 			break;
+		if (KBASE(k) == 0)
 		if (c->type == CBits && immarg(r, op, i))
 		if (-2048 <= c->bits.i && c->bits.i < 2048)
 			break;

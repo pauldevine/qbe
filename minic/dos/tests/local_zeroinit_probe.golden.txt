@@ -1,0 +1,9 @@
+zero ok
+mid ok
+p1 ok
+p2 ok
+p3 ok
+p4 ok
+init ok
+mid2 ok
+desig ok

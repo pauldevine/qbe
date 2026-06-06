@@ -41,9 +41,22 @@ bitwidth(uint64_t v)
 	return n+v;
 }
 
-/* no more than w bits are used */
 static int
-usewidthle(Fn *fn, Ref r, int w)
+visit(Fn *fn, Ref r, int w, int f(Fn *, Ref, int))
+{
+	Blk *b;
+	Phi *p;
+	int ret;
+
+	ret = f(fn, r, w);
+	for (b=fn->start; b; b=b->link)
+		for (p=b->phi; p; p=p->link)
+			p->visit = 0;
+	return ret;
+}
+
+static int
+uwl(Fn *fn, Ref r, int w)
 {
 	Ext e;
 	Tmp *t;
@@ -52,7 +65,6 @@ usewidthle(Fn *fn, Ref r, int w)
 	Ins *i;
 	Ref rc;
 	int64_t v;
-	int b;
 
 	assert(rtype(r) == RTmp);
 	t = &fn->tmp[r.val];
@@ -69,21 +81,19 @@ usewidthle(Fn *fn, Ref r, int w)
 			if (p->visit || req(p->to, R))
 				continue;
 			p->visit = 1;
-			b = usewidthle(fn, p->to, w);
-			p->visit = 0;
-			if (b)
+			if (uwl(fn, p->to, w))
 				continue;
 			break;
 		case UIns:
 			i = u->u.ins;
 			assert(i != 0);
 			if (i->op == Ocopy)
-				if (usewidthle(fn, i->to, w))
+				if (uwl(fn, i->to, w))
 					continue;
 			if (ext(i, &e)) {
 				if (e.usew <= w)
 					continue;
-				if (usewidthle(fn, i->to, w))
+				if (uwl(fn, i->to, w))
 					continue;
 			}
 			if (i->op == Oand) {
@@ -107,15 +117,21 @@ usewidthle(Fn *fn, Ref r, int w)
 	return 1;
 }
 
+/* no more than w bits are used */
+static int
+usewidthle(Fn *fn, Ref r, int w)
+{
+	return visit(fn, r, w, uwl);
+}
+
 static int
 min(int v1, int v2)
 {
 	return v1 < v2 ? v1 : v2;
 }
 
-/* is the ref narrower than w bits */
 static int
-defwidthle(Fn *fn, Ref r, int w)
+dwl(Fn *fn, Ref r, int w)
 {
 	Ext e;
 	Tmp *t;
@@ -128,6 +144,8 @@ defwidthle(Fn *fn, Ref r, int w)
 	if (isconbits(fn, r, &v)
 	&& bitwidth(v) <= w)
 		return 1;
+	if (w <= 0)
+		return 0;
 	if (rtype(r) != RTmp)
 		return 0;
 	t = &fn->tmp[r.val];
@@ -140,21 +158,18 @@ defwidthle(Fn *fn, Ref r, int w)
 			if (req(p->to, r))
 				break;
 		assert(p);
-		if (p->visit)
+		if (p->visit && p->visit <= w)
 			return 1;
-		p->visit = 1;
+		p->visit = w;
 		for (n=0; n<p->narg; n++)
-			if (!defwidthle(fn, p->arg[n], w)) {
-				p->visit = 0;
+			if (!dwl(fn, p->arg[n], w))
 				return 0;
-			}
-		p->visit = 0;
 		return 1;
 	}
 
 	i = t->def;
 	if (i->op == Ocopy)
-                return defwidthle(fn, i->arg[0], w);
+                return dwl(fn, i->arg[0], w);
 	if (i->op == Oshr || i->op == Osar) {
 		if (isconbits(fn, i->arg[1], &v))
 		if (0 < v && v <= 32) {
@@ -167,19 +182,19 @@ defwidthle(Fn *fn, Ref r, int w)
 					w = min(32, w+v);
 			}
 		}
-		return defwidthle(fn, i->arg[0], w);
+		return dwl(fn, i->arg[0], w);
 	}
 	if (iscmp(i->op, &x, &x))
 		return w >= 1;
 	if (i->op == Oand) {
-		if (defwidthle(fn, i->arg[0], w)
-		|| defwidthle(fn, i->arg[1], w))
+		if (dwl(fn, i->arg[0], w)
+		|| dwl(fn, i->arg[1], w))
 			return 1;
 		return 0;
 	}
 	if (i->op == Oor || i->op == Oxor) {
-		if (defwidthle(fn, i->arg[0], w)
-		&& defwidthle(fn, i->arg[1], w))
+		if (dwl(fn, i->arg[0], w)
+		&& dwl(fn, i->arg[1], w))
 			return 1;
 		return 0;
 	}
@@ -187,10 +202,17 @@ defwidthle(Fn *fn, Ref r, int w)
 		if (e.zext && e.usew <= w)
 			return 1;
 		w = min(w, e.nopw);
-		return defwidthle(fn, i->arg[0], w);
+		return dwl(fn, i->arg[0], w);
 	}
 
 	return 0;
+}
+
+/* is the ref narrower than w bits */
+static int
+defwidthle(Fn *fn, Ref r, int w)
+{
+	return visit(fn, r, w, dwl);
 }
 
 static int
@@ -366,14 +388,20 @@ phicopyref(Fn *fn, Blk *b, Phi *p)
 {
 	Blk *d, **s;
 	Phi *p1;
+	Ref r;
 	uint n, c;
 
 	/* identical args */
-	for (n=0; n<p->narg-1; n++)
-		if (!req(p->arg[n], p->arg[n+1]))
-			break;
-	if (n == p->narg-1)
-		return p->arg[n];
+	r = R;
+	for (n=0; n<p->narg; n++)
+		if (!req(p->arg[n], p->to)) {
+			if (req(r, R))
+				r = p->arg[n];
+			else if (!req(p->arg[n], r))
+				break;
+		}
+	if (n == p->narg)
+		return r;
 
 	/* same as a previous phi */
 	for (p1=b->phi; p1!=p; p1=p1->link) {

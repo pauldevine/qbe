@@ -96,6 +96,14 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 		a.offset.sym.id = intern(buf);
 		fn->mem[fn->nmem-1] = a;
 	}
+	else if (op == Ocall && r == &i->arg[0]
+	&& rtype(r0) == RCon && fn->con[r0.val].type != CAddr) {
+		/* use a temporary register so that we
+		 * produce an indirect call
+		 */
+		r1 = newtmp("isel", Kl, fn);
+		emit(Ocopy, Kl, r1, r0, R);
+	}
 	else if (op != Ocopy && k == Kl && noimm(r0, fn)) {
 		/* load constants that do not fit in
 		 * a 32bit signed integer into a
@@ -112,8 +120,9 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 		r1 = newtmp("isel", Kl, fn);
 		emit(Oaddr, Kl, r1, SLOT(s), R);
 	}
-	else if (T.apple && hascon(r0, &c, fn)
-	&& c->type == CAddr && c->sym.type == SThr) {
+	else if (op != Ocall && hascon(r0, &c, fn)
+	&& c->type == CAddr && ((c->sym.type & SExt)
+	 || (T.apple && c->sym.type == SThr))) {
 		r1 = newtmp("isel", Kl, fn);
 		if (c->bits.i) {
 			r2 = newtmp("isel", Kl, fn);
@@ -123,16 +132,18 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 			emit(Oadd, Kl, r1, r2, r3);
 		} else
 			r2 = r1;
-		emit(Ocopy, Kl, r2, TMP(RAX), R);
-		r2 = newtmp("isel", Kl, fn);
-		r3 = newtmp("isel", Kl, fn);
-		emit(Ocall, 0, R, r3, CALL(17));
-		emit(Ocopy, Kl, TMP(RDI), r2, R);
-		emit(Oload, Kl, r3, r2, R);
+		if (T.apple && (c->sym.type & SThr)) {
+			emit(Ocopy, Kl, r2, TMP(RAX), R);
+			r2 = newtmp("isel", Kl, fn);
+			r3 = newtmp("isel", Kl, fn);
+			emit(Ocall, 0, R, r3, CALL(17));
+			emit(Ocopy, Kl, TMP(RDI), r2, R);
+			emit(Oload, Kl, r3, r2, R);
+		}
 		cc = *c;
 		cc.bits.i = 0;
 		r3 = newcon(&cc, fn);
-		emit(Oload, Kl, r2, r3, R);
+		emit(Oaddr, Kl, r2, r3, R);
 		if (rtype(r0) == RMem) {
 			m = &fn->mem[r0.val];
 			m->offset.type = CUndef;
@@ -143,9 +154,8 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 	else if (!(isstore(op) && r == &i->arg[1])
 	&& !isload(op) && op != Ocall && rtype(r0) == RCon
 	&& fn->con[r0.val].type == CAddr) {
-		/* apple as does not support 32-bit
-		 * absolute addressing, use a rip-
-		 * relative leaq instead
+		/* turn address operands into
+		 * lea/mov instructions
 		 */
 		r1 = newtmp("isel", Kl, fn);
 		emit(Oaddr, Kl, r1, r0, R);
@@ -162,6 +172,10 @@ fixarg(Ref *r, int k, Ins *i, Fn *fn)
 			m->offset.type = CUndef;
 			m->base = r0;
 		}
+	}
+	else if (isxsel(op) && rtype(*r) == RCon) {
+		r1 = newtmp("isel", i->cls, fn);
+		emit(Ocopy, i->cls, r1, *r, R);
 	}
 	*r = r1;
 }
@@ -425,7 +439,8 @@ sel(Ins i, Num *tn, Fn *fn)
 	case Oexts:
 	case Otruncd:
 	case Ocast:
-	case_OExt:
+	case_Oxsel:
+	case_Oext:
 Emit:
 		emiti(i);
 		i1 = curi; /* fixarg() can change curi */
@@ -439,7 +454,9 @@ Emit:
 		break;
 	default:
 		if (isext(i.op))
-			goto case_OExt;
+			goto case_Oext;
+		if (isxsel(i.op))
+			goto case_Oxsel;
 		if (isload(i.op))
 			goto case_Oload;
 		if (iscmp(i.op, &kc, &x)) {
@@ -493,6 +510,88 @@ flagi(Ins *i0, Ins *i)
 	return 0;
 }
 
+static Ins*
+selsel(Fn *fn, Blk *b, Ins *i, Num *tn)
+{
+	Ref r, cr[2];
+	int c, k, swap, gencmp, gencpy;
+	Ins *isel0, *isel1, *fi;
+	Tmp *t;
+
+	assert(i->op == Osel1);
+	for (isel0=i; b->ins<isel0; isel0--) {
+		if (isel0->op == Osel0)
+			break;
+		assert(isel0->op == Osel1);
+	}
+	assert(isel0->op == Osel0);
+	r = isel0->arg[0];
+	assert(rtype(r) == RTmp);
+	t = &fn->tmp[r.val];
+	fi = flagi(b->ins, isel0);
+	cr[0] = cr[1] = R;
+	gencmp = gencpy = swap = 0;
+	k = Kw;
+	c = Cine;
+	if (!fi || !req(fi->to, r)) {
+		gencmp = 1;
+		cr[0] = r;
+		cr[1] = CON_Z;
+	}
+	else if (iscmp(fi->op, &k, &c)) {
+		if (c == NCmpI+Cfeq
+		|| c == NCmpI+Cfne) {
+			/* these are selected as 'and'
+			 * or 'or', so we check their
+			 * result with Cine
+			 */
+			c = Cine;
+			goto Other;
+		}
+		swap = cmpswap(fi->arg, c);
+		if (swap)
+			c = cmpop(c);
+		if (t->nuse == 1) {
+			gencmp = 1;
+			cr[0] = fi->arg[0];
+			cr[1] = fi->arg[1];
+			*fi = (Ins){.op = Onop};
+		}
+	}
+	else if (fi->op == Oand && t->nuse == 1
+	     && (rtype(fi->arg[0]) == RTmp ||
+	         rtype(fi->arg[1]) == RTmp)) {
+		fi->op = Oxtest;
+		fi->to = R;
+		if (rtype(fi->arg[1]) == RCon) {
+			r = fi->arg[1];
+			fi->arg[1] = fi->arg[0];
+			fi->arg[0] = r;
+		}
+	}
+	else {
+	Other:
+		/* since flags are not tracked in liveness,
+		 * the result of the flag-setting instruction
+		 * has to be marked as live
+		 */
+		if (t->nuse == 1)
+			gencpy = 1;
+	}
+	/* generate conditional moves */
+	for (isel1=i; isel0<isel1; --isel1) {
+		isel1->op = Oxsel+c;
+		sel(*isel1, tn, fn);
+	}
+	assert(!gencmp || !gencpy);
+	if (gencmp)
+		selcmp(cr, k, swap, fn);
+	if (gencpy)
+		emit(Ocopy, Kw, R, r, R);
+	*isel0 = (Ins){.op = Onop};
+	return isel0;
+}
+
 static void
 seljmp(Blk *b, Fn *fn)
 {
@@ -522,7 +621,7 @@ seljmp(Blk *b, Fn *fn)
 		b->jmp.type = Jjf + Cine;
 	}
 	else if (iscmp(fi->op, &k, &c)
-	     && c != NCmpI+Cfeq /* see sel() */
+	     && c != NCmpI+Cfeq /* see sel(), selsel() */
 	     && c != NCmpI+Cfne) {
 		swap = cmpswap(fi->arg, c);
 		if (swap)
@@ -826,8 +925,14 @@ amd64_isel(Fn *fn)
 		memset(num, 0, n * sizeof num[0]);
 		anumber(num, b, fn->con);
 		seljmp(b, fn);
-		for (i=&b->ins[b->nins]; i!=b->ins;)
-			sel(*--i, num, fn);
+		for (i=&b->ins[b->nins]; i!=b->ins;) {
+			--i;
+			assert(i->op != Osel0);
+			if (i->op == Osel1)
+				i = selsel(fn, b, i, num);
+			else
+				sel(*i, num, fn);
+		}
 		idup(b, curi, &insb[NIns]-curi);
 	}
 	free(num);

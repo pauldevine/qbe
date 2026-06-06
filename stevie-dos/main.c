@@ -106,10 +106,10 @@ int parse_dash_arg(int argc, char **argv)
 int parse_plus_slash(int argc, char **argv)
 {
 	char *p;
-	int tmp;
+	char *tmp;
 	if (argv[2] == (char *)0) usage();
 	tmp = strsave(argv[2]);
-	Filename = (char *)tmp;
+	Filename = tmp;
 	p = argv[1];
 	p = p + 1;
 	arg_pat = p;
@@ -121,13 +121,13 @@ int parse_plus_num(int argc, char **argv, int c1)
 {
 	int isdig;
 	char *p;
-	int tmp;
+	char *tmp;
 	isdig = 0;
 	if (c1 >= 48 && c1 <= 57) isdig = 1;
 	if (isdig == 0 && c1 != NUL) return 0;
 	if (argv[2] == (char *)0) usage();
 	tmp = strsave(argv[2]);
-	Filename = (char *)tmp;
+	Filename = tmp;
 	numfiles = 1;
 	arg_line = 0;
 	p = argv[1];

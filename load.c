@@ -48,8 +48,8 @@ loadsz(Ins *l)
 	switch (l->op) {
 	case Oloadsb: case Oloadub: return 1;
 	case Oloadsh: case Oloaduh: return 2;
-	case Oloadsw: case Oloaduw: return 4;
-	case Oload: return KWIDE(l->cls) ? 8 : 4;
+	case Oloadsw: case Oloaduw: return T.wordsz;
+	case Oload: return KWIDE(l->cls) ? 2 * T.wordsz : T.wordsz;
 	}
 	die("unreachable");
 }
@@ -60,8 +60,10 @@ storesz(Ins *s)
 	switch (s->op) {
 	case Ostoreb: case Ostorefb: return 1;
 	case Ostoreh: case Ostorefh: return 2;
-	case Ostorew: case Ostores: case Ostorefw: return 4;
-	case Ostorel: case Ostored: return 8;
+	case Ostorew: case Ostorefw: return T.wordsz;
+	case Ostores: return 4; /* IEEE single, always 4 bytes */
+	case Ostorel: case Ostorefl: return 2 * T.wordsz;
+	case Ostored: return 8; /* IEEE double, always 8 bytes */
 	}
 	die("unreachable");
 }
@@ -77,7 +79,7 @@ iins(int cls, int op, Ref a0, Ref a1, Loc *l)
 	ist->num = inum++;
 	ist->bid = l->blk->id;
 	ist->off = l->off;
-	ist->new.ins = (Ins){op, cls, R, {a0, a1}};
+	ist->new.ins = (Ins){.op=op, .cls=cls, .to=R, .arg={a0, a1}};
 	return ist->new.ins.to = newtmp("ld", cls, curf);
 }
 
@@ -131,7 +133,7 @@ load(Slice sl, bits msk, Loc *l)
 	if (all)
 		cls = sl.cls;
 	else
-		cls = sl.sz > 4 ? Kl : Kw;
+		cls = sl.sz > T.wordsz ? Kl : Kw;
 	r = sl.ref;
 	/* sl.ref might not be live here,
 	 * but its alias base ref will be
@@ -164,6 +166,23 @@ load(Slice sl, bits msk, Loc *l)
 	if (!all)
 		mask(cls, &r, msk, l);
 	return r;
+}
+
+static void
+rebase(Slice *sl)
+{
+	Alias *a;
+
+	if (rtype(sl->ref) != RTmp)
+		return;
+	a = &curf->tmp[sl->ref.val].alias;
+	if (a->offset == (short)a->offset)
+	if (a->type == ALoc
+	|| a->type == AEsc
+	|| a->type == AUnk) {
+		sl->ref = TMP(a->base);
+		sl->off = a->offset;
+	}
 }
 
 static int
@@ -228,13 +247,24 @@ def(Slice sl, bits msk, Blk *b, Ins *i, Loc *il)
 
 	if (!i)
 		i = &b->ins[b->nins];
-	cls = sl.sz > 4 ? Kl : Kw;
+	/* A slice wider than one machine word needs the wide class so the
+	 * shl/or reconstruction below runs at full width.  Hardcoding 4
+	 * assumed a 32-bit word (Kw); on i8086 (T.wordsz==2) a 4-byte slice
+	 * is Kl, else `high << 16` shifts a 16-bit Kw temp to 0 and the
+	 * loadl loses its high word (struct-copy of a long member).  No
+	 * change on 32-bit-word targets where T.wordsz==4. */
+	cls = sl.sz > T.wordsz ? Kl : Kw;
 	msks = MASK(sl.sz);
 
 	while (i > b->ins) {
 		--i;
 		if (killsl(i->to, sl)
 		|| (iscall(i->op) && escapes(sl.ref, curf)))
+			goto Load;
+		/* A volatile access is a barrier: do not resolve a load by
+		 * reading a value across it (a volatile store's value must not
+		 * be forwarded, and an aliasing load must re-read memory). */
+		if (i->vol)
 			goto Load;
 		ld = isload(i->op);
 		if (ld) {
@@ -290,7 +320,7 @@ def(Slice sl, bits msk, Blk *b, Ins *i, Loc *il)
 			}
 			if (off) {
 				cls1 = cls;
-				if (op == Oshr && off + sl.sz > 4)
+				if (off + sl.sz > T.wordsz)
 					cls1 = Kl;
 				cast(&r, cls1, il);
 				r1 = getcon(8*off, curf);
@@ -428,9 +458,14 @@ loadopt(Fn *fn)
 		for (i=b->ins; i<&b->ins[b->nins]; ++i) {
 			if (!isload(i->op))
 				continue;
+			/* A volatile load must re-read memory: never forward a
+			 * prior store's value into it. */
+			if (i->vol)
+				continue;
 			sz = loadsz(i);
 			sl = (Slice){i->arg[0], 0, sz, i->cls};
 			l = (Loc){LRoot, i-b->ins, b};
+			rebase(&sl);
 			i->arg[1] = def(sl, MASK(sz), b, i, &l);
 		}
 	qsort(ilog, nlog, sizeof ilog[0], icmp);

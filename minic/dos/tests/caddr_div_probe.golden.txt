@@ -1,0 +1,6 @@
+udiv_7 ok
+urem_7 ok
+udiv_13 ok
+urem_13 ok
+udiv_100k ok
+urem_100k ok

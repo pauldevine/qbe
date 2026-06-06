@@ -327,3 +327,8 @@ export function w $test() {
 @fail
     ret 1
 }
+
+# >>> driver
+# extern int test(void);
+# int main(void) { return test(); }
+# <<<

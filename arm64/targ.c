@@ -26,6 +26,7 @@ arm64_memargs(int op)
 }
 
 #define ARM64_COMMON \
+	.wordsz = 4, \
 	.gpr0 = R0, \
 	.ngpr = NGPR, \
 	.fpr0 = V0, \
@@ -40,6 +41,7 @@ arm64_memargs(int op)
 	.isel = arm64_isel, \
 	.abi1 = arm64_abi, \
 	.emitfn = arm64_emitfn, \
+	.cansel = 0, \
 
 Target T_arm64 = {
 	.name = "arm64",

@@ -33,6 +33,14 @@
 #define NULL 0
 #endif
 
+#ifndef EOF
+#define EOF (-1)
+#endif
+
+#ifndef NUL
+#define NUL 0
+#endif
+
 #include "param.h"
 #include "ascii.h"
 #include "term.h"
@@ -116,8 +124,41 @@ extern char *Insptr;
 extern char *Filename;
 
 /*
- * Note: MiniC does not support function prototypes with pointer return types
- * or ANSI-style parameters. Functions are called without prior declaration.
- * Function definitions are in their respective source files:
- *   alloc.c, linefunc.c, mark.c, misccmds.c, search.c, screen.c, dos.c
+ * Function prototypes for stevie's pointer-returning helpers.  MiniC now
+ * supports ANSI prototypes; without these the call sites would treat the
+ * results as int (default) and pointer-typed assignments would fail.
  */
+/* regerror is shared.  regcomp/regexec/regsub take regexp* and are
+ * declared by files that include regexp.h. */
+void regerror(char *s);
+
+char *alloc(unsigned int size);
+char *strsave(char *string);
+char *malloc(unsigned int size);
+/* `free` deliberately omitted as a typed prototype: it accepts any pointer
+ * type (void * in standard C), and a strict prototype would force casts at
+ * every call site.  Calls fall back to implicit declaration. */
+LINE *newline(int nchars);
+LPTR *prevline(LPTR *p);
+LPTR *nextline(LPTR *p);
+LPTR *gotoline(int n);
+LPTR *coladvance(LPTR *p, int col);
+LPTR *getmark(int c);
+LPTR *bck_word(LPTR *p, int type);
+LPTR *fwd_word(LPTR *p, int type);
+LPTR *end_word(LPTR *p, int type);
+LPTR *showmatch(void);
+LPTR *ssearch(int dir, char *str);
+char *mapstring(char *s);
+char *mkstr(char c);
+char *strcpy(char *dest, char *src);
+int strlen(char *s);
+int strcmp(char *a, char *b);
+int strncmp(char *a, char *b, int n);
+char *strchr(char *s, int c);
+char *strcat(char *dest, char *src);
+int sprintf(char *buf, char *fmt);
+int fprintf(FILE *f, char *fmt);
+int fopen(char *path, char *mode);
+int getc(FILE *f);
+int fclose(FILE *f);

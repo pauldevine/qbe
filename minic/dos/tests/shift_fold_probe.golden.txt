@@ -1,0 +1,4 @@
+sar ok
+shr ok
+smaxmin ok
+noovf ok

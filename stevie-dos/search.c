@@ -33,9 +33,7 @@ bool_t	begword;	/* does the search include a 'begin word' match */
 /*
  * mapstring(s) - map special backslash sequences
  */
-static char *
-mapstring(s)
-register char	*s;
+char * mapstring(char *s)
 {
 	static	char	ns[80];
 	char	*p;
@@ -74,16 +72,13 @@ register char	*s;
 	return ns;
 }
 
-static char *laststr = NULL;
-static int lastsdir;
+char *laststr = NULL;
+int lastsdir;
 //static LPTR *bcksearch(), *fwdsearch();
 static LPTR *bcksearch(char *str);
 static LPTR *fwdsearch(char *str);
 
-static LPTR *
-ssearch(dir,str)
-int	dir;	/* FORWARD or BACKWARD */
-char	*str;
+LPTR * ssearch(int dir, char *str)
 {
 	LPTR	*pos;
 
@@ -107,10 +102,7 @@ char	*str;
 	return pos;
 }
 
-void
-dosearch(dir,str)
-int dir;
-char *str;
+void dosearch(int dir, char *str)
 {
 	LPTR *p;
 
@@ -130,9 +122,7 @@ char *str;
 
 #define	OTHERDIR(x)	(((x) == FORWARD) ? BACKWARD : FORWARD)
 
-void
-repsearch(flag)
-int	flag;
+void repsearch(int flag)
 {
 	int	dir = lastsdir;
 
@@ -154,9 +144,7 @@ char	*s;
 	emsg(s);
 }*/
 
-static LPTR *
-fwdsearch(str)
-register char *str;
+LPTR * fwdsearch(char *str)
 {
 	static LPTR infile;
 	register LPTR *p;
@@ -220,9 +208,7 @@ register char *str;
 	return(NULL);
 }
 
-static LPTR *
-bcksearch(str)
-char *str;
+LPTR * bcksearch(char *str)
 {
 	static LPTR infile;
 	register LPTR *p;
@@ -340,9 +326,9 @@ char *str;
  * Character Searches
  */
 
-static char lastc = NUL;	/* last character searched for */
-static int  lastcdir;		/* last direction of character search */
-static int  lastctype;		/* last type of search ("find" or "to") */
+char lastc = NUL;	/* last character searched for */
+int  lastcdir;		/* last direction of character search */
+int  lastctype;		/* last type of search ("find" or "to") */
 
 /*
  * searchc(c, dir, type)
@@ -350,11 +336,7 @@ static int  lastctype;		/* last type of search ("find" or "to") */
  * Search for character 'c', in direction 'dir'. If type is 0, move to
  * the position of the character, otherwise move to just before the char.
  */
-bool_t
-searchc(c, dir, type)
-char	c;
-int	dir;
-int	type;
+bool_t searchc(char c, int dir, int type)
 {
 	LPTR	save;
 
@@ -381,9 +363,7 @@ int	type;
 	return FALSE;
 }
 
-bool_t
-crepsearch(flag)
-int	flag;
+bool_t crepsearch(int flag)
 {
 	int	dir = lastcdir;
 	int	rval;
@@ -405,15 +385,18 @@ int	flag;
 /*
  * showmatch - move the cursor to the matching paren or brace
  */
-LPTR *
-showmatch()
+int inc(LPTR *p);
+int dec(LPTR *p);
+
+LPTR * showmatch()
 {
 	static	LPTR	pos;
-	int	(*move)(), inc(), dec();
-	char	initc = gchar(Curschar);	/* initial char */
+	int	(*move)(LPTR *p);
+	char	initc;
 	char	findc;				/* terminating char */
 	char	c;
 	int	count = 0;
+	initc = gchar(Curschar);	/* initial char */
 
 	pos = *Curschar;		/* set starting point */
 
@@ -465,9 +448,7 @@ showmatch()
  *
  * Return TRUE if a function was found.
  */
-bool_t
-findfunc(dir)
-int	dir;
+bool_t findfunc(int dir)
 {
 	LPTR	*curr;
 
@@ -515,9 +496,7 @@ static	int	stype;		/* type of the word motion being performed */
  * class 2 are reported as class 1 since only white space boundaries are
  * of interest.
  */
-static	int
-cls(c)
-char	c;
+int cls(char c)
 {
 	if (C0(c))
 		return 0;
@@ -537,10 +516,7 @@ char	c;
  *
  * Returns the resulting position, or NULL if EOF was reached.
  */
-LPTR *
-fwd_word(p, type)
-LPTR	*p;
-int	type;
+LPTR * fwd_word(LPTR *p, int type)
 {
 	static	LPTR	pos;
 	int	sclass = cls(gchar(p));		/* starting class */
@@ -588,10 +564,7 @@ int	type;
  *
  * Returns the resulting position, or NULL if EOF was reached.
  */
-LPTR *
-bck_word(p, type)
-LPTR	*p;
-int	type;
+LPTR * bck_word(LPTR *p, int type)
 {
 	static	LPTR	pos;
 int	sclass = cls(gchar(p));		/* starting class */
@@ -665,10 +638,7 @@ return &pos;
  *
  * Returns the resulting position, or NULL if EOF was reached.
  */
-LPTR *
-end_word(p, type)
-LPTR	*p;
-int	type;
+LPTR * end_word(LPTR *p, int type)
 {
     static	LPTR	pos;
     int	sclass = cls(gchar(p));		/* starting class */

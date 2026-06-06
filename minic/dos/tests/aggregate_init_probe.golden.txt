@@ -1,0 +1,8 @@
+base=1234 (want 1234)
+flags=9 name=42 (want 9,42)
+slots=11,22,33,0 (want 11,22,33,0)
+pt=7,9 (want 7,9)
+label=hi (want hi)
+P=100,200 (want 100,200)
+Q.name=5 Q.flags=0 (want 5,0)
+U=4660 (want 4660)

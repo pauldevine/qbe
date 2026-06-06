@@ -123,9 +123,9 @@ O(ultof,   T(e,e,l,l, e,e,x,x), F(1,0,0,0,0,0,0,0,0,0)) X(0,0,1) V(0)
 O(cast,    T(s,d,w,l, x,x,x,x), F(1,0,0,0,0,0,0,0,0,0)) X(0,0,1) V(0)
 
 /* Stack Allocation */
-O(alloc4,  T(e,l,e,e, e,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
-O(alloc8,  T(e,l,e,e, e,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
-O(alloc16, T(e,l,e,e, e,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
+O(alloc4,  T(w,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
+O(alloc8,  T(w,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
+O(alloc16, T(w,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
 
 /* Variadic Function Helpers */
 O(vaarg,   T(m,m,m,m, x,x,x,x), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
@@ -144,12 +144,15 @@ O(asm,     T(w,w,w,w, x,x,x,x), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
 O(loadfb,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* load byte through far ptr */
 O(loadfh,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* load halfword through far ptr */
 O(loadfw,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* load word through far ptr */
+O(loadfl,  T(e,l,e,e, e,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* load long (32-bit) through far ptr */
 O(storefb, T(w,e,e,e, l,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* store byte through far ptr */
 O(storefh, T(w,e,e,e, l,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* store halfword through far ptr */
 O(storefw, T(w,e,e,e, l,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* store word through far ptr */
+O(storefl, T(l,e,e,e, l,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* store long (32-bit) through far ptr */
 O(mkfar,   T(e,w,e,e, e,w,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* make far ptr: (seg, off) -> far */
 O(farseg,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* extract segment from far ptr */
 O(faroff,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* extract offset from far ptr */
+O(vargp,   T(x,x,x,x, x,x,x,x), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* va_start: ptr to first vararg = SS:(bp+vararg_off) */
 
 /****************************************/
 /* INTERNAL OPERATIONS (keep nop first) */
@@ -160,6 +163,8 @@ O(nop,     T(x,x,x,x, x,x,x,x), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,1) V(0)
 O(addr,    T(m,m,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,1) V(0)
 O(blit0,   T(m,e,e,e, m,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,1,0) V(0)
 O(blit1,   T(w,e,e,e, x,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,1,0) V(0)
+O(sel0,    T(w,e,e,e, x,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
+O(sel1,    T(w,l,e,e, w,l,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,0) V(0)
 O(swap,    T(w,l,s,d, w,l,s,d), F(0,0,0,0,0,0,0,0,0,0)) X(1,0,0) V(0)
 O(sign,    T(w,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
 O(salloc,  T(e,l,e,e, e,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
@@ -211,6 +216,26 @@ O(flagflt,  T(x,x,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,1) V(0)
 O(flagfne,  T(x,x,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,1) V(0)
 O(flagfo,   T(x,x,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,1) V(0)
 O(flagfuo,  T(x,x,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,1) V(0)
+
+/* Backend Flag Select (Condition Move) */
+O(xselieq,  T(w,l,e,e, w,l,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xseline,  T(w,l,e,e, w,l,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xselisge, T(w,l,e,e, w,l,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xselisgt, T(w,l,e,e, w,l,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xselisle, T(w,l,e,e, w,l,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xselislt, T(w,l,e,e, w,l,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xseliuge, T(w,l,e,e, w,l,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xseliugt, T(w,l,e,e, w,l,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xseliule, T(w,l,e,e, w,l,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xseliult, T(w,l,e,e, w,l,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xselfeq,  T(e,e,s,d, e,e,s,d), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xselfge,  T(e,e,s,d, e,e,s,d), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xselfgt,  T(e,e,s,d, e,e,s,d), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xselfle,  T(e,e,s,d, e,e,s,d), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xselflt,  T(e,e,s,d, e,e,s,d), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xselfne,  T(e,e,s,d, e,e,s,d), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xselfo,   T(e,e,s,d, e,e,s,d), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
+O(xselfuo,  T(e,e,s,d, e,e,s,d), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)
 
 #undef T
 #undef X

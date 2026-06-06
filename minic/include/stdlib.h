@@ -5,15 +5,20 @@
 #ifndef _STDLIB_H
 #define _STDLIB_H
 
-typedef unsigned long size_t;
+#include <stddef.h>
 
-/* Memory allocation - must be provided by runtime */
-void *malloc(size_t size);
-void *calloc(size_t nmemb, size_t size);
-void free(void *ptr);
+extern void *malloc();
+extern void *calloc();
+extern void *realloc();
+extern void free();
 
-/* Other standard functions */
-void exit(int status);
-int abs(int x);
+extern void exit();
+extern void abort();
+extern int system();
+extern char *getenv();
+
+extern int abs();
+extern int atoi();
+extern long atol();
 
 #endif /* _STDLIB_H */

@@ -1,0 +1,3 @@
+sum ok
+q ok
+mixed ok

@@ -8,17 +8,30 @@
 set -e
 set -o pipefail  # Fail on any pipe stage failure
 
+# Optional --model=<m> flag, forwarded to minic.
+MODEL=""
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --model=*) MODEL="${arg#--model=}" ;;
+        -m) ;;  # not supported here — use --model= form
+        *) ARGS+=("$arg") ;;
+    esac
+done
+set -- "${ARGS[@]}"
+
 INPUT="$1"
 OUTPUT="$2"
 
 if [ -z "$INPUT" ]; then
-    echo "Usage: $0 input.c [output.ssa]" >&2
+    echo "Usage: $0 [--model=<m>] input.c [output.ssa]" >&2
     echo "" >&2
     echo "Preprocesses C source with cpp and compiles with MiniC" >&2
     echo "" >&2
     echo "Examples:" >&2
     echo "  $0 program.c program.ssa    # Preprocess and compile to file" >&2
     echo "  $0 program.c | qbe          # Pipe directly to QBE" >&2
+    echo "  $0 --model=medium program.c program.ssa" >&2
     exit 1
 fi
 
@@ -78,10 +91,13 @@ s/^[ \t]*size_t[ \t]\+\([a-zA-Z_][a-zA-Z0-9_]*\)[ \t]*(/\1(/
 s/^[ \t]*bool[ \t]\+\([a-zA-Z_][a-zA-Z0-9_]*\)[ \t]*(/\1(/
 '
 
+MINIC_ARGS=()
+[ -n "$MODEL" ] && MINIC_ARGS+=(-m "$MODEL")
+
 if [ -z "$OUTPUT" ]; then
     # Output to stdout
-    cpp -P "$INPUT" | sed "$NORMALIZE_TYPES" | sed "$STRIP_TYPES" | "$MINIC"
+    cpp -P "$INPUT" | sed "$NORMALIZE_TYPES" | sed "$STRIP_TYPES" | "$MINIC" "${MINIC_ARGS[@]}"
 else
     # Output to file
-    cpp -P "$INPUT" | sed "$NORMALIZE_TYPES" | sed "$STRIP_TYPES" | "$MINIC" > "$OUTPUT"
+    cpp -P "$INPUT" | sed "$NORMALIZE_TYPES" | sed "$STRIP_TYPES" | "$MINIC" "${MINIC_ARGS[@]}" > "$OUTPUT"
 fi

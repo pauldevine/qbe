@@ -91,8 +91,7 @@ int	opnum;
  * Execute a command in normal mode.
  */
 
-void
-normal(int c)
+void normal(int c)
 {
 	char *p;
 	char *q;
@@ -246,7 +245,7 @@ normal(int c)
 				while ((l < n) && (lp != NULL)) {
 					l += plines(lp);
 					*Topchar = *lp;
-					lp = prevline(lp);
+					lp = (struct lptr *)prevline(lp);
 				}
 			}
 			Topchar->index = 0;
@@ -265,7 +264,7 @@ normal(int c)
 
 	case 'G':
 		mtype = MLINE;
-		*Curschar = *gotoline(Prenum);
+		*Curschar = *(struct lptr *)gotoline(Prenum);
 		break;
 
 	case 'H':
@@ -286,7 +285,7 @@ normal(int c)
 
 	case 'L':
 		mtype = MLINE;
-		*Curschar = *prevline(Botchar);
+		*Curschar = *(struct lptr *)prevline(Botchar);
 		for (n = Prenum; n && oneup(1) ;n--)
 			;
 		beginline(TRUE);
@@ -367,7 +366,7 @@ normal(int c)
 		mincl = TRUE;
 		beginline(FALSE);
 		if (Prenum > 0)
-			*Curschar = *coladvance(Curschar, Prenum-1);
+			*Curschar = *(struct lptr *)coladvance(Curschar, Prenum-1);
 		Curswant = Prenum - 1;
 		break;
 		
@@ -410,7 +409,7 @@ normal(int c)
 		mtype = MCHAR;
 		mincl = TRUE;
 		{
-			if ((pos = showmatch()) == NULL)
+			if ((pos = (struct lptr *)showmatch()) == NULL)
 				beep();
 			else {
 				setpcmark();
@@ -433,7 +432,7 @@ normal(int c)
 		mincl = FALSE;
 		set_want_col = TRUE;
 		for (n = DEFAULT1(Prenum); n > 0 ;n--) {
-			if ((pos = bck_word(Curschar, type)) == NULL) {
+			if ((pos = (struct lptr *)bck_word(Curschar, type)) == NULL) {
 				beep();
 				break;
 			} else
@@ -459,7 +458,7 @@ normal(int c)
 		mincl = FALSE;
 		set_want_col = TRUE;
 		for (n = DEFAULT1(Prenum); n > 0 ;n--) {
-			if ((pos = fwd_word(Curschar, type)) == NULL) {
+			if ((pos = (struct lptr *)fwd_word(Curschar, type)) == NULL) {
 				beep();
 				break;
 			} else
@@ -477,7 +476,7 @@ normal(int c)
 		mincl = TRUE;
 		set_want_col = TRUE;
 		for (n = DEFAULT1(Prenum); n > 0 ;n--) {
-			if ((pos = end_word(Curschar, type)) == NULL) {
+			if ((pos = (struct lptr *)end_word(Curschar, type)) == NULL) {
 				beep();
 				break;
 			} else
@@ -740,7 +739,7 @@ normal(int c)
 
 	case '`':
 		{
-			mark = getmark(vgetc());
+			mark = (struct lptr *)getmark(vgetc());
 
 			if (mark == NULL)
 				beep();
@@ -945,10 +944,10 @@ normal(int c)
 /*
  * doshift - handle a shift operation
  */
-void
-doshift(int op, char c1, char c2, int num)
+void doshift(int op, char c1, char c2, int num)
 {
-	struct lptr	top, bot;
+	struct lptr	top;
+	struct lptr	bot;
 	int	nlines;
 	char	opchar;
 
@@ -990,10 +989,10 @@ doshift(int op, char c1, char c2, int num)
 /*
  * dodelete - handle a delete operation
  */
-void
-dodelete(char c1, char c2, int num)
+void dodelete(char c1, char c2, int num)
 {
-	struct lptr	top, bot;
+	struct lptr	top;
+	struct lptr	bot;
 	int	nlines;
 	int	n;
 
@@ -1040,7 +1039,7 @@ dodelete(char c1, char c2, int num)
 					break;
 
 			top = *Curschar;
-			*Curschar = *nextline(Curschar);
+			*Curschar = *(struct lptr *)nextline(Curschar);
 			delline(nlines-2);
 			Curschar->index = 0;
 			n = bot.index + 1;
@@ -1070,8 +1069,7 @@ dodelete(char c1, char c2, int num)
 /*
  * dochange - handle a change operation
  */
-void
-dochange(char c1, char c2, int num)
+void dochange(char c1, char c2, int num)
 {
 	char	sbuf[16];
 	int	doappend;	/* true if we should do append, not insert */
@@ -1098,16 +1096,27 @@ dochange(char c1, char c2, int num)
 
 #define	YBSIZE	1024
 
-char	ybuf[YBSIZE];
+char	*ybuf;	/* Note: must call init_normal() to allocate */
 int	ybtype;  /* Note: should be initialized to MBAD (-1) at runtime */
+char	*mkstr_buf;	/* must be allocated by init_normal */
 
-static int
-doyank(void)
+void init_normal(void)
 {
-	struct lptr	top, bot;
-	char	*yptr = ybuf;
-	char	*ybend = &ybuf[YBSIZE-1];
+	ybuf = (char *)alloc((unsigned int)YBSIZE);
+	mkstr_buf = (char *)alloc((unsigned int)2);
+	ybtype = MBAD;
+}
+
+int doyank(void)
+{
+	struct lptr	top;
+	struct lptr	bot;
+	char	*yptr;
+	char	*ybend;
 	int	nlines;
+
+	yptr = ybuf;
+	ybend = &ybuf[YBSIZE-1];
 
 	top = startop;
 	bot = *Curschar;
@@ -1161,8 +1170,7 @@ doyank(void)
 	return TRUE;
 }
 
-void
-doput(int dir)
+void doput(int dir)
 {
 	if (ybtype == MBAD) {
 		beep();
@@ -1184,12 +1192,12 @@ doput(int dir)
  * If inout==0, add a tab to the begining of the next num lines.
  * If inout==1, delete a tab from the beginning of the next num lines.
  */
-void
-tabinout(int inout, int num)
+void tabinout(int inout, int num)
 {
-	int	ntodo = num;
+	int	ntodo;
 	struct lptr	*p;
 
+	ntodo = num;
 	/* construct undo stuff */
 	resetundo();
 	*Uncurschar = *Curschar;
@@ -1205,7 +1213,7 @@ tabinout(int inout, int num)
 				delchar(TRUE);
 		}
 		if ( ntodo > 0 ) {
-			if ( (p=nextline(Curschar)) != NULL )
+			if ( (p=(struct lptr *)nextline(Curschar)) != NULL )
 				*Curschar = *p;
 			else
 				break;
@@ -1214,8 +1222,7 @@ tabinout(int inout, int num)
 	can_undo = TRUE;
 }
 
-void
-startinsert(char *initstr, int startln)
+void startinsert(char *initstr, int startln)
 {
 	char *p;
 	char c;
@@ -1225,23 +1232,21 @@ startinsert(char *initstr, int startln)
 		Insstart->index = 0;
 	Ninsert = 0;
 	Insptr = Insbuff;
-	for (p=initstr; (c=(*p++))!='\0'; )
+	for (p=initstr; (c = *p++)!='\0'; )
 		*Insptr++ = c;
 	State = INSERT;
 	if (P(P_MO))
 		msg("Insert Mode");
 }
 
-void
-resetundo(void)
+void resetundo(void)
 {
 	Undelchars = 0;
 	*Undobuff = '\0';
-	Uncurschar->linep = NULL;
+	Uncurschar->linep = (struct line *)NULL;
 }
 
-static int
-dojoin(void)
+int dojoin(void)
 {
 	int	scol;		/* save cursor column */
 	int	size;		/* size of the joined line */
@@ -1288,14 +1293,11 @@ inschar(' ');
 return TRUE;
 }
 
-char *
-mkstr(char c)
+char * mkstr(char c)
 {
-    static	char	s[2];
+    mkstr_buf[0] = c;
+    mkstr_buf[1] = NUL;
 
-    s[0] = c;
-    s[1] = NUL;
-
-    return s;
+    return mkstr_buf;
 }
 

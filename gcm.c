@@ -19,14 +19,19 @@ isdivwl(Ins *i)
 int
 pinned(Ins *i)
 {
-	return optab[i->op].pinned || isdivwl(i);
+	/* A volatile load/store/alloc is pinned to its block so gcm cannot
+	 * reorder it across other accesses. */
+	return optab[i->op].pinned || isdivwl(i) || i->vol;
 }
 
 /* pinned ins that can be eliminated if unused */
 static int
 canelim(Ins *i)
 {
-	return isload(i->op) || isalloc(i->op) || isdivwl(i);
+	/* A volatile load must execute even when its value is unused (e.g.
+	 * reading a hardware register for its side effect), so it is never
+	 * eliminable. */
+	return (isload(i->op) || isalloc(i->op) || isdivwl(i)) && !i->vol;
 }
 
 static uint earlyins(Fn *, Blk *, Ins *);

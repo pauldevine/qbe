@@ -26,11 +26,22 @@
  *   ...
  */
 
-/* Check if current memory model uses far code (requires RETF, CALL FAR) */
+/* Check if current memory model uses far code (requires RETF, CALL FAR).
+ *
+ * Compact is conventionally "near code, far data".  But our toolchain
+ * places each .obj's CODE class into its own physical 64KB segment
+ * (per asm_to_omf / omf_link), so user code and libstub already live in
+ * distinct CS frames.  Treating compact as far-code here lets the
+ * crt0's `call far _main` line up with main's `retf`, and inter-module
+ * calls (cprobe -> _far_printf) traverse segments safely.  The "near
+ * code" of compact stays an aspirational property: it can be regained
+ * later by coalescing CODE segments under a single `_TEXT` name.
+ */
 static int
 uses_far_code(void)
 {
 	return T.memmodel == Mmedium ||
+	       T.memmodel == Mcompact ||
 	       T.memmodel == Mlarge ||
 	       T.memmodel == Mhuge;
 }
@@ -129,7 +140,14 @@ selpar(Fn *fn, Ins *i0, Ins *i1)
 				emit(Oload, Kw, i->to, SLOT(s), R);
 				s--;  /* Next parameter is 2 bytes higher */
 			} else if (i->cls == Kl) {
-				/* 32-bit parameter (takes 4 bytes = 2 words) */
+				/* 32-bit parameter (takes 4 bytes = 2 words).  The
+				 * Oload below materializes the param into its temp; on
+				 * i8086 spill.c::spill aliases this temp's slot to the
+				 * incoming ABI slot s so the load becomes an elided
+				 * self-copy (see the "Kl param" pass in spill.c).  We
+				 * must NOT pre-set tmp[].slot here: isel overloads a
+				 * set .slot to mean "fast-local alloca address" and
+				 * would materialize &param instead of the value. */
 				emit(Oload, Kl, i->to, SLOT(s), R);
 				s -= 2;  /* Next parameter is 4 bytes higher */
 			} else if (i->cls == Ks) {
@@ -158,6 +176,13 @@ selpar(Fn *fn, Ins *i0, Ins *i1)
 			break;
 		}
 	}
+
+	/* Record the BP-relative byte offset of the first variadic argument
+	 * (just past the named params).  SLOT(s) maps to 2*-s, so after the
+	 * loop `s` indexes the next stack slot = the first vararg.  The Ovargp
+	 * op (va_start) materialises SS:(bp+vararg_off).  See
+	 * [[project-minic-vararg-stub]]. */
+	fn->vararg_off = 2 * -s;
 }
 
 static void
@@ -196,16 +221,14 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 	cty = 0;
 
 	/* emit() builds in reverse, so emit in reverse order of execution:
-	 * Execution order: allocate -> store args -> call -> get result -> cleanup
-	 * Emit order: cleanup -> get result -> call -> store args -> allocate
+	 * Execution order: store args -> call -> get result
+	 * Emit order: get result -> call -> store args
+	 *
+	 * NOTE: arg slots are pre-reserved at the bottom of the locals frame
+	 * (see i8086_abi).  The prologue's `sub sp, 2*fn->slot` already accounts
+	 * for them, so we don't emit any per-call sub/add of SP.  Args are
+	 * written directly into the reserved slots via SLOT() refs.
 	 */
-
-	/* 5. Caller cleanup (last emitted, last executed)
-	 * Use Osalloc with negative value to deallocate (add to SP)
-	 */
-	if (stk > 0) {
-		emit(Osalloc, Kw, R, getcon(-stk, fn), R);
-	}
 
 	/* 4. Handle return value (get result from AX after call) */
 	if (!req(icall->to, R)) {
@@ -224,86 +247,151 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 	else
 		emit(Ocall, 0, R, icall->arg[0], CALL(cty));
 
-	/* 2. Pass arguments on stack (right-to-left for cdecl)
+	/* 2. Pass arguments via pre-reserved slots at the bottom of the
+	 * locals frame.  Slot indices 0..arg_words-1 always lie at the
+	 * deepest part of the frame (just above SP after prologue), so
+	 * they hand off to a far/near call's return-address push naturally.
 	 *
-	 * FINAL SIMPLIFIED APPROACH for 8086:
-	 * The problem: mov [ax], value is invalid (AX can't be base register)
-	 * The solution: Use BP-relative addressing instead!
+	 * Layout (after prologue, just before this call's stores):
+	 *   SP = BP - 2*fn->slot   (set by `sub sp, 2*fn->slot` in prologue)
+	 *   slot 0   → [BP - 2*fn->slot]      = [SP]      (first arg)
+	 *   slot 1   → [BP - 2*(fn->slot-1)]  = [SP+2]    (second arg)
+	 *   ...
 	 *
-	 * After allocating stack space, we can store arguments using
-	 * [BP-offset] addressing, which is valid on 8086.
-	 *
-	 * Example:
-	 *   sub sp, 4      ; Allocate 4 bytes
-	 *   mov [bp-4], 72  ; Store arg1 (at SP position)
-	 *   mov [bp-2], 105 ; Store arg2 (at SP+2 position)
-	 *   call func
-	 *   add sp, 4      ; Clean up
+	 * Far CALL pushes 4 bytes of return at [SP-4..SP-1]; the callee's
+	 * `[bp+6]` (after push bp; mov bp,sp) reads our slot 0.  ✓
 	 */
 	if (stk > 0) {
-		/* Emit stores FIRST (so they execute AFTER allocation due to reversal)
-		 * Then emit allocation LAST (so it executes FIRST)
-		 *
-		 * Execution order will be:
-		 * 1. sub sp, stk       (allocate space)
-		 * 2. mov [bp-stk], arg1  (store first argument)
-		 * 3. mov [bp-stk+2], arg2 (store second argument)
-		 * 4. call function
-		 */
-
-		/* Calculate offset for each argument and emit stores
-		 * After "sub sp, stk", the arguments are at [bp-stk], [bp-stk+2], etc.
-		 */
-		off = stk;  /* Start from the bottom of allocated space */
+		off = 0;  /* slot index for first arg = bottom of arg region */
 		for (i = i0; i < icall; i++) {
 			if (!isarg(i->op))
 				continue;
 			if (req(i->arg[0], R))
 				continue;
 
-			int arg_size;
-			if (i->cls == Kl) arg_size = 4;
-			else if (i->cls == Ks) arg_size = 4;
-			else if (i->cls == Kd) arg_size = 8;
-			else arg_size = 2;
+			int arg_words;
+			if (i->cls == Kl) arg_words = 2;
+			else if (i->cls == Ks) arg_words = 2;
+			else if (i->cls == Kd) arg_words = 4;
+			else arg_words = 1;
 
-			/* Store this argument at [bp - off]
-			 * Create a memory reference with BP as base and negative offset
-			 */
-			int midx = fn->nmem++;
-			vgrow(&fn->mem, fn->nmem);
-			fn->mem[midx] = (Mem){
-				.base = TMP(RBP),  /* Use BP as base */
-				.index = R,
-				.offset = {.type = CBits, .bits.i = -off},
-				.scale = 0
-			};
-			Ref mem_ref = MEM(midx);
+			Ref slot_ref = SLOT(off);
 
 			/* Emit store based on type */
 			if (i->cls == Ks)
-				emit(Ostores, Ks, R, i->arg[0], mem_ref);
+				emit(Ostores, Ks, R, i->arg[0], slot_ref);
 			else if (i->cls == Kd)
-				emit(Ostored, Kd, R, i->arg[0], mem_ref);
+				emit(Ostored, Kd, R, i->arg[0], slot_ref);
+			else if (i->cls == Kl)
+				emit(Ostorel, Kw, R, i->arg[0], slot_ref);
 			else
-				emit(Ostorew, Kw, R, i->arg[0], mem_ref);
+				emit(Ostorew, Kw, R, i->arg[0], slot_ref);
 
-			off -= arg_size;  /* Move to next argument position */
+			off += arg_words;  /* Next slot index */
 		}
+	}
+}
 
-		/* NOW emit allocation (emitted last, executes first) */
-		emit(Osalloc, Kw, R, getcon(stk, fn), R);
+/* Width, in 16-bit words, that an arg-slot store op occupies. */
+static int
+argstore_words(int op)
+{
+	switch (op) {
+	case Ostoreb:
+	case Ostoreh:
+	case Ostorew: return 1;
+	case Ostorel: return 2;  /* 32-bit long / far pointer */
+	case Ostores: return 2;  /* float */
+	case Ostored: return 4;  /* double */
+	default:      return 0;
+	}
+}
+
+/* §2y: eliminate a redundant outgoing-argument marshal.
+ *
+ * selcall writes each call's arguments into the shared arg-slot region at
+ * the bottom of the frame (slot indices [0, fn->arg_slot_top)).  When two
+ * calls in the same block pass the IDENTICAL value (same ref) at the
+ * IDENTICAL slot+width with no other store touching those words in
+ * between, the second marshal is dead — the slot already holds the value:
+ *
+ *      mov ax,[bp+6]; mov dx,[bp+8]; mov [bp-12],ax; mov [bp-10],dx
+ *      call far _far_strlen
+ *      mov [bp-8], ax                 ; <- other arg, different slot
+ *      mov ax,[bp+6]; mov dx,[bp+8]; mov [bp-12],ax; mov [bp-10],dx  <- DEAD
+ *      call far _mp_hal_stdout_tx_strn_cooked
+ *
+ * SOUNDNESS rests on one closed-world invariant: an intervening call does
+ * NOT write the arg slots passed to it.  This holds for every callee in
+ * this toolchain — minic copies each incoming parameter into a fresh local
+ * alloca and never writes the incoming [bp+N] slot (see the %str=alloc4 +
+ * storel %t0,%str shape minic emits), so a compiled callee leaves the
+ * caller's arg slots intact; the hand-written libstub helpers read their
+ * stack args into registers without writing them back.  A call therefore
+ * clobbers caller-save REGISTERS but never caller-frame arg-slot MEMORY,
+ * so we deliberately do NOT invalidate tracking on a call.  A FUTURE
+ * libstub helper that modifies an incoming arg slot in place would break
+ * this — see the warning in minic/dos/libstub.asm.
+ *
+ * Tracking is per word and reset at each block head (a slot value from a
+ * predecessor block is never assumed).  Any store to a tracked word —
+ * whether an arg store of a different value or any other store — overwrites
+ * the tracked (op,src) and thereby defeats a later spurious match.  Runs at
+ * abi1 time (still SSA: an RTmp source is single-assignment, hence stable
+ * across the block once defined), before isel/spill/rega. */
+static void
+dedup_arg_stores(Fn *fn)
+{
+	Blk *b;
+	Ins *i, *o;
+	int top, w, s, k, redundant;
+	int *tw_op;
+	Ref *tw_src;
+
+	top = fn->arg_slot_top;
+	if (top <= 0)
+		return;
+	tw_op = alloc(top * sizeof tw_op[0]);
+	tw_src = alloc(top * sizeof tw_src[0]);
+
+	for (b = fn->start; b; b = b->link) {
+		for (k = 0; k < top; k++) {
+			tw_op[k] = Onop;  /* no live store tracked for this word */
+			tw_src[k] = R;
+		}
+		o = b->ins;
+		for (i = b->ins; i < &b->ins[b->nins]; i++) {
+			if (isstore(i->op)
+			 && rtype(i->arg[1]) == RSlot
+			 && (s = rsval(i->arg[1])) >= 0 && s < top
+			 && (w = argstore_words(i->op)) > 0
+			 && s + w <= top) {
+				redundant = 1;
+				for (k = 0; k < w; k++)
+					if (tw_op[s+k] != i->op
+					 || !req(tw_src[s+k], i->arg[0])) {
+						redundant = 0;
+						break;
+					}
+				if (redundant)
+					continue;  /* drop the dead re-marshal */
+				for (k = 0; k < w; k++) {
+					tw_op[s+k] = i->op;
+					tw_src[s+k] = i->arg[0];
+				}
+			}
+			*o++ = *i;
+		}
+		b->nins = o - b->ins;
 	}
 }
 
 static void
 selret(Blk *b, Fn *fn)
 {
-	int j, ca;
+	int j, cty;
 	Ref r0;
 	int farret;
-
-	(void)fn;  /* unused */
 
 	j = b->jmp.type;
 	farret = uses_far_code();
@@ -325,13 +413,18 @@ selret(Blk *b, Fn *fn)
 	if (j == Jretw) {
 		/* Word return - copy to AX */
 		emit(Ocopy, Kw, TMP(RAX), r0, R);
-		ca = 1;  /* 1 GP register used for return */
+		cty = 1;  /* 1 GP register used (AX) */
 		b->jmp.type = farret ? Jretfw : Jret0;
 	} else if (j == Jretl) {
-		/* Long return - DX:AX pair */
-		emit(Ocopy, Kw, TMP(RDX), r0, R);  /* High word */
-		emit(Ocopy, Kw, TMP(RAX), r0, R);  /* Low word */
-		ca = 2;  /* 2 GP registers used for return (DX:AX) */
+		/* Always route through Ofarseg/Ofaroff: Ocopy Kw on a Kl source
+		 * extracts only the low word (rega has no register-pair concept
+		 * on 8086), so the fallback path produced `mov dx, [slot+0]` for
+		 * the high half: duplicate low word in DX:AX, segment lost.
+		 * Surfaced 2026-05-23 (j) by fnptrprobe.c via an indirect call
+		 * returning `char *` (Kl) in compact mode. */
+		emit(Ofarseg, Kw, TMP(RDX), r0, R);
+		emit(Ofaroff, Kw, TMP(RAX), r0, R);
+		cty = 2;  /* 2 GP registers used (DX:AX) */
 		b->jmp.type = farret ? Jretfl : Jret0;
 	} else {
 		/* No support for float returns yet - convert to void return */
@@ -339,8 +432,8 @@ selret(Blk *b, Fn *fn)
 		return;
 	}
 
-	/* Tell register allocator that return uses these registers */
-	b->jmp.arg = CALL(ca);
+	/* Encode which registers contain return value */
+	b->jmp.arg = CALL(cty);
 }
 
 void
@@ -349,6 +442,48 @@ i8086_abi(Fn *fn)
 	Blk *b;
 	Ins *i, *i0;
 	int n0, n1, ioff;
+	int max_arg_words;
+
+	/* Pre-pass: compute the maximum arg-region size across all calls
+	 * in this function and reserve that many slots at the bottom of
+	 * the locals frame.  selcall stores args to slots 0..N-1, which
+	 * the prologue's `sub sp, 2*fn->slot` allocates for free.
+	 *
+	 * Slot index 0 maps to [BP - 2*final_fn_slot] = [SP after prologue],
+	 * so the first arg lands exactly where a CALL needs it.  All call
+	 * sites in this function share these slots since only one call is
+	 * live at a time.
+	 */
+	max_arg_words = 0;
+	for (b = fn->start; b; b = b->link) {
+		int call_words = 0;
+		for (i = b->ins; i < &b->ins[b->nins]; i++) {
+			if (isarg(i->op)) {
+				if (req(i->arg[0], R))
+					continue;
+				if (i->cls == Kl) call_words += 2;
+				else if (i->cls == Ks) call_words += 2;
+				else if (i->cls == Kd) call_words += 4;
+				else call_words += 1;
+			} else if (i->op == Ocall) {
+				if (call_words > max_arg_words)
+					max_arg_words = call_words;
+				call_words = 0;
+			}
+		}
+		/* Also handle the last call in the block (no trailing op
+		 * to flush against). */
+		if (call_words > max_arg_words)
+			max_arg_words = call_words;
+	}
+	fn->slot += max_arg_words;
+	/* Record the call-arg slot count so emit can distinguish ABI's
+	 * direct-slot writes (Ostorel %val, SLOT(off) where off lives in
+	 * the call-arg region at the bottom of the frame) from frontend
+	 * spilled-Kl-ptr writes (Ostorel %val, %ptr_spilled_to_slot where
+	 * the slot HOLDS a pointer value).  See [[huge-phase-b-storel-gap]]
+	 * and i8086/emit.c's Ostorel + Oload Kl handlers. */
+	fn->arg_slot_top = max_arg_words;
 
 	/* Lower parameters in the entry block */
 	b = fn->start;
@@ -421,4 +556,7 @@ i8086_abi(Fn *fn)
 		icpy(b->ins, curi, n0);
 		b->nins = n0;
 	}
+
+	/* §2y: drop redundant outgoing-arg re-marshals across adjacent calls. */
+	dedup_arg_stores(fn);
 }

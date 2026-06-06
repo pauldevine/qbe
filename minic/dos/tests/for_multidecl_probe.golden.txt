@@ -1,0 +1,2 @@
+sum=14 count=5
+best=48

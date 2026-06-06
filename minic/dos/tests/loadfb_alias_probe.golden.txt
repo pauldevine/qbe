@@ -1,0 +1,6 @@
+byte_pair 11 22
+byte_quad 33 44 55 66
+short_pair 1111 2222
+word_pair aaaa bbbb
+mixed 77 3333
+same_byte 88 11

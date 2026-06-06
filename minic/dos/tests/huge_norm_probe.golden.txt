@@ -1,0 +1,5 @@
+nocross=17340007 (want 17340007)
+paragraph=10020000 (want 10020000)
+sixtyfourK=20010000 (want 20010000)
+borrow=0fff0000 (want 0fff0000)
+preinc=10010000 (want 10010000)

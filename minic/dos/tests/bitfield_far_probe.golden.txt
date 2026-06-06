@@ -1,0 +1,4 @@
+local_rule_id ok
+local_rmw ok
+heap_bf ok
+pack ok

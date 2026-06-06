@@ -1,0 +1,17 @@
+eq_sym ok
+eq_sym_hi ok
+eq_sym_lo ok
+ne_sym ok
+ne_sym_hi ok
+ltu_sym ok
+ltu_eq ok
+ltu_hi ok
+leu_sym ok
+leu_eq ok
+leu_hi ok
+gtu_sym ok
+gtu_eq ok
+gtu_lo ok
+geu_sym ok
+geu_eq ok
+geu_lo ok

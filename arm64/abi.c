@@ -352,7 +352,7 @@ stkblob(Ref r, Class *c, Fn *fn, Insl **ilp)
 	if (al < 0)
 		al = 0;
 	sz = c->class & Cptr ? c->t->size : c->size;
-	il->i = (Ins){Oalloc+al, Kl, r, {getcon(sz, fn)}};
+	il->i = (Ins){.op=Oalloc+al, .cls=Kl, .to=r, .arg={getcon(sz, fn)}};
 	il->link = *ilp;
 	*ilp = il;
 }
@@ -429,7 +429,7 @@ selcall(Fn *fn, Ins *i0, Ins *i1, Insl **ilp)
 	for (i=i0, c=ca; i<i1; i++, c++) {
 		if ((c->class & Cstk) != 0)
 			continue;
-		if (i->op == Oarg || i->op == Oarge)
+		if (i->op == Oarg || i->op == Oarge || isargbh(i->op))
 			emit(Ocopy, *c->cls, TMP(*c->reg), i->arg[0], R);
 		if (i->op == Oargc)
 			ldregs(c->reg, c->cls, c->nreg, i->arg[1], fn);
@@ -548,7 +548,7 @@ split(Fn *fn, Blk *b)
 	idup(bn, curi, &insb[NIns]-curi);
 	curi = &insb[NIns];
 	bn->visit = ++b->visit;
-	strf(bn->name, "%s.%d", b->name, b->visit);
+	bn->name = strf(PFn, "%s.%d", b->name, b->visit);
 	bn->loop = b->loop;
 	bn->link = b->link;
 	b->link = bn;

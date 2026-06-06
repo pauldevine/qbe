@@ -61,12 +61,25 @@ emitfnlnk(char *n, Lnk *l, FILE *f)
 void
 emitdat(Dat *d, FILE *f)
 {
-	static char *dtoa[] = {
-		[DB] = "\t.byte",
-		[DH] = "\t.short",
-		[DW] = "\t.int",
-		[DL] = "\t.quad"
+	static struct {
+		char decl[8];
+		int64_t mask;
+	} di[] = {
+		[DB] = {"\t.byte", 0xffL},
+		[DH] = {"\t.short", 0xffffL},
+		[DW] = {"\t.int", 0xffffffffL},
+		[DL] = {"\t.quad", -1L},
 	};
+	/* On i8086, IR class `l` is 4 bytes (32-bit long / far pointer),
+	 * not 8 bytes.  Override the DL directive so global struct/array
+	 * initializers lay out at the same width as `sizeof()` reports.
+	 * Stevie's `chars[]` table caught this: each entry has a `char *`
+	 * field, sizeof returns 5, but global init was emitting 9 bytes
+	 * per entry (1 + 8), so `chars[c].ch_size` accessed wrong memory.
+	 * T.wordsz==2 is the i8086 marker; no other target sets word size
+	 * to 2 bytes. */
+	char *dl_dir = (T.wordsz == 2) ? "\t.long" : di[DL].decl;
+	int64_t dl_mask = (T.wordsz == 2) ? 0xffffffffL : di[DL].mask;
 	static int64_t zero;
 	char *p;
 
@@ -109,14 +122,18 @@ emitdat(Dat *d, FILE *f)
 			fprintf(f, "\t.ascii %s\n", d->u.str);
 		}
 		else if (d->isref) {
+			char *dir = (d->type == DL) ? dl_dir : di[d->type].decl;
 			p = d->u.ref.name[0] == '"' ? "" : T.assym;
 			fprintf(f, "%s %s%s%+"PRId64"\n",
-				dtoa[d->type], p, d->u.ref.name,
+				dir, p, d->u.ref.name,
 				d->u.ref.off);
 		}
 		else {
+			char *dir = (d->type == DL) ? dl_dir : di[d->type].decl;
+			int64_t mask = (d->type == DL) ? dl_mask : di[d->type].mask;
 			fprintf(f, "%s %"PRId64"\n",
-				dtoa[d->type], d->u.num);
+				dir,
+				d->u.num & mask);
 		}
 		break;
 	}
@@ -217,8 +234,16 @@ macho_emitfin(FILE *f)
 	static char *sec[3] = {
 		"__TEXT,__literal4,4byte_literals",
 		"__TEXT,__literal8,8byte_literals",
-		".abort \"unreachable\"",
+		"__TEXT,__literal16,16byte_literals",
 	};
+
+	emitfin(f, sec);
+}
+
+void
+pe_emitfin(FILE *f)
+{
+	static char *sec[3] = { ".rodata", ".rodata", ".rodata" };
 
 	emitfin(f, sec);
 }

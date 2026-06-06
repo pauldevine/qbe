@@ -43,11 +43,11 @@ static uint gvntbln;
 static Ins *
 gvndup(Ins *i, int insert)
 {
-	uint idx, n;
+	uint idx;
 	Ins *ii;
 
 	idx = ihash(i) % gvntbln;
-	for (n=1;; n++) {
+	for (;;) {
 		ii = gvntbl[idx];
 		if (!ii)
 			break;
@@ -247,6 +247,10 @@ dedupins(Fn *fn, Blk *b, Ins *i)
 	if (i->op == Onop || pinned(i))
 		return;
 
+	/* when sel instructions are inserted
+	 * before gvn, we may want to optimize
+	 * them here */
+	assert(i->op != Osel0);
 	assert(!req(i->to, R));
 	assoccon(fn, b, i);
 
