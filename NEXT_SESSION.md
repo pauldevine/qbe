@@ -79,6 +79,17 @@ Add focused DOS probes under `minic/dos/examples/` plus golden output under `min
   - `ialpha beta gamma\rsecond line\rthird line\e1Gwdw:q!\r` leaves first line as `alpha gamma`.
   These use `build/repl-victor.sh` to run production Stevie through the real edit loop with redirected input on Victor/MAME.  If manual still fails, verify the exact EXE copied into the image and the exact file/cursor state; the direct `normal()`, stuffed `vgetc()` path, file-loaded self-test, and redirected-input edit loop all stayed bounded.
 
+## 2026-06-06 Codex continuation notes (LPTR workaround reduced)
+- Reduced the provisional Stevie `LPCOPY()`/`LPCOPYP()` workaround layer in `stevie-orig/stevie.h`:
+  - `LPCOPY(d,s)` now expands to normal aggregate assignment: `(d) = (s)`.
+  - `LPCOPYP(d,s)` now expands to normal pointed-to aggregate assignment: `*(d) = *(s)`.
+- This keeps the existing Stevie call sites stable while making them exercise the compiler's struct assignment path again.
+- Validation after the change:
+  - `tools/build-stevie.sh --exe` succeeds, producing `build/stevie-orig/stevie.exe` at 146272 bytes.
+  - `tools/test-dos.sh` passes: `208/208 ok`, including `struct_copy_probe`, `static_lptr_return_probe`, `lptr_range_probe`, `operator_pending_probe`, `grouped_bss_probe`, and the Stevie rebuild/size check.
+  - `make check` passes.
+- Remaining follow-up, if manual MAME still disagrees with scripted runs: verify the exact EXE copied into the boot image and the exact manual file/cursor state.  The workaround reduction did not reproduce the old through-EOF operator bug in the tracked gates.
+
 ## Stevie state to preserve
 Keep the Victor-specific platform changes:
 - `VICTOR9000` terminal/key handling in `dos.c`, `term.h`, `env.h`.

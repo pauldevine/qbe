@@ -89,8 +89,8 @@ struct	lptr {
 typedef	struct line	LINE;
 typedef	struct lptr	LPTR;
 
-#define	LPCOPY(d,s)	((d).linep = (s).linep, (d).index = (s).index)
-#define	LPCOPYP(d,s)	((d)->linep = (s)->linep, (d)->index = (s)->index)
+#define	LPCOPY(d,s)	((d) = (s))
+#define	LPCOPYP(d,s)	(*(d) = *(s))
 
 struct charinfo {
 	char ch_size;
