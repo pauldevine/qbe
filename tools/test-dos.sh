@@ -81,6 +81,10 @@ RUNTIME_TESTS=(
 	# truncates through minic's loadfw/storefw (a deferred follow-up; see
 	# softfloat_probe.c + NEXT_SESSION.md).
 	"minic/dos/examples/softfloat_probe.c:minic/dos/tests/softfloat_probe.golden.txt:medium"
+	"minic/dos/examples/struct_copy_probe.c:minic/dos/tests/struct_copy_probe.golden.txt:medium"
+	"minic/dos/examples/static_lptr_return_probe.c:minic/dos/tests/static_lptr_return_probe.golden.txt:medium"
+	"minic/dos/examples/lptr_range_probe.c:minic/dos/tests/lptr_range_probe.golden.txt:medium"
+	"minic/dos/examples/operator_pending_probe.c:minic/dos/tests/operator_pending_probe.golden.txt:medium"
 	"minic/dos/examples/divreg_probe.c:minic/dos/tests/divreg_probe.golden.txt:medium"
 	"minic/dos/examples/shlconst_probe.c:minic/dos/tests/shlconst_probe.golden.txt:medium"
 	"minic/dos/examples/shlconst_probe.c:minic/dos/tests/shlconst_probe.golden.txt:compact"
@@ -334,6 +338,20 @@ run_runtime_probe() {
 	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
 }
 
+# Runtime regression for OMF target-frame fixups into grouped near data.
+# This needs two translation units: the referenced _BSS globals live in one
+# object, while the data guard that old BSS-relative fixups corrupt lives in
+# another.  The single-source runtime table cannot express that shape.
+run_grouped_bss_probe() {
+	src="$QBE_DIR/minic/dos/examples/grouped_bss_probe.c"
+	def="$QBE_DIR/minic/dos/examples/grouped_bss_def.c"
+	golden="$QBE_DIR/minic/dos/tests/grouped_bss_probe.golden.txt"
+	exe="$QBE_DIR/build/examples/grouped_bss_probe/grouped_bss_probe.exe"
+	"$QBE_DIR/tools/build-example.sh" --model=medium "$src" "$def" >/dev/null
+	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
+	echo "$out" | diff -u "$golden" - >&2
+}
+
 # Compile-time probe for C `volatile` on named locals.  volatile is a codegen
 # property (not runtime-observable in a self-contained program), so this
 # inspects the emitted i8086 asm: volf() must KEEP its volatile loads/stores
@@ -580,6 +598,9 @@ for entry in "${RUNTIME_TESTS[@]}"; do
 	desc="$model runtime ($(basename "$src" .c))"
 	run "$desc" run_runtime_probe "$src" "$golden" "$model"
 done
+
+run "medium runtime (grouped_bss_probe)" \
+	run_grouped_bss_probe
 
 run "volatile asm (named local)" \
 	run_volatile_asm_probe

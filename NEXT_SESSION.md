@@ -1,3 +1,103 @@
+# Next session (§3r — Stevie found real MiniC/QBE correctness bugs; STOP working around them in Stevie and make compiler regression probes first)
+
+## Context
+We ported `stevie-orig` far enough to run on the Victor 9000 under unaltered MS-DOS 3.1:
+- Victor console/keyboard/display path works without IBM BIOS interrupts.
+- CR stripping on read and CRLF writeback now work.
+- Insert mode redraw is performant.
+- Normal-mode arrows, `ESC`, `:q`/`:x`, `x`, `X`, and `3x` are working.
+- `build/stevie-orig/stevie.exe` currently builds and launches.
+
+The current editor bug is **not** a Victor hardware issue:
+- `w` by itself moves word-to-word correctly.
+- `dw`, `de`, and `yw` operate from the cursor position through EOF.
+- Earlier versions reported `yank too big for buffer`; after a direct-copy yank workaround, the same bad range became visible as "to EOF".
+
+This means the word motion endpoint is correct in isolation, but the operator/range path corrupts or misinterprets the `LPTR` range when a pending operator is involved.
+
+## Primary goal
+Use Stevie as the integration test, but fix the compiler/backend/runtime bugs underneath it.  Do **not** keep broadening Stevie source workarounds unless they are platform porting fixes.  Start by creating tiny bug-loud probes, then fix MiniC/QBE/runtime and remove or reduce the Stevie `LPCOPY` workaround layer.
+
+## Highest-priority suspected compiler bugs
+1. **Struct assignment copies only the first word.**
+   Evidence: `struct lptr { LINE *linep; int index; }` assignments like `top = startop`, `*Curschar = *pos`, and `tmp = *a` behaved as if only `linep` was copied and `index` was dropped.  `edit.c` already had a comment/workaround saying `*X = *Filemem` only copies the `linep` pointer.  The temporary `LPCOPY()` field-by-field workaround made `x` and `3x` work but should not be necessary.
+2. **Pointer-to-struct assignment and temp-swap paths.**
+   `pswap(a,b)` originally used:
+   ```c
+   tmp = *a;
+   *a = *b;
+   *b = tmp;
+   ```
+   This is exactly the kind of operation Stevie's operator ranges depend on.  Probe both local struct assignment and `*dst = *src`.
+3. **Pending-operator range handling with small structs.**
+   Since `w` alone works but `dw`/`de`/`yw` span to EOF, build a minimal C probe that saves an `LPTR`-like start position, mutates a current position through a helper, then yanks/copies the range.  This can be independent of Stevie and should expose whether the corruption happens in struct copy, static-return pointers, comparison, or function-call ABI.
+4. **Far-call/runtime ctype was one confirmed non-QBE bug.**
+   `3x` only worked after `_isdigit`/`_isalpha`/`_isspace` in `minic/dos/libstub.asm` were implemented.  Keep that fix, but separate runtime-stub bugs from QBE codegen bugs in the notes/tests.
+
+## Suggested probes
+Add focused DOS probes under `minic/dos/examples/` plus golden output under `minic/dos/tests/`, then wire them into `tools/test-dos.sh`.
+
+1. `struct_copy_probe.c`
+   - `struct P { void *p; int i; };`
+   - Test `b = a`, `*dst = *src`, return/copy through a helper, and swap through a temp.
+   - Golden should prove both pointer and integer fields survive.
+
+2. `lptr_range_probe.c`
+   - Model `LINE { next, prev, char *s, unsigned long num }` and `LPTR { LINE *linep; int index }`.
+   - Save `startop`, move `cur` from word start to next word, then copy/yank only `[startop, cur]`.
+   - Golden should be one word, not the rest of the file.
+
+3. `static_lptr_return_probe.c`
+   - Helper returns `static struct P *`.
+   - Caller copies returned struct into a global/current struct and checks both fields.
+   - This mirrors `fwd_word()`/`end_word()` returning static `LPTR *`.
+
+4. `operator_pending_probe.c`
+   - Simulate `normal('d')` saving `startop`, then `normal('w')` using an already-pending operator and finishing the operation.
+   - Golden should confirm the saved start and moved end positions are distinct and bounded.
+
+## 2026-06-06 Codex continuation notes
+- Added and wired the first regression probes:
+  - `struct_copy_probe.c`
+  - `static_lptr_return_probe.c`
+  - `lptr_range_probe.c`
+  - `operator_pending_probe.c`
+- Result: the simple suspected `LPTR` struct-copy failures do **not** reproduce in isolation.  Under `medium`, local aggregate assignment, `*dst = *src`, struct-return copy, temp-swap, static-return-pointer copy, pending `d` + `w`, and the original iterator-style yank loop all preserve both fields and stay bounded.
+- Also checked the richer `operator_pending_probe` under `compact`; it stays bounded there too.
+- A transient `compact` failure in the first `lptr_range_probe` version came from a static `struct LINE { char *s; ... }` initializer with a string pointer, not LPTR range logic.  The probe now initializes that field at runtime to avoid the known far static-data pointer relocation family.
+- Superseded implication at this point in the investigation: the `dw`/`de`/`yw` through-EOF Stevie bug needed a closer integration reproducer (real Stevie command path, input/stuff buffer, or multi-TU/runtime behavior).  Do not assume "struct assignment copies only the first word" until a bug-loud probe shows it.
+
+## 2026-06-06 Codex continuation notes (root cause found)
+- Root cause: `tools/omf_link.py` handled NASM target-frame 16-bit offset fixups into grouped near data as if the target segment itself were the frame.  Generated i8086 code uses DS for ordinary near `_DATA`/`_BSS` references, and DS is DGROUP, so `_BSS` symbols were patched with BSS-relative offsets instead of DGROUP-relative offsets.
+- Why the earlier probes missed it: they were single-TU and too small.  Stevie's failing path saves `startop` in one object and reads it from others, with enough DATA/BSS layout for the wrong BSS-relative offset to alias live initialized data.  The symptom looked like an LPTR/struct-copy bug because `startop.index` and `startop.linep` were read from the wrong DGROUP address.
+- Fix: `_frame_para()` now uses the containing output group paragraph for target-frame `loc=1`/`loc=5` offset fixups whose target output segment is a DGROUP member, leaving segment/far-pointer fixups unchanged.
+- Regression: `grouped_bss_probe.c` + `grouped_bss_def.c` build as two translation units.  The BSS object is padded so the old BSS-relative offset lands inside `data_guard`; the golden requires the BSS writes to work and the initialized data guard to remain unmodified.
+- Victor/MAME confirmation: a guarded Stevie self-test of `y` then `w` on `alpha beta gamma` now finishes with `same_line=1`, `start_index=0`, and `op=0`.  Do not run this Victor-targeted Stevie under DOSBox.
+- IBM DOSBox confirmation: the apparent DOSBox crash was from launching the macOS DOSBox app inside the Codex sandbox; crash reports show `EXC_CRASH (SIGABRT)` in `HIServices`/`AppKit` during `+[NSApplication sharedApplication]`, before the DOS payload runs.  User-captured log: `/Users/pauldevine/Desktop/dosbox_crash_6_jun_2026.txt`.  Running the DOS gate outside the sandbox completes cleanly: `tools/test-dos.sh` reports `208/208 ok`, including `grouped_bss_probe`.
+- Manual Stevie discrepancy remains: user re-tested in MAME and still saw manual `dw` delete from cursor to EOF.  Current rebuilt `build/stevie-orig/stevie.exe` (146480 bytes) does **not** reproduce that under scripted Victor input:
+  - `ialpha beta gamma\rsecond line\rthird line\e1G0dw:q!\r` leaves first line as `beta gamma`.
+  - `ialpha beta gamma\rsecond line\rthird line\e1Gwdw:q!\r` leaves first line as `alpha gamma`.
+  These use `build/repl-victor.sh` to run production Stevie through the real edit loop with redirected input on Victor/MAME.  If manual still fails, verify the exact EXE copied into the image and the exact file/cursor state; the direct `normal()`, stuffed `vgetc()` path, file-loaded self-test, and redirected-input edit loop all stayed bounded.
+
+## Stevie state to preserve
+Keep the Victor-specific platform changes:
+- `VICTOR9000` terminal/key handling in `dos.c`, `term.h`, `env.h`.
+- INT 21h console I/O and Z-19/Victor escape sequences.
+- CR stripping on read and CRLF on write.
+- Row-only redraw/performance fix.
+- DOS display restoration on exit.
+- Direct `x` implementation is acceptable as an editor behavior simplification, but revisit once compiler struct assignment is fixed.
+
+Treat the broad `LPCOPY()` edits as provisional.  Once struct assignment/codegen is fixed, retest Stevie and decide whether to revert those source-level workarounds or leave only the minimal ones needed for old-compiler compatibility.
+
+## Rebuild / current artifact
+- Current build command: `tools/build-stevie.sh --exe`
+- Current artifact: `build/stevie-orig/stevie.exe`
+- Current marker: `STEVIE - Version 3.69b V9K-20260606-xfix`
+- Current known failure: `dw`, `de`, `yw` affect through EOF even though `w` alone moves correctly.
+
+<details><summary>§3q (prior) — software float on no-8087 target</summary>
+
 # Next session (§3q DONE — WIRED single-precision software float (`Ks`) end-to-end on the no-8087 target.  Native C `float` arithmetic / comparison / int↔float conversion now lower to `call far _sf_*` helpers (the host-validated `softfloat.c`, moved in-tree to `minic/dos/softfloat.c` and compiled-through-minic into a linked `softfloat.obj` via `build-example.sh --softfloat`).  New `softfloat_probe.c` runs through minic→qbe→DOSBox and its add/sub/mul/div/compare/convert results **byte-match the host hardware-float oracle**.  `make check` green; DOS gate **+1** (`softfloat_probe`, medium).  **MEDIUM-ONLY** — far-data float and float-literal-as-double are deferred follow-ups (see below).  COMMITTED.
 
 ## What landed (§3q)
@@ -17,6 +117,8 @@
 - `tools/build-example.sh --softfloat --model=medium minic/dos/examples/softfloat_probe.c` → `tools/run-dos-exe.sh build/examples/softfloat_probe/softfloat_probe.exe` diffs clean against the golden (and the host oracle `cc /tmp/sfgold.c` style).
 - `make check` green; `tools/test-dos.sh` green.
 - Inspect `build/examples/softfloat_probe/softfloat_probe.asm`: arithmetic = `call far _sf_*`, neg = `xor ..., 0x8000`, **no `fld`/`faddp`/`fild` anywhere**.)
+
+</details>
 
 <details><summary>§3p (prior) — fixed the dense-`Kl` miscompiles that blocked soft-float</summary>
 

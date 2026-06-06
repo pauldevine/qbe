@@ -352,8 +352,12 @@ lnexttoscreen()
 	register char	*np = Nextscreen + (Cline_row * Columns);
 	register char	*rp = Realscreen + (Cline_row * Columns);
 	register char	*endline;
+#ifdef VICTOR9000
+	register int	row, col;
+#else
 	register int	row, col;
 	int	gorow = -1, gocol = -1;
+#endif
 
 	if (anyinput()) {
 		need_redraw = TRUE;
@@ -365,6 +369,14 @@ lnexttoscreen()
 	row = Cline_row;
 	col = 0;
 
+#ifdef VICTOR9000
+	for ( ; np < endline ; row++) {
+		windgoto(row, 0);
+		for (col = 0; col < Columns && np < endline ; col++, np++, rp++)
+			outchar(*rp = *np);
+	}
+	flushbuf();
+#else
 	CUROFF;		/* disable cursor */
 
 	for ( ; np < endline ; np++,rp++ ) {
@@ -393,6 +405,8 @@ lnexttoscreen()
 		}
 	}
 	CURON;		/* enable cursor again */
+	flushbuf();	/* commit the diff to the actual screen */
+#endif
 }
 
 static char *

@@ -1006,6 +1006,12 @@ class Linker:
     def _frame_para(self, m: Module, mi: int, fix: Fixup,
                     target_out_idx: int, target_offset_in_out: int) -> int:
         """Return paragraph base of the frame for this fixup."""
+        def containing_group_para(out_idx: int) -> Optional[int]:
+            for og in self.out_groups.values():
+                if out_idx in og.member_out_segs:
+                    return min(self.out_segs[i].para_base for i in og.member_out_segs)
+            return None
+
         method = fix.frame_method
         if method == 0:  # segment
             mod_seg_idx = fix.frame_index
@@ -1021,7 +1027,19 @@ class Linker:
             sym = self.symbols[ext_name]
             out_idx, _ = self.seg_map[(sym.module_idx, sym.seg_idx)]
             return self.out_segs[out_idx].para_base
-        if method in (4, 5):  # preceding-frame / target-frame
+        if method == 5:  # target-frame
+            # NASM commonly emits target-frame fixups for `mov ax, [_data]`.
+            # In the generated instruction there is no segment override, so
+            # the CPU uses DS.  For grouped DATA/BSS, DS is DGROUP, not the
+            # physical target segment.  Use the group frame for 16-bit offset
+            # fixups to DATA/BSS members so the patched displacement is
+            # DGROUP-relative.
+            if fix.location in (1, 5):
+                para = containing_group_para(target_out_idx)
+                if para is not None:
+                    return para
+            return self.out_segs[target_out_idx].para_base
+        if method == 4:  # preceding-frame
             return self.out_segs[target_out_idx].para_base
         die('unsupported frame method %d' % method)
         return 0

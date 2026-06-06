@@ -159,6 +159,15 @@ edit()
 			opencmd(FORWARD, TRUE);		/* open a new line */
 			break;
 
+		case K_UARROW:
+		case K_DARROW:
+		case K_LARROW:
+		case K_RARROW:
+		case K_HOME:
+		case K_INSERT:
+			beep();
+			break;
+
 		default:
 			did_ai = FALSE;
 			insertchar(c);

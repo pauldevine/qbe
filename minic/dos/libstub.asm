@@ -1112,23 +1112,52 @@ _putchar:
     push bp
     mov bp, sp
     mov ax, [bp+4]
-    push bx
-    mov ah, 0x0E
-    xor bx, bx
-    int 0x10
-    pop bx
+    mov dl, al
+    mov ah, 0x02
+    int 0x21
     mov ax, [bp+4]
     pop bp
     ret
 
 global _isalpha
 _isalpha:
-    mov ax, 0
+    push bp
+    mov bp, sp
+    mov ax, [bp+4]
+    and ax, 0FFh
+    cmp ax, 'A'
+    jb .no
+    cmp ax, 'Z'
+    jbe .yes
+    cmp ax, 'a'
+    jb .no
+    cmp ax, 'z'
+    jbe .yes
+.no:
+    xor ax, ax
+    jmp .done
+.yes:
+    mov ax, 1
+.done:
+    pop bp
     ret
 
 global _isdigit
 _isdigit:
-    mov ax, 0
+    push bp
+    mov bp, sp
+    mov ax, [bp+4]
+    and ax, 0FFh
+    cmp ax, '0'
+    jb .no
+    cmp ax, '9'
+    ja .no
+    mov ax, 1
+    jmp .done
+.no:
+    xor ax, ax
+.done:
+    pop bp
     ret
 
 global _toupper
@@ -1136,6 +1165,12 @@ _toupper:
     push bp
     mov bp, sp
     mov ax, [bp+4]
+    cmp ax, 'a'
+    jb .done
+    cmp ax, 'z'
+    ja .done
+    sub ax, 20h
+.done:
     pop bp
     ret
 
@@ -1144,6 +1179,12 @@ _tolower:
     push bp
     mov bp, sp
     mov ax, [bp+4]
+    cmp ax, 'A'
+    jb .done
+    cmp ax, 'Z'
+    ja .done
+    add ax, 20h
+.done:
     pop bp
     ret
 
@@ -1165,7 +1206,23 @@ _fgets:
 
 global _isspace
 _isspace:
-    mov ax, 0
+    push bp
+    mov bp, sp
+    mov ax, [bp+4]
+    and ax, 0FFh
+    cmp ax, ' '
+    je .yes
+    cmp ax, 9
+    jb .no
+    cmp ax, 13
+    ja .no
+.yes:
+    mov ax, 1
+    jmp .done
+.no:
+    xor ax, ax
+.done:
+    pop bp
     ret
 
 global _getenv

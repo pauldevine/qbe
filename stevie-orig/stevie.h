@@ -89,6 +89,9 @@ struct	lptr {
 typedef	struct line	LINE;
 typedef	struct lptr	LPTR;
 
+#define	LPCOPY(d,s)	((d).linep = (s).linep, (d).index = (s).index)
+#define	LPCOPYP(d,s)	((d)->linep = (s)->linep, (d)->index = (s)->index)
+
 struct charinfo {
 	char ch_size;
 	char *ch_str;
@@ -218,6 +221,7 @@ void	dosub(), doglob();
 bool_t	searchc(), crepsearch(), findfunc(), dosearch(), repsearch();
 LPTR	*showmatch();
 LPTR	*fwd_word(), *bck_word(), *end_word();
+bool_t	mfwd_word(), mbck_word(), mend_word();
 
 /*
  * tagcmd.c

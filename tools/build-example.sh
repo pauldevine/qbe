@@ -1,44 +1,46 @@
 #!/bin/bash
-# Build a single DOS example .EXE from minic/dos/examples/ (or any path).
+# Build a DOS example .EXE from minic/dos/examples/ (or any path).
 # Modeled on tools/build-int86x-probe.sh, parameterized by source file.
 #
-# Usage: tools/build-example.sh path/to/source.c
+# Usage: tools/build-example.sh path/to/source.c [path/to/extra.c ...]
 # Output: build/examples/<name>/<name>.exe
 
 set -eu
 
 MODEL="medium"
 SOFTFLOAT=0
-SRC=""
+SOURCES=()
 for arg in "$@"; do
 	case "$arg" in
 		--model=*) MODEL="${arg#--model=}" ;;
 		--softfloat) SOFTFLOAT=1 ;;
 		-h|--help)
-			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] [--softfloat] <source.c>" >&2
+			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] [--softfloat] <source.c> [extra.c ...]" >&2
 			exit 0 ;;
 		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
-		*)
-			if [ -z "$SRC" ]; then SRC="$arg"
-			else echo "$0: extra argument: $arg" >&2; exit 2
-			fi ;;
+		*) SOURCES+=("$arg") ;;
 	esac
 done
 
-if [ -z "$SRC" ]; then
-	echo "usage: $0 [--model=<m>] <source.c>" >&2
+if [ "${#SOURCES[@]}" -eq 0 ]; then
+	echo "usage: $0 [--model=<m>] <source.c> [extra.c ...]" >&2
 	exit 2
 fi
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-if [ ! -f "$SRC" ]; then
-	SRC="$QBE_DIR/$SRC"
-fi
-if [ ! -f "$SRC" ]; then
-	echo "$0: cannot find source file" >&2
-	exit 2
-fi
+for i in "${!SOURCES[@]}"; do
+	src="${SOURCES[$i]}"
+	if [ ! -f "$src" ]; then
+		src="$QBE_DIR/$src"
+	fi
+	if [ ! -f "$src" ]; then
+		echo "$0: cannot find source file: ${SOURCES[$i]}" >&2
+		exit 2
+	fi
+	SOURCES[$i]="$src"
+done
 
+SRC="${SOURCES[0]}"
 base="$(basename "$SRC" .c)"
 OUT_DIR="$QBE_DIR/build/examples/$base"
 MINIC="$QBE_DIR/minic/minic"
@@ -165,15 +167,21 @@ nasm -w-label-redef-late -f obj "$OUT_DIR/$unit_base.omf.asm" \
 	-o "$OUT_DIR/$unit_base.obj" 2>>"$ERR"
 }
 
-# Compile the main translation unit.
-compile_unit "$SRC" "$base"
+# Compile the requested translation units.  The first source controls the
+# output directory and executable basename; every source contributes one .obj.
+OBJ_FILES=()
+for unit_src in "${SOURCES[@]}"; do
+	unit_base="$(basename "$unit_src" .c)"
+	compile_unit "$unit_src" "$unit_base"
+	OBJ_FILES+=("$OUT_DIR/$unit_base.obj")
+done
 
 # Optionally compile the soft-float helper library (single-precision Ks ops are
 # lowered by the i8086 backend to `call far _sf_*`; this provides those symbols).
-SOFTFLOAT_OBJ=""
+LINK_OBJS=("${OBJ_FILES[@]}")
 if [ "$SOFTFLOAT" = "1" ]; then
 	compile_unit "$DOS_DIR/softfloat.c" softfloat
-	SOFTFLOAT_OBJ="$OUT_DIR/softfloat.obj"
+	LINK_OBJS+=("$OUT_DIR/softfloat.obj")
 fi
 
 # Stage 5: crt0_exe.obj and libstub_exe.obj
@@ -195,8 +203,7 @@ nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR"
 	--entry _start \
 	--stack-size 8192 \
 	"$OUT_DIR/crt0_exe.obj" \
-	"$OUT_DIR/$base.obj" \
-	$SOFTFLOAT_OBJ \
+	"${LINK_OBJS[@]}" \
 	"$OUT_DIR/libstub_exe.obj" 2>>"$ERR"
 
 echo "  OK: $OUT_DIR/$base.exe ($(wc -c <"$OUT_DIR/$base.exe") bytes)"

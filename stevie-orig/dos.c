@@ -29,6 +29,16 @@ void bios_t_ed();
 void bios_t_el();
 #endif
 
+#ifdef VICTOR9000
+static	int	victor_getch();
+static	int	victor_kbhit();
+static	int	victor_decode_esc();
+static	void	victor_ungetch();
+static	void	victor_program_key();
+static	void	victor_program_editor_keys();
+static	void	victor_putch();
+#endif
+
 enum hostval_e {hIBMPC, hTIPRO};
 typedef enum hostval_e hostval;
 static	hostval	host_type   = 0;	/* Gets host computer type */
@@ -73,6 +83,14 @@ inchar()
 
 		flushbuf();	/* flush any pending output */
 
+#ifdef VICTOR9000
+		c = victor_getch();
+		if (c == 0x1e)
+			return ESC;
+		if (c == ESC)
+			return victor_decode_esc();
+		return c;
+#else
 		switch (c = getch()) {
 		case 0x1e:
 			return K_CCIRCM;
@@ -166,8 +184,126 @@ inchar()
 		default:
 			return c;
 		}
+#endif
 	}
 }
+
+#ifdef VICTOR9000
+static int	victor_pushback[2];
+static int	victor_pushcount = 0;
+
+static int
+victor_getch()
+{
+	union REGS r;
+
+	if (victor_pushcount > 0)
+		return victor_pushback[--victor_pushcount];
+
+	r.x.ax = 0x0700;	/* INT 21h AH=07h: raw console input */
+	intdos(&r, &r);
+	return r.h.al & 0xff;
+}
+
+static int
+victor_kbhit()
+{
+	union REGS r;
+
+	r.x.ax = 0x0b00;	/* INT 21h AH=0Bh: console input status */
+	intdos(&r, &r);
+	return r.h.al != 0;
+}
+
+static int
+victor_decode_esc()
+{
+	int	c1;
+	int	c2;
+
+	if (!victor_kbhit())
+		return ESC;
+
+	c1 = victor_getch();
+	switch (c1) {
+	case 'A':
+		return K_UARROW;
+	case 'B':
+		return K_DARROW;
+	case 'C':
+		return K_RARROW;
+	case 'D':
+		return K_LARROW;
+	}
+
+	if (c1 == 'x' || c1 == 'y') {
+		if (!victor_kbhit()) {
+			victor_ungetch(c1);
+			return ESC;
+		}
+		c2 = victor_getch();
+		switch (c2) {
+		case 'A':
+			return K_UARROW;
+		case 'B':
+			return K_DARROW;
+		case 'C':
+			return K_RARROW;
+		case 'D':
+			return K_LARROW;
+		}
+		victor_ungetch(c2);
+	}
+
+	victor_ungetch(c1);
+	return ESC;
+}
+
+static void
+victor_ungetch(c)
+int	c;
+{
+	if (victor_pushcount < 2)
+		victor_pushback[victor_pushcount++] = c;
+}
+
+static void
+victor_putch(c)
+char	c;
+{
+	union REGS r;
+
+	r.h.ah = 0x02;		/* INT 21h AH=02h: console output */
+	r.h.dl = c;
+	intdos(&r, &r);
+}
+
+static void
+victor_program_key(mode, key, value)
+int	mode;
+int	key;
+int	value;
+{
+	outchar(ESC);
+	outchar('4');
+	outchar(mode);
+	outchar(key);
+	outchar(value);
+}
+
+static void
+victor_program_editor_keys()
+{
+	/*
+	 * The stock Victor key table maps the physical ESC key to local
+	 * display commands: ESC p (reverse video) and Shift-ESC to ESC q.
+	 * Reprogram both forms to deliver a literal ESC to the application.
+	 */
+	victor_program_key('1', 53, ESC);
+	victor_program_key('2', 53, ESC);
+}
+#endif
+
 
 
 static	int	bpos = 0;
@@ -307,8 +443,18 @@ static	char	outbuf[BSIZE];
 void
 flushbuf()
 {
+#ifdef VICTOR9000
+	char	*bptr;
+	int	n;
+
+	bptr = outbuf;
+	n = bpos;
+	while (n-- > 0)
+		victor_putch(*bptr++);
+#else
 	if (bpos != 0)
 		write(1, outbuf, bpos);
+#endif
 	bpos = 0;
 }
 
@@ -445,9 +591,16 @@ static	char	schar;		/* save original switch character */
 void
 windinit()
 {
+#ifndef VICTOR9000
 	union	REGS	regs;
 /*	struct	SREGS	sregs; never used */
+#endif
 
+#ifdef VICTOR9000
+	host_type = hIBMPC;
+	Columns = 80;
+	P(P_CO) = bgn_color = 0x07;
+#else
 	/* The "SYSROM..." string is a signature in the TI Pro's ROM which
 	 * which we can look for to determine whether or not we're running
 	 * on a TI Pro.  If we don't find it at F400:800D,
@@ -510,14 +663,21 @@ windinit()
 		Columns = 80;
 		break;
 	}
+#endif
 
 	P(P_LI) = Rows = 25;
+
+#ifdef VICTOR9000
+	outstr("\033x1");	/* enable Victor status line 25 */
+	victor_program_editor_keys();
+	flushbuf();
+#endif
 
 	schar = getswitch();
 	setswitch('/');
 
 	signal(SIGINT, sig);
-#ifndef BIOS
+#if !defined(BIOS) && !defined(VICTOR9000)
 	setraw (1);
 #endif
 }
@@ -527,13 +687,20 @@ windexit(r)
 int r;
 {
 
+#ifndef VICTOR9000
 	union	REGS	regs;
+#endif
 
 	quitting_now = 1;
 
 	/* Restore original color */
 	setcolor (bgn_color);
 
+#ifdef VICTOR9000
+	outstr("\033q\033y5\033H\033E\033y1\033H");
+#endif
+
+#ifndef VICTOR9000
 	if (host_type == hIBMPC) {
 		/* If we've changed any of the setup, reset the mode.
 		 * Otherwise, leave stuff on the screen.
@@ -543,10 +710,11 @@ int r;
 		if (bgn_mode != regs.h.al)
 			set_mode (bgn_mode);
 	}
+#endif
 
 	flushbuf();
 	setswitch(schar);
-#ifndef BIOS
+#if !defined(BIOS) && !defined(VICTOR9000)
 	setraw(0);
 #endif
 	exit(r);
@@ -615,6 +783,12 @@ register int	r, c;
 
 #else		/* Not BIOS */
 
+#ifdef VICTOR9000
+	outbuf[bpos++] = '\033';
+	outbuf[bpos++] = 'Y';
+	outbuf[bpos++] = r + 0x20;
+	outbuf[bpos++] = c + 0x20;
+#else
 	r += 1;
 	c += 1;
 
@@ -634,6 +808,7 @@ register int	r, c;
 		outbuf[bpos++] = c/10 + '0';
 	outbuf[bpos++] = c%10 + '0';
 	outbuf[bpos++] = 'H';
+#endif
 
 #endif
 }
@@ -767,6 +942,13 @@ void setcolor (color)
 #ifdef BIOS
 	P(P_CO) = host_type == hIBMPC ? color : ((color & 0x17) | 0x08);
 #else
+#ifdef VICTOR9000
+	if (color & 0x70)
+		outstr("\033p");
+	else
+		outstr("\033q");
+	P(P_CO) = color;
+#else
 	unsigned char work;
 
 	/* Send the ANSI define-attribute sequence */
@@ -806,6 +988,7 @@ void setcolor (color)
 	/*  The 'm' suffix means "set graphic rendition"  */
 	outone('m');
 	P(P_CO) = color;
+#endif
 
 #endif		/* Not BIOS */
 
@@ -912,14 +1095,19 @@ int	lines;
 
 void set_25 ()
 {
+#ifndef VICTOR9000
 	send_setmode (bgn_mode);
+#endif
 }
 
 void set_43 ()
 {
+#ifndef VICTOR9000
 	send_setmode (43);
+#endif
 }
 
+#ifndef VICTOR9000
 void send_setmode (m)
 int m;
 {
@@ -932,6 +1120,7 @@ int m;
 	outone( m%10 + '0' );
 	outone ('h');
 }
+#endif
 
 #endif		/* Not BIOS */
 

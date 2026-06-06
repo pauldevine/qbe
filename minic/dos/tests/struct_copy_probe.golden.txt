@@ -1,0 +1,5 @@
+local=1,1111
+ptrcopy=1,1111
+retcopy=1,3333
+swap_a=1,2222
+swap_b=1,1111

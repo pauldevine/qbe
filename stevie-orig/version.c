@@ -309,5 +309,5 @@ static	char	RCSid[] =
  *
  */
 
-char	*Version = "STEVIE - Version 3.69b";
+char	*Version = "STEVIE - Version 3.69b V9K-20260606-xfix";
 

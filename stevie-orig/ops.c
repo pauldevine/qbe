@@ -21,8 +21,8 @@ int	num;
 	int	nlines;
 	char	opchar;
 
-	top = startop;
-	bot = *Curschar;
+	LPCOPY(top, startop);
+	LPCOPY(bot, *Curschar);
 
 	if (lt(&bot, &top))
 		pswap(&top, &bot);
@@ -30,7 +30,7 @@ int	num;
 	u_save(top.linep->prev, bot.linep->next);
 
 	nlines = cntllines(&top, &bot);
-	*Curschar = top;
+	LPCOPY(*Curschar, top);
 	tabinout((op == LSHIFT), nlines);
 
 	/* construct Redo buff */
@@ -43,7 +43,7 @@ int	num;
 	/*
 	 * The cursor position afterward is the prior of the two positions.
 	 */
-	*Curschar = top;
+	LPCOPY(*Curschar, top);
 
 	/*
 	 * If we were on the last char of a line that got shifted left,
@@ -67,9 +67,11 @@ char	c1, c2;
 int	num;
 {
 	LPTR	top, bot;
+	LPTR	*pp;
 	int	nlines;
 	int	botindex;
 	register int	n;
+
 
 	/*
 	 * Do a yank of whatever we're about to delete. If there's too much
@@ -81,13 +83,13 @@ int	num;
 		msg("yank buffer exceeded: press <y> to delete anyway");
 		if (vgetc() != 'y') {
 			msg("delete aborted");
-			*Curschar = startop;
+			LPCOPY(*Curschar, startop);
 			return;
 		}
 	}
 
-	top = startop;
-	bot = *Curschar;
+	LPCOPY(top, startop);
+	LPCOPY(bot, *Curschar);
 
 	if (lt(&bot, &top))
 		pswap(&top, &bot);
@@ -97,7 +99,7 @@ int	num;
 	clrmark (top.linep);
 
 	nlines = cntllines(&top, &bot);
-	*Curschar = top;
+	LPCOPY(*Curschar, top);
 	cursupdate();
 
 	if (mtype == MLINE) {
@@ -110,26 +112,27 @@ int	num;
 				dec(&bot);
 		}
 
-		if (top.linep == bot.linep) {		/* del. within line */
-			n = bot.index - top.index + 1;
-			while (n--)
-				if (!delchar(TRUE))
-					break;
+	if (top.linep == bot.linep) {		/* del. within line */
+		n = bot.index - top.index + 1;
+		while (n--)
+			if (!delchar(TRUE))
+				break;
 		} else {				/* del. between lines */
 			n = Curschar->index;
 			while (Curschar->index >= n)
 				if (!delchar(TRUE))
 					break;
 
-			top = *Curschar;
-			*Curschar = *nextline(Curschar);
+			LPCOPY(top, *Curschar);
+			pp = nextline(Curschar);
+			LPCOPY(*Curschar, *pp);
 			delline(nlines-2, TRUE);
 			Curschar->index = 0;
 			n = bot.index + 1;
 			while (n-- && botindex)
 				if (!delchar(TRUE))
 					break;
-			*Curschar = top;
+			LPCOPY(*Curschar, top);
 			(void) dojoin(FALSE);
 			oneright();	/* we got bumped left up above */
 		}
@@ -184,8 +187,8 @@ int	num;
 	LPTR	top, bot;
 	int	nlines;
 
-	top = startop;
-	bot = *Curschar;
+	LPCOPY(top, startop);
+	LPCOPY(bot, *Curschar);
 
 	buff = getcmdln('!');
 
@@ -213,7 +216,7 @@ int	num;
 	u_save(top.linep->prev, bot.linep->next);
 
 	nlines = cntllines(&top, &bot);
-	*Curschar = top;
+	LPCOPY(*Curschar, top);
 	cursupdate();
 
 	/*
@@ -289,8 +292,8 @@ int	num;
 	else
 		sprintf(Redobuff, "~%c%c", c1, c2);
 
-	top = startop;
-	bot = *Curschar;
+	LPCOPY(top, startop);
+	LPCOPY(bot, *Curschar);
 
 	if (lt(&bot, &top))
 		pswap(&top, &bot);
@@ -322,7 +325,7 @@ int	num;
 			CHANGED;
 		}
 	}
-	*Curschar = startop;
+	LPCOPY(*Curschar, startop);
 	updatescreen();
 }
 #endif
@@ -340,8 +343,8 @@ int	num;
 	bool_t	at_eof;		/* changing through the end of file */
 	LPTR	top, bot;
 
-	top = startop;
-	bot = *Curschar;
+	LPCOPY(top, startop);
+	LPCOPY(bot, *Curschar);
 
 	if (lt(&bot, &top))
 		pswap(&top, &bot);
@@ -381,16 +384,31 @@ int	num;
 static	char	ybuf[YBSIZE];
 static	int	ybtype = MBAD;
 
+static char *
+yput(yptr, ybend, c)
+char	*yptr, *ybend;
+int	c;
+{
+	if (yptr >= ybend)
+		return NULL;
+
+	*yptr++ = c;
+	return yptr;
+}
+
 bool_t
 doyank()
 {
 	LPTR	top, bot;
+	LPTR	*pp;
+	LINE	*lp;
+	char	*s;
 	char	*yptr = ybuf;
 	char	*ybend = &ybuf[YBSIZE-1];
-	int	nlines;
+	int	nlines, i;
 
-	top = startop;
-	bot = *Curschar;
+	LPCOPY(top, startop);
+	LPCOPY(bot, *Curschar);
 
 	if (lt(&bot, &top))
 		pswap(&top, &bot);
@@ -410,37 +428,95 @@ doyank()
 		if (dec(&bot) == -1) {
 			ybuf[0] = NUL;
 			if (operator == YANK)
-				*Curschar = startop;
+				LPCOPY(*Curschar, startop);
 			return TRUE;
 		}
 	} else {
 		if (!mincl) {
 			if (bot.index)
 				bot.index--;
-			else		/* already first column */
-				bot = *( prevchar (&bot));
+			else {		/* already first column */
+				pp = prevchar(&bot);
+				LPCOPY(bot, *pp);
+			}
 		}
+
+		if (top.linep == bot.linep) {
+			s = top.linep->s;
+			for (i = top.index; i <= bot.index; i++) {
+				yptr = yput(yptr, ybend,
+					(s[i] != NUL) ? s[i] : NL);
+				if (yptr == NULL)
+					goto too_big;
+				if (s[i] == NUL)
+					break;
+			}
+		} else {
+			s = top.linep->s;
+			for (i = top.index; ; i++) {
+				if (s[i] == NUL) {
+					yptr = yput(yptr, ybend, NL);
+					if (yptr == NULL)
+						goto too_big;
+					break;
+				}
+				yptr = yput(yptr, ybend, s[i]);
+				if (yptr == NULL)
+					goto too_big;
+			}
+
+			for (lp = top.linep->next; lp != bot.linep; lp = lp->next) {
+				s = lp->s;
+				for (i = 0; ; i++) {
+					if (s[i] == NUL) {
+						yptr = yput(yptr, ybend, NL);
+						if (yptr == NULL)
+							goto too_big;
+						break;
+					}
+					yptr = yput(yptr, ybend, s[i]);
+					if (yptr == NULL)
+						goto too_big;
+				}
+			}
+
+			s = bot.linep->s;
+			for (i = 0; i <= bot.index; i++) {
+				yptr = yput(yptr, ybend,
+					(s[i] != NUL) ? s[i] : NL);
+				if (yptr == NULL)
+					goto too_big;
+				if (s[i] == NUL)
+					break;
+			}
+		}
+
+		goto yank_done;
 	}
 
 	for (; ltoreq(&top, &bot) ;inc(&top)) {
 		*yptr = (gchar(&top) != NUL) ? gchar(&top) : NL;
 		if (++yptr >= ybend) {
-			msg("yank too big for buffer");
-			ybtype = MBAD;
-			return FALSE;
+			goto too_big;
 		}
 	}
 
+yank_done:
 	*yptr = NUL;
 
 	if (operator == YANK) {	/* restore Curschar if really doing yank */
-		*Curschar = startop;
+		LPCOPY(*Curschar, startop);
 
 		if (nlines > P(P_RP))
 			smsg("%d lines yanked", nlines);
 	}
 
 	return TRUE;
+
+too_big:
+	msg("yank too big for buffer");
+	ybtype = MBAD;
+	return FALSE;
 }
 
 /*
@@ -553,7 +629,7 @@ int	startln;	/* if set, insert point really at start of line */
 {
 	register char	*p, c;
 
-	*Insstart = *Curschar;
+	LPCOPY(*Insstart, *Curschar);
 	if (startln)
 		Insstart->index = 0;
 	Ninsert = 0;
@@ -594,7 +670,7 @@ int	num;
 		}
 		if ( ntodo > 0 ) {
 			if ((p = nextline(Curschar)) != NULL)
-				*Curschar = *p;
+				LPCOPY(*Curschar, *p);
 			else
 				break;
 		}

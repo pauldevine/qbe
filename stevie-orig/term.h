@@ -109,6 +109,21 @@ extern char *T_CM;		/* cursor motion string */
  * console driver. The standard "ansi.sys" driver doesn't support
  * sequences for insert/delete line.
  */
+#ifdef VICTOR9000
+/*
+ * Stock Victor 9000 MS-DOS 3.1 CO.PLM is a Z-19 emulator, not an IBM
+ * PC ANSI/NANSI console.  Cursor addressing is ESC Y row+0x20 col+0x20;
+ * windgoto() emits that directly in dos.c.
+ */
+#define	T_EL	"\033K"		/* erase to end of line */
+#define	T_IL	"\033L"		/* insert line */
+#define	T_DL	"\033M"		/* delete line */
+#define	T_ED	"\033E"		/* clear screen and home cursor */
+#define	T_SC	"\033j"		/* save cursor position */
+#define	T_RC	"\033k"		/* restore cursor position */
+#define	T_CI	""		/* avoid per-line cursor mode changes */
+#define	T_CV	""
+#else
 #define	T_EL	"\033[K"	/* erase the entire current line */
 #define	T_IL	"\033[L"	/* insert line (requires nansi.sys driver) */
 #define	T_DL	"\033[M"	/* delete line (requires nansi.sys driver) */
@@ -117,6 +132,7 @@ extern char *T_CM;		/* cursor motion string */
 #define	T_RC	"\033[u"	/* restore the cursor position */
 #define	T_CI	""		/* invisible cursor (very optional) */
 #define	T_CV	""		/* visible cursor (very optional) */
+#endif
 #endif
 
 #endif
