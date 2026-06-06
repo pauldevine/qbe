@@ -363,6 +363,16 @@ cheap(Ins *i)
 
 	if (KBASE(i->cls) != 0)
 		return 0;
+	/* On i8086, Kl (32-bit) temps are forced slot-resident (see
+	 * spill.c force_kl_slot).  Sinking a cheap Kl op to its point of
+	 * use lands its slot-write def in the SAME block as a jnz that
+	 * consumes it, while spill then treats the value's register
+	 * incarnation as live-in and inserts the reload (R1 = copy SLOT)
+	 * in the PREDECESSOR edges — reading the slot before the in-block
+	 * def has written it.  Sinking is a pure register-pressure
+	 * optimization, so simply don't sink Kl ops on i8086. */
+	if (i->cls == Kl && strcmp(T.name, "i8086") == 0)
+		return 0;
 	switch (i->op) {
 	case Oneg:
 	case Oadd:

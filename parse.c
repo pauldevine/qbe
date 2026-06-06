@@ -1462,8 +1462,12 @@ printfn(Fn *fn, FILE *f)
 		case Jrets:
 		case Jretd:
 		case Jretc:
+		case Jretfw:
+		case Jretfl:
+		case Jretf0:
 			fprintf(f, "\t%s", jtoa[b->jmp.type]);
-			if (b->jmp.type != Jret0 || !req(b->jmp.arg, R)) {
+			if ((b->jmp.type != Jret0 && b->jmp.type != Jretf0)
+			    || !req(b->jmp.arg, R)) {
 				fprintf(f, " ");
 				printref(b->jmp.arg, fn, f);
 			}

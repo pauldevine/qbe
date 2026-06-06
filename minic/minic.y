@@ -2994,25 +2994,65 @@ expr(Node *n)
 		fprintf(of, "@l%d\n", l);
 		s0 = expr(n->r->l);
 		fprintf(of, "\tjmp @l%d\n", l+2);
-		fprintf(of, "@l%d\n", l+2);
-		fprintf(of, "\tjmp @l%d\n", l+4);
 		/* False branch */
 		fprintf(of, "@l%d\n", l+1);
 		s1 = expr(n->r->r);
 		fprintf(of, "\tjmp @l%d\n", l+3);
-		fprintf(of, "@l%d\n", l+3);
-		fprintf(of, "\tjmp @l%d\n", l+4);
-		/* Merge */
-		fprintf(of, "@l%d\n", l+4);
-		if (s0.ctyp != s1.ctyp) {
-			if (s0.ctyp == LNG && s1.ctyp == INT)
+		/* Usual arithmetic conversions of the two arms.  The phi (and
+		 * therefore BOTH arms) must have the IL width of the WIDER arm,
+		 * else the wider value is truncated through the phi.  The old
+		 * code only recognised the exact signed INT/LNG pair, so
+		 * `cond ? 0 : (U32)x` (an `unsigned long` = LNG|UNSIGNED arm,
+		 * which is not == LNG) defaulted to the narrow INT arm and emitted
+		 * a `=w` phi that dropped the high word of the 32-bit arm.  Now
+		 * any 4-byte ('l') arm forces an 'l' phi and the 2-byte ('w') arm
+		 * is sign/zero-extended (per its own signedness) in its trailer
+		 * block, where referencing the arm value is still SSA-dominated. */
+		{
+			char w0 = irtyp_ret(s0.ctyp);
+			char w1 = irtyp_ret(s1.ctyp);
+			int widen0 = 0, widen1 = 0;
+			if (s0.ctyp == s1.ctyp)
+				sr.ctyp = s0.ctyp;
+			else if (w0 == 'l' && w1 == 'w') {
+				sr.ctyp = s0.ctyp; widen1 = 1;
+			} else if (w1 == 'l' && w0 == 'w') {
+				sr.ctyp = s1.ctyp; widen0 = 1;
+			} else if (s0.ctyp == LNG && s1.ctyp == INT)
 				sr.ctyp = LNG;
 			else if (s0.ctyp == INT && s1.ctyp == LNG)
 				sr.ctyp = LNG;
 			else
 				sr.ctyp = s0.ctyp;
-		} else
-			sr.ctyp = s0.ctyp;
+			/* Trailer-true: predecessor of the merge for the true arm. */
+			fprintf(of, "@l%d\n", l+2);
+			if (widen0) {
+				Symb e;
+				e.t = Tmp; e.u.n = tmp++; e.ctyp = sr.ctyp;
+				fprintf(of, "\t");
+				psymb(e);
+				fprintf(of, " =l %s ", ISUNSIGNED(s0.ctyp) ? "extuw" : "extsw");
+				psymb(s0);
+				fprintf(of, "\n");
+				s0 = e;
+			}
+			fprintf(of, "\tjmp @l%d\n", l+4);
+			/* Trailer-false. */
+			fprintf(of, "@l%d\n", l+3);
+			if (widen1) {
+				Symb e;
+				e.t = Tmp; e.u.n = tmp++; e.ctyp = sr.ctyp;
+				fprintf(of, "\t");
+				psymb(e);
+				fprintf(of, " =l %s ", ISUNSIGNED(s1.ctyp) ? "extuw" : "extsw");
+				psymb(s1);
+				fprintf(of, "\n");
+				s1 = e;
+			}
+			fprintf(of, "\tjmp @l%d\n", l+4);
+		}
+		/* Merge */
+		fprintf(of, "@l%d\n", l+4);
 		fprintf(of, "\t");
 		psymb(sr);
 		fprintf(of, " =%c phi @l%d ", irtyp_ret(sr.ctyp), l+2);

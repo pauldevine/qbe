@@ -517,6 +517,46 @@ kl_unstage_arg(ArgStage s, FILE *f)
 	if (s.pushed) fprintf(f, "\tpop %s\n", s.scratch_reg);
 }
 
+/* Helpers for the Kl (32-bit) Omul handler's 32x32->32 multiply.
+ * The 8086 only has a 16x16->32 mul, so a 32-bit product's low 32 bits
+ * are formed from three 16-bit partials:
+ *   result = a_lo*b_lo + ((a_lo*b_hi + a_hi*b_lo) << 16)   (mod 2^32)
+ * Unsigned `mul` is used for every partial: the low 32 bits of a*b are
+ * identical for signed and unsigned operands, so summing unsigned
+ * partials over the FULL operand words is correct regardless of whether
+ * the operands were sign- or zero-extended.  (The old handler did a
+ * single 16x16 `imul` of the low words, which corrupted the high result
+ * word for a zero-extended operand whose low word had bit 15 set — e.g.
+ * (U32)0xCCCD * x — because imul sign-extended it.)
+ * Operands are RSlot or RCon only (spill.c force_kl_slot evicts every Kl
+ * temp to a slot, so an RTmp Kl operand cannot occur). */
+static void
+klmul_movax(Ref r, int hi, Fn *fn, FILE *f)
+{
+	int64_t v;
+	if (rtype(r) == RSlot)
+		fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r, fn) + (hi ? 2 : 0));
+	else if (rtype(r) == RCon) {
+		v = fn->con[r.val].bits.i;
+		fprintf(f, "\tmov ax, %d\n", (int)((hi ? (v >> 16) : v) & 0xFFFF));
+	} else
+		die("i8086: Omul Kl operand is not slot/const");
+}
+
+static void
+klmul_byword(Ref r, int hi, Fn *fn, FILE *f)
+{
+	int64_t v;
+	if (rtype(r) == RSlot)
+		fprintf(f, "\tmul word [bp%+ld]\n", (long)slot(r, fn) + (hi ? 2 : 0));
+	else if (rtype(r) == RCon) {
+		v = fn->con[r.val].bits.i;
+		fprintf(f, "\tmov bx, %d\n", (int)((hi ? (v >> 16) : v) & 0xFFFF));
+		fprintf(f, "\tmul bx\n");
+	} else
+		die("i8086: Omul Kl operand is not slot/const");
+}
+
 /* Emit a Kl RCon value into AX:DX.  CBits gets the literal split into
  * low/high words.  CAddr is materialized as a far pointer: `sym+addend`
  * for the offset, `seg sym` for the segment selector — NASM emits the
@@ -1440,54 +1480,46 @@ emitins(Ins *i, Fn *fn, FILE *f)
 
 		case Omul:
 			/*
-			 * 32-bit multiplication: dest = src0 * src1
-			 * imul writes DX:AX unconditionally; preserve AX/DX across.
+			 * 32-bit multiplication: dest = src0 * src1 (low 32 bits).
+			 * Proper 32x32->32 via three 16x16 unsigned partials (see
+			 * klmul_movax/klmul_byword).  CAddr is rejected: multiplying
+			 * a pointer is C-illegal, so it's unreachable from realistic
+			 * frontend output, and bits.i for a CAddr is only the addend
+			 * (segment lives in the relocation) — die() makes any such
+			 * bug loud rather than silently dropping the segment word.
+			 * mul writes DX:AX, and we use CX (plus BX for a const
+			 * multiplier) as scratch; rega models none of these, so
+			 * preserve AX/DX (kl_save_axdx) and push/pop CX (+BX).
 			 */
 			{
 			int dst_in_dx_mul = (rtype(i->to) == RTmp && i->to.val == RDX);
-			ArgStage r1s = kl_stage_arg(r1, r0, i->to, f);
-			AxDxSave s_mul = kl_save_axdx(i->to, f);
+			int need_bx = (rtype(r1) == RCon);
+			AxDxSave s_mul;
 
-			/* Load src0 low word to AX.  CAddr is rejected: multiplying
-			 * a pointer is C-illegal, so this path is unreachable from
-			 * realistic frontend output.  bits.i for a CAddr is just the
-			 * addend (segment lives in the relocation), so silently
-			 * accepting it would drop the seg word and produce wrong
-			 * results — die() makes the bug loud instead.  Same family
-			 * of CAddr-portability fixes as Oadd/Osub/Oand/Oor/Oxor/cmp/
-			 * push: see [[caddr-arith-portable]] and siblings. */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-			} else if (rtype(r0) == RCon) {
-				if (fn->con[r0.val].type == CAddr)
-					die("i8086: Omul Kl with CAddr arg0 — pointer multiplication is not a valid C operation");
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-			} else if (rtype(r0) == RTmp) {
-				{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
-			}
+			if ((rtype(r0) == RCon && fn->con[r0.val].type == CAddr)
+			 || (rtype(r1) == RCon && fn->con[r1.val].type == CAddr))
+				die("i8086: Omul Kl with CAddr arg — pointer multiplication is not a valid C operation");
 
-			/* Multiply by src1 low word (result in DX:AX) */
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\timul word [bp%+ld]\n", (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				if (fn->con[r1.val].type == CAddr)
-					die("i8086: Omul Kl with CAddr arg1 — pointer multiplication is not a valid C operation");
-				int64_t val = fn->con[r1.val].bits.i;
-				/* Hoist the constant through BX with save/restore: BX may
-				 * hold a live SSA temp that rega doesn't expect us to
-				 * clobber.  Mirrors the Kw Omul const path (emit.c:3488)
-				 * and the same pattern used by Oadd/Osub Kl. */
-				fprintf(f, "\tpush bx\n");
-				fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\timul bx\n");
-				fprintf(f, "\tpop bx\n");
-			} else if (rtype(r1) == RTmp) {
-				const char *r1n = r1s.scratch_reg ? r1s.scratch_reg : rname[r1.val];
-				fprintf(f, "\timul %s\n", r1n);
-			}
+			s_mul = kl_save_axdx(i->to, f);
+			fprintf(f, "\tpush cx\n");
+			if (need_bx) fprintf(f, "\tpush bx\n");
 
-			/* Store result */
+			/* cx = (a_hi*b_lo + a_lo*b_hi) low 16 — the high cross sum */
+			klmul_movax(r0, 1, fn, f);   /* ax = a_hi */
+			klmul_byword(r1, 0, fn, f);  /* dx:ax = a_hi*b_lo */
+			fprintf(f, "\tmov cx, ax\n");
+			klmul_movax(r0, 0, fn, f);   /* ax = a_lo */
+			klmul_byword(r1, 1, fn, f);  /* dx:ax = a_lo*b_hi */
+			fprintf(f, "\tadd cx, ax\n");
+			/* dx:ax = a_lo*b_lo (full low product) */
+			klmul_movax(r0, 0, fn, f);
+			klmul_byword(r1, 0, fn, f);
+			fprintf(f, "\tadd dx, cx\n");  /* result high word */
+
+			if (need_bx) fprintf(f, "\tpop bx\n");
+			fprintf(f, "\tpop cx\n");
+
+			/* Store result DX:AX */
 			if (rtype(i->to) == RSlot) {
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
@@ -1500,7 +1532,6 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			}
 
 			kl_restore_axdx(s_mul, f);
-			kl_unstage_arg(r1s, f);
 			}
 			return;
 
