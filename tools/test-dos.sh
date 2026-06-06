@@ -76,6 +76,11 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/kl_ternary_mul_probe.c:minic/dos/tests/kl_ternary_mul_probe.golden.txt:medium"
 	"minic/dos/examples/kl_ternary_mul_probe.c:minic/dos/tests/kl_ternary_mul_probe.golden.txt:compact"
 	"minic/dos/examples/kl_ternary_mul_probe.c:minic/dos/tests/kl_ternary_mul_probe.golden.txt:large"
+	# Single-precision software float (no 8087): native `float` lowers to
+	# _sf_* helper calls.  Medium-only — far-data float access (compact/large)
+	# truncates through minic's loadfw/storefw (a deferred follow-up; see
+	# softfloat_probe.c + NEXT_SESSION.md).
+	"minic/dos/examples/softfloat_probe.c:minic/dos/tests/softfloat_probe.golden.txt:medium"
 	"minic/dos/examples/divreg_probe.c:minic/dos/tests/divreg_probe.golden.txt:medium"
 	"minic/dos/examples/shlconst_probe.c:minic/dos/tests/shlconst_probe.golden.txt:medium"
 	"minic/dos/examples/shlconst_probe.c:minic/dos/tests/shlconst_probe.golden.txt:compact"
@@ -320,8 +325,11 @@ run_runtime_probe() {
 	# until far-global direct access is complete (see NEXT_SESSION.md).
 	farstatic=0
 	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe) farstatic=1 ;; esac
+	# Soft-float probes link the single-precision soft-float helper library.
+	sfflag=""
+	case "$base" in softfloat_probe) sfflag="--softfloat" ;; esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
-		"$QBE_DIR/tools/build-example.sh" --model="$model" "$QBE_DIR/$src" >/dev/null
+		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag "$QBE_DIR/$src" >/dev/null
 	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
 	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
 }

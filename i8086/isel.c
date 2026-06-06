@@ -314,6 +314,13 @@ sel(Ins i, Fn *fn)
 
 	/* Handle comparisons specially */
 	if (iscmp(i.op, &ck, &cc)) {
+		/* Float comparisons (operand class Ks/Kd) can't use the
+		 * integer cmp path; route them through selfp so emit lowers
+		 * them to a soft-float `call far _sf_cmp` ([[softfloat-spike]]). */
+		if (ck == Ks || ck == Kd) {
+			selfp(i, fn);
+			return;
+		}
 		selcmp(i, ck, cc, fn);
 		return;
 	}

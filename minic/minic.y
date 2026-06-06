@@ -2010,6 +2010,10 @@ loadfar(Symb d, Symb s)
 	} else if (t == 'l') {
 		fprintf(of, " =l loadfl ");  /* 32-bit long through far ptr */
 	} else {
+		/* NOTE: float (Ks) through a far ptr would truncate here
+		 * (loadfw, 16-bit) — far-data single-precision float is a
+		 * deferred follow-up; soft-float is currently medium-only.
+		 * See [[softfloat-spike]] / NEXT_SESSION.md. */
 		fprintf(of, " =w loadfw ");  /* Word (16-bit) load through far ptr */
 	}
 	/* Volatile through the far path (far-data model): keep the access for
@@ -2043,6 +2047,9 @@ storefar(Symb d, Symb s)
 	} else if (t == 'l') {
 		fprintf(of, "storefl ");  /* 32-bit long through far ptr */
 	} else {
+		/* NOTE: float (Ks) through a far ptr would truncate here
+		 * (storefw, 16-bit) — far-data single-precision float is a
+		 * deferred follow-up; soft-float is currently medium-only. */
 		fprintf(of, "storefw ");  /* Word (16-bit) store through far ptr */
 	}
 	/* Keep the store for a volatile far destination (named global/extern)

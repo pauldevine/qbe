@@ -8,12 +8,14 @@
 set -eu
 
 MODEL="medium"
+SOFTFLOAT=0
 SRC=""
 for arg in "$@"; do
 	case "$arg" in
 		--model=*) MODEL="${arg#--model=}" ;;
+		--softfloat) SOFTFLOAT=1 ;;
 		-h|--help)
-			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] <source.c>" >&2
+			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] [--softfloat] <source.c>" >&2
 			exit 0 ;;
 		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
 		*)
@@ -64,21 +66,29 @@ mkdir -p "$OUT_DIR"
 ERR="$OUT_DIR/build.err"
 : > "$ERR"
 
+# compile_unit <source.c> <base>: run stages 1-4 (cpp → minic → qbe → asm
+# normalize → OMF wrap → nasm) on one C translation unit, producing
+# "$OUT_DIR/<base>.obj".  Used for the main source and (with --softfloat) for
+# the soft-float helper library.
+compile_unit() {
+	local unit_src="$1" unit_base="$2"
+	local pp asm_clean prefix
+
 # Stage 1: C → preprocessed → SSA
-pp="$OUT_DIR/$base.pp.c"
+pp="$OUT_DIR/$unit_base.pp.c"
 cpp -P -nostdinc -isysroot/var/empty -DDOS -D__TURBOC__ \
-	"-I$INC_DIR" "-I$(dirname "$SRC")" \
-	"$SRC" 2>"$ERR" | tr -d '\r\032' | sed "$NORMALIZE_TYPES" > "$pp"
-"$MINIC" -m "$MODEL" < "$pp" > "$OUT_DIR/$base.ssa" 2>>"$ERR"
+	"-I$INC_DIR" "-I$(dirname "$unit_src")" \
+	"$unit_src" 2>>"$ERR" | tr -d '\r\032' | sed "$NORMALIZE_TYPES" > "$pp"
+"$MINIC" -m "$MODEL" < "$pp" > "$OUT_DIR/$unit_base.ssa" 2>>"$ERR"
 
 # Stage 2: SSA → ASM
-"$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$base.ssa" > "$OUT_DIR/$base.asm" 2>>"$ERR"
+"$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$unit_base.ssa" > "$OUT_DIR/$unit_base.asm" 2>>"$ERR"
 
 # Stage 3: ASM normalize (same sed/awk/perl pipeline as build-int86x-probe.sh).
-prefix="${base}_"
-asm_clean="$OUT_DIR/$base.nasm.asm"
+prefix="${unit_base}_"
+asm_clean="$OUT_DIR/$unit_base.nasm.asm"
 grep -v -E '^\.(text|data|bss|balign|section|globl|type|size|local|file|ident|string|p2align|model|code)' \
-		"$OUT_DIR/$base.asm" \
+		"$OUT_DIR/$unit_base.asm" \
 	| sed -e 's/; TODO: 32-bit op [0-9]*/; XXX 32-bit op stub - codegen incomplete/' \
 	      -e 's/^[[:space:]]*\.ascii "\(.*\)"$/.nasm_str \1/' \
 	| awk '
@@ -149,10 +159,22 @@ FARSTATIC_FLAG=""
 if [ "${QBE_FAR_STATIC_DATA:-0}" = "1" ]; then
 	FARSTATIC_FLAG="--far-static-data"
 fi
-"$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" $FARSTATIC_FLAG "$base" \
-	"$OUT_DIR/$base.asm" "$OUT_DIR/$base.omf.asm" 2>>"$ERR"
-nasm -w-label-redef-late -f obj "$OUT_DIR/$base.omf.asm" \
-	-o "$OUT_DIR/$base.obj" 2>>"$ERR"
+"$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" $FARSTATIC_FLAG "$unit_base" \
+	"$OUT_DIR/$unit_base.asm" "$OUT_DIR/$unit_base.omf.asm" 2>>"$ERR"
+nasm -w-label-redef-late -f obj "$OUT_DIR/$unit_base.omf.asm" \
+	-o "$OUT_DIR/$unit_base.obj" 2>>"$ERR"
+}
+
+# Compile the main translation unit.
+compile_unit "$SRC" "$base"
+
+# Optionally compile the soft-float helper library (single-precision Ks ops are
+# lowered by the i8086 backend to `call far _sf_*`; this provides those symbols).
+SOFTFLOAT_OBJ=""
+if [ "$SOFTFLOAT" = "1" ]; then
+	compile_unit "$DOS_DIR/softfloat.c" softfloat
+	SOFTFLOAT_OBJ="$OUT_DIR/softfloat.obj"
+fi
 
 # Stage 5: crt0_exe.obj and libstub_exe.obj
 # Far-data models need crt0_exe to build argv as 4-byte far ptrs to
@@ -174,6 +196,7 @@ nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR"
 	--stack-size 8192 \
 	"$OUT_DIR/crt0_exe.obj" \
 	"$OUT_DIR/$base.obj" \
+	$SOFTFLOAT_OBJ \
 	"$OUT_DIR/libstub_exe.obj" 2>>"$ERR"
 
 echo "  OK: $OUT_DIR/$base.exe ($(wc -c <"$OUT_DIR/$base.exe") bytes)"

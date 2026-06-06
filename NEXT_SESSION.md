@@ -1,4 +1,26 @@
-# Next session (§3p DONE — fixed the dense-`Kl` (32-bit) miscompiles that blocked software float on the no-8087 Victor.  The soft-float spike's "it's a rega/spill bug under pressure" diagnosis was WRONG — it was THREE independent, ordinary bugs (one minic frontend, one GCM×i8086 interaction, one i8086 emit), each found by tracing the wrong VALUE rather than trusting the pressure-shifts-symptom hunch.  All three soft-float probes (`build/sf-spike/sf_const_probe.c`, `sf_dos_probe.c`) now byte-match the host oracle; every `build/sf-spike/min/*` repro is correct; `make check` green; DOS gate **199→202** (new `kl_ternary_mul_probe` × medium/compact/large).  COMMITTED.)
+# Next session (§3q DONE — WIRED single-precision software float (`Ks`) end-to-end on the no-8087 target.  Native C `float` arithmetic / comparison / int↔float conversion now lower to `call far _sf_*` helpers (the host-validated `softfloat.c`, moved in-tree to `minic/dos/softfloat.c` and compiled-through-minic into a linked `softfloat.obj` via `build-example.sh --softfloat`).  New `softfloat_probe.c` runs through minic→qbe→DOSBox and its add/sub/mul/div/compare/convert results **byte-match the host hardware-float oracle**.  `make check` green; DOS gate **+1** (`softfloat_probe`, medium).  **MEDIUM-ONLY** — far-data float and float-literal-as-double are deferred follow-ups (see below).  COMMITTED.
+
+## What landed (§3q)
+- **Helper shipped:** `build/sf-spike/softfloat.c` → `minic/dos/softfloat.c` (tracked).  `tools/build-example.sh` gained a `--softfloat` flag; stages 1-4 were refactored into a `compile_unit()` shell function so the helper goes through the identical minic→asm_to_omf→nasm pipeline, and `softfloat.obj` is added to the `omf_link` line.  Helpers: `_sf_add/_sf_sub/_sf_mul/_sf_div/_sf_from_int/_sf_to_int` (DX:AX result), `_sf_cmp` (-1/0/1, or 2 for NaN, in AX).
+- **`i8086/emit.c`:** the DEAD 8087 op-table rows AND the big `fld/faddp/fcompp` block are GONE.  Replaced by: `Ks` arith → `emit_sf_binop` (`call far _sf_{add,sub,mul,div}`, save/push/call/`add sp`/store-DX:AX-to-slot/restore — mirrors the `_qbe_div32*` sequence); `Oneg Ks` → inline `xor hi,0x8000`; float comparisons (detected by op-range `Ocmps..Ocmps1`, since their result cls is `Kw`) → `call far _sf_cmp` + a per-op map of the -1/0/1/2 result to a boolean; `Oswtof/Ouwtof/Osltof` → `_sf_from_int` (sign/zero-extend the int into DX:AX first); `Ostosi/Ostoui` → `_sf_to_int` (low word → Kw dest); **all double (`Kd`) ops `die()` loudly**.  `Ks` load/copy/store — and the load-forwarded union-pun `cast` (Ks↔Kl, both 32-bit on i8086) — REUSE the existing `Kl` 32-bit move handlers (the Kl-block guard now admits `Ks` for Oload/Ocopy, `Ostores` shares the `Ostorel` case, and a new `case Ocast` shares `Ocopy`).
+- **`i8086/abi.c`:** `selret` handles `Jrets` exactly like `Jretl` (32-bit value → DX:AX via Ofarseg/Ofaroff); `selcall` captures a `Ks` call return (KBASE(Ks)==1 so it's admitted explicitly alongside the integer path).
+- **`spill.c`:** `Ks` is treated like `Kl` by the i8086 `force_kl_slot` machinery — slot-resident, given a **4-byte (2-word) slot** (the line-139 `KWIDE` test gained an i8086 `Ks` clause), and **evicted from every live set**.  This is MANDATORY: i8086 has `NFPR==0`, so any `Ks` temp left needing an FP register makes rega die "no more regs".
+- **`i8086/isel.c`:** float comparisons are routed to `selfp` (emit does the lowering) instead of `selcmp`, which previously die'd "unsupported comparison 14".
+- Probe `minic/dos/examples/softfloat_probe.c` + golden `minic/dos/tests/softfloat_probe.golden.txt`; wired into `tools/test-dos.sh` (medium).  minic grammar unchanged (115 s/r — action-only edits; the long-quoted "111" was stale, HEAD reports 115 too).
+
+## Deferred follow-ups (clean, self-contained)
+1. **Far-data single-precision float (compact/large/huge).**  minic's `loadfar`/`storefar` (`minic/minic.y`) have no `'s'` (Ks) case, so a `float` through a far pointer truncates via `loadfw`/`storefw` (16-bit) and `ret`-ing it mistypes a `=w` value from a `=s` function (qbe parse error).  The fix needs `Ks` to ride the 32-bit far path (`loadfl`/`storefl`), but those ops' type masks in `ops.h` forbid `Ks`, and a store instruction's cls is `Kw` (so `storefl` can't accept a `Ks` value without a new op or a Ks→Kl bitcast).  This is the `[[storefar-lacks-storefl]]` family extended to `Ks` — its own focused task.  (A spike that added the `'s'` minic cases + widened the masks got as far as a "no first operand expected in storefl" parse error and was reverted; the mask/usecheck/store-cls interaction is the crux.)
+2. **minic float-literal + unary-minus typing.**  minic types a float literal `1.5f` as `double` (`=d copy d_1.5` + `exts`/`truncd`) and `-x` as `0.0 - x` in double, so any literal-mixed or negated float expression silently becomes `Kd` (→ the new `die()` / "no more regs").  The probe avoids both (operands built from 32-bit bit patterns via a `union`; negation via subtraction).  Fixing `1.5f`→`Ks` typing is the natural next step to make `float` actually ergonomic.
+3. **Wire float into MicroPython** (`MICROPY_FLOAT_IMPL_FLOAT`) once (1)+(2) land — the original consumer (true division `/`, etc.).
+
+## Verify
+- `tools/build-example.sh --softfloat --model=medium minic/dos/examples/softfloat_probe.c` → `tools/run-dos-exe.sh build/examples/softfloat_probe/softfloat_probe.exe` diffs clean against the golden (and the host oracle `cc /tmp/sfgold.c` style).
+- `make check` green; `tools/test-dos.sh` green.
+- Inspect `build/examples/softfloat_probe/softfloat_probe.asm`: arithmetic = `call far _sf_*`, neg = `xor ..., 0x8000`, **no `fld`/`faddp`/`fild` anywhere**.)
+
+<details><summary>§3p (prior) — fixed the dense-`Kl` miscompiles that blocked soft-float</summary>
+
+# (§3p DONE — fixed the dense-`Kl` (32-bit) miscompiles that blocked software float on the no-8087 Victor.  The soft-float spike's "it's a rega/spill bug under pressure" diagnosis was WRONG — it was THREE independent, ordinary bugs (one minic frontend, one GCM×i8086 interaction, one i8086 emit), each found by tracing the wrong VALUE rather than trusting the pressure-shifts-symptom hunch.  All three soft-float probes (`build/sf-spike/sf_const_probe.c`, `sf_dos_probe.c`) now byte-match the host oracle; every `build/sf-spike/min/*` repro is correct; `make check` green; DOS gate **199→202** (new `kl_ternary_mul_probe` × medium/compact/large).  COMMITTED.)
 
 ## What was actually wrong (3 bugs — none was rega-under-pressure)
 
@@ -23,6 +45,8 @@
 
 ## Artifacts / references
 `build/sf-spike/SPIKE_FINDINGS.md` (the spike writeup — note its rega diagnosis was wrong), `build/sf-spike/min/*` (repros), `build/sf-spike/{softfloat.c,sf_host_test.c}` (proven algorithm + host oracle).  Memory: [[softfloat-spike]] (update: not a rega bug), [[i8086-kl-add-sub-mul-r1-alias]].
+
+</details>
 
 <details><summary>§3p (prior) — original plan: "fix the rega/spill bug" (diagnosis turned out wrong; kept for context)</summary>
 
