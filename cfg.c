@@ -329,6 +329,7 @@ simpljmp(Fn *fn)
 
 	Blk **uf; /* union-find */
 	Blk **p, *b, *ret;
+	int n;
 
 	ret = newblk();
 	ret->id = fn->nblk++;
@@ -339,7 +340,9 @@ simpljmp(Fn *fn)
 	 * and lets control fall through into adjacent block bodies.  Use a
 	 * non-local prefix so NASM scoping doesn't tie it to whichever
 	 * label happens to precede the epilogue. */
-	snprintf(ret->name, NString, "ret_%s", fn->name);
+	n = snprintf(0, 0, "ret_%s", fn->name) + 1;
+	ret->name = alloc(n);
+	snprintf(ret->name, n, "ret_%s", fn->name);
 	uf = emalloc(fn->nblk * sizeof uf[0]);
 	for (b=fn->start; b; b=b->link) {
 		assert(!b->phi);

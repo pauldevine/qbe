@@ -329,7 +329,8 @@ static Ins* lower_call(Fn* func,
     return_pad = alloc(sizeof(ExtraAlloc));
     Ref ret_pad_ref = newtmp("abi.ret_pad", Kl, func);
     return_pad->instr =
-        (Ins){Oalloc8, Kl, ret_pad_ref, {getcon(ret_arg_class.size, func)}};
+        (Ins){.op=Oalloc8, .cls=Kl, .to=ret_pad_ref,
+              .arg={getcon(ret_arg_class.size, func)}};
     return_pad->link = (*pextra_alloc);
     *pextra_alloc = return_pad;
     reg_usage.rax_returned = true;
@@ -342,7 +343,8 @@ static Ins* lower_call(Fn* func,
       // subsequent IL will still be treating the function return as a pointer.
       ExtraAlloc* return_copy = alloc(sizeof(ExtraAlloc));
       return_copy->instr =
-          (Ins){Oalloc8, Kl, call_instr->to, {getcon(8, func)}};
+          (Ins){.op=Oalloc8, .cls=Kl, .to=call_instr->to,
+                .arg={getcon(8, func)}};
       return_copy->link = (*pextra_alloc);
       *pextra_alloc = return_copy;
       Ref copy = newtmp("abi.copy", Kl, func);
@@ -438,7 +440,8 @@ static Ins* lower_call(Fn* func,
         ExtraAlloc* arg_copy = alloc(sizeof(ExtraAlloc));
         Ref copy_ref = newtmp("abi.copy", Kl, func);
         arg_copy->instr =
-            (Ins){Oalloc8, Kl, copy_ref, {getcon(arg->size, func)}};
+            (Ins){.op=Oalloc8, .cls=Kl, .to=copy_ref,
+                  .arg={getcon(arg->size, func)}};
         arg_copy->link = (*pextra_alloc);
         *pextra_alloc = arg_copy;
         emit(Oblit1, 0, R, INT(arg->size), R);

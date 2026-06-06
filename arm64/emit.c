@@ -370,7 +370,7 @@ fixarg(Ref *pr, int sz, int t, E *e)
 		if (s > sz * 4095u) {
 			if (t < 0)
 				return 1;
-			i = &(Ins){Oaddr, Kl, TMP(t), {r}};
+			i = &(Ins){.op=Oaddr, .cls=Kl, .to=TMP(t), .arg={r}};
 			emitins(i, e);
 			*pr = TMP(t);
 		}
