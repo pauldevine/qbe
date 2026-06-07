@@ -639,7 +639,7 @@ rename_pop_closed(void)
  * unchanged.  Mutates node->u.v in place so an initializer assignment
  * built from the same node targets the renamed slot. */
 char *
-block_scope_decl(Node *node, unsigned ctyp)
+block_scope_decl(Node *node, unsigned ctyp, int isarray)
 {
 	char *v = node->u.v;
 	unsigned h0, h;
@@ -651,7 +651,8 @@ block_scope_decl(Node *node, unsigned ctyp)
 			break;
 		if (strcmp(varh[h].v, v) == 0) {
 			if (varh[h].glo == 0 && !varh[h].isextern &&
-			    !varh[h].enumconst && varh[h].ctyp != ctyp) {
+			    !varh[h].enumconst &&
+			    (varh[h].ctyp != ctyp || varh[h].isarray != isarray)) {
 				if (renamestksp >= NRename)
 					die("too many block-scoped renames");
 				sprintf(renamestk[renamestksp].mangled,
@@ -8023,7 +8024,7 @@ stmt: ';'                            { $$ = 0; }
         char *v;
         if ($1 == NIL)
             die("invalid void declaration");
-        v = block_scope_decl($2, $1);
+        v = block_scope_decl($2, $1, 0);
         s = SIZE($1);
         varadd(v, 0, $1, 0);
         emit_local_alloc(v, ALLOC_T(), iralign($1), s);
@@ -8041,7 +8042,7 @@ stmt: ';'                            { $$ = 0; }
         Node *init_node;
         if ($1 == NIL)
             die("invalid void declaration");
-        v = block_scope_decl($2, $1);
+        v = block_scope_decl($2, $1, 0);
         s = SIZE($1);
         varadd(v, 0, $1, 0);
         emit_local_alloc(v, ALLOC_T(), iralign($1), s);
@@ -8059,7 +8060,7 @@ stmt: ';'                            { $$ = 0; }
         Node *clit_node, *init_node;
         if ($1 == NIL)
             die("invalid void declaration");
-        v = $2->u.v;
+        v = block_scope_decl($2, $1, 0);
         s = SIZE($1);
         varadd(v, 0, $1, 0);
         fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), s);
@@ -8096,7 +8097,7 @@ stmt: ';'                            { $$ = 0; }
         char *v;
         if ($1 == NIL)
             die("invalid void array");
-        v = $2->u.v;
+        v = block_scope_decl($2, IDIR($1), 1);
         n = const_eval($4);
         s = SIZE($1);
         total = s * n;
@@ -8115,7 +8116,7 @@ stmt: ';'                            { $$ = 0; }
         Node *chain;
         if ($1 == NIL)
             die("invalid void array");
-        v = $2->u.v;
+        v = block_scope_decl($2, IDIR($1), 1);
         n = const_eval($4);
         total = SIZE($1) * n;
         varadd(v, 0, IDIR($1), 1);
@@ -8132,7 +8133,7 @@ stmt: ';'                            { $$ = 0; }
         Node *chain;
         if ($1 == NIL)
             die("invalid void array");
-        v = $2->u.v;
+        v = block_scope_decl($2, IDIR($1), 1);
         chain = mk_local_array_init(v, $7, 0, 0, &n);
         varadd(v, 0, IDIR($1), 1);
         var_set_arraybytes(v, SIZE($1) * n);
@@ -8323,7 +8324,7 @@ forinit_var: type IDENT '='
     if ($1 == NIL)
         die("invalid void declaration");
     forinit_basetyp = $1;
-    v = block_scope_decl($2, $1);
+    v = block_scope_decl($2, $1, 0);
     s = SIZE($1);
     varadd(v, 0, $1, 0);
     emit_local_alloc(v, ALLOC_T(), iralign($1), s);
