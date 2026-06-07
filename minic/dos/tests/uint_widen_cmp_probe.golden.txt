@@ -1,0 +1,4 @@
+field_hi=1
+field_lo=0
+local_hi=1
+local_lo=0

@@ -174,6 +174,8 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/dup_label_probe.c:minic/dos/tests/dup_label_probe.golden.txt:medium"
 	"minic/dos/examples/dup_label_probe.c:minic/dos/tests/dup_label_probe.golden.txt:large"
 	"minic/dos/examples/caddr_slot_probe.c:minic/dos/tests/caddr_slot_probe.golden.txt:medium"
+	"minic/dos/examples/uint_widen_cmp_probe.c:minic/dos/tests/uint_widen_cmp_probe.golden.txt:compact"
+	"minic/dos/examples/mp_str_int_probe.c:minic/dos/tests/mp_str_int_probe.golden.txt:compact"
 	"minic/dos/examples/static_linkage_probe.c:minic/dos/tests/static_linkage_probe.golden.txt:medium"
 	"minic/dos/examples/static_linkage_probe.c:minic/dos/tests/static_linkage_probe.golden.txt:large"
 	"minic/dos/examples/setjmp_probe.c:minic/dos/tests/setjmp_probe.golden.txt:medium"

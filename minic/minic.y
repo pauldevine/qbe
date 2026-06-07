@@ -1526,6 +1526,45 @@ typeof_expr(Node *n)
 	return s.ctyp;
 }
 
+int
+sizeof_member_array_expr(Node *n)
+{
+	FILE *save_of = of, *nullf;
+	int save_tmp = tmp, save_lbl = lbl, save_clit = clit;
+	Symb s;
+	struct Member *m = 0;
+	int sidx, i, bytes = 0;
+
+	if (!n || n->op != '.')
+		return 0;
+
+	nullf = fopen("/dev/null", "w");
+	if (nullf)
+		of = nullf;
+	s = lval(n->l);
+	of = save_of;
+	if (nullf)
+		fclose(nullf);
+	tmp = save_tmp;
+	lbl = save_lbl;
+	clit = save_clit;
+
+	if (KIND(s.ctyp) != STRUCT_T && KIND(s.ctyp) != UNION_T)
+		return 0;
+
+	sidx = DREF(s.ctyp);
+	for (i = 0; i < structh[sidx].nmembers; i++) {
+		if (strcmp(structh[sidx].members[i].name, n->r->u.v) == 0) {
+			m = &structh[sidx].members[i];
+			break;
+		}
+	}
+	if (!m || m->count <= 0)
+		return 0;
+	bytes = SIZE(m->ctyp) * m->count;
+	return bytes;
+}
+
 char
 irtyp(unsigned ctyp)
 {
@@ -1751,6 +1790,21 @@ sext(Symb *s)
 	s->u.n = tmp++;
 }
 
+void
+widen_int_to_long(Symb *s)
+{
+	if (s->t == Con) {
+		s->ctyp = ISUNSIGNED(s->ctyp) ? (LNG | UNSIGNED) : LNG;
+		return;
+	}
+	fprintf(of, "\t%%t%d =l %s ", tmp, ISUNSIGNED(s->ctyp) ? "extuw" : "extsw");
+	psymb(*s);
+	fprintf(of, "\n");
+	s->t = Tmp;
+	s->ctyp = ISUNSIGNED(s->ctyp) ? (LNG | UNSIGNED) : LNG;
+	s->u.n = tmp++;
+}
+
 unsigned
 prom(int op, Symb *l, Symb *r)
 {
@@ -1866,12 +1920,12 @@ prom(int op, Symb *l, Symb *r)
 
 	/* Promote int to long (handles both signed and unsigned) */
 	if (KIND(l->ctyp) == LNG && KIND(r->ctyp) == INT) {
-		sext(r);
+		widen_int_to_long(r);
 		/* Return unsigned long if l is unsigned, else signed long */
 		return ISUNSIGNED(l->ctyp) ? (LNG | UNSIGNED) : LNG;
 	}
 	if (KIND(l->ctyp) == INT && KIND(r->ctyp) == LNG) {
-		sext(l);
+		widen_int_to_long(l);
 		/* Return unsigned long if r is unsigned, else signed long */
 		return ISUNSIGNED(r->ctyp) ? (LNG | UNSIGNED) : LNG;
 	}
@@ -2344,7 +2398,7 @@ call_target_name(char *f)
 		"fread", "fwrite", "fflush",
 		"strlen", "strcpy", "strcmp", "strncmp", "strncpy",
 		"strchr", "strcat", "strcspn", "strstr", "strrchr",
-		"memcpy", "memcmp", "memset",
+		"memcpy", "memmove", "memcmp", "memset",
 		"intdos", "int86", "segread",
 		"setjmp", "longjmp",
 		0
@@ -8703,9 +8757,12 @@ post: NUM
         /* sizeof of an expression: unevaluated; report its type size.
          * A bare array variable reports its whole-array byte size;
          * everything else routes through typeof_expr. */
+        int member_array_bytes;
         $$ = mknode('N', 0, 0);
         if ($3->op == 'V' && var_arraybytes($3->u.v) > 0)
             $$->u.n = var_arraybytes($3->u.v);
+        else if ((member_array_bytes = sizeof_member_array_expr($3)) > 0)
+            $$->u.n = member_array_bytes;
         else
             $$->u.n = SIZE(typeof_expr($3));
     }

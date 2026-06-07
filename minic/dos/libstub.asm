@@ -2073,6 +2073,57 @@ _far_memcpy:
     pop bp
     ret
 
+; void *memmove(__far void *dest, __far const void *src, size_t n)
+; dest @ bp+4..7, src @ bp+8..11, n @ bp+12
+global _far_memmove
+_far_memmove:
+    push bp
+    mov bp, sp
+    push si
+    push di
+    push bx
+    push es
+    push ds
+    mov di, [bp+4]
+    mov bx, [bp+6]        ; dst.seg
+    mov si, [bp+8]
+    mov ax, [bp+10]       ; src.seg
+    mov cx, [bp+12]
+    jcxz .done
+
+    ; Only same-segment ranges can overlap in the 16-bit far model.
+    cmp bx, ax
+    jne .fwd
+    cmp di, si
+    jbe .fwd
+
+    mov es, bx
+    mov ds, ax
+    add si, cx
+    add di, cx
+    dec si
+    dec di
+    std
+    rep movsb
+    cld
+    jmp .done
+
+.fwd:
+    mov es, bx
+    mov ds, ax
+    cld
+    rep movsb
+.done:
+    pop ds
+    mov ax, [bp+4]
+    mov dx, [bp+6]
+    pop es
+    pop bx
+    pop di
+    pop si
+    pop bp
+    ret
+
 ; int memcmp(__far const void *s1, __far const void *s2, size_t n)
 global _far_memcmp
 _far_memcmp:

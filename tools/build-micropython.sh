@@ -60,6 +60,12 @@ QBE="$QBE_DIR/qbe"
 DOS_DIR="$QBE_DIR/minic/dos"
 OUT_DIR="$QBE_DIR/build/mp-link"
 mkdir -p "$OUT_DIR"
+MP_STACK_SIZE=${MP_STACK_SIZE:-24576}
+MP_STACK_LIMIT=${MP_STACK_LIMIT:-8192}
+MP_HEAP_SIZE=${MP_HEAP_SIZE:-49152}
+MP_DOS_TINY_STACK_CHECK=${MP_DOS_TINY_STACK_CHECK:-0}
+MP_DOS_STACKLESS_RECURSION_RAISE=${MP_DOS_STACKLESS_RECURSION_RAISE:-0}
+MP_EXTRA_CPPFLAGS=${MP_EXTRA_CPPFLAGS:-}
 
 NORMALIZE='s/\bunsigned short int\b/unsigned short/g;s/\bunsigned long int\b/unsigned long/g;s/\bsigned short int\b/short/g;s/\bsigned long int\b/long/g;s/\blong long int\b/long long/g;s/\blong int\b/long/g;s/\bshort int\b/short/g;s/\bsigned char\b/char/g;s/\bsigned long long\b/long long/g;s/\bsigned long\b/long/g;s/\bsigned int\b/int/g'
 
@@ -94,11 +100,39 @@ for f in "${ALL_SRCS[@]}"; do
 	: > "$err"
 
 	if ! clang -E -P -nostdinc -DDOS -D__TURBOC__ $FARDATA_DEF \
+			$MP_EXTRA_CPPFLAGS \
 			"-I$DOSPORT" "-I$STUB" "-I$INC_DIR" "-I$MP" "-I$GENHDR" \
 			"$f" 2>"$err" > "$OUT_DIR/$base.raw.c"; then
 		fail+=("$base (cpp)"); [ $KEEP_GOING -eq 0 ] && { echo "FAIL cpp: $base"; cat "$err"; exit 1; }; continue
 	fi
 	tr -d '\r\032' < "$OUT_DIR/$base.raw.c" | sed "$NORMALIZE" > "$pp"
+	if [ "$base" = "main" ] && [ "$MP_STACK_LIMIT" != "8192" ]; then
+		sed "s/mp_stack_set_limit(8192);/mp_stack_set_limit($MP_STACK_LIMIT);/" "$pp" > "$pp.tmp"
+		mv "$pp.tmp" "$pp"
+	fi
+	if [ "$base" = "main" ] && [ "$MP_HEAP_SIZE" != "49152" ]; then
+		sed "s/static char heap\\[(49152)\\];/static char heap[($MP_HEAP_SIZE)];/" "$pp" > "$pp.tmp"
+		mv "$pp.tmp" "$pp"
+	fi
+	if [ "$base" = "cstack" ] && [ "$MP_DOS_TINY_STACK_CHECK" != "0" ]; then
+		sed '/^void mp_cstack_check(void) {/,/^}/c\
+void mp_cstack_check(void) {\
+    volatile int stack_dummy;\
+    unsigned int top = (unsigned int)(mp_state_ctx.thread.stack_top);\
+    unsigned int cur = (unsigned int)&stack_dummy;\
+    if ((unsigned int)(top - cur) >= (unsigned int)(mp_state_ctx.thread.stack_limit)) {\
+        mp_raise_recursion_depth();\
+    }\
+}' "$pp" > "$pp.tmp"
+		mv "$pp.tmp" "$pp"
+	fi
+	if [ "$base" = "runtime" ] && [ "$MP_DOS_STACKLESS_RECURSION_RAISE" != "0" ]; then
+		cat >> "$pp" <<'EOF'
+__attribute__((noreturn)) void mp_raise_recursion_depth(void) {
+    mp_raise_type_arg(&mp_type_RuntimeError, ((mp_obj_t)((((mp_uint_t)(MP_QSTR_maximum_space_recursion_space_depth_space_exceeded)) << 3) | 2)));
+}
+EOF
+	fi
 
 	if ! "$MINIC" -m "$MODEL" < "$pp" > "$ssa" 2>"$err"; then
 		fail+=("$base (minic)"); [ $KEEP_GOING -eq 0 ] && { echo "FAIL minic: $base"; cat "$err"; exit 1; }; continue
@@ -139,6 +173,7 @@ nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$OUT_DI
 
 echo "=== Linking ==="
 OBJS=("$OUT_DIR/crt0_exe.obj" "${pass_objs[@]}" "$OUT_DIR/libstub_exe.obj")
+printf '%s\n' "${OBJS[@]}" > /tmp/mp_objs.txt
 # --gc-sections dead-strips CODE/FAR_DATA segments unreachable from _start
 # (the standard linker --gc-sections model, sound here because every
 # cross-segment dependency is an OMF fixup).  This is the biggest size lever:
@@ -148,11 +183,14 @@ OBJS=("$OUT_DIR/crt0_exe.obj" "${pass_objs[@]}" "$OUT_DIR/libstub_exe.obj")
 # few <=64KB buckets, reclaiming the per-function paragraph padding (~5KB on the
 # core subset — see NEXT_SESSION.md §2p).  Safe because every code reference is
 # an offset-aware OMF fixup and near jumps stay intra-function.
+# The VM recurses through C frames for Python calls; 8KB corrupted the return
+# path at recsum(8) on Victor.  24KB is the largest tested setting with current
+# image size that still loads reliably (28KB reports "Program too big").
 if "$QBE_DIR/tools/omf_link.py" \
 		-o "$OUT_DIR/mpython.exe" \
 		--map "$OUT_DIR/mpython.map" \
 		--entry _start \
-		--stack-size 8192 \
+		--stack-size "$MP_STACK_SIZE" \
 		--gc-sections \
 		--pack-code \
 		"${OBJS[@]}" 2>"$OUT_DIR/link.err"; then
