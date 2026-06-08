@@ -1,4 +1,69 @@
-# Next session (§3x — algebraic soft-float libm + copy.c narrowing-fold fix)
+# Next session (§3y — transcendental soft-libm: exp2/log2/exp/log + powf)
+
+## 2026-06-08 §3y notes (powf landed — the last soft-libm LINK blocker for MICROPY_FLOAT_IMPL_FLOAT)
+- **Goal: implement the transcendental soft-libm `powf` (and the exp/log it
+  needs)** — §3x's audit found `powf` is the one transcendental the curated
+  MicroPython core references at LINK time under `MICROPY_FLOAT_IMPL_FLOAT`
+  (objfloat `**`, parsenum `1eN`, modbuiltins `round(x,n)`); the algebraic
+  surface (floor/ceil/round/fmod/fabs/copysign/isnan/isinf/signbit) was done
+  in §3x.  This session closes the `powf` gap.
+- **`minic/dos/softfloat.c` — added the transcendental core** (after `sf_fmod`):
+  - `ieee_exp2(U32)` — 2^x: split x = n + r (n = nearest int via `sf_round`,
+    r in [-0.5,0.5]), `sf_exp2_frac(r)` is a degree-7 Taylor in r with
+    coefficients (ln2)^k/k!, then `sf_scalbn(g, n)` adds n to the exponent
+    field (clamps to signed inf / signed zero).  Clamps |x| extremes first.
+  - `ieee_log2(U32)` — log2(x): decompose x = 2^e·m, recentre m to
+    [√½,√2), atanh series `s=(m-1)/(m+1)`, `log(m)=2s·(1+s²/3+s⁴/5+…)`
+    (degree-9, 5 bracket terms), `log2(x)=e+log(m)·(1/ln2)`.
+  - `sf_expf`/`sf_logf` are derived: `e^x = exp2(x·log2(e))`,
+    `ln(x)=log2(x)·ln2`.  `sf_exp2f`/`sf_log2f` are thin wrappers.
+  - `sf_powf(x,y) = 2^(y·log2(x))` with an **exact integer-exponent fast
+    path** (binary exponentiation, `|y|≤64`) so `2**10`/`10**5`/`round(x,n)`
+    are exact (the exp2/log2 round-trip alone gives `10**5 = 99999.977`); the
+    squaring loop carries the sign of a negative base for free.  Full edge
+    handling: `x^0=1`, `1^y=1`, nan, `0^±`, negative base (`nan` for
+    non-integer exponent, signed for odd integer).  `sf_int_parity()` returns
+    -1/0/1 (not-integer / even / odd).
+  - All built on the exact `sf_add/sub/mul/div`, no float operators inside
+    (consistent with the §3x algebraic helpers).
+- **`minic/include/math.h`** — declared the 5 helpers and mapped
+  `exp2f/exp2/log2f/log2/expf/exp/logf/log/powf/pow` to them.
+- **Host validation FIRST** (the fast loop): compiled softfloat.c with
+  `-DSF_HOST` + a libm-comparison harness — every case within ~2 ulps of
+  glibc (rel ≤ 2.3e-7); integer powers exact.  Two bugs caught on the host
+  before DOSBox: (1) initial pass forgot the integer fast path → `pow 10,5`
+  off by 2 ulps (added it); (2) the fast path passed `sf_frombits(...)` (a
+  float) to `sf_to_int` (which wants a BIT PATTERN) → exponent read as a
+  denormal → `ye=0` → every integer power returned 1.  Fixed to
+  `sf_to_int(ay & ABS_MASK)`.
+- **Probe `minic/dos/examples/softtrig_probe.c` (+golden), gated medium with
+  `--softfloat`** (`tools/test-dos.sh` **217→218 ok**).  19 lines: exp2/log2,
+  exp/log, integer-pow fast path (`2**10`,`10**5`,`10**-2`,`(-2)**3`,`(-2)**2`),
+  fractional pow (`2**0.5`,`9**0.5`,`3**3.3`), and edges (`x^0`,`0^3`,
+  `(-2)**2.5`→nan).  Bit patterns round-trip exactly in DOSBox (golden
+  generated from the SF_HOST build, 32-bit union to match the target's
+  32-bit `unsigned long`).  Hit the known minic limit `{ U32 a=.., b=..; }`
+  (multi-declarator-with-init in an inner block) → split into two decls.
+- **Gates:** `make check` green; `tools/test-dos.sh` **218/218 ok**.  No
+  MicroPython rebuild (float still `NONE` — flip is the next step).
+- **Soft-libm is now LINK-complete for `MICROPY_FLOAT_IMPL_FLOAT`.**  Next
+  steps (the remaining items 2-3 from §3x, now unblocked on the math side):
+  1. **Wire softfloat.c into `tools/build-micropython.sh`** (always link it
+     under float) and point the MP build's `<math.h>` at the real
+     `minic/include/math.h` — `build/mp-spike/stubinc/math.h` is an EMPTY stub
+     that SHADOWS the real one (`stubinc` is `-I`'d first); replace/redirect
+     it for the MP build.
+  2. **Flip `ports/dos8086/mpconfigport.h`** `MICROPY_FLOAT_IMPL` →
+     `MICROPY_FLOAT_IMPL_FLOAT`, build compact far-data `--keep-going`, and
+     **MEASURE the image**.  §3x flagged only ~3 KB body headroom; objfloat +
+     formatfloat + parsenum-float + the soft-libm will likely overflow the
+     ~896 KB Victor ceiling.  If so the levers are heap trim
+     (`MICROPY_HEAP_SIZE`) or a feature trim — `--gc-sections`/`--pack-code`
+     won't help (the float type is reachable once enabled, and gc-sections
+     WILL strip the unused exp2f/log2f/expf/logf, keeping only powf).  Then
+     run a float feature probe on Victor.
+
+## 2026-06-07 §3x notes (toward MICROPY_FLOAT_IMPL_FLOAT: soft-libm groundwork)
 
 ## 2026-06-07 §3x notes (toward MICROPY_FLOAT_IMPL_FLOAT: soft-libm groundwork)
 - **Goal was to enable `MICROPY_FLOAT_IMPL_FLOAT`.**  Audit first: under that

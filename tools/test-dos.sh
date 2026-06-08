@@ -84,8 +84,12 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/float_literal_probe.c:minic/dos/tests/float_literal_probe.golden.txt:medium"
 	# Algebraic soft-float libm (fabs/copysign/floor/ceil/round/nearbyint/fmod
 	# + isnan/isinf/signbit) reached via <math.h> macro names.  Prerequisite
-	# for MICROPY_FLOAT_IMPL_FLOAT (powf/transcendentals still TODO).
+	# for MICROPY_FLOAT_IMPL_FLOAT.
 	"minic/dos/examples/softlibm_probe.c:minic/dos/tests/softlibm_probe.golden.txt:medium"
+	# Transcendental soft-float libm (exp2/log2/exp/log + powf).  powf is the
+	# one of these the curated MicroPython core links (objfloat **, parsenum
+	# 1eN, round(x,n)); exact integer-exponent fast path + exp2/log2 core.
+	"minic/dos/examples/softtrig_probe.c:minic/dos/tests/softtrig_probe.golden.txt:medium"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:compact"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:large"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:huge"
@@ -346,7 +350,7 @@ run_runtime_probe() {
 	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe) farstatic=1 ;; esac
 	# Soft-float probes link the single-precision soft-float helper library.
 	sfflag=""
-	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe) sfflag="--softfloat" ;; esac
+	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe) sfflag="--softfloat" ;; esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag "$QBE_DIR/$src" >/dev/null
 	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?

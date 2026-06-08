@@ -6,7 +6,10 @@
  * target.  The implementations live in minic/dos/softfloat.c (linked with
  * build-example.sh --softfloat).  Only the EXACT / algebraic functions are
  * provided so far; powf/expf/logf and the trig/transcendental family are
- * still TODO (see softfloat.c).
+ * provided so far; the transcendental family is exp2/log2/exp/log/pow
+ * (Taylor + atanh series, single-precision accurate to a few ulps).  Of
+ * those, only powf is referenced by the curated MicroPython core.  The trig
+ * family is still TODO (see softfloat.c).
  *
  * `float` is the only floating type that lowers to the _sf_* helpers; the
  * `f`-suffixed names are the ones MicroPython uses under
@@ -26,6 +29,11 @@ float sf_ceil(float);
 float sf_round(float);
 float sf_nearbyint(float);
 float sf_fmod(float, float);
+float sf_exp2f(float);
+float sf_log2f(float);
+float sf_expf(float);
+float sf_logf(float);
+float sf_powf(float, float);
 
 #define isnan(x)          sf_isnan(x)
 #define isinf(x)          sf_isinf(x)
@@ -49,5 +57,15 @@ float sf_fmod(float, float);
 #define nearbyint(x)      sf_nearbyint(x)
 #define fmodf(x, y)       sf_fmod((x), (y))
 #define fmod(x, y)        sf_fmod((x), (y))
+#define exp2f(x)          sf_exp2f(x)
+#define exp2(x)           sf_exp2f(x)
+#define log2f(x)          sf_log2f(x)
+#define log2(x)           sf_log2f(x)
+#define expf(x)           sf_expf(x)
+#define exp(x)            sf_expf(x)
+#define logf(x)           sf_logf(x)
+#define log(x)            sf_logf(x)
+#define powf(x, y)        sf_powf((x), (y))
+#define pow(x, y)         sf_powf((x), (y))
 
 #endif /* _MATH_H */

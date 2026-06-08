@@ -472,3 +472,211 @@ float sf_fmod(float x, float y)
 	}
 	return sf_frombits(sign ? (r | SIGN_BIT) : r);
 }
+
+/* ======================================================================
+ * Transcendental soft-libm: exp2/log2 (cores), exp/log (derived), and powf.
+ *
+ * Built on the exact sf_add/sf_sub/sf_mul/sf_div primitives (U32 bit
+ * patterns), evaluated with Horner's method.  Accuracy target is single
+ * precision (a few ulps): a Taylor series for 2^r over r in [-0.5,0.5] and
+ * the atanh series for log over a sqrt2-centred mantissa.
+ *
+ * Of these, only powf is referenced by the curated MicroPython core
+ * (objfloat `**`, parsenum exponents, round(x,n)).  exp2f/log2f/expf/logf
+ * ride along for completeness and are gc-section-stripped from the MP image
+ * if unused.  powf is computed as 2^(y*log2(x)) with integer-exponent and
+ * negative-base handling.
+ * ====================================================================== */
+
+/* 2^r Taylor coefficients (ln2)^k/k! as binary32 bit patterns. */
+#define EXP2_C0   ((U32)0x3F800000)   /* 1.0 */
+#define EXP2_C1   ((U32)0x3F317218)   /* ln2 */
+#define EXP2_C2   ((U32)0x3E75FDF0)   /* ln2^2/2 */
+#define EXP2_C3   ((U32)0x3D635847)   /* ln2^3/6 */
+#define EXP2_C4   ((U32)0x3C1D955B)   /* ln2^4/24 */
+#define EXP2_C5   ((U32)0x3AAEC3FF)   /* ln2^5/120 */
+#define EXP2_C6   ((U32)0x39218489)   /* ln2^6/720 */
+#define EXP2_C7   ((U32)0x377FE5FE)   /* ln2^7/5040 */
+
+#define LN2_F     ((U32)0x3F317218)   /* 0.69314718 */
+#define INVLN2_F  ((U32)0x3FB8AA3B)   /* 1.44269504 = log2(e) */
+#define SQRT2_F   ((U32)0x3FB504F3)   /* 1.41421356 */
+
+/* log atanh bracket coefficients 1, 1/3, 1/5, 1/7, 1/9. */
+#define LOG_C0    ((U32)0x3F800000)
+#define LOG_C1    ((U32)0x3EAAAAAB)
+#define LOG_C2    ((U32)0x3E4CCCCD)
+#define LOG_C3    ((U32)0x3E124925)
+#define LOG_C4    ((U32)0x3DE38E39)
+
+#define TWO_F     ((U32)0x40000000)   /* 2.0 */
+#define NINF      ((U32)0xFF800000)   /* -inf */
+
+/* a * 2^n via the exponent field; clamps to signed inf / signed zero.
+ * `a` must be finite and normal (the only callers pass such values). */
+static U32 sf_scalbn(U32 a, int n)
+{
+	int e;
+	if (EXP_OF(a) == 0xFF || (a & ABS_MASK) == 0)
+		return a;                         /* inf / nan / zero unchanged */
+	e = EXP_OF(a) + n;
+	if (e >= 0xFF)
+		return sf_inf(SIGN_OF(a));
+	if (e <= 0)
+		return (U32)SIGN_OF(a) << 31;     /* flush to signed zero */
+	return (a & ~(EXP_MASK << 23)) | ((U32)e << 23);
+}
+
+/* 2^r for r (bit pattern) in [-0.5, 0.5], Taylor via Horner. */
+static U32 sf_exp2_frac(U32 r)
+{
+	U32 p = EXP2_C7;
+	p = sf_add(EXP2_C6, sf_mul(r, p));
+	p = sf_add(EXP2_C5, sf_mul(r, p));
+	p = sf_add(EXP2_C4, sf_mul(r, p));
+	p = sf_add(EXP2_C3, sf_mul(r, p));
+	p = sf_add(EXP2_C2, sf_mul(r, p));
+	p = sf_add(EXP2_C1, sf_mul(r, p));
+	p = sf_add(EXP2_C0, sf_mul(r, p));
+	return p;
+}
+
+/* 2^x on a bit pattern. */
+static U32 ieee_exp2(U32 a)
+{
+	int sign = SIGN_OF(a);
+	U32 fn, r, g;
+	int n;
+
+	if (sf_is_nan(a))
+		return QNAN;
+	if (EXP_OF(a) == 0xFF)                    /* +/-inf */
+		return sign ? 0 : a;              /* 2^-inf = 0, 2^+inf = +inf */
+	if (!sign && sf_cmp(a, (U32)0x43000000) >= 0)        /* x >= 128 */
+		return sf_inf(0);
+	if (sign && sf_cmp(a & ABS_MASK, (U32)0x43160000) >= 0) /* x <= -150 */
+		return 0;
+
+	/* n = nearest int to x; r = x - n in [-0.5, 0.5] */
+	fn = sf_bits(sf_round(sf_frombits(a)));
+	n  = (int)sf_to_int(fn);
+	r  = sf_sub(a, fn);
+	g  = sf_exp2_frac(r);                     /* 2^r in [~0.707, 1.414] */
+	return sf_scalbn(g, n);
+}
+
+/* log2(x) on a bit pattern. */
+static U32 ieee_log2(U32 a)
+{
+	int sign = SIGN_OF(a);
+	int e;
+	U32 m, s, s2, p, logm;
+
+	if (sf_is_nan(a))
+		return QNAN;
+	if (sign && (a & ABS_MASK) != 0)          /* x < 0 */
+		return QNAN;
+	if ((a & ABS_MASK) == 0)                  /* +/-0 -> -inf */
+		return NINF;
+	if (EXP_OF(a) == 0xFF)                     /* +inf -> +inf */
+		return a;
+
+	/* x = 2^e * m, m in [1,2); recentre m to [sqrt(1/2), sqrt(2)). */
+	e = EXP_OF(a) - 127;
+	m = (a & MANT_MASK) | ((U32)127 << 23);
+	if (sf_cmp(m, SQRT2_F) >= 0) {
+		m = sf_scalbn(m, -1);
+		e++;
+	}
+	/* s = (m-1)/(m+1); log(m) = 2*s*(1 + s2/3 + s2^2/5 + ...). */
+	s  = sf_div(sf_sub(m, ONE_F), sf_add(m, ONE_F));
+	s2 = sf_mul(s, s);
+	p = LOG_C4;
+	p = sf_add(LOG_C3, sf_mul(s2, p));
+	p = sf_add(LOG_C2, sf_mul(s2, p));
+	p = sf_add(LOG_C1, sf_mul(s2, p));
+	p = sf_add(LOG_C0, sf_mul(s2, p));
+	logm = sf_mul(sf_mul(TWO_F, s), p);       /* natural log(m) */
+	logm = sf_mul(logm, INVLN2_F);            /* -> log2(m) */
+	return sf_add(sf_from_int(e), logm);
+}
+
+/* Parity of `a` as an integer: -1 = not an integer, 0 = even, 1 = odd. */
+static int sf_int_parity(U32 a)
+{
+	int e = EXP_OF(a) - 127;
+	if (EXP_OF(a) == 0xFF)
+		return -1;                        /* inf/nan: not a finite integer */
+	if ((a & ABS_MASK) == 0)
+		return 0;                         /* 0 is even */
+	if (e < 0)
+		return -1;                        /* 0 < |x| < 1 */
+	if (e >= 24)
+		return 0;                         /* |x| >= 2^24: integral and even */
+	if (FRAC_OF(a) & (MANT_MASK >> e))
+		return -1;                        /* has fractional bits */
+	return (int)(((FRAC_OF(a) | IMPLICIT) >> (23 - e)) & 1);
+}
+
+float sf_exp2f(float x) { return sf_frombits(ieee_exp2(sf_bits(x))); }
+float sf_log2f(float x) { return sf_frombits(ieee_log2(sf_bits(x))); }
+
+/* e^x = 2^(x*log2(e)); ln(x) = log2(x)*ln2. */
+float sf_expf(float x) { return sf_frombits(ieee_exp2(sf_mul(sf_bits(x), INVLN2_F))); }
+float sf_logf(float x) { return sf_frombits(sf_mul(ieee_log2(sf_bits(x)), LN2_F)); }
+
+/* x^y = 2^(y * log2(x)), with integer-exponent and negative-base handling. */
+float sf_powf(float x, float y)
+{
+	U32 ax = sf_bits(x), ay = sf_bits(y);
+	int xsign = SIGN_OF(ax);
+	int parity;
+	U32 mag;
+
+	if ((ay & ABS_MASK) == 0)                 /* x^0 = 1 (incl nan, per C) */
+		return sf_frombits(ONE_F);
+	if (ax == ONE_F)                          /* 1^y = 1 */
+		return sf_frombits(ONE_F);
+	if (sf_is_nan(ax) || sf_is_nan(ay))
+		return sf_frombits(QNAN);
+
+	parity = sf_int_parity(ay);
+
+	if ((ax & ABS_MASK) == 0) {               /* x == 0 */
+		if (SIGN_OF(ay))                  /* 0^negative = +inf */
+			return sf_frombits(sf_inf(0));
+		return sf_frombits(0);            /* 0^positive = +0 */
+	}
+
+	/* Exact integer-exponent fast path (binary exponentiation).  Keeps
+	 * x^n exact for the common cases the exp2/log2 round-trip would blur
+	 * (1eN parsing, round(x,n), integer powers) and gets the sign of a
+	 * negative base right for free.  Bounded to avoid runaway iteration;
+	 * |y| > 64 falls through to the general path (overflows anyway). */
+	if (parity >= 0) {
+		int ye = (int)sf_to_int(ay & ABS_MASK);
+		if (ye <= 64) {
+			U32 base = ax;
+			U32 acc = ONE_F;
+			while (ye) {
+				if (ye & 1)
+					acc = sf_mul(acc, base);
+				base = sf_mul(base, base);
+				ye >>= 1;
+			}
+			if (SIGN_OF(ay))         /* negative exponent -> reciprocal */
+				acc = sf_div(ONE_F, acc);
+			return sf_frombits(acc);
+		}
+	}
+
+	if (xsign) {                              /* x < 0, non-integer exponent */
+		if (parity < 0)
+			return sf_frombits(QNAN);
+		mag = ieee_exp2(sf_mul(ay, ieee_log2(ax & ABS_MASK)));
+		if (parity == 1)                  /* odd power keeps the sign */
+			mag |= SIGN_BIT;
+		return sf_frombits(mag);
+	}
+	return sf_frombits(ieee_exp2(sf_mul(ay, ieee_log2(ax))));   /* x > 0 */
+}
