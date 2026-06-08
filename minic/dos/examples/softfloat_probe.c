@@ -22,12 +22,14 @@
  *
  * IMPORTANT — what this probe deliberately AVOIDS (current minic gaps,
  * documented in NEXT_SESSION.md):
- *   - float LITERALS (`1.5f`): minic types them as `double`, forcing Kd
- *     arithmetic (unimplemented).  Operands are built from their 32-bit
- *     bit patterns through a union instead.
  *   - unary minus on a float (`-x`): minic desugars it to `0.0 - x` in
  *     double, also Kd.  Negation is exercised via subtraction instead.
  * Both stay single-precision; the soft-float path is what's under test.
+ *
+ * NOTE: `f`-suffixed float LITERALS (`1.5f`) are now typed single-precision
+ * (Ks) by minic — see minic/dos/examples/float_literal_probe.c.  This probe
+ * still uses bit patterns so it can exercise exact IEEE-754 operands (e.g.
+ * 0.1) that no short decimal literal can express.
  */
 #include <stdio.h>
 

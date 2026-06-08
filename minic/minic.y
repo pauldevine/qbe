@@ -176,7 +176,9 @@ struct Node {
 	char op;
 	unsigned char nlong;  /* 'N' nodes: 1 if the integer literal is `long`
 	                       * (L/l suffix, or value too wide for i8086's
-	                       * 16-bit int) so expr() types it LNG not INT. */
+	                       * 16-bit int) so expr() types it LNG not INT.
+	                       * 'F' nodes: 1 if the float literal carries an
+	                       * f/F suffix (single-precision Ks), 0 = double. */
 	union {
 		int n;
 		char v[NString];
@@ -3180,14 +3182,21 @@ expr(Node *n)
 		break;
 
 	case 'F':
-		/* Floating-point literal */
-		/* For now, default to double; we can make this smarter later */
+		/* Floating-point literal.  An `f`/`F` suffix (n->nlong==1) types it
+		 * single-precision (Ks); otherwise it is double (Kd). */
 		sr.t = Tmp;
 		sr.u.n = tmp++;
-		sr.ctyp = LNG | FLOAT;  /* double */
-		fprintf(of, "\t");
-		psymb(sr);
-		fprintf(of, " =d copy d_%s\n", n->u.v);
+		if (n->nlong) {
+			sr.ctyp = INT | FLOAT;  /* float (single) */
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =s copy s_%s\n", n->u.v);
+		} else {
+			sr.ctyp = LNG | FLOAT;  /* double */
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =d copy d_%s\n", n->u.v);
+		}
 		break;
 
 	case 'S':
@@ -8951,6 +8960,7 @@ yylex_inner()
 	};
 	int i, c, c1;
 	int suffix_l;  /* set when an integer literal carries an L/l suffix */
+	int single_float;  /* set when a float literal carries an f/F suffix */
 	unsigned long n;
 	char v[NString], *p;
 
@@ -8994,6 +9004,7 @@ yylex_inner()
 	if (isdigit(c) || c == '.') {
 		int isfloat = 0;
 		suffix_l = 0;
+		single_float = 0;
 		p = v;
 
 		/* Handle leading dot for numbers like .5 */
@@ -9124,6 +9135,7 @@ yylex_inner()
 		 */
 		if (c == 'f' || c == 'F') {
 			isfloat = 1;
+			single_float = 1;  /* `1.5f` is single-precision (Ks), not double */
 			c = getchar();  /* Consume float suffix */
 		} else if (c == 'l' || c == 'L') {
 			if (isfloat) {
@@ -9155,6 +9167,7 @@ yylex_inner()
 			*p = 0;
 			yylval.n = mknode('F', 0, 0);
 			strcpy(yylval.n->u.v, v);
+			yylval.n->nlong = single_float;  /* 'F': 1 = single (Ks), 0 = double */
 			return FNUM;
 		} else {
 			yylval.n = mknode('N', 0, 0);

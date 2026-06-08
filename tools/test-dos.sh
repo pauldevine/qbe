@@ -81,6 +81,7 @@ RUNTIME_TESTS=(
 	# truncates through minic's loadfw/storefw (a deferred follow-up; see
 	# softfloat_probe.c + NEXT_SESSION.md).
 	"minic/dos/examples/softfloat_probe.c:minic/dos/tests/softfloat_probe.golden.txt:medium"
+	"minic/dos/examples/float_literal_probe.c:minic/dos/tests/float_literal_probe.golden.txt:medium"
 	"minic/dos/examples/struct_copy_probe.c:minic/dos/tests/struct_copy_probe.golden.txt:medium"
 	"minic/dos/examples/static_lptr_return_probe.c:minic/dos/tests/static_lptr_return_probe.golden.txt:medium"
 	"minic/dos/examples/lptr_range_probe.c:minic/dos/tests/lptr_range_probe.golden.txt:medium"
@@ -334,7 +335,7 @@ run_runtime_probe() {
 	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe) farstatic=1 ;; esac
 	# Soft-float probes link the single-precision soft-float helper library.
 	sfflag=""
-	case "$base" in softfloat_probe) sfflag="--softfloat" ;; esac
+	case "$base" in softfloat_probe|float_literal_probe) sfflag="--softfloat" ;; esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag "$QBE_DIR/$src" >/dev/null
 	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
