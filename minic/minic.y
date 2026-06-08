@@ -1816,15 +1816,17 @@ prom(int op, Symb *l, Symb *r)
 
 	/* Floating-point promotion: if either operand is float/double, promote both */
 	if (ISFLOAT(l->ctyp) || ISFLOAT(r->ctyp)) {
-		unsigned target_type = (LNG | FLOAT);  /* default to double */
-
-		/* If both are float, result is float; otherwise double */
-		if (ISFLOAT(l->ctyp) && ISFLOAT(r->ctyp)) {
-			if (KIND(l->ctyp) == INT && KIND(r->ctyp) == INT)
-				target_type = INT | FLOAT;  /* both float */
-			else
-				target_type = LNG | FLOAT;  /* at least one double */
-		}
+		/* C usual arithmetic conversions: the common floating type is the
+		 * widest operand — double only if either operand is itself double;
+		 * a float combined with an integer (or another float) stays float
+		 * and the integer converts to float, NOT double.  This also keeps
+		 * unary minus on a float — which mkneg desugars to `0 - x` — single
+		 * precision (Ks), instead of promoting to Kd which the soft-float
+		 * backend cannot lower. */
+		int l_dbl = ISFLOAT(l->ctyp) && KIND(l->ctyp) == LNG;
+		int r_dbl = ISFLOAT(r->ctyp) && KIND(r->ctyp) == LNG;
+		unsigned target_type = (l_dbl || r_dbl) ? (LNG | FLOAT)
+		                                        : (INT | FLOAT);
 
 		/* Convert integer to floating-point if needed */
 		if (!ISFLOAT(l->ctyp)) {

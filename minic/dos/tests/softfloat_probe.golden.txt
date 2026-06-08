@@ -7,6 +7,11 @@ mul_3_3 41100000
 div_3_2 3fc00000
 div_1_10 3dcccccd
 addneg c0800000
+neg_3 c0400000
+neg_neg7 40e00000
+flt_add_int 40800000
+int_sub_flt 3f800000
+flt_mul_int 40c00000
 cvt_5 40a00000
 cvt_neg3 c0400000
 cvtu_40000 471c4000

@@ -20,11 +20,10 @@
  * [[storefar-lacks-storefl]] family extended to Ks).  The soft-float
  * backend lowering itself (this milestone) is model-independent.
  *
- * IMPORTANT — what this probe deliberately AVOIDS (current minic gaps,
- * documented in NEXT_SESSION.md):
- *   - unary minus on a float (`-x`): minic desugars it to `0.0 - x` in
- *     double, also Kd.  Negation is exercised via subtraction instead.
- * Both stay single-precision; the soft-float path is what's under test.
+ * Unary minus on a float (`-x`) is exercised directly: minic desugars it
+ * to `0 - x`, and the usual-arithmetic-conversion fix keeps that single
+ * precision (Ks) — a float combined with an integer stays float, never
+ * promoting to the unsupported Kd.  Mixed `float OP int` is exercised too.
  *
  * NOTE: `f`-suffixed float LITERALS (`1.5f`) are now typed single-precision
  * (Ks) by minic — see minic/dos/examples/float_literal_probe.c.  This probe
@@ -61,6 +60,15 @@ main(void)
 	printf("div_3_2 %08lx\r\n",   raw(f3 / f2));    /* 3fc00000  (1.5)  */
 	printf("div_1_10 %08lx\r\n",  raw(f1 / f10));   /* 3dcccccd  (0.1)  */
 	printf("addneg %08lx\r\n",    raw(f3 + fneg7)); /* c0800000  (-4.0) */
+
+	/* Unary minus on a float (desugars to 0 - x; stays single-precision). */
+	printf("neg_3 %08lx\r\n",    raw(-f3));          /* c0400000  (-3.0) */
+	printf("neg_neg7 %08lx\r\n", raw(-fneg7));       /* 40e00000  (7.0)  */
+
+	/* Mixed float OP int — the integer converts to float, result float. */
+	printf("flt_add_int %08lx\r\n",  raw(f3 + 1));   /* 40800000  (4.0)  */
+	printf("int_sub_flt %08lx\r\n",  raw(2 - f1));   /* 3f800000  (1.0)  */
+	printf("flt_mul_int %08lx\r\n",  raw(f3 * 2));   /* 40c00000  (6.0)  */
 
 	/* int -> float (signed + unsigned), float -> int. */
 	printf("cvt_5 %08lx\r\n",   raw((float)5));        /* 40a00000 (5.0)  */

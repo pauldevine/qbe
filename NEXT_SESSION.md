@@ -1,3 +1,26 @@
+# Next session (§3v — unary-minus-on-float / float-vs-int usual conversions)
+
+## 2026-06-07 §3v notes (unary minus on a float → single precision)
+- **Compiler change — float usual-arithmetic-conversions corrected:** minic's
+  binop type-promotion promoted `float OP int` (and `int OP float`) to `double`
+  (Kd), which the i8086 soft-float backend `die()`s on.  Per C, a `float`
+  combined with an integer stays `float` — the integer converts to float; only
+  a `double` operand makes the result double.  `minic/minic.y` now computes the
+  common floating type as `double` iff either operand is itself double, else
+  `float` (action-body only, no grammar change).
+- **Closes unary minus on a float:** `mkneg` desugars `-x` to `0 - x` with an
+  integer `0`; that subtraction now stays Ks instead of Kd.  Verified `-x` →
+  `=s sub` → `call far _sf_sub`, `x + 1` → `=s add` → `call far _sf_add`.
+- **Probe:** extended `minic/dos/examples/softfloat_probe.c` (+golden) with
+  direct `-f3`, `-fneg7`, `f3 + 1`, `2 - f1`, `f3 * 2`; removed the stale
+  "deliberately avoids unary minus" note.  DOSBox run matches golden.
+- **Gates:** `make check` green; `tools/test-dos.sh` **212/212 ok**.  MicroPython
+  compact far-data rebuild **106/106 objects, image 844288 — byte-identical** to
+  §3u (MP is `MICROPY_FLOAT_IMPL=NONE`, so no float-promotion path is reachable).
+- **Next on the float path:** far-data `Ks` load/store (`loadfw`/`storefw`
+  truncate Ks through a far ptr — the `[[storefar-lacks-storefl]]` family
+  extended to Ks), then `MICROPY_FLOAT_IMPL_FLOAT`.
+
 # Next session (§3u — float-literal Ks typing + feature-surface validation)
 
 ## 2026-06-07 §3u continuation notes (float literal `1.5f` → Ks; broad MP validation)
