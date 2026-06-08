@@ -63,11 +63,17 @@
   float comment too): flip the 3 mpconfigport defines (FLOAT + COMPLEX 0 +
   FLT16 0) and append the 2 QDEF0 genhdr lines above.  The minic/softfloat/
   math.h groundwork is all in-tree and inert under NONE.
-- **Next:** either (a) an i8086 code-size campaign to recover ~60 KB so float
-  fits Victor, or (b) keep float as a medium-model DOS capability only (it's
-  fully gated and working there) and move the MicroPython driver back to
-  integer-feature frontiers.  Reduce any new MP failure to a probe first, as
-  always.
+- **DECISION (2026-06-08, user): do NOT pursue MICROPY_FLOAT_IMPL_FLOAT on
+  Victor.**  The effort to recover ~60 KB of code is not worth the payback in
+  this RAM-limited environment.  Soft-float stays a fully-gated MEDIUM-MODEL
+  DOS capability (the `--softfloat` probes), and the float groundwork in tree
+  (softfloat.c, math.h, double→single, static float init) is inert under
+  MicroPython's `MICROPY_FLOAT_IMPL_NONE`.  The MicroPython port stays
+  integer-only; the FLOAT path is *available* (recipe above) but not a target.
+- **Next:** drive the MicroPython port on integer-feature frontiers again
+  (slicing/strings/GC pressure/recursion) and reduce any new failure to a
+  `minic/dos/examples/*_probe.c` before fixing, as always.  The float flip is
+  closed as "won't-fit, not worth it".
 
 # Next session (§3z — MicroPython float flip groundwork: double→single, static float init)
 
