@@ -1,3 +1,177 @@
+# Next session (§4d — TRY THIS: reduce the pre-existing churn(~80) GC-pressure corruption — the real compiler-bug candidate)
+
+## 2026-06-08 §4c notes (§4b DONE: stackless-strict is the dos8086 port default — clean win, no compiler bug)
+- **§4b landed.**  `MICROPY_STACKLESS (1)` + `MICROPY_STACKLESS_STRICT (1)` are
+  now the dos8086 port default (external `~/projects/micropython/ports/dos8086/
+  mpconfigport.h`), with `mp_raise_recursion_depth()` provided as a real port
+  symbol in `ports/dos8086/main.c` (py/runtime.c only defines it under
+  MICROPY_STACK_CHECK, which we keep off).  The qbe-repo artifact is the harness
+  default **`MP_STACK_SIZE` 24576 → 16384** in `tools/build-micropython.sh`
+  (committed).  Build: 107/107 TUs, **image 843344 / body 820096** (under the
+  ~824416 "Program too big" point; loads with margin).  `make check` green;
+  `tools/test-dos.sh` was **219/219 ok** at session start and is unchanged (NO
+  minic/qbe/i8086/runtime/probe source changed this session — the only qbe edit
+  is the shell-script stack default + this doc).
+- **Why 16384, not the plan's 8192:** 8192 corrupts.  Deep PLAIN recursion is
+  now heap-framed (stackless), so the C stack stays shallow — but generator
+  RESUME still C-recurses (`mp_execute_bytecode`, objgenerator.c:210; STACKLESS
+  does NOT cover generator resume), so deep generator nesting overflows the C
+  stack into DGROUP data.  At 8192 that corruption is catastrophic (garbage
+  output + `Divide overflow` INT 0); 16384 degrades it gracefully (wrong value,
+  clean exit).  16384 is the largest stack that still fits the load ceiling
+  (body 820096 < ~824416; 24576 → body 828224 → won't load).
+- **On-Victor verification (real Victor via `tools/run-victor-sasi.sh`):**
+  - `build/mp-recsum-probe.py` → `recsum(6/12/20/30)` = 21/78/210/465, clean
+    `D4`/`C5`.  **The documented HARD frontier (recursive image corrupted at
+    recsum(20) with `DE`+`(nil)`) is GONE.**
+  - `build/mp-frontier2.py` → reaches **`OK recsum`** (the old recsum(30) wall),
+    then hits the pre-existing churn(80) frontier (see §4d below).
+  - `build/mp-feature-probe.py` → ALL 23 checks OK (mul…enum), clean `D4`/`C5`.
+- **Stackless is strictly ≥ the committed recursive image on every axis** (all
+  measured on real Victor this session):
+  | workload | recursive 24 KB (was committed) | stackless 16 KB (now) |
+  |---|---|---|
+  | deep plain recursion recsum(30) | ✗ corrupt (`DE`+`(nil)` @ 20) | ✓ clean 465 |
+  | deep generator recursion `sum(gc(15))` | ✗ **machine REBOOT** | ~ wrong 99, clean exit |
+  | GC pressure churn(80) | ✗ corrupt (NameError) | ✗ corrupt (hang) — TIE, pre-existing |
+- **No compiler bug surfaced** — the §4b "stress for a codegen bug" prize did NOT
+  materialise (the honest-caveat outcome).  The deep-generator-recursion limit is
+  target-fundamental (finite DOS C stack vs. generator C-recursion, no fit-able
+  MICROPY_STACK_CHECK), not a minic/qbe/i8086 bug and not a stackless regression.
+- **Probes written this session (untracked `build/*.py` scratch):**
+  `mp-stackless-stress.py` (mutual/raise-catch/generator/GC recursion),
+  `mp-gen-probe.py` (generator-recursion bisection), `mp-churn-scale2.py`
+  (churn 20→120 GC-pressure scale).
+
+## §4d — THE GOAL FOR NEXT SESSION: reduce the churn(~80) GC-pressure corruption
+**`churn(n)` corrupts between n=60 (ok) and n=80 (fails) on BOTH the stackless
+and the recursive images** — a pre-existing, VM-mode-independent bug, and the
+most promising remaining compiler/runtime-bug candidate.  `churn` is a FLAT loop
+(no recursion), so it is NOT a C-stack issue — it is **GC pressure**: each
+iteration allocates `[i+j for j in range(8)]` (a list + a comprehension
+frame) + `{str(i):row,"last":row[-1]}` (a dict + a str).  At ~churn(80) a live
+object is lost: symptoms are nondeterministic (`NameError: local variable
+referenced before assignment` in `<listcomp>`, `TypeError: object isn't
+subscriptable` on `table["last"]`, or a hang), all consistent with a GC
+root-scan miss or heap corruption under pressure.
+- **Repro:** `VICTOR_SRC=build/mp-churn-scale2.py tools/run-victor-sasi.sh
+  build/mp-link/mpython.exe 240` → prints `20 330`, `40 1060`, `60 2190`, then
+  fails at 80.
+- **Likely loci** (reduce to a `minic/dos/examples/*_probe.c` FIRST, per the
+  discipline): the conservative C-stack root scan in `ports/dos8086/main.c`
+  `gc_collect()` (does it miss a live far pointer at some alignment under deep
+  allocation?), gc.c block/ATB math under near-full heap, or a codegen bug in
+  the list-comprehension / dict-store path that only bites once the heap is
+  churned.  Instrument MicroPython gc at the C level (mark/sweep of the listcomp
+  frame + the per-iteration dict) for `churn(80)` to find which object is freed
+  while live, then reduce that shape to a DOS probe and fix QBE/minic/runtime.
+- **HARNESS GOTCHA (cost me a wasted run this session — see
+  [[feedback-victor-harness-pipe-buffer]]):** do NOT pipe `run-victor-sasi.sh`
+  through `tail`/`head`.  Its watchdog subshell `( sleep WALL_SECS; kill )&`
+  inherits the pipe write-fd (~1080 s for a 240 s run), so `tail` blocks for an
+  EOF that never comes and the run looks empty/hung.  Redirect straight to a
+  file (`... > /tmp/run.out 2>&1`), background it, and poll the file.  macOS has
+  **no `setsid`**.
+
+# (ARCHIVED) §4b plan — land stackless-strict as the port default
+
+## THE GOAL FOR NEXT SESSION
+**Enable `MICROPY_STACKLESS=1` + `MICROPY_STACKLESS_STRICT=1` as the dos8086 port
+default, rebuild compact far-data, and re-verify on Victor — then stress the
+recursion paths to see if the different VM code paths shake a compiler/backend
+bug loose.**  This is the most concrete remaining frontier with a known payoff:
+it eliminates the one documented HARD frontier (deep Python recursion) while
+staying under the Victor image ceiling.
+
+### Why this is the pick
+- The committed port today uses MicroPython's **recursive** VM: each Python call
+  is a C-level recursive call into `mp_execute_bytecode`, so deep recursion
+  burns the hard-capped DOS stack.  `build/mp-recsum-probe.py` reaches
+  `recsum(12)` but fails by `recsum(20)` with an **uncaught** `DE` + `(nil)`
+  (corruption, not a clean exception).  `build/mp-frontier2.py` dies at the
+  `recsum(30)` case.
+- You **cannot fix it by growing the stack**: 28 KiB → body 824416 → Victor
+  "Program too big to fit in memory"; 32 KiB → won't link (DGROUP+stack > 64 KB).
+  And `MICROPY_STACK_CHECK=1` is both too big AND consumes more transient C stack
+  per frame, so it trips during *shallow* recursion (see the 2026-06-07 Codex
+  stack-check experiment notes below).  Both are dead ends.
+- **Stackless-strict is already proven to work via build knobs** (2026-06-07
+  Codex notes, lines ~441-445): with `MP_STACK_SIZE=8192` it links at total
+  **835088 (well under ceiling)** and `build/mp-recsum-probe.py` completes
+  `recsum(6/12/20/30)` with clean `D4`/`C5`; `mp-test.py`/`mp-feature-probe.py`/
+  `mp-frontier.py` all still pass; `mp-frontier2.py` reaches `OK recsum`.  The
+  deep-recursion frontier disappears.
+
+### Concrete steps (promote experiment → committed port default)
+1. **External MicroPython checkout** (`~/projects/micropython`, NOT this repo):
+   - `ports/dos8086/mpconfigport.h`: add `#define MICROPY_STACKLESS (1)` and
+     `#define MICROPY_STACKLESS_STRICT (1)` (both default to `0` in
+     `py/mpconfig.h:386,393`; the port does not currently override them).
+   - Provide `mp_raise_recursion_depth` **properly** as a real port source symbol
+     (e.g. in `ports/dos8086/main.c` or a small port .c), NOT via the generated
+     `runtime.pp.c` sed-patch.  The existing build knob
+     `MP_DOS_STACKLESS_RECURSION_RAISE=1` (tools/build-micropython.sh:67,136)
+     proves the one-liner body; just make it a committed symbol so the build is
+     reproducible without the env knob.
+   - Set the DOS port stack to the value that fit: `MP_STACK_SIZE=8192` worked
+     (vs the current 24576 default).  Decide whether to bake 8192 into the
+     harness default or keep it an env override — but RECORD the chosen value.
+2. **Build:** `tools/build-micropython.sh --model=compact` (with the stackless
+   config above).  Confirm 106/107 TUs → objects and a clean link.  **MEASURE
+   the image** and compare to the 844256 NONE baseline / the 835088 stackless
+   experiment number.
+3. **Re-verify on Victor** (`VICTOR_SRC=... tools/run-victor-sasi.sh
+   build/mp-link/mpython.exe 240`), in this order:
+   - `build/mp-recsum-probe.py` — must reach `recsum(30)` + clean `D4`/`C5`
+     (the whole point).
+   - `build/mp-test.py`, `build/mp-feature-probe.py`, `build/mp-frontier.py`,
+     `build/mp-frontier2.py`, `build/mp-frontier3.py` (NEW this session — see
+     §4a-followup below) — full feature surface must still pass.
+4. **Stress the new VM paths for a compiler bug** (the REAL prize): stackless
+   uses heap frame-chaining + a different nlr/exception interaction.  Push
+   deep+wide recursion, mutual recursion, recursion-through-generators,
+   recursion-raising-and-catching-exceptions, and recursion under GC pressure.
+   If anything mis-behaves, **reduce it to a `minic/dos/examples/*_probe.c`
+   FIRST**, fix the QBE/minic/i8086/runtime bug, then gate it in
+   `tools/test-dos.sh` — same discipline as every prior §.
+
+### The honest caveat (decide if it's worth it)
+This is a **MicroPython port-config improvement, NOT inherently a compiler
+change.**  It makes the *port* more capable (clean deep recursion within the
+ceiling).  Its value as a *compiler exercise* is indirect: the different VM code
+paths MIGHT flush out a latent minic/codegen bug (that reduction would be the
+real win), or it might just work — in which case you've improved the port, not
+the compiler.  If the session goal is strictly "find compiler bugs," a fresh
+untested feature surface may be a better net than port tuning.  But stackless is
+the one frontier with a mapped path AND a known payoff, so it's the default pick
+unless the user redirects.
+
+## §4a-followup (2026-06-08): frontier3 sweep — CLEAN, no compiler bug
+- Re-verified baseline gates green BEFORE any work: `make check` ✅,
+  `tools/test-dos.sh` **219/219 ok**.  No tracked changes made this session.
+- Wrote `build/mp-frontier3.py` (untracked scratch, alongside the other
+  `build/mp-*.py`) to push past the fixed `str(int)` frontier on real Victor.
+  **Every minimal-ROM-supported feature passed**, including the codegen-sensitive
+  cross-word 32-bit (DX:AX) integer arithmetic that's most likely to expose an
+  i8086 bug:
+  - int: `100000*5`, `1<<20`, `divmod(100000,7)`, `-7//2`, `-7%2`, big XOR,
+    `~0`, `1000000>>3`, `7**6` — all correct.
+  - dict: `update`/`get`/`get(default)`/`keys`/`values`.
+  - list: `insert`/`extend`/`pop`/`index`.
+  - `zip`, `map`, `sorted(key=lambda)`, nested `repr` (list-of-dicts-of-lists),
+    `str.format` (positional + reordered), and a 200-iteration GC churn loop
+    (list+dict+str per pass, some retained as live roots) → correct checksum,
+    clean collection.  `DONE` → `D4` → `C5`.
+- The ONLY "failures" were `filter` / `reversed` raising `NameError` — these are
+  **deliberate config omissions** (`MICROPY_PY_BUILTINS_FILTER`/`_REVERSED`
+  require `AT_LEAST_CORE_FEATURES`; the port is `MINIMUM` ROM level,
+  `py/mpconfig.h:1531,1536`).  Same category as the documented `str.count` /
+  `%`-format gaps — NOT a compiler bug.
+- Net: the port's integer-feature surface is robust wherever the minimal config
+  enables it.  This frontier found nothing to fix — hence §4b redirects to the
+  stackless-strict recursion direction, which has a mapped path and a real
+  payoff.
+
 # Next session (§4a — float flip: all per-TU gaps cleared; FLOAT LINKS but overflows Victor ceiling)
 
 ## 2026-06-08 §4a notes (MICROPY_FLOAT_IMPL_FLOAT now LINKS; size wall is the blocker)

@@ -60,7 +60,17 @@ QBE="$QBE_DIR/qbe"
 DOS_DIR="$QBE_DIR/minic/dos"
 OUT_DIR="$QBE_DIR/build/mp-link"
 mkdir -p "$OUT_DIR"
-MP_STACK_SIZE=${MP_STACK_SIZE:-24576}
+# Default DOS stack = 16384.  The dos8086 port runs the STACKLESS-strict VM
+# (ports/dos8086/mpconfigport.h §4b): deep Python recursion chains code_state
+# frames on the GC heap instead of the C stack, so the C stack stays shallow.
+# A bigger stack would push the compact far-data image over the Victor load
+# ceiling (24576 → body 828224 > ~824416 "Program too big"); 16384 → body
+# 820096 loads with margin and gives recsum(30) a clean run.  8192 is too small
+# — deep GENERATOR recursion still C-recurses (mp_execute_bytecode on resume,
+# which STACKLESS does NOT cover) and overflows an 8 KB stack into DGROUP data,
+# corrupting it; 16384 degrades that case gracefully instead.  Override with
+# MP_STACK_SIZE for a larger-RAM target or a non-stackless build.
+MP_STACK_SIZE=${MP_STACK_SIZE:-16384}
 MP_STACK_LIMIT=${MP_STACK_LIMIT:-8192}
 MP_HEAP_SIZE=${MP_HEAP_SIZE:-49152}
 MP_DOS_TINY_STACK_CHECK=${MP_DOS_TINY_STACK_CHECK:-0}
