@@ -1,3 +1,74 @@
+# Next session (§4a — float flip: all per-TU gaps cleared; FLOAT LINKS but overflows Victor ceiling)
+
+## 2026-06-08 §4a notes (MICROPY_FLOAT_IMPL_FLOAT now LINKS; size wall is the blocker)
+- **Goal: clear the 4 remaining per-TU gaps from §3z and actually flip
+  `MICROPY_FLOAT_IMPL` → FLOAT.**  All 4 gaps cleared; the flip now produces a
+  **clean link (107/107 TUs, compact far-data)**.  BUT the float image is too
+  big for the Victor load ceiling, so the flip is REVERTED to NONE (the §3z
+  discipline).  `make check` green; `tools/test-dos.sh` **219/219 ok**; the
+  NONE image is **844256 — byte-identical** to §3z (all groundwork is
+  gc-stripped under NONE).
+- **The 4 gaps were NOT 4 distinct compiler bugs — they collapsed to 3 root
+  causes, only ONE of which touched compiler-adjacent code:**
+  1. **objfloat / objtype / modbuiltins → ONE qstr gap.**  All three referenced
+     `MP_QSTR_float` / `MP_QSTR___float__`, absent from the pre-generated
+     `ports/minimal/build/genhdr/qstrdefs.generated.h` (built integer-only).
+     modbuiltins's "non-constant in case label" was a LAGGED line number —
+     instrumenting `const_eval`'s die printed the real culprit `MP_QSTR_float`
+     (an undefined identifier in the `mp_module_builtins_globals_table` rom-map
+     entry, NOT a real `case`).  **Fix = append two QDEF0 (static-pool) lines**
+     to the genhdr (hashes via the verified djb2 `hash*33^b & 0xFFFF` — matched
+     known entries __dir__=36730/__call__=63911):
+       `QDEF0(MP_QSTR_float,    17461, 5, "float")`
+       `QDEF0(MP_QSTR___float__, 28725, 9, "__float__")`
+     Safe because pool 0 is **unsorted** (linear search) and
+     `MP_QSTRnumber_of_static` is **positional** (auto-counted) — both the enum
+     (qstr.h) and the data arrays (qstr.c) scan QDEF0 in file order, so an
+     appended line stays index-consistent.  Static pool now 185 (< 256, so
+     bytecode short-qstr encoding is unaffected).
+  2. **parsenum.c "undefined variable" → missing `INFINITY` macro (header
+     gap, NOT the §3z-guessed float-local scope bug).**  `(mp_float_t)INFINITY`
+     left `INFINITY` unexpanded — `minic/include/math.h` never defined it.
+     **Fix:** new public `float sf_inff(void)` in `minic/dos/softfloat.c`
+     (`sf_frombits(sf_inf(0))`) + `#define INFINITY/HUGE_VALF/HUGE_VAL
+     (sf_inff())` and `#define NAN (sf_nan(""))` in math.h.  (Reduced the
+     suspected scope shape first — it compiled clean — which pointed at the
+     macro.)
+  3. **binary.c "parse error" → `_Float16` (config decision, NOT a minic
+     parse bug).**  host clang defines `__FLT16_MAX__`, so mpconfig.h
+     auto-selected the native `_Float16` union path; minic/i8086 has no
+     `_Float16` and MicroPython ships a portable `uint32_t`-bit fallback for
+     exactly that.  **Fix = `#define MICROPY_FLOAT_USE_NATIVE_FLT16 (0)`** in
+     the port config.
+- **Probe:** extended `minic/dos/examples/softlibm_probe.c` (+golden, medium
+  `--softfloat`) with the new `INFINITY`/`NAN`/`HUGE_VALF` macros
+  (`inf_bits=7f800000`, `isinf(INFINITY)=1`, `signbit(-INFINITY)=1`,
+  `huge_bits=7f800000`, `isnan(NAN)=1`).  This is the only compiler-surface
+  artifact of the session (the qstr + FLT16 fixes are external/config).
+- **THE WALL — why FLOAT is reverted:** the FLOAT compact far-data image is
+  **908944 total / body 882944** (code 742882, far data 77904).  The Victor
+  load ceiling is **footprint = body + heap + stack ≤ ~896 KB**; the prior
+  data points: NONE body 821152 loads, a 28 KiB-stack body 824416 already
+  reported "Program too big".  Float body 882944 is **~59 KB past a
+  known-failing point** — and that 59 KB is intrinsic float CODE (objfloat +
+  formatfloat + parsenum-float path + the exp2/log2/powf soft-libm + every
+  `_sf_*` call the VM now emits).  Heap is BSS, so trimming it cannot shrink
+  the body; `--gc-sections` already ran (stripped 201 segments, keeping only
+  the reachable powf, not exp2f/log2f/expf/logf).  **Enabling float on Victor
+  requires a code-size campaign first** (feature trim won't help — float IS the
+  feature; the candidates are the §2-style i8086 backend size levers, or a
+  larger-RAM target).  Did NOT run Victor — 882944 vs the recorded
+  824416-fails point makes the result certain; no need to burn the long run.
+- **To re-attempt the flip** (recorded in `ports/dos8086/mpconfigport.h`'s
+  float comment too): flip the 3 mpconfigport defines (FLOAT + COMPLEX 0 +
+  FLT16 0) and append the 2 QDEF0 genhdr lines above.  The minic/softfloat/
+  math.h groundwork is all in-tree and inert under NONE.
+- **Next:** either (a) an i8086 code-size campaign to recover ~60 KB so float
+  fits Victor, or (b) keep float as a medium-model DOS capability only (it's
+  fully gated and working there) and move the MicroPython driver back to
+  integer-feature frontiers.  Reduce any new MP failure to a probe first, as
+  always.
+
 # Next session (§3z — MicroPython float flip groundwork: double→single, static float init)
 
 ## 2026-06-08 §3z notes (toward MICROPY_FLOAT_IMPL_FLOAT: compiler gaps cleared; flip surfaces per-TU gaps)

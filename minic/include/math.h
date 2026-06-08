@@ -34,6 +34,12 @@ float sf_log2f(float);
 float sf_expf(float);
 float sf_logf(float);
 float sf_powf(float, float);
+float sf_inff(void);
+
+#define INFINITY          (sf_inff())
+#define HUGE_VALF         (sf_inff())
+#define HUGE_VAL          (sf_inff())
+#define NAN               (sf_nan(""))
 
 #define isnan(x)          sf_isnan(x)
 #define isinf(x)          sf_isinf(x)

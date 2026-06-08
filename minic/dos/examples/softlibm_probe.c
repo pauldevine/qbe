@@ -8,9 +8,10 @@
  * printed as their 32-bit bit pattern (via a union) so a wrong high word or a
  * mis-rounded result is loud against the golden.
  *
- * powf / the transcendentals are intentionally NOT tested here — they are not
- * implemented yet (they need a soft expf/logf); this probe pins the exact /
- * algebraic surface only.  See NEXT_SESSION.md.
+ * powf / the transcendentals are exercised by softtrig_probe.c; this probe
+ * pins the exact / algebraic surface plus the INFINITY/NAN/HUGE_VALF macros
+ * (the latter back parsenum.c's `(mp_float_t)INFINITY` under the float flip).
+ * See NEXT_SESSION.md.
  */
 #include <stdio.h>
 #include <math.h>
@@ -70,5 +71,13 @@ int main(void)
 	printf("fmod_a=%08lx\n",       fbits(fmodf(7.0f, 3.0f)));
 	printf("fmod_b=%08lx\n",       fbits(fmodf(-7.0f, 3.0f)));
 	printf("fmod_c=%08lx\n",       fbits(fmodf(5.5f, 2.0f)));
+
+	/* INFINITY / NAN / HUGE_VALF macros (new in <math.h>; sf_inff backs them).
+	 * (mp_float_t)INFINITY is exactly the shape parsenum.c uses. */
+	printf("inf_bits=%08lx\n",     fbits(INFINITY));
+	printf("inf_isinf=%d\n",       isinf(INFINITY));
+	printf("ninf_sbit=%d\n",       signbit(-INFINITY));
+	printf("huge_bits=%08lx\n",    fbits(HUGE_VALF));
+	printf("nan_isnan=%d\n",       isnan(NAN));
 	return 0;
 }

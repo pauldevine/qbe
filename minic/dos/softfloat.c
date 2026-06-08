@@ -363,6 +363,11 @@ float sf_copysign(float x, float y)
 /* nan("tag"): the tag/payload is ignored — we canonicalise to one quiet NaN. */
 float sf_nan(const char *tag) { (void)tag; return sf_frombits(QNAN); }
 
+/* +inf as a float — backs the INFINITY / HUGE_VALF macros in <math.h>.
+   (Those are compile-time constants in hosted C, but minic has no float-inf
+   literal; this is a cheap runtime builder, gc-stripped when unreferenced.) */
+float sf_inff(void) { return sf_frombits(sf_inf(0)); }
+
 /* Truncate toward zero: clear the fractional mantissa bits. */
 float sf_trunc(float x)
 {
