@@ -83,9 +83,16 @@ for f in "$MP"/py/*.c; do
 	CORE_SRCS+=("$f")
 done
 PORT_SRCS=("$DOSPORT/main.c" "$DOSPORT/mphalport.c")
-ALL_SRCS=("${CORE_SRCS[@]}" "${PORT_SRCS[@]}")
+# softfloat.c provides the single-precision soft-libm: the _sf_add/sub/mul/div
+# arithmetic helpers the i8086 backend calls for Ks ops, plus the algebraic +
+# transcendental libm surface (floorf/powf/...) MicroPython references under
+# MICROPY_FLOAT_IMPL_FLOAT.  Always linked; --gc-sections dead-strips it
+# entirely when MICROPY_FLOAT_IMPL is NONE (no _sf_*/sf_* references), so the
+# image is byte-identical to a build without it in that case.
+SOFTFLOAT_SRC=("$DOS_DIR/softfloat.c")
+ALL_SRCS=("${CORE_SRCS[@]}" "${PORT_SRCS[@]}" "${SOFTFLOAT_SRC[@]}")
 
-echo "=== Compiling ${#ALL_SRCS[@]} TUs (${#CORE_SRCS[@]} core + ${#PORT_SRCS[@]} port) [model=$MODEL${FARSTATIC_FLAG:+, far-static-data}] ==="
+echo "=== Compiling ${#ALL_SRCS[@]} TUs (${#CORE_SRCS[@]} core + ${#PORT_SRCS[@]} port + ${#SOFTFLOAT_SRC[@]} softfloat) [model=$MODEL${FARSTATIC_FLAG:+, far-static-data}] ==="
 
 pass_objs=()
 fail=()

@@ -1,0 +1,13 @@
+szd 4
+szf 4
+ghalf 3fc00000
+gneg bf000000
+gdbl 40200000
+pa 3e800000
+pb 40400000
+dmul 40a00000
+fconv 40490fdb
+ftol 100
+ftol_neg -100
+ftoi 2
+itof 40e00000

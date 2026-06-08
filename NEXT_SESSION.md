@@ -1,3 +1,90 @@
+# Next session (§3z — MicroPython float flip groundwork: double→single, static float init)
+
+## 2026-06-08 §3z notes (toward MICROPY_FLOAT_IMPL_FLOAT: compiler gaps cleared; flip surfaces per-TU gaps)
+- **Goal: flip `MICROPY_FLOAT_IMPL` → FLOAT** (the §3y next step).  §3y's
+  soft-libm made the *math* LINK-complete; this session did the build wiring,
+  flipped the flag, and cleared the COMPILER gaps the flip exposed.  The flip
+  is NOT yet complete — it surfaces 5 further per-TU gaps (below), 2 of which
+  are build-infra (qstr regen), not compiler bugs.  **Landed the compiler work
+  as a green-gate milestone; the external `mpconfigport.h` flip was REVERTED to
+  NONE to keep that checkout clean.**  `make check` green; `tools/test-dos.sh`
+  **218→219 ok**.
+- **Build wiring (verified inert under NONE):**
+  - `tools/build-micropython.sh` always links `minic/dos/softfloat.c` (the
+    `_sf_*` arithmetic + algebraic/transcendental libm).  Under
+    `MICROPY_FLOAT_IMPL_NONE` `--gc-sections` strips it ENTIRELY → image
+    **byte-identical** (844256, 0 `sf_` symbols in the map).
+  - `build/mp-spike/stubinc/math.h` was an EMPTY stub that SHADOWED the real
+    `minic/include/math.h` (stubinc is `-I`'d first); now it `#include`s the
+    real header.  Inert under NONE.
+- **`double` aliases to single-precision (Ks)** — the decision (FPU-less i8086,
+  no 8087, no 64-bit int to build a soft-double; standard tiny-target
+  convention).  `minic/minic.y`: `TDOUBLE` → `INT|FLOAT` (was `LNG|FLOAT`);
+  every float literal — suffixed or not — types single; `irtyp`/`irtyp_ret`
+  always return `'s'` for a float (backstop so no stray `Kd` reaches the
+  backend).  The existing `exts`/`truncd` conversion sites are guarded on a
+  float-precision *difference* which can no longer occur, so they go dead (no
+  bogus conversion).  This unblocked **93 of 107 MP TUs** (obj.h's
+  `mp_obj_get_float_to_d`/`_from_d` inline helpers, emitted into every TU, no
+  longer carry a `Kd`).
+- **Pre-existing `SIZE(float)`=2 bug FIXED** — the `SIZE` macro never checked
+  `FLOAT`, so `float` (`INT|FLOAT`) sized as the 2-byte `int` (masked before
+  because `double` was `LNG|FLOAT`→4).  Added `ISFLOAT(x) ? 4` early.  Without
+  this, `sizeof(float)`==2 and float struct members overlapped (probe `pb` read
+  the wrong 2 bytes).  float LOCALS were unaffected (backend Ks slots are 4B).
+- **`Ostosi`/`Ostoui` with a `Kl` result** (`i8086/emit.c`) — float→`long`
+  (the `mp_float_hash` `(mp_int_t)val` shape) hit the `i->cls == Kl` switch and
+  died.  Excluded them from that switch so they reach the soft-float conversion
+  handler, which now stores the full `_sf_to_int` DX:AX into the Kl slot (Kw
+  result still takes the low word only).
+- **Static float initializers** (`minic/minic.y`) — a file-scope `float g=1.5f;`
+  or a const struct float member used to die "unsupported operation in constant
+  expression" (integer-only `const_eval`).  New `const_eval_double()` (host
+  double; handles literals/casts/`+-*/`/unary-minus, incl. the `0 - x` form
+  `mkneg` emits for a negative float) + `cival_float_text()` (`%.17g`) +
+  `emit_global_float_init()` + an `ISFLOAT` branch in `agg_emit_scalar`.
+  Emits QBE `s s_<value>`.
+- **Float DATA truncation FIXED** (`parse.c`) — QBE maps `s` (float) data →
+  `DW`, which on i8086 (`wordsz==2`, where `int`/`Kw` is 2 bytes) emits the
+  2-byte `int` width → a 4-byte float was truncated.  `case Ts:` now picks `DL`
+  (the §ll `.long` = 4-byte directive) when `T.wordsz==2`.  Target-general
+  (gated on word size), `make check` green.
+- **Probe `minic/dos/examples/double_float_probe.c` (+golden), gated medium
+  `--softfloat`** (`tools/test-dos.sh` **219/219 ok**): sizeof(double/float)==4,
+  static float globals (incl. negative) + struct float members, double
+  single-precision arithmetic, float↔double identity conversion, float→long
+  (Ostosi Kl), float→int (Ostosi Kw), int→float (swtof).  Bug-loud: a `Kd`
+  double would die() in the backend, a stale static-float init would die in
+  minic, and a 2-byte float would mis-read.
+- **REMAINING to actually enable `MICROPY_FLOAT_IMPL_FLOAT`** (after re-flipping
+  `ports/dos8086/mpconfigport.h` to FLOAT and adding back
+  `#define MICROPY_PY_BUILTINS_COMPLEX (0)` — complex defaults on with float,
+  mpconfig.h:983, and is niche/costly here so keep it off):
+  1. **qstr/genhdr regeneration (build infra, NOT a minic bug)** — objfloat.c
+     and objtype.c reference NEW qstrs `MP_QSTR_float` / `MP_QSTR___float__`
+     that are ABSENT from the pre-generated `ports/minimal/build/genhdr/
+     qstrdefs.generated.h` (built for the integer-only config).  Regenerate the
+     qstr/genhdr set with the float-enabled dos8086 config (MicroPython's
+     `makeqstrdefs.py`/`makeqstrdata.py`).  This is how the build harness
+     borrows genhdr from `ports/minimal/build`; it needs a float-config genhdr.
+  2. **parsenum.c** — `dec_val` (a float local in the float-parsing path)
+     reported "undefined variable".  Reduce to a minic probe (likely a
+     float-local-in-a-conditional-block scope gap).
+  3. **modbuiltins.c** — "non-constant in case label" (lookahead-lagged; find
+     the real `case` — likely a float-related `round`/builtin switch).
+  4. **binary.c** — "parse error" at `mp_decode_half_float`'s
+     `union { uint16_t i; ... }` (float16 decode); reduce + fix the minic parse
+     gap.
+  Then build compact far-data `--keep-going`, **MEASURE the image** (§3y/§3x
+  flagged ~3 KB body headroom; objfloat + formatfloat + parsenum-float + the
+  soft-libm will likely overflow the ~896 KB Victor ceiling — levers are heap
+  trim / feature trim; `--gc-sections` strips unused exp2f/log2f/expf/logf,
+  keeping only powf), then run a float feature probe on Victor.
+- **Reduction discipline reminder:** the dominant 93-TU blocker reduced cleanly;
+  the remaining 4 (objfloat/objtype = qstr; parsenum/modbuiltins/binary =
+  compiler) each need their own reduced `minic/dos/examples/*_probe.c` + gate
+  before relying on the MP behavior, same as every prior §.
+
 # Next session (§3y — transcendental soft-libm: exp2/log2/exp/log + powf)
 
 ## 2026-06-08 §3y notes (powf landed — the last soft-libm LINK blocker for MICROPY_FLOAT_IMPL_FLOAT)

@@ -145,6 +145,7 @@ int memmodel = MSmall;
  * For far pointers (always `l`) the size stays 4 (seg:off). */
 #define SIZE(x)                                    \
 	(KIND(x) == NIL ? (die("void has no size"), 0) : \
+	 ISFLOAT(x) ? 4 :  /* float == double == single-precision, 4 bytes */ \
 	 KIND(x) == CHR ? 1 :  \
 	 ((x) & SHORT) ? 2 :  \
 	 KIND(x) == INT ? 2 : \
@@ -1586,8 +1587,11 @@ irtyp(unsigned ctyp)
 		return DATAPTR_T();
 	}
 	if (ISFLOAT(ctyp)) {
-		if (k == LNG) return 'd';  /* double */
-		return 's';  /* float */
+		/* No soft-double on i8086: double is aliased to single (Ks), so
+		 * every float — including any leftover LNG|FLOAT — emits as 's'.
+		 * This keeps a stray Kd from ever reaching the backend (which has
+		 * no double support). */
+		return 's';
 	}
 	/* Characters are bytes */
 	if (k == CHR) return 'b';
@@ -1613,8 +1617,8 @@ irtyp_ret(unsigned ctyp)
 		return DATAPTR_T();
 	}
 	if (ISFLOAT(ctyp)) {
-		if (KIND(ctyp) == LNG) return 'd';  /* double */
-		return 's';  /* float */
+		/* double aliases to single (Ks) on i8086 — see irtyp(). */
+		return 's';
 	}
 	if (KIND(ctyp) == LNG) return 'l';  /* 32-bit long on i8086 (SIZE 4) */
 	if (SIZE(ctyp) == 8) return 'l';
@@ -3186,21 +3190,17 @@ expr(Node *n)
 		break;
 
 	case 'F':
-		/* Floating-point literal.  An `f`/`F` suffix (n->nlong==1) types it
-		 * single-precision (Ks); otherwise it is double (Kd). */
+		/* Floating-point literal.  On this FPU-less i8086 target `double`
+		 * is single-precision (see TDOUBLE below): there is no soft-double
+		 * and no 64-bit int to build one, so EVERY float literal — suffixed
+		 * or not — types as single (Ks) and lowers through the _sf_* helpers.
+		 * QBE truncates the `s_` constant to binary32. */
 		sr.t = Tmp;
 		sr.u.n = tmp++;
-		if (n->nlong) {
-			sr.ctyp = INT | FLOAT;  /* float (single) */
-			fprintf(of, "\t");
-			psymb(sr);
-			fprintf(of, " =s copy s_%s\n", n->u.v);
-		} else {
-			sr.ctyp = LNG | FLOAT;  /* double */
-			fprintf(of, "\t");
-			psymb(sr);
-			fprintf(of, " =d copy d_%s\n", n->u.v);
-		}
+		sr.ctyp = INT | FLOAT;  /* float (single); double aliases to this */
+		fprintf(of, "\t");
+		psymb(sr);
+		fprintf(of, " =s copy s_%s\n", n->u.v);
 		break;
 
 	case 'S':
@@ -5546,6 +5546,70 @@ agg_unwrap_scalar(Node *init)
 	return init;
 }
 
+/* Evaluate a compile-time-constant floating expression to a host double.
+ * Handles float/int literals, value-preserving casts, the four arithmetic
+ * ops, and unary minus — including the `0 - x` form mkneg desugars `-x` into
+ * (so a negative float initializer like `float n = -0.5f;` folds correctly).
+ * Integer-only subexpressions fall back to const_eval.  Used only for static
+ * float initializers (minic runs on the host, so host double is fine). */
+double
+const_eval_double(Node *n)
+{
+	double l, r;
+
+	if (!n) die("null expression in float constant");
+	switch (n->op) {
+	case 'F':                      /* float literal */
+		return strtod(n->u.v, 0);
+	case 'K':                      /* (type)expr cast: value-preserving */
+		return const_eval_double(n->l);
+	case '+':
+		return const_eval_double(n->l) + const_eval_double(n->r);
+	case '*':
+		return const_eval_double(n->l) * const_eval_double(n->r);
+	case '/':
+		l = const_eval_double(n->l);
+		r = const_eval_double(n->r);
+		if (r == 0.0) die("division by zero in float constant");
+		return l / r;
+	case '-':
+		if (!n->r)             /* unary minus */
+			return -const_eval_double(n->l);
+		return const_eval_double(n->l) - const_eval_double(n->r);
+	default:
+		/* Integer constant promoted to float, e.g. `float x = 5;`. */
+		return (double)const_eval(n);
+	}
+}
+
+/* Produce the QBE float-literal text (the part after the `s_` prefix) for a
+ * compile-time-constant single-precision initializer.  `%.17g` round-trips a
+ * host double exactly; QBE's `s_` lexer (fscanf "_%f") accepts the sign,
+ * decimal, and exponent forms this can produce, then rounds to binary32. */
+void
+cival_float_text(Node *n, char *out)
+{
+	sprintf(out, "%.17g", const_eval_double(n));
+}
+
+/* `T NAME = <const float expr>;` at file scope. */
+void
+emit_global_float_init(Node *n)
+{
+	char buf[96], ftext[64];
+
+	if (parsed_type == NIL)
+		die("invalid void declaration");
+	if (nglo == NGlo)
+		die("too many globals");
+	cival_float_text(n, ftext);
+	sprintf(buf, "{ s s_%s }", ftext);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], parsed_ident);
+	varadd(parsed_ident, nglo++, parsed_type, 0);
+}
+
 void
 agg_emit_scalar(unsigned ctyp, Node *init, char *buf, int *bl, int *first)
 {
@@ -5556,6 +5620,14 @@ agg_emit_scalar(unsigned ctyp, Node *init, char *buf, int *bl, int *first)
 	init = agg_unwrap_scalar(init);
 	if (!init) {
 		*bl += sprintf(buf + *bl, " %c 0", ir);
+		return;
+	}
+	if (ISFLOAT(ctyp)) {
+		/* Single-precision member: emit `s s_<value>` (QBE rounds to
+		 * binary32 and the i8086 data path lays it out as 4 bytes). */
+		char ftext[64];
+		cival_float_text(init, ftext);
+		*bl += sprintf(buf + *bl, " s s_%s", ftext);
 		return;
 	}
 	cival_eval(init, &v);
@@ -6975,7 +7047,10 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	 * reduces via the '=' STR rule below (its '.' shifts ';'); '=' gaggr
 	 * is distinguished by its leading brace.  Non-constant initializers
 	 * die in const_eval. */
-	emit_global_int_init(const_eval($2));
+	if (ISFLOAT(parsed_type))
+		emit_global_float_init($2);
+	else
+		emit_global_int_init(const_eval($2));
 }
                | '=' gaggr ';'                   { emit_global_aggregate(parsed_type, parsed_ident, $2); }
                | '[' expr ']' ';'
@@ -7909,7 +7984,7 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
     | TLNGLNG  { $$ = LNG; /* long long aliases to 32-bit long on i8086 */ }
     | TBOOL    { $$ = CHR | UNSIGNED; }
     | TFLOAT   { $$ = INT | FLOAT; }
-    | TDOUBLE  { $$ = LNG | FLOAT; }
+    | TDOUBLE  { $$ = INT | FLOAT; /* no 8087 / no soft-double on i8086: double aliases to single-precision (Ks) */ }
     | TVOID    { $$ = NIL; }
     | TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
     | TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }

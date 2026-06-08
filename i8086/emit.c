@@ -1313,7 +1313,8 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	 * (Ostores shares the Ostorel case).  Their arithmetic, comparison,
 	 * and conversion are lowered to _sf_* helper calls further down
 	 * ([[softfloat-spike]]). */
-	if ((i->cls == Kl && i->op != Oaddr && i->op != Oloadfl) || i->op == Ostorel
+	if ((i->cls == Kl && i->op != Oaddr && i->op != Oloadfl
+	     && i->op != Ostosi && i->op != Ostoui) || i->op == Ostorel
 	    || i->op == Ovargp
 	    || INRANGE(i->op, Oceql, Ocultl)
 	    || (i->cls == Ks && (i->op == Oload || i->op == Ocopy))
@@ -2928,9 +2929,17 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		fprintf(f, "\tcall%s _sf_to_int\n", sf_farcall() ? " far" : "");
 		fprintf(f, "\tadd sp, 4\n");
 
-		/* Result S32 in DX:AX; the Kw destination takes the low word.
-		 * Move into dst BEFORE restoring the overlapping caller-save. */
-		if (rtype(i->to) == RSlot)
+		/* Result S32 in DX:AX.  A Kw destination takes the low word (AX);
+		 * a Kl destination (float -> 32-bit long, e.g. mp_float_hash's
+		 * (mp_int_t)val) takes the full DX:AX into its slot.  Move into dst
+		 * BEFORE restoring the overlapping caller-save. */
+		if (i->cls == Kl) {
+			/* Kl float->long results are slot-resident (Kl invariant). */
+			if (rtype(i->to) != RSlot)
+				die("i8086: stosi/stoui Kl result must be slot-resident");
+			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
+		} else if (rtype(i->to) == RSlot)
 			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 		else if (rtype(i->to) == RTmp && !dst_in_ax_t) {
 			if (dst_in_dx_t)

@@ -82,6 +82,11 @@ RUNTIME_TESTS=(
 	# loadfs/storefs ops (float_fardata_probe, compact/large/huge).
 	"minic/dos/examples/softfloat_probe.c:minic/dos/tests/softfloat_probe.golden.txt:medium"
 	"minic/dos/examples/float_literal_probe.c:minic/dos/tests/float_literal_probe.golden.txt:medium"
+	# `double` aliases to single-precision (Ks) on this FPU-less target
+	# (sizeof==4, single-precision arithmetic), static float initializers
+	# (file-scope global + struct member, incl. negative via the 0-x desugar),
+	# and float->long conversion (Ostosi with a Kl result).
+	"minic/dos/examples/double_float_probe.c:minic/dos/tests/double_float_probe.golden.txt:medium"
 	# Algebraic soft-float libm (fabs/copysign/floor/ceil/round/nearbyint/fmod
 	# + isnan/isinf/signbit) reached via <math.h> macro names.  Prerequisite
 	# for MICROPY_FLOAT_IMPL_FLOAT.
@@ -350,7 +355,7 @@ run_runtime_probe() {
 	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe) farstatic=1 ;; esac
 	# Soft-float probes link the single-precision soft-float helper library.
 	sfflag=""
-	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe) sfflag="--softfloat" ;; esac
+	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe) sfflag="--softfloat" ;; esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag "$QBE_DIR/$src" >/dev/null
 	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
