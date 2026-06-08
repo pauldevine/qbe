@@ -323,3 +323,152 @@ int sf_cmp(U32 a, U32 b)
 		return (mA > mB) ? -1 : 1;
 	return (mA > mB) ? 1 : -1;
 }
+
+/* ======================================================================
+ * Algebraic soft-libm surface (for MICROPY_FLOAT_IMPL_FLOAT).
+ *
+ * The helpers above take a U32 because the i8086 backend lowers a Ks
+ * arithmetic op directly to `call far _sf_add` etc., handing over the raw
+ * 32-bit bit pattern.  The helpers below are instead called from C SOURCE
+ * (formatfloat.c does `fabsf(x)`, objfloat.c does `floorf(x)`, ...), so they
+ * must have honest `float`/`int` signatures and reinterpret the value to its
+ * bit pattern internally.  A `float` and a `U32` argument occupy the same
+ * 32-bit register pair, but minic would *convert* (truncate) a float passed
+ * to a U32 parameter, so the reinterpret has to happen here via a union.
+ *
+ * Only EXACT / algebraic operations live here — no transcendentals.  powf
+ * (needed by objfloat `**`, parsenum exponents, round/pow builtins) needs a
+ * soft expf/logf and is a separate piece of work; it is intentionally absent.
+ * ====================================================================== */
+
+#define ONE_F   ((U32)0x3F800000)    /* 1.0f */
+#define HALF_F  ((U32)0x3F000000)    /* 0.5f */
+
+union sf_cvt { float f; U32 u; };
+
+static U32 sf_bits(float x)     { union sf_cvt v; v.f = x; return v.u; }
+static float sf_frombits(U32 b) { union sf_cvt v; v.u = b; return v.f; }
+
+int sf_isnan(float x)   { U32 a = sf_bits(x); return EXP_OF(a) == 0xFF && FRAC_OF(a) != 0; }
+int sf_isinf(float x)   { U32 a = sf_bits(x); return EXP_OF(a) == 0xFF && FRAC_OF(a) == 0; }
+int sf_signbit(float x) { return (int)(sf_bits(x) >> 31); }
+
+float sf_fabs(float x)  { return sf_frombits(sf_bits(x) & ABS_MASK); }
+
+float sf_copysign(float x, float y)
+{
+	return sf_frombits((sf_bits(x) & ABS_MASK) | (sf_bits(y) & SIGN_BIT));
+}
+
+/* nan("tag"): the tag/payload is ignored — we canonicalise to one quiet NaN. */
+float sf_nan(const char *tag) { (void)tag; return sf_frombits(QNAN); }
+
+/* Truncate toward zero: clear the fractional mantissa bits. */
+float sf_trunc(float x)
+{
+	U32 a = sf_bits(x);
+	int e = EXP_OF(a) - 127;             /* unbiased: value = 1.frac * 2^e */
+	U32 mask;
+
+	if (EXP_OF(a) == 0xFF)               /* inf / nan */
+		return x;
+	if (e < 0)                           /* |x| < 1 -> +/- 0 */
+		return sf_frombits(a & SIGN_BIT);
+	if (e >= 23)                         /* no fractional bits */
+		return x;
+	mask = MANT_MASK >> e;               /* low (23-e) bits are fractional */
+	return sf_frombits(a & ~mask);
+}
+
+/* Floor toward -inf. */
+float sf_floor(float x)
+{
+	U32 a = sf_bits(x);
+	U32 t;
+
+	if (EXP_OF(a) == 0xFF)
+		return x;
+	t = sf_bits(sf_trunc(x));
+	if (SIGN_OF(a) && t != a)            /* x < 0 and not integral: trunc - 1 */
+		return sf_frombits(sf_sub(t, ONE_F));
+	return sf_frombits(t);
+}
+
+/* Ceil toward +inf:  ceil(x) = -floor(-x). */
+float sf_ceil(float x)
+{
+	U32 a = sf_bits(x);
+	if (EXP_OF(a) == 0xFF)
+		return x;
+	return sf_frombits(sf_bits(sf_floor(sf_frombits(a ^ SIGN_BIT))) ^ SIGN_BIT);
+}
+
+/* Round half away from zero (C round()). */
+float sf_round(float x)
+{
+	U32 a = sf_bits(x);
+	int sign;
+	U32 ax, fl, frac;
+
+	if (EXP_OF(a) == 0xFF)
+		return x;
+	sign = SIGN_OF(a);
+	ax = a & ABS_MASK;
+	fl = sf_bits(sf_floor(sf_frombits(ax)));
+	frac = sf_sub(ax, fl);               /* ax - floor(ax), in [0,1) */
+	if (sf_cmp(frac, HALF_F) >= 0)       /* >= 0.5 -> round up */
+		fl = sf_add(fl, ONE_F);
+	return sf_frombits(sign ? (fl | SIGN_BIT) : fl);
+}
+
+/* Round to nearest, ties to even (C nearbyint() under default rounding). */
+float sf_nearbyint(float x)
+{
+	U32 a = sf_bits(x);
+	int sign, c;
+	U32 ax, fl, frac;
+
+	if (EXP_OF(a) == 0xFF)
+		return x;
+	sign = SIGN_OF(a);
+	ax = a & ABS_MASK;
+	fl = sf_bits(sf_floor(sf_frombits(ax)));
+	frac = sf_sub(ax, fl);
+	c = sf_cmp(frac, HALF_F);
+	if (c > 0) {
+		fl = sf_add(fl, ONE_F);          /* > 0.5 -> up */
+	} else if (c == 0) {
+		if (sf_to_int(fl) & 1)           /* tie -> round to even */
+			fl = sf_add(fl, ONE_F);
+	}
+	return sf_frombits(sign ? (fl | SIGN_BIT) : fl);
+}
+
+/* fmod(x, y): IEEE remainder of x/y with the sign of x, exact.
+ * Reduces |x| by exponent-aligned subtraction of |y| (scale |y| up by 2^k by
+ * adding k to its exponent field; each step is an exact binary32 subtract). */
+float sf_fmod(float x, float y)
+{
+	U32 bx = sf_bits(x), by = sf_bits(y);
+	U32 ax = bx & ABS_MASK, ay = by & ABS_MASK;
+	int sign = SIGN_OF(bx);
+	U32 r, yk;
+	int k;
+
+	if (EXP_OF(bx) == 0xFF || ay == 0)   /* x inf/nan, or y == 0 -> nan */
+		return sf_frombits(QNAN);
+	if (EXP_OF(ay) == 0xFF)              /* y inf -> x (x finite here) */
+		return x;
+	if (sf_cmp(ax, ay) < 0)              /* |x| < |y| -> x unchanged */
+		return x;
+
+	r = ax;
+	while (sf_cmp(r, ay) >= 0) {
+		k = EXP_OF(r) - EXP_OF(ay);      /* >= 0 since r >= ay */
+		yk = ay + ((U32)k << 23);        /* ay * 2^k */
+		if (sf_cmp(yk, r) > 0)           /* overshot: back off one binade */
+			yk = ay + ((U32)(k - 1) << 23);
+		r = sf_sub(r, yk);
+	}
+	return sf_frombits(sign ? (r | SIGN_BIT) : r);
+}

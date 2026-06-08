@@ -1,3 +1,68 @@
+# Next session (§3x — algebraic soft-float libm + copy.c narrowing-fold fix)
+
+## 2026-06-07 §3x notes (toward MICROPY_FLOAT_IMPL_FLOAT: soft-libm groundwork)
+- **Goal was to enable `MICROPY_FLOAT_IMPL_FLOAT`.**  Audit first: under that
+  config the curated MicroPython core references a soft-libm at LINK time
+  (`parsenum.c`/`objfloat.c`/`modbuiltins.c` reference `powf`/`floorf`/`fmodf`/
+  `copysignf`/`nearbyintf`/`nanf`; `formatfloat.c` references
+  `isnan`/`isinf`/`signbit`/`fabsf`).  The existing soft-float surface was only
+  `sf_add/sub/mul/div/from_int/to_int/cmp`.  Plus the image has only ~3 KB of
+  body headroom (body 821168 loads; 824416 reports "Program too big").  So the
+  flip is a multi-front effort, not a flag change — this session built the
+  prerequisite **algebraic** soft-libm and fixed a backend bug it surfaced.
+- **`minic/dos/softfloat.c` — added the EXACT/algebraic helpers** (no
+  transcendentals): `sf_isnan/sf_isinf/sf_signbit`, `sf_fabs`, `sf_copysign`,
+  `sf_nan`, `sf_trunc`, `sf_floor`, `sf_ceil`, `sf_round`, `sf_nearbyint`,
+  `sf_fmod`.  These take/return honest `float`/`int` (called from C source, not
+  emitted by the backend), reinterpreting to bits via a `union sf_cvt`.  All
+  work on the 32-bit bit pattern and reuse the existing `sf_add/sub/cmp/to_int`
+  (no float operators inside, so no `_sf_` lowering of the helpers themselves).
+  `sf_fmod` is exact (exponent-aligned shift-subtract).  **`powf` is
+  deliberately ABSENT** — it needs a soft `expf`/`logf` and is the next piece.
+- **`minic/include/math.h` (NEW)** — declares the `sf_*` helpers and maps the
+  libm names to them (`floorf`→`sf_floor`, `isnan`→`sf_isnan`, `fabsf`/`fabs`,
+  `copysignf`, `nanf`/`nan`, `truncf`, `ceilf`, `roundf`, `nearbyintf`,
+  `fmodf`, ...).  No `powf` yet.
+- **Backend bug found + fixed (`copy.c`):** the soft-libm `floor/ceil/round/
+  nearbyint/fmod` came out with INVERTED sign decisions (`fmodf(7,3)`→-1.0,
+  `fmodf(-7,3)`→+1.0) while `sf_signbit` standalone was fine.  Reduced to
+  `(int)(a >> 31) && (t != a)`: the `(int)` cast emits `%w =w copy %l` (a real
+  16-bit truncation on i8086, where `l`=4-byte pair, `w`=2-byte reg), and
+  `copy.c`'s `copyref()` folded EVERY `Ocopy` to its source — sound on
+  word-uniform targets (registers alias) but on i8086 it let the `jnz` (a `w`
+  use) reference the wider `l` temp; spill then parked it in a 4-byte slot and
+  rega never reloaded the low word into the branch register, so the branch
+  tested garbage.  **Fix:** `copyref()` no longer folds a class-narrowing copy
+  (`i->cls==Kw` of a non-`Kw` temp) when `T.wordsz==2`; the explicit low-word
+  `mov` is kept.  Generic-pass change gated on the i8086 word size, same shape
+  as the `load.c` `T.wordsz` precedent.  `make check` green (no SSA regression).
+- **Probes (both NEW, gated medium):**
+  - `kl_narrow_copy_branch_probe.c` — pins the copy.c fix directly
+    (`(int)(a>>31) && ...`, bug-loud: inverted sign without the fix).  Pure
+    integer, no softfloat link needed.
+  - `softlibm_probe.c` (`--softfloat`) — exercises every algebraic helper
+    against known bit patterns via a union (`fabs/copysign/trunc/floor/ceil/
+    round/nearbyint/fmod` + `isnan/isinf/signbit/nan`).
+- **Gates:** `make check` green; `tools/test-dos.sh` **215→217 ok**.  No
+  MicroPython rebuild this session (float not yet flipped).
+- **Next on the float path (to actually enable `MICROPY_FLOAT_IMPL_FLOAT`):**
+  1. **Implement `powf`** (and the soft `expf`/`logf`/`exp2f`/`log2f` it needs)
+     in softfloat.c + math.h.  Integer-exponent fast path covers parsenum
+     (`1e5`), `round(x,n)`, and integer `**`; the general fractional path needs
+     exp/log.  This is the remaining hard blocker before MP float can LINK.
+  2. **Wire softfloat.c into `tools/build-micropython.sh`** (add a `--softfloat`
+     equivalent / always link it under float) and point the MP build's math.h
+     at the real one — note `build/mp-spike/stubinc/math.h` is an EMPTY stub
+     that currently SHADOWS `minic/include/math.h` (stubinc is `-I`'d first);
+     replace/redirect it for the MP build.
+  3. **Flip `ports/dos8086/mpconfigport.h`** `MICROPY_FLOAT_IMPL` →
+     `MICROPY_FLOAT_IMPL_FLOAT`, build compact far-data with `--keep-going`,
+     and MEASURE the image.  Expect the ~3 KB body headroom to be the wall:
+     objfloat+formatfloat+parsenum-float+soft-libm will likely overflow.  If so,
+     the levers are heap trim (`MICROPY_HEAP_SIZE`), a feature trim, or
+     `--gc-sections`/`--pack-code` already in place won't help (float type is
+     reachable once enabled).  Then run a float feature probe on Victor.
+
 # Next session (§3w — far-data single-precision float load/store)
 
 ## 2026-06-07 §3w notes (float through a far pointer: loadfs/storefs)
