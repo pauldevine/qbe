@@ -381,7 +381,7 @@
   - `tools/test-dos.sh`: **211/211 ok** (was 210; +1 for the new probe).
   - MicroPython compact far-data rebuilt: 106/106 objects, body `821184` (+32 B), total `844288` (under the Victor ceiling).
   - `VICTOR_SRC=build/mp-repeat-comp-globals-direct.py tools/run-victor-sasi.sh build/mp-link/mpython.exe 260` now prints `HAS_CK True`, `HAS_BASE True`, `HAS_ARG True`, `DONE`, clean `D4`/`C5`.
-- Next: resume the "Candidate next exercises" list below — heavier string formatting / `repr` / GC pressure, stackless-strict recursion frontier, and the float path.
+- Next: resume the "Candidate next exercises" list below — heavier string formatting / `repr` / GC pressure, and the stackless-strict recursion frontier.  (The float path is CLOSED as of §4a — see top of file.)
 
 ## Active focus
 Stevie §3r is closed.  Manual MAME testing confirms `dw`/`de` work, matching the scripted Victor/MAME checks and the tracked gates.  Keep Stevie as a regression target, but stop using it as the primary driver unless a new editor regression appears.
@@ -405,7 +405,7 @@ Return to the MicroPython port as the main exercise tool for identifying QBE/Min
 - Deep recursion is still bounded by stack/runtime behavior, not yet a compiler probe: `build/mp-frontier2.py` reaches dict/filter comprehensions then fails at `recsum(30)`; `build/mp-recsum-probe.py` reaches `recsum(12)` on the 24 KiB stack and fails by `recsum(20)` with the uncaught path printing `(nil)`.  A 28 KiB link stack produces body `824416` and does not load on Victor (`Program too big to fit in memory`), while 32 KiB cannot link (`DGROUP + stack overflows 64KB`).
 - The latest reduced compiler issue was an unsigned int-to-long promotion bug in MiniC: `prom()` sign-extended unsigned `int` operands when comparing/promoting against `long`.  This was fixed with `extuw` for unsigned widening and covered by compact DOS probe `minic/dos/examples/uint_widen_cmp_probe.c`.
 - MicroPython stack-check experiments exposed that unsigned-widening bug in `mp_cstack_check()`, but stack checks were not left enabled.  With the normal minimum-ROM no-stack-check config restored, MicroPython still reaches `recsum(12)` and still fails around `recsum(20)` with `(nil)`.
-- Software single-precision float is wired for medium-model DOS probes, but far-data `float`, float literal typing, and MicroPython float enablement remain deferred.
+- Software single-precision float is COMPLETE for DOS (medium + far-data, literal/unary typing, double→single, static init, soft-libm) and gated via the `--softfloat` probes.  MicroPython float enablement is CLOSED (§4a, won't-fit on Victor) — float is NOT a target; the port stays integer-only.
 - The next session should investigate whether the remaining deep-recursion failure is expected MicroPython stack-limit handling, a bad uncaught-stack-overflow exception path, or excessive i8086 VM C-frame size.  If it becomes a compiler/backend issue, reduce it to a focused `minic/dos/examples/*_probe.c` before fixing.
 
 ## 2026-06-06 Codex continuation notes
@@ -465,7 +465,10 @@ Return to the MicroPython port as the main exercise tool for identifying QBE/Min
 ## Candidate next exercises
 1. Continue pushing MicroPython features past the fixed `str(int)` frontier: heavier string formatting, `repr()`, dict/list rendering, exception tracebacks, and GC pressure.
 2. Revisit stackless strict as the recursion direction now that string conversion is fixed; rerun `build/mp-frontier2.py` and the churn scripts to identify the next real frontier.
-3. Resume the float path when ready: far-data `Ks` load/store, `1.5f`/unary-minus typing, then `MICROPY_FLOAT_IMPL_FLOAT`.
+3. ~~Resume the float path~~ — CLOSED 2026-06-08 (§4a, user decision): float on
+   Victor is "won't-fit, not worth it".  Soft-float stays a gated medium-model
+   DOS capability only; the MicroPython port stays integer-only.  Do NOT
+   re-attempt the flip.
 4. For every failure, follow the same discipline as §3r: reproduce as a focused `minic/dos/examples/*_probe.c`, fix QBE/MiniC/runtime, then gate it.
 
 ## 2026-06-07 Codex continuation notes (post-str(int) frontier)
