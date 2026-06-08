@@ -145,10 +145,12 @@ O(loadfb,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* load b
 O(loadfh,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* load halfword through far ptr */
 O(loadfw,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* load word through far ptr */
 O(loadfl,  T(e,l,e,e, e,x,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* load long (32-bit) through far ptr */
+O(loadfs,  T(e,e,l,e, e,e,x,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* load single-float (32-bit) through far ptr */
 O(storefb, T(w,e,e,e, l,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* store byte through far ptr */
 O(storefh, T(w,e,e,e, l,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* store halfword through far ptr */
 O(storefw, T(w,e,e,e, l,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* store word through far ptr */
 O(storefl, T(l,e,e,e, l,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* store long (32-bit) through far ptr */
+O(storefs, T(s,e,e,e, l,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* store single-float (32-bit) through far ptr */
 O(mkfar,   T(e,w,e,e, e,w,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* make far ptr: (seg, off) -> far */
 O(farseg,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* extract segment from far ptr */
 O(faroff,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* extract offset from far ptr */

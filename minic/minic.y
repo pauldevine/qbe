@@ -1840,8 +1840,11 @@ prom(int op, Symb *l, Symb *r)
 			l->t = Tmp;
 			l->ctyp = target_type;
 			l->u.n = tmp++;
-		} else if (l->ctyp != target_type) {
-			/* Convert float to double or vice versa */
+		} else if ((KIND(l->ctyp) == LNG) != (KIND(target_type) == LNG)) {
+			/* Convert float to double or vice versa — only on a real
+			 * precision change (compare KIND, not the full ctyp, so the
+			 * far-data FAR bit on a float value doesn't force a bogus
+			 * float->float truncd). */
 			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(target_type));
 			if (KIND(target_type) == LNG)
 				fprintf(of, "exts ");  /* float to double */
@@ -1865,8 +1868,10 @@ prom(int op, Symb *l, Symb *r)
 			r->t = Tmp;
 			r->ctyp = target_type;
 			r->u.n = tmp++;
-		} else if (r->ctyp != target_type) {
-			/* Convert float to double or vice versa */
+		} else if ((KIND(r->ctyp) == LNG) != (KIND(target_type) == LNG)) {
+			/* Convert float to double or vice versa — only on a real
+			 * precision change (compare KIND, not the full ctyp; see the
+			 * matching note on the left operand above). */
 			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(target_type));
 			if (KIND(target_type) == LNG)
 				fprintf(of, "exts ");  /* float to double */
@@ -2068,11 +2073,9 @@ loadfar(Symb d, Symb s)
 		fprintf(of, " =w loadfh ");
 	} else if (t == 'l') {
 		fprintf(of, " =l loadfl ");  /* 32-bit long through far ptr */
+	} else if (t == 's') {
+		fprintf(of, " =s loadfs ");  /* 32-bit single-float through far ptr */
 	} else {
-		/* NOTE: float (Ks) through a far ptr would truncate here
-		 * (loadfw, 16-bit) — far-data single-precision float is a
-		 * deferred follow-up; soft-float is currently medium-only.
-		 * See [[softfloat-spike]] / NEXT_SESSION.md. */
 		fprintf(of, " =w loadfw ");  /* Word (16-bit) load through far ptr */
 	}
 	/* Volatile through the far path (far-data model): keep the access for
@@ -2105,10 +2108,9 @@ storefar(Symb d, Symb s)
 		fprintf(of, "storefh ");
 	} else if (t == 'l') {
 		fprintf(of, "storefl ");  /* 32-bit long through far ptr */
+	} else if (t == 's') {
+		fprintf(of, "storefs ");  /* 32-bit single-float through far ptr */
 	} else {
-		/* NOTE: float (Ks) through a far ptr would truncate here
-		 * (storefw, 16-bit) — far-data single-precision float is a
-		 * deferred follow-up; soft-float is currently medium-only. */
 		fprintf(of, "storefw ");  /* Word (16-bit) store through far ptr */
 	}
 	/* Keep the store for a volatile far destination (named global/extern)
@@ -3921,8 +3923,13 @@ expr(Node *n)
 			s0.t = Tmp;
 			s0.ctyp = s1.ctyp;
 			s0.u.n = tmp++;
-		} else if (ISFLOAT(s1.ctyp) && ISFLOAT(s0.ctyp) && s1.ctyp != s0.ctyp) {
-			/* Convert between float and double */
+		} else if (ISFLOAT(s1.ctyp) && ISFLOAT(s0.ctyp)
+		           && (KIND(s1.ctyp) == LNG) != (KIND(s0.ctyp) == LNG)) {
+			/* Convert between float and double.  Compare only the
+			 * floating PRECISION (double = KIND LNG, float = KIND INT),
+			 * not the full ctyp — under a far-data model the RHS value
+			 * carries an extra FAR bit, so `float = float` must NOT be
+			 * mistaken for a precision change and emit a bogus truncd. */
 			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(s1.ctyp));
 			if (KIND(s1.ctyp) == LNG)
 				fprintf(of, "exts ");  /* float to double */
@@ -3998,6 +4005,8 @@ expr(Node *n)
 				fprintf(of, "\tstorefh ");
 			else if (t == 'l')
 				fprintf(of, "\tstorefl ");
+			else if (t == 's')
+				fprintf(of, "\tstorefs ");
 			else
 				fprintf(of, "\tstorefw ");
 		} else {
@@ -4063,6 +4072,8 @@ expr(Node *n)
 				fprintf(of, "\tstorefh ");
 			else if (t == 'l')
 				fprintf(of, "\tstorefl ");
+			else if (t == 's')
+				fprintf(of, "\tstorefs ");
 			else
 				fprintf(of, "\tstorefw ");
 		} else {
@@ -4228,6 +4239,8 @@ expr(Node *n)
 				fprintf(of, "\tstorefh ");
 			else if (t == 'l')
 				fprintf(of, "\tstorefl ");
+			else if (t == 's')
+				fprintf(of, "\tstorefs ");
 			else
 				fprintf(of, "\tstorefw ");
 		} else {
@@ -4677,7 +4690,11 @@ stmt(Stmt *s, int b, int c)
 				psymb(x);
 				fprintf(of, "\n");
 				x.t = Tmp; x.ctyp = curfntyp; x.u.n = tmp++;
-			} else if (ISFLOAT(curfntyp) && ISFLOAT(x.ctyp) && curfntyp != x.ctyp) {
+			} else if (ISFLOAT(curfntyp) && ISFLOAT(x.ctyp)
+			           && (KIND(curfntyp) == LNG) != (KIND(x.ctyp) == LNG)) {
+				/* Convert between float and double only on a real
+				 * precision change (compare KIND, not the full ctyp —
+				 * the far-data FAR bit must not force a bogus truncd). */
 				fprintf(of, "\t%%t%d =%c ", tmp, irtyp(curfntyp));
 				fprintf(of, KIND(curfntyp) == LNG ? "exts " : "truncd ");
 				psymb(x);

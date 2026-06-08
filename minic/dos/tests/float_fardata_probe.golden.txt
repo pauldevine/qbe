@@ -1,0 +1,10 @@
+rt 40490fdb
+add 40a00000
+mul 40c00000
+div 3fc00000
+sub 3f800000
+ptr c0e00000
+arr 41200000
+mem 3dcccccd
+lt 1
+gt 0

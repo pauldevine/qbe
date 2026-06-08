@@ -77,11 +77,14 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/kl_ternary_mul_probe.c:minic/dos/tests/kl_ternary_mul_probe.golden.txt:compact"
 	"minic/dos/examples/kl_ternary_mul_probe.c:minic/dos/tests/kl_ternary_mul_probe.golden.txt:large"
 	# Single-precision software float (no 8087): native `float` lowers to
-	# _sf_* helper calls.  Medium-only — far-data float access (compact/large)
-	# truncates through minic's loadfw/storefw (a deferred follow-up; see
-	# softfloat_probe.c + NEXT_SESSION.md).
+	# _sf_* helper calls.  Arithmetic/compare/convert are model-independent
+	# (medium probes below); far-data float load/store goes through the
+	# loadfs/storefs ops (float_fardata_probe, compact/large/huge).
 	"minic/dos/examples/softfloat_probe.c:minic/dos/tests/softfloat_probe.golden.txt:medium"
 	"minic/dos/examples/float_literal_probe.c:minic/dos/tests/float_literal_probe.golden.txt:medium"
+	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:compact"
+	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:large"
+	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:huge"
 	"minic/dos/examples/struct_copy_probe.c:minic/dos/tests/struct_copy_probe.golden.txt:medium"
 	"minic/dos/examples/static_lptr_return_probe.c:minic/dos/tests/static_lptr_return_probe.golden.txt:medium"
 	"minic/dos/examples/lptr_range_probe.c:minic/dos/tests/lptr_range_probe.golden.txt:medium"
@@ -335,7 +338,7 @@ run_runtime_probe() {
 	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe) farstatic=1 ;; esac
 	# Soft-float probes link the single-precision soft-float helper library.
 	sfflag=""
-	case "$base" in softfloat_probe|float_literal_probe) sfflag="--softfloat" ;; esac
+	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe) sfflag="--softfloat" ;; esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag "$QBE_DIR/$src" >/dev/null
 	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?

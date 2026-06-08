@@ -13,12 +13,12 @@
  * Verify: tools/run-dos-exe.sh build/examples/softfloat_probe/softfloat_probe.exe \
  *             | diff - minic/dos/tests/softfloat_probe.golden.txt
  *
- * Wired into tools/test-dos.sh (MEDIUM only) with --softfloat.  Far-data
- * models (compact/large/huge) are NOT covered yet: minic's far load/store
- * (loadfw/storefw) truncates a float (Ks) through a far pointer to 16 bits,
- * so far-data single-precision float is a deferred follow-up (the
- * [[storefar-lacks-storefl]] family extended to Ks).  The soft-float
- * backend lowering itself (this milestone) is model-independent.
+ * Wired into tools/test-dos.sh (MEDIUM) with --softfloat.  The soft-float
+ * backend lowering exercised here (arithmetic, compare, int<->float) is
+ * model-independent.  Far-data float load/store (a float through a far
+ * pointer under compact/large/huge) is covered separately by
+ * float_fardata_probe.c, which exercises the loadfs/storefs ops that carry
+ * the full 32-bit Ks value through a far segment.
  *
  * Unary minus on a float (`-x`) is exercised directly: minic desugars it
  * to `0 - x`, and the usual-arithmetic-conversion fix keeps that single

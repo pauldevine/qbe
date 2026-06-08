@@ -1,3 +1,45 @@
+# Next session (§3w — far-data single-precision float load/store)
+
+## 2026-06-07 §3w notes (float through a far pointer: loadfs/storefs)
+- **Closed the last deferred far-data float gap.** Under compact/large/huge a
+  `float` global/array/struct-member lives in a far segment, so reading/writing
+  it goes through the i8086 far load/store path.  minic routed a far float
+  through `loadfw`/`storefw` (16-bit) and silently truncated the 32-bit Ks
+  value to its low half.  Now there are dedicated far single-float ops.
+- **New QBE ops `loadfs` / `storefs`** (ops.h), mirroring `loadfl`/`storefl`
+  but with a Ks value: `loadfs` result Ks ← far ptr (`l`); `storefs` value Ks,
+  far addr (`l`).  Wired into `all.h` (`isloadfar`→`Oloadfs`, `isstore` 2nd
+  range→`Ostorefs`) and `load.c` `storesz` (Ostorefs = 4 bytes).  The QBE IL
+  lexer perfect-hash (parse.c `K`) did NOT collide — no regen needed.
+- **i8086 backend** (`i8086/emit.c`): `Oloadfs` falls into the `Oloadfl`
+  handler, `Ostorefs` into `Ostorefl` — the far 32-bit DX:AX move is
+  class-agnostic.  Oloadfs (cls Ks) is excluded from the soft-float `(2)` Ks
+  guard so it reaches the main op switch with the other far ops.
+- **minic** (`minic.y`): `loadfar`/`storefar` + the 3 inline member/array
+  `storef*` sites gain an `'s'` branch (loadfs/storefs).
+- **Also fixed a float usual-conversion bug exposed under far-data:** the
+  float↔double conversion sites compared the FULL ctyp (`a.ctyp != b.ctyp`)
+  to decide whether to emit `exts`/`truncd`.  Under far-data a float VALUE
+  carries an extra `FAR` bit, so `float = float` (and `float + float`, and
+  `return float`) spuriously emitted a `truncd` on an already-Ks operand
+  (QBE: "invalid type for first operand in truncd").  Fixed 4 sites (binop l/r
+  at minic.y ~1843/1868, assignment ~3921, return ~4688) to compare only the
+  floating PRECISION: `(KIND(a)==LNG) != (KIND(b)==LNG)`.  Medium codegen is
+  unaffected (the FAR bit is never set there).
+- **Probe:** `minic/dos/examples/float_fardata_probe.c` (+golden), gated under
+  COMPACT/LARGE/HUGE with `--softfloat`.  Exercises far round-trip, far
+  arithmetic (`g_c = g_a OP g_b`), float through an explicit far pointer, far
+  float array element, far float struct member, and far compare — all via a
+  near `union` so a truncated high word prints a wrong `%08lx`.  Bit patterns
+  round-trip exactly on all three far-data models in DOSBox.
+- **Gates:** `make check` green; `tools/test-dos.sh` **215/215 ok**.  Soft-float
+  is now model-complete (medium arith/compare/convert + far-data load/store).
+- **Next on the float path:** `MICROPY_FLOAT_IMPL_FLOAT` — enable single-float
+  in the MicroPython compact far-data build and run a float feature probe on
+  Victor.  Watch image size (MP is currently `MICROPY_FLOAT_IMPL=NONE`;
+  enabling float pulls in objfloat.c + float formatting and will grow the
+  image — may bump against the Victor load ceiling).
+
 # Next session (§3v — unary-minus-on-float / float-vs-int usual conversions)
 
 ## 2026-06-07 §3v notes (unary minus on a float → single precision)

@@ -2799,8 +2799,10 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	}
 
 	/* (2) Ks arithmetic / negation.  (Ks load/copy/store already returned
-	 * via the Kl 32-bit handlers above.)  Kd value ops die. */
-	if (i->cls == Ks || i->cls == Kd) {
+	 * via the Kl 32-bit handlers above.)  Kd value ops die.  Oloadfs (a Ks
+	 * far load) is excluded: it is a 32-bit far-pointer load, handled with
+	 * the other far ops in the main switch below (shares Oloadfl). */
+	if ((i->cls == Ks && i->op != Oloadfs) || i->cls == Kd) {
 		if (i->cls == Kd)
 			die("i8086: double (Kd) soft-float not implemented — single-precision only (op %d)", i->op);
 		r0 = i->arg[0];
@@ -3093,6 +3095,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		return;
 
+	case Oloadfs:
+		/*
+		 * Load single-precision float (Ks) through a far pointer.  A Ks
+		 * value is a 32-bit IEEE bit pattern, carried exactly like Kl
+		 * (slot-resident DX:AX pair), so share the Oloadfl handler — the
+		 * load is class-agnostic 32 bits.  See [[storefar-lacks-storefl]]
+		 * extended to Ks ([[softfloat-spike]]).
+		 */
 	case Oloadfl:
 		/*
 		 * Load 32-bit long through far pointer.
@@ -3258,6 +3268,13 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		return;
 
+	case Ostorefs:
+		/*
+		 * Store single-precision float (Ks) through a far pointer.  A Ks
+		 * value is a 32-bit IEEE bit pattern, written exactly like Kl, so
+		 * share the Ostorefl handler — the store is class-agnostic 32 bits.
+		 * See [[storefar-lacks-storefl]] extended to Ks ([[softfloat-spike]]).
+		 */
 	case Ostorefl:
 		/*
 		 * Store 32-bit long through far pointer.

@@ -61,7 +61,7 @@ storesz(Ins *s)
 	case Ostoreb: case Ostorefb: return 1;
 	case Ostoreh: case Ostorefh: return 2;
 	case Ostorew: case Ostorefw: return T.wordsz;
-	case Ostores: return 4; /* IEEE single, always 4 bytes */
+	case Ostores: case Ostorefs: return 4; /* IEEE single, always 4 bytes */
 	case Ostorel: case Ostorefl: return 2 * T.wordsz;
 	case Ostored: return 8; /* IEEE double, always 8 bytes */
 	}
