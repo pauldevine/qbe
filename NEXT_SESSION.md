@@ -1,4 +1,74 @@
-# Next session (§4j — VICTOR RE-VERIFY the §4i far-pointer fix on real MicroPython, then optionally close the orthogonal huge-mode `_qbe_huge_add` >=0x8000 gap.  §4i LANDED the offset-only far-pointer arithmetic fix in the compiler; DOSBox gate is 224/224 and the reduction probe is ALL OK, but the MicroPython end-to-end payoff on Victor is NOT yet confirmed.)
+# Next session (§4k — the NEW frontier is churn(120) GC-pressure corruption on the 49 KB heap.  §4i+§4j are DONE: the offset-only far-pointer fix LANDED, is gate-verified 224/224, AND is Victor-verified on real MicroPython — the far-ptr churn(80) stall is GONE.  The remaining failure is a SEPARATE, newly-reachable GC bug.)
+
+## 2026-06-09 §4j notes (VICTOR RE-VERIFY of the §4i far-pointer fix — DONE; far-ptr stall fixed; a further GC frontier surfaced)
+
+**§4i+§4j land the far-pointer fix end-to-end.**  §4i implemented offset-only
+far-pointer arithmetic (`addfo`/`subfo`); §4j re-verified it on a REAL Victor 9000
+(MAME, `tools/run-victor-sasi.sh`, compact far-data, stackless, 49 KB heap — the exact
+config where §4g/§4h saw the churn(80) stall).  **The far-pointer bug is fixed on the
+actual consumer**, and a §4i refinement (below) made the MicroPython image SMALLER.
+
+### §4i refinement committed after the first build: VARIABLE-index only
+The first §4i `far_ptr_offset_binop` fired for BOTH constant and variable offsets.
+That GREW the MicroPython image +2304 B (body 820400→822704) because a CONSTANT scaled
+offset (`arr[const]`, `&arr[const]`, `p + const`) that QBE used to FOLD into a single
+relocated `CAddr` was being routed through the opaque (non-foldable) `addfo`, defeating
+the fold.  The §4h scope was always **variable-index only** (the bug needs a runtime
+index >= 0x8000 or a runtime-wrapped negative delta; a constant is folded + linker-resolved).
+Added `if (soff.t == Con) return 0;` to `far_ptr_offset_binop`.  Net effect: constant
+far-arith folds again AND variable far-arith drops the `adc` → image **820400 → 817840
+body (-2560 B vs the §4g baseline)**, more headroom under the ~824416 ceiling.  Gate
+re-run **224/224 ok** (the restriction changes no runtime output — constant far-arith
+reverts to the previously-passing flat add).
+
+### Victor results (real hardware; redirect-to-file, never pipe through tail — [[feedback-victor-harness-pipe-buffer]])
+| probe | result |
+|---|---|
+| `build/mp-churn-scale2.py` (49 KB heap) | `20 330` `40 1060` `60 2190` **`80 3720` `100 5650`** then churn(120) → `NameError`.  **churn(80)/(100) now CORRECT — was a hard hang at churn(80) pre-§4i.** |
+| `build/mp-feature-probe.py` | **23/23 OK** (mul…enum incl. `comp`/`gen`/`sort` — the exact checks the §4h naive-extuw attempt REGRESSED to `ER list`/`XX gen`).  No regression. |
+| `build/mp-fill-probe.py` | clean: all 16 markers `0`…`960` + `D4`/`C5` — 1000 iters force MANY gc_collects on the 49 KB heap (non-retained garbage), no corruption/hang. |
+
+### THE NEW FRONTIER FOR §4k — churn(120) NameError (a SEPARATE GC-pressure bug, NOT far-ptr)
+`scale2` now advances from the old churn(80) hang all the way to **churn(120)**, where it
+raises `NameError: name not defined` at module scope (marker `DE`, then clean `C5`).  This
+is NOT the far-ptr bug (the 49 KB heap maxes at offset ~0xC000, all < 0x10000 and all
+covered by addfo; churn(80)/(100) at the same offsets are correct) and NOT a §4i regression
+(pre-§4i it never even reached churn(120) — strictly more iterations complete correctly now).
+It is the **§4d/§4e/§4f "a live heap object is freed across a GC collection under heavy
+churn"** family — `NameError` at module scope = a freed-while-live qstr_pool / global-dict
+(the §4f symptom).  §4g's struct-alignment fix cleared it for MODERATE pressure
+(feature-probe 23/23, fill-probe clean) but NOT for scale2's extreme churn on the big heap —
+and §4g never actually confirmed scale2 completing on 49 KB (it was blocked first by the
+far-ptr bug, then mis-attributed to a perf cliff).  Now the far-ptr bug is gone, this is the
+exposed remaining issue.  Plan (per the §4e discipline — measure, don't reason):
+- Reduce on real Victor with the `build/mp-churn-*.py` family + a SMALLER heap to force the
+  collection earlier (`MP_HEAP_SIZE=16384 tools/recompile-mp-tu.sh main …` then run scale2 /
+  churn-lit).  §4e already showed churn-lit corrupts on a 16 KB heap when a live object spans
+  a collection — re-confirm it still does post-§4g+§4i (it may now, since the far-ptr fix
+  changes nothing about marking completeness).
+- Instrument MARKING COMPLETENESS directly (§4e step 1/2): in the port `gc_collect` (external
+  tree), capture a known-live object's block before the collection and check its ATB kind is
+  not FREE after `gc_collect_end`.  Find WHICH live block is swept.
+- Suspect: conservative C-stack scan range, or a multi-block live object's tail words (child
+  pointers) not traced, or a far-pointer VALUE inside a live container read at a wrong offset.
+- A medium-model DOS probe linking `py/gc.c` with stub `mp_state` (cross-linked objs, drop
+  most, force gc_collect, verify a retained object) would give a DOSBox-speed repro — if it
+  reproduces in medium it's not far-data-specific; if not, it's in the far load/store paths.
+
+### OPTIONAL §4k side-tracks (lower priority, independent)
+- **Huge-mode `_qbe_huge_add` >= 0x8000 gap**: `gc_bigheap_probe` still FAILS under
+  `--model=huge` (NOT gated there).  Orthogonal to §4i (huge uses huge_ptr_binop →
+  `_qbe_huge_add`, untouched; huge codegen byte-identical before/after).  Probe `rt`
+  (far-ptr DIFF) is correct under huge so `*p` writes fine; only `pool[off]` (the
+  `_qbe_huge_add` read) is wrong.  Fix in the libstub helper / `huge_ptr_binop` unsigned
+  widening.  Real consumer (MicroPython) runs compact, so low priority.
+- **build-example.sh -DFAR_DATA gap**: still self-#defined by gc_bigheap_probe.  Clean fix =
+  build-example.sh adds `-DFAR_DATA=1 -DDOS_FAR_DATA=1` for compact/large/huge; VERIFY it
+  doesn't shift farglobal/fardata/farstruct_ptr goldens (medium stdint_probe asserts sizeof==2).
+
+---
+
+# (DONE — §4i+§4j landed, Victor-verified) Next session (§4j — VICTOR RE-VERIFY the §4i far-pointer fix on real MicroPython, then optionally close the orthogonal huge-mode `_qbe_huge_add` >=0x8000 gap.  §4i LANDED the offset-only far-pointer arithmetic fix in the compiler; DOSBox gate is 224/224 and the reduction probe is ALL OK, but the MicroPython end-to-end payoff on Victor is NOT yet confirmed.)
 
 ## 2026-06-08 §4i notes (THE FIX LANDED — offset-only 16-bit segment-preserving far-pointer arithmetic; DOS gate green; Victor re-verify still pending)
 

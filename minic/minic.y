@@ -3038,6 +3038,19 @@ far_ptr_offset_binop(int op, Symb dst, Symb lhs, Symb rhs)
 		soff = lhs;
 	}
 
+	/* VARIABLE index only.  A CONSTANT offset keeps the flat `=l add`: the
+	 * bug needs a runtime index whose 16-bit value is >= 0x8000 (gc_alloc's
+	 * start_block*16) or a runtime-wrapped negative delta — a compile-time
+	 * constant scaled offset is folded by QBE into a single relocated CAddr
+	 * (`$sym+off`, no runtime arith), and routing it through the opaque
+	 * addfo/subfo would defeat that fold and bloat every `arr[const]` /
+	 * `&arr[const]` site (measured +2304 B across MicroPython, near the load
+	 * ceiling).  A constant index >= 0x8000 could in theory carry into the
+	 * segment too, but it is rare and the linker resolves the CAddr addend;
+	 * handle it only if a real case appears (NEXT_SESSION §4h scope note). */
+	if (soff.t == Con)
+		return 0;
+
 	fprintf(of, "\t");
 	psymb(dst);
 	fprintf(of, " =l %s ", op == '+' ? "addfo" : "subfo");
