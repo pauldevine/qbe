@@ -1,4 +1,90 @@
-# Next session (§4q — find WHY the X00 mark phase fails to mark the qstr-string chunk.  §4p NAILED THE MECHANISM: churn(120) NameError = `mp_load_global(MP_QSTR_churn)` misses because the "churn" qstr STRING was FREED-WHILE-LIVE during the churn(100) collection and reused — its recomputed hash then lands the lookup on an empty slot.  NOT a wild write (§4o's framing was wrong); it's a freed-while-live GC marking failure, layout-sensitive per §4o's period-4.  The exact failing lookup is fully understood; the open question is the marking link that breaks.)
+# Next session (§4r — FIX the i8086 variable-shift codegen bug §4q ROOT-CAUSED.  §4q CRACKED THE 13-SESSION SAGA: the churn chunk is freed-while-live because `gc_mark_subtree`'s child-check `ATB_GET_KIND` = `(atb >> (2*(block&3))) & 3` is MISCOMPILED — the variable Kw shift reads its count from a register the preceding `extub` (atb-byte zero-extend) clobbered, so it computes `atb >> atb` instead of `atb >> shift`, mis-classifies the chunk's HEAD as non-HEAD, skips marking → freed-while-live → reused → NameError.  Register-allocation-dependent ⇒ CODE-LAYOUT-sensitive (the heisenbug).  NOT segment-sensitive — §4o's period-4 only governs whether the reused-garbage hash misses the lookup slot (NameError manifestation).  FIX RECIPE = mirror amd64/isel.c `selshift`: pin a variable shift count to RCX via `Ocopy RCX<-count` + a clobber-marker; i8086 `selshift` currently does neither.)
+
+## 2026-06-09 §4q notes (ROOT-CAUSED the saga: i8086 variable-shift count-operand clobber in gc_mark_subtree's ATB_GET_KIND)
+
+**§4q definitively cracked the churn(120) bug via on-target instrumentation (real Victor/MAME)
++ generated-asm analysis.**  No qbe source changed this session (diagnosis + a precise fix
+recipe for §4r).  All instrumentation is in the EXTERNAL micropython tree, guarded by
+`-DMP_DBG_SWEEP=1` (normal builds unaffected); LEFT IN PLACE for §4r.  The clean shipping FAIL
+image is restored (`build/mp-link/mpython.exe`, body 817840, byte-identical to §4p).
+
+### THE BUG (airtight, multi-stage)
+1. **Freed-while-live = a MARKING MISS, not a sweep mis-read.**  Instrumented `py/gc.c`
+   `gc_sweep_free_blocks` to walk back to the "churn" chunk's HEAD block and print its ATB kind
+   after the mark phase (`PRESWP ... hk=`), and main.c `gc_collect` to set the watch from
+   `qstr_str(qstr_find_strn("churn",5))`.  The chunk head is **block 0xA5** in every run (the
+   intra-heap layout is stable).  Across an 8-way `--stack-size` sweep (heap_seg 0xBB10..0xBB17,
+   two full mod-4 periods) the head is `hk=1` (AT_HEAD, **UNMARKED**) in EVERY alignment, and
+   `SWPLIVE` fires — the chunk is freed-while-live UNCONDITIONALLY.
+2. **NOT segment-sensitive.**  The PASS/FAIL outcome still followed §4o's period-4 (FAIL iff
+   heap_seg mod4∈{0,3}), but `hk=1` regardless.  So the segment only governs whether the
+   reused-object garbage that overwrites the freed "churn" string (a far type-ptr whose SEGMENT
+   word shifts with `--stack-size`) hashes to a slot that still finds "churn" (PASS) or misses
+   (FAIL→NameError).  §4o's "segment-sensitive wild write" was a DOWNSTREAM red herring.
+3. **The "instrumentation hides it" heisenbug, EXPLAINED twice.**  (a) A naive watch that
+   materialized the chunk POINTER in `gc_collect`'s frame got picked up by the conservative
+   C-stack scan and ROOTED the chunk (masking the bug) — fixed by doing the qstr lookup entirely
+   inside a deep void helper (`gc_dbg_update_watch`) so only the integer block escapes.  (b) Even
+   then, adding the CHILD/ROOT probes (code in the MARK functions) flipped `hk=1`→`hk=3` (chunk
+   marked, PASS) at the SAME segment class — i.e. the marking miss is **code-layout-sensitive**,
+   not data/segment-sensitive.
+4. **ROOT CAUSE in the generated asm.**  `build/mp-link/gc.asm` (clean) `gc_mark_subtree`'s
+   child-check `if (ATB_GET_KIND(ptr_block) != AT_HEAD) continue;` compiles to (SSA
+   `%t146 =w mul 2,%t148` = 2*(block&3) = shift; `%t154 =w extub %t134` = atb byte;
+   `%t133 =w sar %t154,%t146`):
+   ```
+   imul bx            ; t146 (count) -> AX
+   mov [bp-16], ax    ; SPILL count to slot
+   mov dx, di         ; extub: atb byte
+   and dx, 255
+   mov ax, dx         ; t154 (value) -> AX   <-- reuses AX, clobbering the count
+   push cx
+   mov cx, ax         ; cx = AX = VALUE  (BUG: rega says count is RTmp(AX), but AX now=value)
+   sar ax, cl         ; atb >> (atb&31)   instead of   atb >> shift
+   ```
+   The count `t146` was spilled to `[bp-16]`, but the `sar`'s arg[1] is still tracked as
+   **RTmp(AX)**; the intervening `extub` reused AX; the i8086 shift emit's `mov cx, rname[r1.val]`
+   reads the stale (clobbered) AX.  So the shift count is the atb byte itself → wrong
+   `ATB_GET_KIND` → the unmarked HEAD reads as non-HEAD → `continue` (skip) → never marked.
+   (Why only "churn" visibly breaks: the wrong formula mis-skips SOME live heads, but under churn
+   almost everything is transient garbage about to die anyway — only a long-lived interned-qstr
+   chunk produces a visible NameError.)
+
+### THE FIX FOR §4r (mirror amd64; the recipe is exact)
+`i8086/isel.c::selshift` (line ~248) just `fixarg`s both operands and lets emit move the count to
+CL — with no register pin, so rega can place the count in a register an adjacent op clobbers.
+`amd64/isel.c::selshift` (case Osar/Oshr/Oshl, ~306-321) is the canonical fix: for a non-RCon
+count it does `i.arg[1]=TMP(RCX); emit(Ocopy,Kw,R,TMP(RCX),R); emiti(i); emit(Ocopy,Kw,TMP(RCX),r0,R)`
+— pinning the count to RCX via a real `Ocopy RCX<-count` (which rega lowers correctly, reloading
+from the spill slot) and a no-dest `Ocopy <- RCX` clobber-marker so rega knows the shift writes RCX.
+- Mirror that in i8086 `selshift` for variable (non-RCon) counts.  Then the shift's arg[1] is
+  always RCX, so `i8086/emit.c`'s Kw-shift handler (~1098-1210) hits the `r1.val==RCX` path and
+  emits no stale `mov cx, <reg>` — the count is materialized into CX by the isel `Ocopy`.
+- Keep the RCon (immediate) paths unchanged (imm 0/1, 2-8 unroll, >8 via CL with push/pop).
+- Check the Kl (32-bit) shift path (separate handler in emit) also expects the count in CL/RCX.
+- **The 224-probe gate did NOT catch this** (layout-sensitive) — so DON'T trust a green gate alone.
+  Add a probe that recreates the spill scenario (a variable shift whose count is spilled across an
+  intervening single-byte zero-extend under register pressure), AND re-run scale2 on real Victor:
+  `VICTOR_SRC=build/mp-churn-scale2.py tools/run-victor-sasi.sh build/mp-link/mpython.exe 240`
+  must print churn(120)=`120 7980` `DONE` at the clean (uninstrumented) FAIL image.
+
+### Repro / instrumentation cheat-sheet (verified this session)
+- Clean FAIL baseline restored: `build/mp-link/mpython.exe` body 817840 (heap_seg 0xBA8B).
+  Baseline run reproduces churn(20..100) correct then churn(120)→NameError.
+- Instrument: `MP_EXTRA_CPPFLAGS="-DMP_DBG_SWEEP=1" tools/recompile-mp-tu.sh gc …/py/gc.c` then
+  `… main …/ports/dos8086/main.c`.  gc.c adds `gc_dbg_watch_block` + `gc_dbg_update_watch()` +
+  `PRESWP`/`SWPLIVE`/`CHILD`/`ROOT` prints (all `#if MP_DBG_SWEEP`).  main.c `gc_collect` calls
+  `gc_dbg_update_watch()`.  Image stays under the ~824416 ceiling (body ~820800 with all probes).
+- `--stack-size` sweep (segment only, intra-heap layout fixed): relink
+  `tools/omf_link.py -o /tmp/qK.exe --stack-size $((16384+16*k)) --gc-sections --pack-code <objs>`
+  from `/tmp/mp_objs.txt` (109 objs); run all in parallel via `run-victor-sasi.sh` (~2.5 wall-min
+  each).  WARNING: heap_seg mod-4 does NOT predict FAIL for an instrumented body — sweep 4-8 and
+  observe.  The MARKING miss (`hk=1`) is alignment-INDEPENDENT, so any single alignment shows it —
+  but adding code to the MARK functions perturbs rega and can flip it (that IS the bug's nature).
+
+---
+
+# (SUPERSEDED by §4q above) Next session (§4q — find WHY the X00 mark phase fails to mark the qstr-string chunk.  §4p NAILED THE MECHANISM: churn(120) NameError = `mp_load_global(MP_QSTR_churn)` misses because the "churn" qstr STRING was FREED-WHILE-LIVE during the churn(100) collection and reused — its recomputed hash then lands the lookup on an empty slot.  NOT a wild write (§4o's framing was wrong); it's a freed-while-live GC marking failure, layout-sensitive per §4o's period-4.  The exact failing lookup is fully understood; the open question is the marking link that breaks.)
 
 ## 2026-06-09 §4p notes (CRACKED the failure mechanism: freed-while-live of the "churn" qstr string → lookup miss; instrumentation via SERIAL, MAME debugger ruled out)
 
