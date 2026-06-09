@@ -1,4 +1,67 @@
-# Next session (§4n — all STRUCTURAL/algorithmic GC hypotheses for churn(120) are now EXHAUSTED by static audits + a faithful repro; the bug is a LAYOUT-SENSITIVE NON-GC WILD WRITE (or an mp_state-scan residual) that needs RUNTIME OBSERVATION of the shipping image.  §4i+§4j fixed+verified the far-ptr bug; §4k=heisenbug; §4l=GC core CLEAN; §4m=all live-type pointer fields 4-aligned.  Two probes gated.  No more static angles — observe the corruption at runtime without perturbing.)
+# Next session (§4o — the churn(120) corruption is now isolated to a LAYOUT-SENSITIVE NON-GC WILD WRITE — the ONLY hypothesis left after EVERY structural/algorithmic one was ruled out (GC core §4l, all live-type ptr alignment §4m, mp_state root scan §4n, mark-stack overflow §4k).  Static analysis is fully spent.  §4o MUST observe the wild write at runtime on the shipping image without perturbing it (instrumentation hides it — §4k).  §4i+§4j fixed+verified the far-ptr bug; three GC probes gated.)
+
+## 2026-06-09 §4n notes (mp_state root-scan re-audit — CLEAN; suspect B ruled out; only the wild-write hypothesis remains)
+
+**§4n extended `gc_offset_probe.c`** (the gated §4m audit) to the mp_state root section that
+`gc_collect_start` scans, and **statically confirmed it is correct** — closing suspect B
+without any MAME run.  The scan covers `[offsetof(thread.dict_locals), offsetof(vm.qstr_last_chunk))`
+at a void**=4 stride; the probe prints (compact/large, far-data):
+- `root_start`(dict_locals)=**8** (4-aligned — §4g padded it from the packed-6), `root_end`
+  (qstr_last_chunk)=**108**, scan window `[8,108)`.
+- Every root pointer is 4-aligned AND inside the window: thread.dict_locals@8, dict_globals@12,
+  nlr_top@16, pending_exc@24; vm.last_pool@32, dict_main.base@64, dict_main.map.table@72,
+  readline_hist@76 (the last root, ending exactly at 108).
+So `gc_collect_start` finds every mp_state root → **suspect B (a missed root) is RULED OUT**,
+which also agrees with "16 KB works" (a missed root is layout/heap-size-INDEPENDENT and would
+fail on the small heap too).
+
+### The suspect set is now a SINGLE hypothesis
+RULED OUT (static + faithful repro): GC core algorithm/codegen (§4l); pointer-field alignment
+in every live object type incl. the value stack (§4m); the mp_state root scan (§4n); mark-stack
+overflow (§4k).  ONLY ONE hypothesis fits ALL the evidence —
+**a LAYOUT-SENSITIVE NON-GC WILD WRITE**: some compiled VM/runtime code (NOT the GC, NOT the
+gate-verified addfo path) does far-pointer arithmetic that, on the 49 KB heap's specific
+address range, computes a target a little past an object and overwrites a live object (the qstr
+pool / globals dict → NameError).  This is the UNIQUE fit for: §4k's heisenbug (a ~32-byte
+image shift moves the target onto harmless padding); "16 KB works, 49 KB fails" (the bad target
+only lands on a live object when the heap occupies the larger offset range); and all
+GC/structural analysis being clean.
+
+### THE GOAL FOR §4o — find the wild write at runtime (the only avenue left)
+A wild write's target depends on RUNTIME addresses, so no static audit can find it — §4o must
+observe it on the SHIPPING `build/mp-link/mpython.exe` (no source change → no layout shift;
+§4k proved any added code hides it).  Concrete approaches, by tractability:
+1. **Layout-sensitivity BISECT (most tractable, mechanical).**  Add a sized UNUSED global
+   (e.g. `static char pad[N];` in a TU, or a linker pad) to shift the image by N bytes, and
+   binary-search N over [0, 64] for the fail↔pass threshold (each step = recompile-one-TU +
+   one ~3-min MAME run).  §4k bracket: clean 817840 FAILS, +112 (817952) PASSES.  The flip
+   granularity (does it flip every 2 / 4 / 16 bytes?) reveals the target's alignment, and the
+   absolute address at the flip, cross-referenced with `build/mp-link/mpython.map`, localizes
+   WHICH data region gets clobbered → which code writes near it.
+2. **MAME debugger observation (definitive, harder).**  Boot under MAME `-debug` with a
+   `-debugscript`: break at `gc_collect` (or `do_str`), walk `mp_state_ctx` (static addr from
+   the .map) → dict_globals → map.table to get the live globals-table heap address, `wpset`
+   write-watch it, continue, and catch the PC of the instruction that writes garbage to it.
+   That PC → the function → the offending far-arith.  Headless MAME debugger scripting
+   (expressions reading memory via `dword(...)`, conditional `wpset`) is the work item; adapt
+   the launch from `tools/run-victor-sasi.sh`.
+3. **Suspect-guided code audit.**  The wild write is far-arith that overshoots on large
+   offsets.  §4i fixed `far_ptr ± idx` (addfo, gate-verified); look for OTHER far-arith shapes
+   minic emits that DON'T go through addfo and could overrun: e.g. `memcpy`/`memmove`/`memset`
+   length or dest computed with a far pointer near the segment top, struct-copy byte loops,
+   `m_renew`/array-grow far-pointer recomputations, or a far-pointer COMPARE used as a bound
+   that mis-orders at high offsets.  Grep the generated `build/mp-link/*.asm` for far stores
+   (`mov [es:...]`) whose address is computed by a non-addfo add/adc pair.
+
+### Three gated GC probes (regression guards locked in this session)
+`gc_churn_probe` (§4l) — faithful GC-core + far-ptr-fix guard.  `gc_offset_probe` (§4m+§4n) —
+§4g far-data alignment guard for every live object type AND the mp_state root section.  Plus
+`gc_bigheap_probe` (§4i).  Gate 228/228 (gc_offset_probe golden extended with the mp_state
+lines; same 2 gate entries).
+
+---
+
+# (§4n done above) Next session (§4n — all STRUCTURAL/algorithmic GC hypotheses for churn(120) are now EXHAUSTED by static audits + a faithful repro; the bug is a LAYOUT-SENSITIVE NON-GC WILD WRITE (or an mp_state-scan residual) that needs RUNTIME OBSERVATION of the shipping image.  §4i+§4j fixed+verified the far-ptr bug; §4k=heisenbug; §4l=GC core CLEAN; §4m=all live-type pointer fields 4-aligned.  Two probes gated.  No more static angles — observe the corruption at runtime without perturbing.)
 
 ## 2026-06-09 §4m notes (static layout audit — all live-type pointer fields are 4-aligned; structural hypotheses exhausted)
 

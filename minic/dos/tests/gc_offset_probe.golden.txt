@@ -17,4 +17,14 @@ code_state.old_globals       off=16 a4=1
 code_state.prev              off=20 a4=1
 code_state.state[]           off=24 a4=1
 mp_code_state_t sizeof=24
+root_start(dict_locals)=8 root_end(qstr_last_chunk)=108 scan_window=[8,108)
+root_start                   off=8 a4=1
+thread.dict_locals           off=8 a4=1
+thread.dict_globals          off=12 a4=1
+thread.nlr_top               off=16 a4=1
+thread.pending_exc           off=24 a4=1
+vm.last_pool                 off=32 a4=1
+vm.dict_main.base            off=64 a4=1
+vm.dict_main.map.table       off=72 a4=1
+vm.readline_hist             off=76 a4=1
 ALL-4-ALIGNED

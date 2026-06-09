@@ -88,6 +88,49 @@ typedef struct _mp_code_state_t {
 	mp_obj_t state[0];
 } mp_code_state_t;
 
+/* mp_state_ctx root section (scanned by gc_collect_start at a void**=4 stride
+ * over [offsetof(thread.dict_locals), offsetof(vm.qstr_last_chunk))).  Every
+ * root POINTER in that window must be 4-aligned, else gc_collect_start misses
+ * it.  Verbatim from build/mp-link/gc.pp.c; pointer-only pointee types are
+ * opaque forward decls (only the 4-byte pointer size matters here). */
+typedef uintptr_t mp_uint_t;
+struct _nlr_buf_t; typedef struct _nlr_buf_t nlr_buf_t;
+struct _nlr_jump_callback_node_t; typedef struct _nlr_jump_callback_node_t nlr_jump_callback_node_t;
+struct _mp_obj_tuple_t; typedef struct _mp_obj_tuple_t mp_obj_tuple_t;
+typedef struct _mp_obj_exception_t {
+	mp_obj_base_t base;
+	size_t traceback_alloc : (8 * sizeof(size_t) / 2);
+	size_t traceback_len : (8 * sizeof(size_t) / 2);
+	size_t *traceback_data;
+	mp_obj_tuple_t *args;
+} mp_obj_exception_t;
+typedef struct _mp_state_vm_t {
+	qstr_pool_t *last_pool;
+	mp_obj_exception_t mp_emergency_exception_obj;
+	mp_obj_dict_t mp_loaded_modules_dict;
+	mp_obj_dict_t dict_main;
+	const char *readline_hist[8];
+	char *qstr_last_chunk;
+	size_t qstr_last_alloc;
+	size_t qstr_last_used;
+	mp_uint_t mp_optimise_value;
+} mp_state_vm_t;
+typedef struct _mp_state_thread_t {
+	char *stack_top;
+	uint16_t gc_lock_depth;
+	mp_obj_dict_t *dict_locals;
+	mp_obj_dict_t *dict_globals;
+	nlr_buf_t *nlr_top;
+	nlr_jump_callback_node_t *nlr_jump_callback_top;
+	volatile mp_obj_t mp_pending_exception;
+	mp_obj_t stop_iteration_arg;
+} mp_state_thread_t;
+typedef struct _mp_state_ctx_t {
+	mp_state_thread_t thread;
+	mp_state_vm_t vm;
+	/* mem section omitted — the root scan ends at vm.qstr_last_chunk */
+} mp_state_ctx_t;
+
 static int allok = 1;
 
 static void chk(const char *what, unsigned off)
@@ -135,6 +178,31 @@ int main(void)
 	chk("code_state.prev",       (unsigned)offsetof(mp_code_state_t, prev));
 	chk("code_state.state[]",    (unsigned)offsetof(mp_code_state_t, state));
 	printf("mp_code_state_t sizeof=%u\r\n", (unsigned)sizeof(mp_code_state_t));
+
+	/* mp_state_ctx root section scanned by gc_collect_start.  thread is first
+	 * (offset 0), so root pointer ctx-offsets == their offsetof in the
+	 * sub-struct; vm starts at sizeof(thread). */
+	{
+		unsigned thr = (unsigned)sizeof(mp_state_thread_t);
+		unsigned rs = (unsigned)offsetof(mp_state_thread_t, dict_locals);
+		unsigned re = thr + (unsigned)offsetof(mp_state_vm_t, qstr_last_chunk);
+		printf("root_start(dict_locals)=%u root_end(qstr_last_chunk)=%u "
+		       "scan_window=[%u,%u)\r\n", rs, re, (rs / 4) * 4, re);
+		chk("root_start", rs);   /* MUST be 4-aligned or the whole scan shifts */
+		/* thread roots (ctx offset == offsetof in thread) */
+		chk("thread.dict_locals",  (unsigned)offsetof(mp_state_thread_t, dict_locals));
+		chk("thread.dict_globals", (unsigned)offsetof(mp_state_thread_t, dict_globals));
+		chk("thread.nlr_top",      (unsigned)offsetof(mp_state_thread_t, nlr_top));
+		chk("thread.pending_exc",  (unsigned)offsetof(mp_state_thread_t, mp_pending_exception));
+		/* vm roots (ctx offset = sizeof(thread) + offsetof in vm) */
+		chk("vm.last_pool",        thr + (unsigned)offsetof(mp_state_vm_t, last_pool));
+		chk("vm.dict_main.base",   thr + (unsigned)offsetof(mp_state_vm_t, dict_main));
+		chk("vm.dict_main.map.table",
+		    thr + (unsigned)offsetof(mp_state_vm_t, dict_main)
+		    + (unsigned)offsetof(mp_obj_dict_t, map)
+		    + (unsigned)offsetof(mp_map_t, table));
+		chk("vm.readline_hist",    thr + (unsigned)offsetof(mp_state_vm_t, readline_hist));
+	}
 
 	printf("%s\r\n", allok ? "ALL-4-ALIGNED" : "MISALIGNED");
 	return 0;
