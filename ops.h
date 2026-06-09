@@ -154,6 +154,17 @@ O(storefs, T(s,e,e,e, l,e,e,e), F(0,0,0,0,0,0,0,0,0,1)) X(0,0,1) V(0)  /* store 
 O(mkfar,   T(e,w,e,e, e,w,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* make far ptr: (seg, off) -> far */
 O(farseg,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* extract segment from far ptr */
 O(faroff,  T(l,l,e,e, x,x,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* extract offset from far ptr */
+/* Far-pointer OFFSET add/sub: arg0 = far ptr, arg1 = byte offset (only its
+ * low 16 bits matter).  The offset is added/subtracted to/from the pointer's
+ * 16-bit OFFSET word with 16-bit wraparound; the SEGMENT word is preserved
+ * (NO carry/borrow).  Correct lowering of `far_ptr ± idx` on 8086 compact/large
+ * (and explicit __far in any non-huge model): the segment is fixed per object
+ * (objects <= 64 KB) and arithmetic stays in-segment.  A flat 32-bit add of a
+ * sign- or zero-extended index is wrong for an in-segment offset >= 0x8000.
+ * Fully opaque to the optimiser (no fold/identity/commute) so no pass rewrites
+ * it back into a plain `add`.  See [[project-far-ptr-unsigned-index-bug]]. */
+O(addfo,   T(e,l,e,e, e,l,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* far ptr + offset (segment preserved) */
+O(subfo,   T(e,l,e,e, e,l,e,e), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* far ptr - offset (segment preserved) */
 O(vargp,   T(x,x,x,x, x,x,x,x), F(0,0,0,0,0,0,0,0,0,0)) X(0,0,0) V(0)  /* va_start: ptr to first vararg = SS:(bp+vararg_off) */
 
 /****************************************/

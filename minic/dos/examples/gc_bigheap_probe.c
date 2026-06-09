@@ -1,34 +1,41 @@
 /*
- * gc_bigheap_probe.c — REPRODUCES an open minic far-data codegen bug (§4h):
- * `far_ptr + unsigned_index` for an index >= 0x8000 is wrong.
+ * gc_bigheap_probe.c — regression guard for §4i: far-pointer offset
+ * arithmetic (`far_ptr + idx`) for an in-segment byte offset >= 0x8000.
  *
- * STATUS: NOT GATED (it FAILS with current minic — it is the repro for the
- * bug, not a regression guard).  Gate it once the fix lands.
+ * STATUS: GATED (compact + large) in tools/test-dos.sh.  It was the repro for
+ * the §4h bug and is now the guard for the §4i fix.
  *
- * THE BUG (confirmed via this probe's SSA + a real-Victor MicroPython repro):
- *   On i8086 far-data, minic lowers `far_ptr + index` (variable index) as a
- *   FLAT 32-bit add of a SIGN-EXTENDED index (minic.y Scale path: it always
+ * THE BUG (§4h, fixed in §4i):
+ *   On i8086 far-data, minic USED to lower `far_ptr + index` (variable index)
+ *   as a FLAT 32-bit add of a SIGN-EXTENDED index (minic.y Scale path always
  *   `sext`s a sub-long index before scaling).  When the index is an UNSIGNED
  *   byte offset >= 0x8000 (top bit of the 16-bit offset set), extsw makes it
- *   negative, so `ptr + off` becomes a wild address BELOW the object.
+ *   negative, so `ptr + off` became a wild address BELOW the object.
  *   MicroPython's gc_alloc returns exactly this shape —
  *   `gc_pool_start + start_block * BYTES_PER_BLOCK` — so on a >32 KB heap any
- *   block in the upper half (start_block >= 2048) is handed back at a bogus
- *   address => heap corruption.  This is why the 49 KB dos8086 heap corrupts
- *   under churn while a 16 KB heap (blocks < 1024, offsets < 0x4000) is clean.
+ *   block in the upper half (start_block >= 2048) was handed back at a bogus
+ *   address => heap corruption.  This is why the 49 KB dos8086 heap corrupted
+ *   under churn while a 16 KB heap (blocks < 1024, offsets < 0x4000) was clean.
  *
- *   The naive fix (zero-extend an unsigned index, extuw) fixes gc_alloc but
- *   REGRESSES code that relies on 16-bit wraparound for a "negative" size_t
- *   delta (extsw handled those by accident) — MicroPython feature-probe
- *   list/gen broke.  The CORRECT fix is offset-only 16-bit segment-preserving
- *   far-pointer arithmetic (a dedicated backend op), not an extension choice
- *   on a flat 32-bit add.  See NEXT_SESSION.md §4h.
+ * THE FIX (§4i): a far pointer's segment is fixed per object (objects <= 64 KB)
+ *   and its 16-bit offset wraps within the segment, so `far_ptr ± idx` must add
+ *   the index to the OFFSET word only, segment preserved — emitted as the
+ *   dedicated `addfo`/`subfo` backend ops (offset-only, 16-bit wraparound).
+ *   That is correct for BOTH a true large offset (>= 0x8000) AND a 16-bit
+ *   wrapped "negative" size_t delta, which neither extsw nor extuw of a flat
+ *   32-bit add can handle simultaneously.  See [[project-far-ptr-unsigned-index-bug]].
  *
  *   What this probe shows: rt (BLOCK_FROM_PTR, far-ptr DIFFERENCE) and vp
  *   (VERIFY_PTR, far-ptr COMPARE) round-trip correctly for every block;
- *   ONLY `direct` (= pool[off], i.e. far_ptr + unsigned index) is wrong for
- *   off >= 0x8000 (b >= 2048).  So the bug is isolated to the additive
- *   far-pointer-plus-index path.
+ *   `direct` (= pool[off], i.e. far_ptr + unsigned index) is now also correct
+ *   for off >= 0x8000 (b >= 2048).
+ *
+ * HUGE is NOT gated here: under --model=huge, `far_ptr ± idx` does NOT use
+ *   addfo/subfo — objects can exceed 64 KB so a genuine segment carry is
+ *   needed, and minic routes it through huge_ptr_binop -> _qbe_huge_add
+ *   (a normalising libstub helper).  This probe still FAILS under huge because
+ *   that helper has its own pre-existing >= 0x8000 gap (orthogonal to §4i, which
+ *   does not touch the huge path; huge codegen is byte-identical before/after).
  *
  * Build:  QBE_FAR_STATIC_DATA=1 tools/build-example.sh --model=compact \
  *             minic/dos/examples/gc_bigheap_probe.c

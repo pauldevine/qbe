@@ -2989,6 +2989,65 @@ huge_ptr_binop(int op, Symb dst, Symb lhs, Symb rhs)
 	return 1;
 }
 
+/*
+ * Far-pointer index arithmetic for compact/large (and explicit __far in any
+ * non-huge model): emit the dedicated `addfo`/`subfo` ops instead of a flat
+ * `=l add`/`=l sub`.
+ *
+ * A far pointer's segment is fixed per object (objects <= 64 KB) and the
+ * 16-bit offset wraps within the segment, so `far_ptr ± idx` must add/sub the
+ * index to the OFFSET word only, preserving the segment.  A flat 32-bit add of
+ * a SIGN-extended index (what the Scale path produces) goes wrong when the
+ * in-segment byte offset is >= 0x8000: extsw makes it negative, so the sum
+ * lands BELOW the object (e.g. MicroPython gc_alloc's pool_start + start_block*16
+ * on a >32 KB heap).  A zero-extended index instead breaks a 16-bit-wrapped
+ * "negative" size_t delta (off + 0xFFFF should give off-1).  Only offset-only
+ * modular arithmetic on the 16-bit offset is correct for BOTH — that's what
+ * the addfo/subfo backend ops do (they read just arg1's low 16 bits, so the
+ * Scale path's `=l mul`/sext is left unchanged: its low word already equals
+ * (idx*sz) mod 0x10000).  See NEXT_SESSION §4i / [[project-far-ptr-unsigned-index-bug]].
+ *
+ * MHuge is excluded: there an object can exceed 64 KB, so a genuine segment
+ * carry is required — handled by huge_ptr_binop (_qbe_huge_add/sub), which the
+ * callers run first.  Function pointers (pointee FUN, living in CS) and near
+ * pointers (16-bit, irtyp 'w') keep the regular add/sub.
+ *
+ * Returns 1 if it emitted addfo/subfo (caller skips its add/sub), else 0.
+ */
+static int
+far_ptr_offset_binop(int op, Symb dst, Symb lhs, Symb rhs)
+{
+	Symb sptr, soff;
+
+	if (op != '+' && op != '-') return 0;
+	if (memmodel == MHuge) return 0;
+	if (KIND(dst.ctyp) != PTR) return 0;
+	if (KIND(DREF(dst.ctyp)) == FUN) return 0;   /* fn ptr lives in CS */
+	if (irtyp_ret(dst.ctyp) != 'l') return 0;     /* near (16-bit) ptr */
+	if (ISFLOAT(lhs.ctyp) || ISFLOAT(rhs.ctyp)) return 0;
+
+	/* The pointer side is the PTR operand; the other is the (already
+	 * element-size-scaled) byte offset.  '+' is commutative; for '-' the
+	 * pointer must be the LHS (prom() has already swapped a `idx + ptr`
+	 * so the pointer is `lhs`). */
+	if (KIND(lhs.ctyp) == PTR) {
+		sptr = lhs;
+		soff = rhs;
+	} else {
+		sptr = rhs;
+		soff = lhs;
+	}
+
+	fprintf(of, "\t");
+	psymb(dst);
+	fprintf(of, " =l %s ", op == '+' ? "addfo" : "subfo");
+	psymb(sptr);
+	fprintf(of, ", ");
+	psymb(soff);
+	fprintf(of, "\n");
+	return 1;
+}
+
 /* Fill a struct/union aggregate's members from an initlist into the storage
  * whose address is the SSA operand `dst` (e.g. "%_clit3" for a compound
  * literal, or "%foo"/"%t9" for a named local / deref target — see the
@@ -4123,7 +4182,8 @@ expr(Node *n)
 		s1.ctyp = INT;
 		/* Compute new value */
 		sr.ctyp = prom(o, &s0, &s1);
-		if (!huge_ptr_binop(o, sr, s0, s1)) {
+		if (!huge_ptr_binop(o, sr, s0, s1)
+		 && !far_ptr_offset_binop(o, sr, s0, s1)) {
 			fprintf(of, "\t");
 			psymb(sr);
 			fprintf(of, " =%c %s ", irtyp_ret(sr.ctyp), o == '+' ? "add" : "sub");
@@ -4223,6 +4283,16 @@ expr(Node *n)
 			fprintf(of, ")\n");
 			break;
 		}
+
+		/* Compact/large (or explicit __far): `far_ptr ± idx` must use the
+		 * offset-only addfo/subfo ops (segment preserved, 16-bit offset
+		 * wraparound) — a flat `=l add` of the Scale path's sign-extended
+		 * index corrupts any in-segment offset >= 0x8000.  Covers a[i],
+		 * p+i, p-i, and the postfix p++/p-- that reach Binop.  The post-switch
+		 * ptr-ptr `div` and the P/M store-back still run after this break.
+		 * See far_ptr_offset_binop / [[project-far-ptr-unsigned-index-bug]]. */
+		if (far_ptr_offset_binop(o, sr, s0, s1))
+			break;
 
 		/* Validate operations on floating-point types */
 		if (ISFLOAT(sr.ctyp)) {

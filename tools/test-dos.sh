@@ -282,6 +282,14 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/struct_align_probe.c:minic/dos/tests/struct_align_probe.golden.txt:compact"
 	"minic/dos/examples/struct_align_probe.c:minic/dos/tests/struct_align_probe.golden.txt:large"
 	"minic/dos/examples/struct_align_probe.c:minic/dos/tests/struct_align_probe.golden.txt:huge"
+	# §4i far-pointer offset arithmetic: `far_ptr + idx` for an in-segment
+	# offset >= 0x8000 (addfo/subfo, segment-preserving 16-bit wraparound).
+	# compact/large only — under huge `far_ptr +/- idx` routes through
+	# huge_ptr_binop/_qbe_huge_add (a different, segment-normalising path that
+	# this fix does not touch), and that path has its own pre-existing >=0x8000
+	# gap; see the probe header.  See [[project-far-ptr-unsigned-index-bug]].
+	"minic/dos/examples/gc_bigheap_probe.c:minic/dos/tests/gc_bigheap_probe.golden.txt:compact"
+	"minic/dos/examples/gc_bigheap_probe.c:minic/dos/tests/gc_bigheap_probe.golden.txt:large"
 )
 
 # --- Stevie size budget ----------------------------------------------------
@@ -355,7 +363,7 @@ run_runtime_probe() {
 	# (statics outside DGROUP).  Gated by basename so only these exercise it
 	# until far-global direct access is complete (see NEXT_SESSION.md).
 	farstatic=0
-	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe) farstatic=1 ;; esac
+	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe|gc_bigheap_probe) farstatic=1 ;; esac
 	# Soft-float probes link the single-precision soft-float helper library.
 	sfflag=""
 	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe) sfflag="--softfloat" ;; esac

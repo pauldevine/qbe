@@ -1481,6 +1481,74 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			}
 			return;
 
+		case Oaddfo:
+		case Osubfo:
+			/*
+			 * Far-pointer OFFSET add/sub: result = far_ptr ± offset,
+			 * with the 16-bit OFFSET word wrapping and the SEGMENT word
+			 * preserved (NO adc/sbb into the segment).  On 8086
+			 * compact/large a far pointer's segment is fixed per object
+			 * (objects <= 64 KB) and arithmetic stays in-segment, so
+			 * adding only arg1's low 16 bits to the offset is the correct
+			 * lowering — and is correct for BOTH a true large offset
+			 * (>= 0x8000, e.g. gc_alloc's start_block*16 on a >32 KB heap)
+			 * AND a 16-bit-wrapped "negative" size_t delta (off + 0xFFFF
+			 * -> off-1), which a flat 32-bit add of a sign- or
+			 * zero-extended index gets wrong in opposite directions.
+			 * See [[project-far-ptr-unsigned-index-bug]].
+			 *
+			 * arg1's HIGH word is deliberately ignored: that is exactly
+			 * the part that would (wrongly) carry into the segment.  AX/DX
+			 * are scratch (rega doesn't model the clobber, so bracket with
+			 * kl_save_axdx); stage an AX/DX-resident RTmp arg1 like Osub.
+			 */
+			{
+			const char *fopc = (i->op == Oaddfo) ? "add" : "sub";
+			int dst_in_dx_fo = (rtype(i->to) == RTmp && i->to.val == RDX);
+			ArgStage r1s = kl_stage_arg(r1, r0, i->to, f);
+			AxDxSave s_fo = kl_save_axdx(i->to, f);
+
+			/* Load the far pointer (arg0) into DX:AX (DX=segment, AX=offset). */
+			if (rtype(r0) == RSlot) {
+				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
+				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
+			} else if (rtype(r0) == RCon) {
+				load32_axdx_con(&fn->con[r0.val], f);
+			} else if (rtype(r0) == RTmp) {
+				if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+				fprintf(f, "\txor dx, dx\n");
+			}
+
+			/* Add/subtract ONLY arg1's low word to/from AX (the offset);
+			 * leave DX (the segment) untouched — no adc/sbb. */
+			if (rtype(r1) == RSlot) {
+				fprintf(f, "\t%s ax, word [bp%+ld]\n", fopc, (long)slot(r1, fn));
+			} else if (rtype(r1) == RCon) {
+				Con *pc = &fn->con[r1.val];
+				if (pc->type == CAddr)
+					die("i8086: addfo/subfo offset is an address — far-pointer index must be a plain integer");
+				fprintf(f, "\t%s ax, %d\n", fopc, (int)(pc->bits.i & 0xFFFF));
+			} else if (rtype(r1) == RTmp) {
+				const char *r1n = r1s.scratch_reg ? r1s.scratch_reg : rname[r1.val];
+				fprintf(f, "\t%s ax, %s\n", fopc, r1n);
+			}
+
+			/* Store result DX:AX (segment word unchanged). */
+			if (rtype(i->to) == RSlot) {
+				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
+			} else if (rtype(i->to) == RTmp) {
+				if (dst_in_dx_fo)
+					fprintf(f, "\tmov dx, ax\n");
+				else if (strcmp(rname[i->to.val], "ax") != 0)
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			}
+
+			kl_restore_axdx(s_fo, f);
+			kl_unstage_arg(r1s, f);
+			}
+			return;
+
 		case Omul:
 			/*
 			 * 32-bit multiplication: dest = src0 * src1 (low 32 bits).

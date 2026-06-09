@@ -1,0 +1,9 @@
+b=0 off=0 rt=0 vp=1 direct=65
+b=1 off=16 rt=1 vp=1 direct=66
+b=100 off=1600 rt=100 vp=1 direct=67
+b=2047 off=32752 rt=2047 vp=1 direct=68
+b=2048 off=32768 rt=2048 vp=1 direct=69
+b=2049 off=32784 rt=2049 vp=1 direct=70
+b=2500 off=40000 rt=2500 vp=1 direct=71
+b=2999 off=47984 rt=2999 vp=1 direct=72
+ALL OK

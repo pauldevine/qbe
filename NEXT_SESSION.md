@@ -1,4 +1,76 @@
-# Next session (§4i — IMPLEMENT THE FIX: offset-only 16-bit segment-preserving far-pointer arithmetic.  §4h root-caused the scale2 churn(80) stall to a REAL minic bug — `far_ptr + unsigned_index >= 0x8000` sign-extends → wild pointer; the §4f/§4g "perf cliff" framing was a FALSE hypothesis; no GC even runs before the stall.  Reduction probe + evidence committed; naive fix reverted because it regresses wraparound deltas.)
+# Next session (§4j — VICTOR RE-VERIFY the §4i far-pointer fix on real MicroPython, then optionally close the orthogonal huge-mode `_qbe_huge_add` >=0x8000 gap.  §4i LANDED the offset-only far-pointer arithmetic fix in the compiler; DOSBox gate is 224/224 and the reduction probe is ALL OK, but the MicroPython end-to-end payoff on Victor is NOT yet confirmed.)
+
+## 2026-06-08 §4i notes (THE FIX LANDED — offset-only 16-bit segment-preserving far-pointer arithmetic; DOS gate green; Victor re-verify still pending)
+
+**§4i implemented the §4h-scoped fix.**  `far_ptr ± idx` on compact/large (and explicit
+`__far` in any non-huge model) now lowers to dedicated **offset-only** backend ops
+`addfo`/`subfo`: add/sub ONLY the 16-bit OFFSET word, segment preserved (no `adc`/`sbb`).
+That is correct for BOTH a true large offset >= 0x8000 (MicroPython gc_alloc's
+`pool_start + start_block*16` on a >32 KB heap) AND a 16-bit-wrapped "negative" `size_t`
+delta — which neither `extsw` nor `extuw` of a flat 32-bit add can handle at the same time.
+
+### What changed (4 tracked files; see [[project-far-ptr-unsigned-index-bug]])
+- `ops.h`: new public ops `O(addfo,…)`/`O(subfo,…)`, `T(e,l,e,e, e,l,e,e)`, ALL flags 0
+  (opaque to fold/gvn/copy so nothing rewrites them back to plain `add`).  Placed right
+  after `faroff`, outside every `INRANGE` op range.  **No `tools/lexh.c` / `parse.c` K
+  regen needed** — the existing perfect-hash `K=362902335`/`M=23` had slack for two more
+  tokens (verified empirically: asserts are ON, and qbe `lexinit()`'s collision assert did
+  NOT fire; `addfo` parses).  If you ever add MORE ops and it DOES collide, regenerate via
+  lexh.c — but note lexh.c's `tok[]` is already stale vs the real op set (missing
+  loadfs/storefs/vargp/callfar), so sync it to all public optab names first.
+- `i8086/emit.c`: `case Oaddfo: case Osubfo:` in the Kl switch.  Loads the far ptr to DX:AX
+  (DX=segment, AX=offset), `add/sub ax, <arg1 LOW word>` with NO adc/sbb, stores DX:AX
+  back (segment word unchanged).  arg1's HIGH word is deliberately ignored — that's exactly
+  the part that would wrongly carry into the segment.  5 insns vs the old flat-add's 6.
+  Bracketed with `kl_save_axdx`/`kl_stage_arg` like Osub Kl; `die()`s on a CAddr offset.
+- `minic.y`: new `far_ptr_offset_binop()` emits `=l addfo/subfo`; called in the prefix
+  inc/dec site AND the default-Binop site (covers `a[i]`, `p+i`, `p-i`, postfix `p++/--`).
+  Excludes MHuge (huge_ptr_binop runs first), fn-pointers (CS), and near (16-bit) pointers.
+  **The Scale path is UNCHANGED** — the backend reads only arg1's low 16 bits, which already
+  equal `(idx*sz) mod 0x10000` regardless of the sext, so no front-end extension change.
+
+### Verified (this session, all on macOS/DOSBox — NO Victor run yet)
+- `make check` green (generic backends unaffected; new ops are i8086-only in emit).
+- `tools/test-dos.sh` **224/224 ok** (was 222; +2 = `gc_bigheap_probe` compact+large).
+  Every pre-existing far-data/medium/huge probe still passes → no regression from addfo/subfo.
+- `gc_bigheap_probe.c`: was `FAIL` (b>=2048 `direct` wrong/zero), now `ALL OK` under compact
+  AND large.  Generated asm confirms the offset-only shape: `mov ax,[off]; mov dx,[seg];
+  add ax,[idx]; mov [res],ax; mov [res+2],dx` — no `adc`.  Probe is now GATED (compact+large).
+
+### THE GOAL FOR §4j (the real payoff, NOT yet done)
+1. **Victor MicroPython re-verify** (`tools/run-victor-sasi.sh`, compact far-data, stackless).
+   The DOSBox probe proves the codegen; this proves the consumer.  Run on real Victor:
+   - `build/mp-churn-scale2.py` on the **49 KB** heap must now reach `120 7980` / `DONE`
+     (the §4g/§4h stall point was churn(80) ≈ 33 KB ≈ just past offset 0x8000 — exactly
+     the bug; it should be GONE).
+   - `build/mp-feature-probe.py` must stay **23/23** (the §4h extuw attempt regressed this to
+     `ER list`/`XX gen`; addfo must NOT — it preserves the wrapped-negative-delta path).
+   - `build/mp-fill-probe.py` → `g G DE` / DONE.
+   - HARNESS GOTCHA (cost runs before): do NOT pipe `run-victor-sasi.sh` through `tr`/`tail`/
+     `head` — the watchdog subshell inherits the pipe fd and blocks ~WALL_SECS.  Redirect to
+     a file then filter.  `-nothrottle` makes a 300 emulated-sec run finish in ~2 wall min.
+   - The committed MicroPython image is the §4g baseline; rebuild it from the EXTERNAL tree
+     with `tools/build-micropython.sh --model=compact` (no external-tree change needed — the
+     §4g struct-alignment fix + §4i offset-only arith are both in the qbe repo now).
+2. **OPTIONAL — close the orthogonal huge gap.**  `gc_bigheap_probe` still FAILS under
+   `--model=huge` (NOT gated there).  That path is `huge_ptr_binop` → `_qbe_huge_add`
+   (segment-normalising libstub helper, needed because huge objects can exceed 64 KB), which
+   has its OWN >=0x8000 bug — untouched by §4i (huge codegen is byte-identical before/after).
+   The probe's `rt` (far-ptr DIFFERENCE) is correct under huge, so `*p` writes fine; only
+   `pool[off]` (the `_qbe_huge_add` read) is wrong.  Reduce to the `_qbe_huge_add` helper in
+   `tools/libstub_to_exe.py` / `minic.y::huge_ptr_binop` (the unsigned `extuw` widening +
+   the helper's offset normalisation for an offset whose top bit is set).  Lower priority —
+   the real consumer (MicroPython) runs compact, not huge.
+3. **Incidental harness gap (do alongside, verify goldens):** `tools/build-example.sh` does
+   NOT pass `-DFAR_DATA` to cpp (only `build-micropython.sh` does), so compact/large probes
+   get 16-bit `uintptr_t`.  `gc_bigheap_probe.c` self-`#define`s `FAR_DATA`/`DOS_FAR_DATA` to
+   work around it.  Clean fix = build-example.sh adds `-DFAR_DATA=1 -DDOS_FAR_DATA=1` for
+   compact/large/huge — but VERIFY it doesn't shift farglobal/fardata/farstruct_ptr goldens
+   (medium stdint_probe asserts sizeof==2, so leave medium alone).
+
+---
+
+# (DONE — §4i landed) Next session (§4i — IMPLEMENT THE FIX: offset-only 16-bit segment-preserving far-pointer arithmetic.  §4h root-caused the scale2 churn(80) stall to a REAL minic bug — `far_ptr + unsigned_index >= 0x8000` sign-extends → wild pointer; the §4f/§4g "perf cliff" framing was a FALSE hypothesis; no GC even runs before the stall.  Reduction probe + evidence committed; naive fix reverted because it regresses wraparound deltas.)
 
 ## 2026-06-08 §4h notes (root-caused the churn stall to a far-pointer codegen bug; reduction probe committed; proper fix scoped, NOT yet landed)
 
