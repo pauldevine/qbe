@@ -1,0 +1,20 @@
+sizeof: void*=4 size_t=2 mp_obj_t=4
+qstr_pool_t.prev             off=0 a4=1
+qstr_pool_t.lengths          off=12 a4=1
+qstr_pool_t.qstrs            off=16 a4=1
+qstr_pool_t sizeof=16
+mp_map_t.table               off=4 a4=1
+mp_map_elem_t.key            off=0 a4=1
+mp_map_elem_t.value          off=4 a4=1
+mp_map_elem_t sizeof=8 mp_map_t sizeof=8
+mp_obj_dict_t.base.type      off=0 a4=1
+dict.map.table (nested)      off=8 a4=1
+mp_obj_list_t.items          off=8 a4=1
+code_state.fun_bc            off=0 a4=1
+code_state.ip                off=4 a4=1
+code_state.sp                off=8 a4=1
+code_state.old_globals       off=16 a4=1
+code_state.prev              off=20 a4=1
+code_state.state[]           off=24 a4=1
+mp_code_state_t sizeof=24
+ALL-4-ALIGNED

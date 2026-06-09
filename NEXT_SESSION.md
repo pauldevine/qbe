@@ -1,4 +1,69 @@
-# Next session (§4m — the churn(120) GC corruption is NOT in the GC core algorithm: a faithful self-contained mark/sweep repro on a 49 KB far-data heap (18 collections, multi-level marking, far-array indexing) is CLEAN.  The bug is in the MicroPython-specific layer (object internals / mp_state roots) or a layout-specific wild access from non-GC code.  Next: a NON-PERTURBING MAME-debugger watchpoint on the real image (instrumentation hides it).  §4i+§4j DONE; §4k+§4l narrowed it sharply.)
+# Next session (§4n — all STRUCTURAL/algorithmic GC hypotheses for churn(120) are now EXHAUSTED by static audits + a faithful repro; the bug is a LAYOUT-SENSITIVE NON-GC WILD WRITE (or an mp_state-scan residual) that needs RUNTIME OBSERVATION of the shipping image.  §4i+§4j fixed+verified the far-ptr bug; §4k=heisenbug; §4l=GC core CLEAN; §4m=all live-type pointer fields 4-aligned.  Two probes gated.  No more static angles — observe the corruption at runtime without perturbing.)
+
+## 2026-06-09 §4m notes (static layout audit — all live-type pointer fields are 4-aligned; structural hypotheses exhausted)
+
+**§4m built `minic/dos/examples/gc_offset_probe.c`** (GATED compact+large, no GC at runtime —
+pure `offsetof`/`sizeof` prints; struct defs copied VERBATIM from `build/mp-link/*.pp.c`).
+It verifies §4l's hypothesis #1: does every far-POINTER field in MicroPython's live heap
+object types sit at a `sizeof(void*)`=4-aligned offset, so the conservative GC's 4-stride
+`gc_mark_subtree` scan finds it (a 2-mod-4 pointer is split across reads → freed-while-live,
+the §4f bug class)?
+
+**RESULT: ALL 4-ALIGNED** under far-data (`sizeof void*=4, size_t=2, mp_obj_t=4`):
+- `qstr_pool_t`: prev@0, **lengths@12, qstrs@16** (§4g correctly padded lengths from the
+  packed-10 to 12), sizeof 16.
+- `mp_map_t.table`@4; `mp_map_elem_t.key`@0/`value`@4 (sizeof 8); `mp_obj_dict_t` → `map.table`@8.
+- `mp_obj_list_t.items`@8.
+- stackless `mp_code_state_t`: fun_bc@0, ip@4, sp@8, old_globals@16, prev@20, **value stack
+  state[]@24** — all 4-aligned (sizeof 24).
+So §4g's alignment is correct for every type behind a name lookup AND the live value stack →
+the GC scan finds every child pointer.  **Hypothesis #1 (off-stride pointer field) is RULED OUT.**
+
+### Suspect set after §4k+§4l+§4m (structural causes exhausted)
+RULED OUT: GC core algorithm/codegen (§4l); pointer-field misalignment in
+qstr_pool/map/dict/list/code_state incl. the value stack (§4m); mp_state root-scan alignment
+(§4g, offsetof(thread.dict_locals) 4-aligned); mark-stack overflow (§4k).
+REMAINING (the only ones left):
+- **(A) A layout-sensitive NON-GC WILD WRITE** — far-pointer arithmetic somewhere in the
+  compiled VM/runtime (NOT the GC, NOT the simple gate-verified addfo path) that, on the big
+  heap's specific addresses, overruns an object boundary into a live object.  This is the BEST
+  fit for §4k's heisenbug profile (the overrun lands on something critical in one image layout,
+  harmless padding in another).
+- **(B) An mp_state root-scan residual** not caught by §4g's single alignment check (e.g. the
+  `gc_collect_start` scan's start/length rounding misses a root at the section's edge, or a
+  root field added since §4g).  Cheap to re-audit statically: extract `mp_state_ctx_t`/
+  `mp_state_thread_t`/`mp_state_vm_t` from a `*.pp.c`, confirm offsetof(thread.dict_locals)%4==0
+  and that every pointer between it and offsetof(vm.qstr_last_chunk) is 4-aligned AND inside the
+  scanned `[root_start/4*4, root_end)` window.
+
+### THE GOAL FOR §4n — observe the corruption at runtime (static angles are spent)
+Static audits + the faithful repro have exhausted the structural hypotheses, so the next step
+MUST observe the actual wild write/freed object at runtime on the SHIPPING image (no source
+change → no layout perturbation; §4k proved instrumentation hides it).  Options, hardest-payoff
+first:
+1. **MAME debugger, non-perturbing.**  Boot `build/mp-link/mpython.exe` under MAME `-debug`
+   with a `-debugscript` file (adapt the launch from `tools/run-victor-sasi.sh`).  The
+   corrupted memory is dynamic (heap), so a fixed `wpset` is hard; instead consider: (a) a
+   TRACE of all far writes (`mov [es:...], ...`) whose target is in the heap segment during the
+   churn(120) collection window, diffed against a passing run; or (b) break at `gc_collect`
+   entry/exit and DUMP the qstr-pool / globals-dict region (addresses found by walking
+   mp_state_ctx in the debugger) to see WHICH bytes change to garbage and WHEN.  Headless MAME
+   debugger scripting is the real work item.
+2. **Static re-audit of the mp_state root section** (suspect B above) — purely static, cheap,
+   do it FIRST as it may close B without any run.
+3. **Bisect the layout sensitivity** to localize: pad the image by N bytes (a sized unused
+   global) in small steps and find the fail↔pass threshold; the threshold maps to which data
+   region's address alignment triggers the wild write — narrows (A) to a specific structure.
+
+### Two gated probes this session
+`gc_churn_probe` (§4l, GATED compact+large) — faithful GC-core + far-ptr-fix guard.
+`gc_offset_probe` (§4m, GATED compact+large) — §4g far-data alignment guard (a future minic
+alignment regression would re-introduce the §4f freed-while-live class; this catches it).
+Gate 226 → 228.
+
+---
+
+# (§4m done above) Next session (§4m — the churn(120) GC corruption is NOT in the GC core algorithm: a faithful self-contained mark/sweep repro on a 49 KB far-data heap (18 collections, multi-level marking, far-array indexing) is CLEAN.  The bug is in the MicroPython-specific layer (object internals / mp_state roots) or a layout-specific wild access from non-GC code.  Next: a NON-PERTURBING MAME-debugger watchpoint on the real image (instrumentation hides it).  §4i+§4j DONE; §4k+§4l narrowed it sharply.)
 
 ## 2026-06-09 §4l notes (built the fast-repro; it CLEARS the GC core; bug is MicroPython-layer or a non-GC wild access)
 

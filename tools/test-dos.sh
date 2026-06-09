@@ -299,6 +299,14 @@ RUNTIME_TESTS=(
 	# output (counts derive from HEAP_BYTES), identical compact/large.
 	"minic/dos/examples/gc_churn_probe.c:minic/dos/tests/gc_churn_probe.golden.txt:compact"
 	"minic/dos/examples/gc_churn_probe.c:minic/dos/tests/gc_churn_probe.golden.txt:large"
+	# §4m STATIC layout audit: every far-POINTER field in MicroPython's live heap
+	# object types (qstr_pool/map/dict/list/code_state) must sit at a 4-mod-0
+	# (sizeof(void*)) offset so the conservative GC's 4-stride scan finds it.
+	# Guards §4g's far-data struct-member alignment — a regression here would
+	# silently re-introduce the §4f "freed-while-live" GC bug class.  No GC at
+	# runtime (just offsetof prints); layout-independent, identical compact/large.
+	"minic/dos/examples/gc_offset_probe.c:minic/dos/tests/gc_offset_probe.golden.txt:compact"
+	"minic/dos/examples/gc_offset_probe.c:minic/dos/tests/gc_offset_probe.golden.txt:large"
 )
 
 # --- Stevie size budget ----------------------------------------------------
