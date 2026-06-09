@@ -21,7 +21,12 @@ QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$QBE_DIR"
 MP="$HOME/projects/micropython"; DOSPORT="$MP/ports/dos8086"
 GENHDR="$MP/ports/minimal/build"; INC_DIR="minic/include"; STUB="build/mp-spike/stubinc"
-MINIC="minic/minic"; QBE="./qbe"; OUT_DIR="build/mp-link"; MODEL=compact; MP_STACK_SIZE=${MP_STACK_SIZE:-24576}
+# MP_STACK_SIZE default MUST match build-micropython.sh (16384, the §4b stackless
+# default).  It was 24576 here, so a fast-loop relink reserved 8192 more stack than
+# the full build and pushed the image OVER the ~824416 "Program too big" load
+# ceiling (a clean gc.c relink came out 826032 vs the full build's 817840) — the
+# relinked .exe then would not load on Victor.  Override via the env var if needed.
+MINIC="minic/minic"; QBE="./qbe"; OUT_DIR="build/mp-link"; MODEL=compact; MP_STACK_SIZE=${MP_STACK_SIZE:-16384}
 MP_STACK_LIMIT=${MP_STACK_LIMIT:-8192}
 MP_HEAP_SIZE=${MP_HEAP_SIZE:-49152}
 MP_DOS_TINY_STACK_CHECK=${MP_DOS_TINY_STACK_CHECK:-0}

@@ -1,4 +1,76 @@
-# Next session (§4k — the NEW frontier is churn(120) GC-pressure corruption on the 49 KB heap.  §4i+§4j are DONE: the offset-only far-pointer fix LANDED, is gate-verified 224/224, AND is Victor-verified on real MicroPython — the far-ptr churn(80) stall is GONE.  The remaining failure is a SEPARATE, newly-reachable GC bug.)
+# Next session (§4l — churn(120) GC corruption on the 49 KB heap is a LAYOUT-SENSITIVE near-miss; the MAME loop is unsuitable to chase it (instrumentation hides it).  Build the MEDIUM-MODEL DOSBox fast-repro.  §4i+§4j are DONE (far-ptr fix landed, gate 224/224, Victor-verified).  §4k narrowed the residual: overflow RULED OUT, collections work, 16 KB clean — it's a layout-dependent heap-corruption heisenbug.)
+
+## 2026-06-09 §4k notes (diagnosed the churn(120) corruption: layout-sensitive heisenbug; overflow ruled out; NO qbe code change)
+
+**§4k is a DIAGNOSIS pass on the §4j-surfaced churn(120) NameError — no compiler bug
+found, no qbe source changed (only a fast-loop harness fix + docs).**  The bug is in the
+MicroPython conservative GC under heavy churn on the BIG heap; it is **layout-sensitive**
+(a near-miss wild access), which makes the slow + perturbing MAME loop the wrong tool.
+
+### What was measured (real Victor, `tools/run-victor-sasi.sh`, scale2 = churn 20→120)
+All builds compact far-data, stackless, MP_STACK_SIZE=16384.  Markers added temporarily to
+EXTERNAL `py/gc.c` (now reverted): `O` = a mark-stack overflow round (`gc_deal_with_stack_overflow`);
+`g` = one per collection (`gc_collect_start`).
+| build | heap | result |
+|---|---|---|
+| clean §4i (body 817840) | 49 KB | **FAIL** churn(120) `NameError` (the §4j result) |
+| + `O` marker only (817920) | 49 KB | **FAIL** churn(120) `NameError`, and **NO `O`** → overflow path never fires |
+| + `O`+`g` markers (817952) | 49 KB | **PASSES** `120 7980` DONE, only 2 collections (`g` at churn100, churn120), no `O` |
+| + `O`+`g` markers | 16 KB | **PASSES** `120 7980` DONE, ~8 collections, no `O` |
+
+### Conclusions (sharp)
+1. **Mark-stack overflow is RULED OUT** — `O` never printed before the failure.  The
+   `gc_deal_with_stack_overflow` O(blocks) path is NOT involved (so raising
+   `MICROPY_ALLOC_GC_STACK_SIZE` is moot, again).
+2. **Collections themselves work** — 16 KB does ~8 clean collections and completes; the
+   markers don't change marking logic.
+3. **It is a LAYOUT-SENSITIVE heisenbug.**  A ~32-byte image shift (adding the `g` marker:
+   817920 FAIL → 817952 PASS) makes the corruption vanish.  MAME is deterministic
+   per-binary, so this is across BINARIES (layout), not across runs — but the *shipping*
+   clean build (817840) deterministically FAILS.  The corruption is a near-miss wild
+   access that lands on something critical in the clean layout and on harmless padding in
+   the shifted layout.  → ANY on-target instrumentation perturbs the layout and can hide
+   the bug, so the MAME loop is the WRONG tool.
+4. It fires at the churn(120) collection point on the big heap (the marker build's 2nd `g`
+   is exactly there).  On 49 KB, `MICROPY_GC_ALLOC_THRESHOLD`=0 means collection only
+   happens when the heap is nearly full, so the *first* collection is very late (deep into
+   churn) with a large, specific live state — unlike 16 KB which collects early and often.
+   This is the §4d/§4e/§4f "a LIVE heap object is freed across a collection" family; §4g's
+   struct-alignment fix cleared it for moderate pressure (feature-probe) and the small heap,
+   but not for this big-heap late-collection case.
+
+### THE GOAL FOR §4l — build the MEDIUM-MODEL DOSBox fast-repro (the §4e plan's key tool)
+The MAME loop (~3 min/run) + layout-sensitivity make on-target debugging impractical.  Build a
+self-contained DOS probe that links `py/gc.c` with stub `mp_state`/`mphal`, allocates
+cross-linked objects, drops most, forces `gc_collect`, reallocates, and verifies a retained
+object's contents — at DOSBox speed (seconds/iter), where layout can be controlled and
+instrumentation added freely.
+- If it reproduces in the MEDIUM model (near-data, 2-byte pointers) → it's a GC LOGIC bug
+  (mark/sweep/block-math), debuggable fast in DOSBox.
+- If it does NOT reproduce in medium but DOES in a compact/far-data probe → it's
+  far-data-specific (a far load/store / far-ptr value read at a wrong offset in the
+  collection paths), which itself narrows it sharply.
+- Either way, instrument MARKING COMPLETENESS directly (§4e step 1): capture a known-live
+  object's block before the collection, assert its ATB kind != FREE after `gc_collect_end`,
+  and print WHICH block is swept-while-live.  In a self-contained probe the live set is
+  known exactly, so the smoking gun is unambiguous.
+Suspects to check in the probe (codegen is otherwise clean — far-ptr arith now via addfo):
+the conservative C-stack scan range `[sp, stack_top)` vs where a live root actually sits at
+the deep collection point; a multi-block live object whose tail words (child pointers) aren't
+traced; or a far-pointer VALUE inside a live container read at a wrong offset by the trace.
+
+### Harness fix committed this session (real bug found while diagnosing)
+`tools/recompile-mp-tu.sh` defaulted `MP_STACK_SIZE=24576` but `build-micropython.sh` uses
+**16384** (the §4b stackless default), so a fast-loop relink reserved 8192 more stack than the
+full build → a clean gc.c relink came out **826032**, OVER the ~824416 "Program too big"
+ceiling → the relinked .exe would not load on Victor.  Fixed the default to 16384 (override via
+env).  Use `MP_STACK_SIZE=16384` explicitly if on an older copy.  Reminder: the
+`gc_bigheap_probe`/§4i scope-note items (huge `_qbe_huge_add` >=0x8000 gap; build-example.sh
+-DFAR_DATA) are still open, independent, lower-priority.
+
+---
+
+# (§4k diagnosed above) Next session (§4k — the NEW frontier is churn(120) GC-pressure corruption on the 49 KB heap.  §4i+§4j are DONE: the offset-only far-pointer fix LANDED, is gate-verified 224/224, AND is Victor-verified on real MicroPython — the far-ptr churn(80) stall is GONE.  The remaining failure is a SEPARATE, newly-reachable GC bug.)
 
 ## 2026-06-09 §4j notes (VICTOR RE-VERIFY of the §4i far-pointer fix — DONE; far-ptr stall fixed; a further GC frontier surfaced)
 
