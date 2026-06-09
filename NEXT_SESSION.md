@@ -1,4 +1,69 @@
-# Next session (§4l — churn(120) GC corruption on the 49 KB heap is a LAYOUT-SENSITIVE near-miss; the MAME loop is unsuitable to chase it (instrumentation hides it).  Build the MEDIUM-MODEL DOSBox fast-repro.  §4i+§4j are DONE (far-ptr fix landed, gate 224/224, Victor-verified).  §4k narrowed the residual: overflow RULED OUT, collections work, 16 KB clean — it's a layout-dependent heap-corruption heisenbug.)
+# Next session (§4m — the churn(120) GC corruption is NOT in the GC core algorithm: a faithful self-contained mark/sweep repro on a 49 KB far-data heap (18 collections, multi-level marking, far-array indexing) is CLEAN.  The bug is in the MicroPython-specific layer (object internals / mp_state roots) or a layout-specific wild access from non-GC code.  Next: a NON-PERTURBING MAME-debugger watchpoint on the real image (instrumentation hides it).  §4i+§4j DONE; §4k+§4l narrowed it sharply.)
+
+## 2026-06-09 §4l notes (built the fast-repro; it CLEARS the GC core; bug is MicroPython-layer or a non-GC wild access)
+
+**§4l built `minic/dos/examples/gc_churn_probe.c`** — a self-contained, faithful copy of the
+gc.c CORE (2-bit ATB FREE/HEAD/TAIL/MARK, gc_setup_area table/pool split, gc_alloc first-fit
+block scan, the bounded mark stack(64) + gc_deal_with_stack_overflow rescan, sweep, and a
+conservative dual-aligned root+C-stack scan), driven by a churn workload that EXPLICITLY
+verifies a retained singly-linked chain (40 nodes) AND a two-level dict-like container
+(header → far table[] → value nodes) after each forced collection.  The explicit verify makes
+it MORE sensitive than MicroPython (which only notices corruption when a wild access hits the
+qstr pool/globals and raises NameError).  GATED compact+large (golden layout-independent —
+counts derive from HEAP_BYTES; identical compact/large).  Gate **224→226**.
+
+**RESULT: CLEAN.** compact AND large far-data, 49 KB heap, **18 collections** under heavy churn
+(varied-size garbage → fragmentation; 0 overflows, consistent with §4k), the retained chain
+AND dict survive every collection → `ALL OK`.  So the GC core is correct on far-data:
+mark/sweep/alloc, the conservative dual-aligned scan, MULTI-LEVEL marking (dict→table→values),
+FAR-ARRAY indexing (`table[i]` = the §4i addfo path), and varied sizes/fragmentation are all
+fine.  **The MicroPython churn(120) corruption is NOT reproduced by a faithful standalone GC.**
+
+### What this RULES OUT and what's LEFT
+RULED OUT (by §4k + §4l): mark-stack overflow path; the GC core mark/sweep/alloc algorithm;
+the conservative scan; multi-level marking; far-array indexing; far-ptr arith (addfo).
+LEFT (the bug must be one of):
+1. **MicroPython object INTERNALS** the probe doesn't model — a specific type whose pointer
+   still sits at a non-stride offset despite §4g's struct-member alignment (e.g. a flex-array
+   member, a union, an embedded sub-struct, or the qstr_pool/str/dict-map exact layout), so
+   `gc_mark_subtree`'s sizeof(void*) stride skips a live child.  → Re-audit the ACTUAL offsets
+   of pointer fields in the live object types (qstr_pool_t, mp_obj_dict_t/mp_map_t,
+   mp_obj_str_t, the stackless code_state frame) in the GENERATED far-data layout, not on paper.
+2. **The mp_state root section** scan (my probe used simple explicit roots) — re-verify
+   offsetof(thread.dict_locals)..vm.qstr_last_chunk are all 4-aligned AND the void**-stride
+   `gc_collect_start` scan covers every root in the real generated struct.
+3. **The stackless VM value-stack / code_state** rooting — frames are heap objects reached via
+   the code_state chain / a C-stack pointer; a live value-stack slot at a deep collection may
+   not be covered.
+4. **A non-GC WILD WRITE** — far-arith somewhere in the VM/runtime that, on the big heap's
+   specific addresses, writes past an object into a live one (consistent with §4k's
+   layout-sensitivity: it hits something critical in one layout, padding in another).
+
+### THE GOAL FOR §4m — a NON-PERTURBING observation of the real image
+Since the bug is layout-sensitive (any added code hides it — §4k) and a simplified probe
+doesn't reproduce it (§4l), stop trying to add markers/probes.  Use a **MAME debugger memory
+WATCHPOINT** on the SHIPPING clean image (no source change → no layout perturbation): boot
+`build/mp-link/mpython.exe` under MAME `-debug` with a scripted command file, set a write
+watchpoint on the qstr-pool / a known-live object's memory (address from the `mpython.map` for
+statics, or discovered live), run `mp-churn-scale2.py`, and catch the instruction that writes
+the wild value.  That PC → the offending function → the codegen/source bug.  Headless MAME
+debugger scripting is the hard part (a `-debugscript` file with `wpset`/`bpset`/`trace`); the
+Victor harness (`tools/run-victor-sasi.sh`) shows the launch/serial plumbing to adapt.
+Alternative if watchpoints are impractical: audit the generated far-data field offsets of the
+live object types (item 1 above) directly from the `build/mp-link/*.ssa`/`*.asm` — purely
+static, no runs, no perturbation.
+
+### Probe is also a permanent regression guard
+`gc_churn_probe` stays gated: it's the strongest in-tree exercise of the §4i far-ptr fix +
+GC-core far-data correctness (multi-level marking + far-array indexing across 18 real
+collections).  Build: `QBE_FAR_STATIC_DATA=1 tools/build-example.sh --model=compact
+minic/dos/examples/gc_churn_probe.c`; the heap size is `-DGC_HEAP_BYTES` overridable (49152
+default; a NEAR-data/medium build needs a small heap — a 49 KB near heap overflows DGROUP,
+which itself proves the bug requires far data).
+
+---
+
+# (§4l done above) Next session (§4l — churn(120) GC corruption on the 49 KB heap is a LAYOUT-SENSITIVE near-miss; the MAME loop is unsuitable to chase it (instrumentation hides it).  Build the MEDIUM-MODEL DOSBox fast-repro.  §4i+§4j are DONE (far-ptr fix landed, gate 224/224, Victor-verified).  §4k narrowed the residual: overflow RULED OUT, collections work, 16 KB clean — it's a layout-dependent heap-corruption heisenbug.)
 
 ## 2026-06-09 §4k notes (diagnosed the churn(120) corruption: layout-sensitive heisenbug; overflow ruled out; NO qbe code change)
 

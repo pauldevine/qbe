@@ -290,6 +290,15 @@ RUNTIME_TESTS=(
 	# gap; see the probe header.  See [[project-far-ptr-unsigned-index-bug]].
 	"minic/dos/examples/gc_bigheap_probe.c:minic/dos/tests/gc_bigheap_probe.golden.txt:compact"
 	"minic/dos/examples/gc_bigheap_probe.c:minic/dos/tests/gc_bigheap_probe.golden.txt:large"
+	# §4l self-contained faithful repro of MicroPython's conservative mark/sweep
+	# GC on a 49 KB far-data heap (forces ~18 collections under churn).  Guards the
+	# §4i far-ptr fix + GC-core far-data correctness (multi-level marking, far-array
+	# indexing, conservative dual-aligned scan).  PASSES — it proved the GC core is
+	# NOT the source of the MicroPython churn(120) corruption (that's in the
+	# MicroPython object/mp_state layer; see NEXT_SESSION §4l/§4m).  Layout-independent
+	# output (counts derive from HEAP_BYTES), identical compact/large.
+	"minic/dos/examples/gc_churn_probe.c:minic/dos/tests/gc_churn_probe.golden.txt:compact"
+	"minic/dos/examples/gc_churn_probe.c:minic/dos/tests/gc_churn_probe.golden.txt:large"
 )
 
 # --- Stevie size budget ----------------------------------------------------
@@ -363,7 +372,7 @@ run_runtime_probe() {
 	# (statics outside DGROUP).  Gated by basename so only these exercise it
 	# until far-global direct access is complete (see NEXT_SESSION.md).
 	farstatic=0
-	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe|gc_bigheap_probe) farstatic=1 ;; esac
+	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe|gc_bigheap_probe|gc_churn_probe) farstatic=1 ;; esac
 	# Soft-float probes link the single-precision soft-float helper library.
 	sfflag=""
 	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe) sfflag="--softfloat" ;; esac

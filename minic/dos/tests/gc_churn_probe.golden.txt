@@ -1,0 +1,8 @@
+gc_churn_probe: heap=49152 pool=768..49152 blocks=3024
+pass=20 collections=0 overflows=0  OK
+pass=40 collections=2 overflows=0  OK
+pass=60 collections=5 overflows=0  OK
+pass=80 collections=8 overflows=0  OK
+pass=100 collections=13 overflows=0  OK
+pass=120 collections=18 overflows=0  OK
+ALL OK
