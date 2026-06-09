@@ -53,6 +53,21 @@ observe it on the SHIPPING `build/mp-link/mpython.exe` (no source change → no 
    that mis-orders at high offsets.  Grep the generated `build/mp-link/*.asm` for far stores
    (`mov [es:...]`) whose address is computed by a non-addfo add/adc pair.
 
+   **Already CLEARED under approach 3 (don't re-tread):**
+   - **libstub `_far_memset`/`_far_memcpy`/`_far_memmove` are correct for heap buffers** — the
+     count is 16-bit (size_t=2) and `dest+count` stays inside the heap `[0x1200,0xD200]` (<
+     0xFFFF), so `rep stosb/movsb`'s DI never wraps the segment.  Not the overshoot source.
+   - **A missed REGISTER root (live far ptr only in a callee-saved reg across the collection,
+     not on the scanned C stack) is ruled out** by spill.c `force_kl_slot`: every Kl far-ptr
+     temp is slot-resident, so the value is always in a stack slot the conservative scan
+     covers.  §4l's repro (which roots its retained chain ONLY via the same C-stack scan +
+     globals) was clean, corroborating the invariant.  Also, a missed register/root would be
+     layout-INDEPENDENT (regalloc is fixed per binary), contradicting §4k.
+   So approach 3 should focus on **minic-emitted far STORES from the VM/runtime** (objstr /
+   objlist / vm value-stack writes / mp_obj_new_* fill loops) whose dest far-arith is NOT the
+   addfo path and could compute a target past the object — OR just do the runtime bisect (1)
+   which doesn't depend on guessing the shape.
+
 ### Three gated GC probes (regression guards locked in this session)
 `gc_churn_probe` (§4l) — faithful GC-core + far-ptr-fix guard.  `gc_offset_probe` (§4m+§4n) —
 §4g far-data alignment guard for every live object type AND the mp_state root section.  Plus
