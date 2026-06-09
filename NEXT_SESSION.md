@@ -1,4 +1,120 @@
-# Next session (§4o — the churn(120) corruption is now isolated to a LAYOUT-SENSITIVE NON-GC WILD WRITE — the ONLY hypothesis left after EVERY structural/algorithmic one was ruled out (GC core §4l, all live-type ptr alignment §4m, mp_state root scan §4n, mark-stack overflow §4k).  Static analysis is fully spent.  §4o MUST observe the wild write at runtime on the shipping image without perturbing it (instrumentation hides it — §4k).  §4i+§4j fixed+verified the far-ptr bug; three GC probes gated.)
+# Next session (§4p — FIND THE WRITER.  §4o nailed the churn(120) corruption to a FAR-DATA-SEGMENT-ALIGNMENT-sensitive wild write with a clean PERIOD-4 signature (FAIL iff far-data seg ≡ {0,3} mod 4), reproducible/maskable purely via `--stack-size` (relink-only).  This also CRACKS the §4k "instrumentation hides it" heisenbug — it was just the far-data segment's mod-4 flipping — so instrumentation is now usable by re-pinning a FAIL alignment with `--stack-size`.  Two armed approaches below.)
+
+## 2026-06-09 §4o notes (BISECT cracked the heisenbug: period-4 far-data-segment-alignment sensitivity; instrumentation now unblocked)
+
+**§4o ran the layout bisect (the §4n approach #1) and it paid off hugely.**  No source
+changed; all work was relink-only experiments + reading generated SSA.  The shipping image
+(`build/mp-link/mpython.exe`, body **817840**, heap_seg **0xBA8B**) was confirmed to
+deterministically FAIL: `mp-churn-scale2.py` prints churn(20…100) correct then churn(120)
+→ `NameError` (markers `DE` then `C5`) — exactly §4j.
+
+### The bisect lever: `--stack-size` shifts the far-data SEGMENT, relink-only, no recompile
+`STACK` (para 0xB0A1) sits BEFORE every `FAR_DATA` segment, and CODE + near-`DGROUP`
+(0xA790) sit before STACK.  So growing `--stack-size` by Δ shifts EVERY far-data segment
+(qstr/objstr/…/`main_BSS` heap) up by Δ/16 paragraphs **as a unit**, while CODE and
+near-data stay put, and the intra-heap layout (offsets) is byte-identical.  Recipe (≈5 s,
+no TU recompile):
+```
+OBJS=(); while IFS= read -r l; do [ -n "$l" ] && OBJS+=("$l"); done < /tmp/mp_objs.txt
+tools/omf_link.py -o /tmp/X.exe --map /tmp/X.map --entry _start \
+    --stack-size $((16384+16*k)) --gc-sections --pack-code "${OBJS[@]}"
+# heap_seg (main_BSS para) = 0xBA8B + k
+```
+Relink at k=0 (stack 16384) is **byte-identical** to the committed `mpython.exe` — lever
+validated.
+
+### THE RESULT — clean PERIOD-4 flip in the far-data segment value
+8 runs on real Victor (`run-victor-sasi.sh`, scale2), one per paragraph:
+| stack | heap_seg | seg mod 4 | result |
+|---|---|---|---|
+| 16384 | 0xBA8B | 3 | **FAIL** |
+| 16400 | 0xBA8C | 0 | **FAIL** |
+| 16416 | 0xBA8D | 1 | PASS |
+| 16432 | 0xBA8E | 2 | PASS |
+| 16448 | 0xBA8F | 3 | **FAIL** |
+| 16464 | 0xBA90 | 0 | **FAIL** |
+| 16480 | 0xBA91 | 1 | PASS |
+| 16496 | 0xBA92 | 2 | PASS |
+
+Clean `FFPPFFPP`: **FAIL iff far-data segment ≡ {0,3} mod 4, PASS iff ≡ {1,2}** (period 4
+in the segment = period **64 bytes** in the linear base; equivalently the far-data base's
+linear-address bits 4–5).  The shipping image is mod-4 = 3 → FAIL.
+
+### What this proves / re-opens
+- **It IS a layout/segment-sensitive WILD WRITE** (§4o's hypothesis), and the sensitive
+  quantity is the far-data base's **alignment mod 64 bytes** — i.e. some far-pointer
+  computation whose overshoot AMOUNT depends on a pointer's segment low-2-bits.  There is NO
+  explicit `& ~0x3F`/`+0x3F` alignment mask in the generated asm (grepped) — so it is a
+  subtler carry/shift interaction, not a literal round-up.
+- **CRACKS the §4k "instrumentation hides it" heisenbug.**  Adding code shifts the far-data
+  base segment's mod-4, which has a 50 % chance of flipping FAIL→PASS — that is the entire
+  "heisenbug."  **Decoupling fix:** add instrumentation freely, then re-pin a FAIL alignment
+  with `--stack-size` (it moves the segment mod-4 INDEPENDENTLY of code size).  This removes
+  the §4e/§4k wall — runtime instrumentation is finally usable on this bug.
+- **§4l's "GC core is CLEAN" is NOT conclusive.**  That standalone probe ran at some other
+  far-data segment whose mod-4 was likely a PASS value, so a segment-mod-4-sensitive GC op
+  would not have fired.  **The GC is back on the suspect list** alongside the VM/runtime —
+  but only for an op that actually uses a far pointer's SEGMENT in arithmetic.
+- The GC MARKING itself is segment-robust for genuine roots (read `gc_collect`,
+  `gc_collect_root`, `gc_mark_subtree` SSA): every genuine heap pointer (stack-resident or
+  in-object) shares the heap segment, so the same-segment `VERIFY_PTR` bounds checks and the
+  `(ptr-pool_start)/16` block math are segment-independent.  So the writer is more likely a
+  far STORE in the churn workload (list-comp fill / dict store+rehash / `str(i)` intern) than
+  in marking — but verify, don't assume.
+
+### LATENT BUG found en route (NOT the churn cause; fix separately)
+minic lowers C pointer **relational** comparisons (`<`,`<=`,`>`,`>=`) as **SIGNED**
+(`cslel`/`csltl` in the `VERIFY_PTR` SSA), but C pointer comparisons must be UNSIGNED.
+Harmless in THIS image only because every segment is ≥ 0x8000 (all "negative", so signed
+ordering matches unsigned), but it is wrong whenever pointers straddle the 0x8000 segment
+boundary.  Real bug, own probe + fix when convenient (same family as
+[[feedback-minic-unsigned-widen-extsw]] §2r and §4h).
+
+### THE GOAL FOR §4p — catch the writer's PC (now well-armed)
+Two approaches, both newly viable:
+1. **MAME debugger watchpoint on the shipping FAIL image** (heap_seg 0xBA8B, no rebuild → no
+   perturbation).  `mp_state_ctx` is at a FIXED addr (`mpstate_BSS` para 0xBA7A : off 0 in
+   the 817840 build; see `mpython.map`).  Boot under `~/projects/mame/mame victor9k … -debug
+   -debugger none -debugscript <f>` (adapt the launch from `run-victor-sasi.sh`); break after
+   `mp_init` (e.g. at the `C4` marker tx, or `do_str` entry); read `thread.dict_globals` /
+   `vm.last_pool` far pointers from mp_state_ctx (offsets per §4n: dict_locals@8,
+   dict_globals@12, vm.last_pool@32) to get the long-lived globals-dict / qstr-pool heap
+   address; `wpset` a write-watch on its `map.table` / chunk bytes; `go`; the PC that writes
+   garbage → the offending function → the far-arith.  Work item = headless 8088 segmented
+   debugger scripting (physical addr = seg*16+off; reading a far ptr = combine two words).
+   **MAME feasibility ALREADY TESTED this session (partial):** `~/projects/mame/mame victor9k
+   … -debug -debugger none -debugscript F -debuglog` runs **headless without hanging**, a
+   debugscript of `printf "…",pc` + `go` executes and the machine runs to completion
+   (`Average speed: …` on stdout), and `debug.log` (in cwd) is created.  **OPEN PROBLEM = the
+   OUTPUT channel:** under `-debugger none` the console is dropped, so the `printf` text does
+   NOT reach `debug.log` (only the debugger banner does), and `trace <file>` / `wpset …` either
+   error or produce nothing (run exits ~2 s with empty stdout, no trace file, no error in
+   debug.log).  So a watchpoint that FIRES can't yet be observed.  NEXT: solve emission — try
+   `-debugger gdbstub -debugger_port N` then drive via `gdb` (set the wp + `commands`), OR find
+   the correct MAME-0.287 `trace`/`wpset` action syntax that lands in a file, OR `-oslog`.  A
+   reusable disk (FAIL `mpython.exe` + scale2 PROG.PY) is staged at `/tmp/mamedbg/run.img`
+   (rebuild via `vtg_image_util copy … :0:\\PROG.EXE` / `\\PROG.PY`); the exact launch flags
+   are in this session's transcript.
+2. **Instrument the external micropython (now that --stack-size re-pins FAIL).**  Add to
+   `~/projects/micropython/ports/dos8086/main.c` (or py/gc.c) a check that CHECKSUMS the
+   globals dict (`mp_state_ctx.thread.dict_globals` → its `map.table` entries) and/or the
+   first qstr-pool chunk after EACH churn iteration (or each `gc_collect`), printing the
+   iteration where it first changes unexpectedly → which churn op corrupts it.  Build with
+   `tools/build-micropython.sh --model=compact` (or relink one TU via `recompile-mp-tu.sh`),
+   then RELINK at a `--stack-size` that lands the far-data segment on mod-4 ∈ {0,3} (the
+   instrumented body size differs, so compute k to hit a FAIL seg — try a few; each MAME run
+   ~2.5 wall-min with `-nothrottle`).  This is the §4e marking-completeness plan, finally
+   unblocked.
+
+### Reproduction cheat-sheet (verified this session)
+- FAIL (shipping): `VICTOR_SRC=build/mp-churn-scale2.py tools/run-victor-sasi.sh build/mp-link/mpython.exe 220`
+- Toggle alignment by relink (above); FAIL k∈{0,1,4,5,…} (seg mod4∈{3,0}), PASS k∈{2,3,6,7,…}.
+- Runs PARALLELISE cleanly (separate temp dirs/serial files) — ran all 6 intermediates at once.
+- `/tmp/mp_objs.txt` (109 link objects) is current; `build/mp-link/` is fully populated.
+
+---
+
+# (§4o done above) Next session (§4o — the churn(120) corruption is now isolated to a LAYOUT-SENSITIVE NON-GC WILD WRITE — the ONLY hypothesis left after EVERY structural/algorithmic one was ruled out (GC core §4l, all live-type ptr alignment §4m, mp_state root scan §4n, mark-stack overflow §4k).  Static analysis is fully spent.  §4o MUST observe the wild write at runtime on the shipping image without perturbing it (instrumentation hides it — §4k).  §4i+§4j fixed+verified the far-ptr bug; three GC probes gated.)
 
 ## 2026-06-09 §4n notes (mp_state root-scan re-audit — CLEAN; suspect B ruled out; only the wild-write hypothesis remains)
 
