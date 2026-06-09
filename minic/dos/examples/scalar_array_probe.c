@@ -104,9 +104,15 @@ main(void)
 		t += folded[i];
 	printf("folded=%ld (want 129)\r\n", t);
 
-	/* offsetof: a at 0, b at 2 (int=2 on i8086), items after long b. */
-	printf("off_b=%d (want 2)\r\n", (int)offsetof(struct vstruct, b));
-	printf("off_items=%d (want 6)\r\n", (int)offsetof(struct vstruct, items));
+	/* offsetof: layout-dependent (§4g far-data 4-aligns the 4-byte `long b`
+	 * to offset 4; medium/NEAR_DATA packs it at 2), so assert the
+	 * model-independent RELATIONSHIPS rather than packed magic numbers:
+	 * a is first, b follows a, and items immediately follows the long b. */
+	printf("offsetof %s\r\n",
+	    (offsetof(struct vstruct, a) == 0
+	     && offsetof(struct vstruct, b) >= sizeof(int)
+	     && offsetof(struct vstruct, items)
+	        == offsetof(struct vstruct, b) + sizeof(long)) ? "ok" : "FAIL");
 
 	return 0;
 }

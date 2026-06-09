@@ -154,6 +154,9 @@ int memmodel = MSmall;
 	 (KIND(x) == PTR && KIND(DREF(x)) == FUN) ? CODEPTR_SZ() : \
 	 (KIND(x) == PTR && ISFAR(x)) ? 4 : DATAPTR_SZ())
 
+/* Round n up to a multiple of a (a must be a power of two). */
+#define ALIGNUP(n, a) (((n) + (a) - 1) & ~((a) - 1))
+
 typedef struct Node Node;
 typedef struct Symb Symb;
 typedef struct Stmt Stmt;
@@ -450,6 +453,8 @@ struct {
 	int nmembers;
 	struct Member members[NMember];  /* Max NMember members per struct */
 	int size;
+	int align;        /* §4g: struct alignment = max member alignment (1 under
+	                   * NEAR_DATA, so medium stays byte-identical/packed). */
 	int curbfoffset;  /* Current bit offset for bitfield packing */
 	int curbfbase;    /* Byte offset of current bitfield storage unit */
 	int forward;      /* 1 = forward/incomplete (tag known, body not yet defined) */
@@ -769,6 +774,7 @@ structadd(char *name, int isunion)
 		structh[idx].isunion = isunion;
 		structh[idx].nmembers = 0;
 		structh[idx].size = 0;
+		structh[idx].align = 1;
 		structh[idx].curbfoffset = 0;
 		structh[idx].curbfbase = 0;
 		structh[idx].forward = 0;
@@ -783,6 +789,7 @@ structadd(char *name, int isunion)
 	structh[idx].isunion = isunion;
 	structh[idx].nmembers = 0;
 	structh[idx].size = 0;
+	structh[idx].align = 1;
 	structh[idx].curbfoffset = 0;  /* No bitfield in progress */
 	structh[idx].curbfbase = 0;
 	structh[idx].forward = 0;
@@ -810,16 +817,53 @@ structadd_forward(char *name, int isunion)
 	structh[idx].isunion = isunion;
 	structh[idx].nmembers = 0;
 	structh[idx].size = 0;
+	structh[idx].align = 1;
 	structh[idx].curbfoffset = 0;
 	structh[idx].curbfbase = 0;
 	structh[idx].forward = 1;
 	return idx;
 }
 
+/* §4g: natural alignment of a member type.  Under NEAR_DATA (tiny/small/
+ * medium) this is always 1, so those models keep the historical PACKED
+ * layout byte-for-byte.  Under far-data a 4-byte member (long / far data
+ * pointer / float / 4-byte fn-ptr) aligns to 4 so MicroPython's conservative
+ * GC, which scans memory in sizeof(void*)=4 strides, finds every pointer at
+ * a stride boundary instead of split across two scan words.  Sub-4-byte
+ * scalars (char, short, int, near ptr) stay align-1 (they can't hold a
+ * pointer, so their alignment is irrelevant to the collector) — this keeps
+ * the padding, and therefore the image growth, to a minimum: a struct with
+ * no 4-byte member has alignment 1 and is byte-identical even under far-data. */
+int
+alignof_ctyp(unsigned ctyp)
+{
+	if (NEAR_DATA())
+		return 1;
+	if (KIND(ctyp) == STRUCT_T || KIND(ctyp) == UNION_T)
+		return structh[DREF(ctyp)].align;
+	if (SIZE(ctyp) >= 4)
+		return 4;
+	return 1;
+}
+
+/* §4g: finalize a struct's layout by tail-padding its size up to its own
+ * alignment, so an array of it (or its embedding in a larger struct) keeps
+ * every element/member at its natural alignment.  Idempotent (rounding an
+ * already-rounded size is a no-op), so it is safe to call at every grammar
+ * close site.  A no-op under NEAR_DATA (align stays 1). */
+void
+structfinish(int idx)
+{
+	if (idx < 0)
+		return;
+	structh[idx].size = ALIGNUP(structh[idx].size, structh[idx].align);
+}
+
 void
 structaddmember(int sidx, char *name, unsigned ctyp)
 {
 	int i;
+	int malign;
 	struct Member *m;
 
 	if (structh[sidx].nmembers >= NMember)
@@ -850,6 +894,11 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 	m->isflex = 0;
 	m->fpid = -1;       /* Not a fn-ptr member (set by the fn-ptr member rule) */
 
+	/* §4g: track the struct's alignment and pad to the member's alignment
+	 * before placing it (no-op under NEAR_DATA — alignof_ctyp returns 1). */
+	malign = alignof_ctyp(ctyp);
+	if (malign > structh[sidx].align)
+		structh[sidx].align = malign;
 	if (structh[sidx].isunion) {
 		/* Union: all members at offset 0 */
 		m->offset = 0;
@@ -858,6 +907,7 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 			structh[sidx].size = SIZE(ctyp);
 	} else {
 		/* Struct: members laid out sequentially */
+		structh[sidx].size = ALIGNUP(structh[sidx].size, malign);
 		m->offset = structh[sidx].size;
 		structh[sidx].size += SIZE(ctyp);
 	}
@@ -870,6 +920,7 @@ void
 structaddarrmember(int sidx, char *name, unsigned ctyp, int count)
 {
 	int i, total;
+	int malign;
 	struct Member *m;
 
 	if (structh[sidx].nmembers >= NMember)
@@ -890,11 +941,17 @@ structaddarrmember(int sidx, char *name, unsigned ctyp, int count)
 	m->count = count;
 	m->isflex = (count == 0);  /* `T x[];` flexible array: 0 bytes but decays */
 	total = SIZE(ctyp) * count;
+	/* §4g: array member aligns to its ELEMENT type (so a `void *arr[]`
+	 * after a 2-byte field starts at a 4-aligned offset). */
+	malign = alignof_ctyp(ctyp);
+	if (malign > structh[sidx].align)
+		structh[sidx].align = malign;
 	if (structh[sidx].isunion) {
 		m->offset = 0;
 		if (total > structh[sidx].size)
 			structh[sidx].size = total;
 	} else {
+		structh[sidx].size = ALIGNUP(structh[sidx].size, malign);
 		m->offset = structh[sidx].size;
 		structh[sidx].size += total;
 	}
@@ -928,10 +985,15 @@ structaddbitfield(int sidx, char *name, unsigned ctyp, int width)
 	if (width > unitsize)
 		die("bitfield width exceeds type size");
 
+	/* §4g: a bitfield's storage unit aligns to its declared type. */
+	if (alignof_ctyp(ctyp) > structh[sidx].align)
+		structh[sidx].align = alignof_ctyp(ctyp);
+
 	/* Check if this bitfield fits in current storage unit */
 	if (structh[sidx].curbfoffset == 0 ||
 	    structh[sidx].curbfoffset + width > unitsize) {
 		/* Start a new storage unit */
+		structh[sidx].size = ALIGNUP(structh[sidx].size, alignof_ctyp(ctyp));
 		structh[sidx].curbfbase = structh[sidx].size;
 		structh[sidx].curbfoffset = 0;
 		structh[sidx].size += unitbytes;
@@ -967,6 +1029,13 @@ hoistanonymous(int parent_sidx, int anon_sidx)
 	/* Base offset for anonymous members in parent struct */
 	base_offset = structh[parent_sidx].size;
 	anon_size = structh[anon_sidx].size;
+	/* §4g: the anonymous aggregate aligns to its own alignment, and that
+	 * alignment propagates to the parent (no-op under NEAR_DATA: align==1,
+	 * so base_offset is unchanged and the layout stays byte-identical). */
+	if (structh[anon_sidx].align > structh[parent_sidx].align)
+		structh[parent_sidx].align = structh[anon_sidx].align;
+	if (!structh[parent_sidx].isunion)
+		base_offset = ALIGNUP(base_offset, structh[anon_sidx].align);
 
 	/* Copy all members from anonymous struct to parent */
 	for (i = 0; i < structh[anon_sidx].nmembers; i++) {
@@ -1011,8 +1080,8 @@ hoistanonymous(int parent_sidx, int anon_sidx)
 		if (anon_size > structh[parent_sidx].size)
 			structh[parent_sidx].size = anon_size;
 	} else {
-		/* Struct: add anonymous member size */
-		structh[parent_sidx].size += anon_size;
+		/* Struct: place the anonymous body at the (aligned) base. */
+		structh[parent_sidx].size = base_offset + anon_size;
 	}
 }
 
@@ -5088,6 +5157,7 @@ emit_struct_global_array(char *name, int count)
 
 	if (idx < 0)
 		die("missing struct context");
+	structfinish(idx);    /* §4g: tail-pad before the array stride is read */
 	styp = (idx << 3) + STRUCT_T;
 	curstruct = -1;
 	total = SIZE(styp) * count;
@@ -6739,6 +6809,7 @@ typedefstruct: typedefstructstart smembers '}' IDENT ';'
 {
 	/* Create typedef to the (tagged) struct */
 	int idx = curstruct;
+	structfinish(idx);
 	curstruct = -1;
 	typhadd($4->u.v, (idx << 3) + STRUCT_T);
 }
@@ -6748,6 +6819,7 @@ typedefunion: typedefunionstart smembers '}' IDENT ';'
 {
 	/* Create typedef to the (tagged) union */
 	int idx = curstruct;
+	structfinish(idx);
 	curstruct = -1;
 	typhadd($4->u.v, (idx << 3) + UNION_T);
 }
@@ -6782,6 +6854,7 @@ static_assert_dcl: STATIC_ASSERT '(' expr ',' STR ')' ';'
 
 sdcl: structstart smembers '}' ';'
 {
+	structfinish(curstruct);
 	curstruct = -1;  /* Done defining this struct */
 }
     | STRUCT IDENT ';'
@@ -6905,6 +6978,7 @@ nestedagg: nested_s_begin smembers '}' ';'
 {
 	/* Anonymous nested struct: hoist its members into the parent. */
 	int idx = curstruct;
+	structfinish(idx);
 	curstruct = structstk[--structstksp];
 	hoistanonymous(curstruct, idx);
 }
@@ -6912,6 +6986,7 @@ nestedagg: nested_s_begin smembers '}' ';'
 {
 	/* Anonymous nested union: hoist its members into the parent. */
 	int idx = curstruct;
+	structfinish(idx);
 	curstruct = structstk[--structstksp];
 	hoistanonymous(curstruct, idx);
 }
@@ -8093,12 +8168,14 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
          * enclosing curstruct, or -1 at top level) so there is exactly one
          * reduce action for `STRUCT '{'` — no reduce/reduce conflict. */
         int idx = curstruct;
+        structfinish(idx);
         curstruct = structstk[--structstksp];
         $$ = (idx << 3) + STRUCT_T;
     }
     | nested_u_begin smembers '}' {
         /* Anonymous union used directly as a type. */
         int idx = curstruct;
+        structfinish(idx);
         curstruct = structstk[--structstksp];
         $$ = (idx << 3) + UNION_T;
     }

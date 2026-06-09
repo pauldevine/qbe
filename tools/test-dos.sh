@@ -279,6 +279,9 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/objalign_probe.c:minic/dos/tests/objalign_probe.golden.txt:medium"
 	"minic/dos/examples/objalign_probe.c:minic/dos/tests/objalign_probe.golden.txt:compact"
 	"minic/dos/examples/objalign_probe.c:minic/dos/tests/objalign_probe.golden.txt:large"
+	"minic/dos/examples/struct_align_probe.c:minic/dos/tests/struct_align_probe.golden.txt:compact"
+	"minic/dos/examples/struct_align_probe.c:minic/dos/tests/struct_align_probe.golden.txt:large"
+	"minic/dos/examples/struct_align_probe.c:minic/dos/tests/struct_align_probe.golden.txt:huge"
 )
 
 # --- Stevie size budget ----------------------------------------------------
