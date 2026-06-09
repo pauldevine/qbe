@@ -1,3 +1,93 @@
+# Next session (§4g — ROOT-CAUSE FIX in the COMPILER: minic now far-data NATURAL-ALIGNS 4-byte struct members so MicroPython's sizeof(void*)-strided conservative GC works as-designed; §4f scanner workarounds REVERTED; verified on real Victor)
+
+## 2026-06-08 §4g notes (the §4f workaround replaced by the real fix; user-chosen direction)
+
+**§4g fixes the §4d/§4e/§4f churn GC corruption at its ROOT, in minic, and reverts
+the §4f scanner workarounds.**  §4f had adapted MicroPython's conservative collector
+to minic's packed struct ABI (2-byte scan stride + a dual-aligned mp_state rescan);
+§4g instead makes minic emit a pointer-aligned ABI under far-data, so the *unmodified*
+upstream collector works.  Committed to master as `d389d63` (compiler change, green-gate
+milestone); the workaround revert lives in EXTERNAL `~/projects/micropython` (not the
+qbe repo), same as the §4f fixes did.
+
+### The fix (minic.y, `d389d63`)
+Lay struct members out with **natural alignment under far-data** (NEAR_DATA stays PACKED
+→ tiny/small/medium byte-identical, whole medium gate untouched):
+- `structh[].align` = max member alignment; new `alignof_ctyp()` returns **1 under
+  NEAR_DATA**, else **4** for a 4-byte member (long / far data ptr / float / 4-byte
+  fn-ptr), the aggregate's own align for a struct/union member, and **1** for sub-4-byte
+  scalars (char/short/int/near-ptr — they can't hold a pointer, so their alignment is
+  irrelevant to the collector; this keeps padding, hence image growth, minimal).
+- pre-pad `size` to the member's alignment + bump struct align in
+  `structaddmember`/`structaddarrmember`/`structaddbitfield`.
+- `structfinish()` tail-pads a struct to its own alignment (idempotent); called at all
+  **9** struct-close grammar sites + `emit_struct_global_array`.
+- `hoistanonymous()` aligns the anonymous body's base offset + propagates its align.
+- The static-initializer machinery already gap-fills (`agg_zfill(m->offset - cursor)`)
+  and tail-fills (`if (cursor < structsize)`), so it followed the aligned offsets with
+  no change; `offsetof`/`emit_clit_aggr`/member access read `m->offset` directly.
+
+**Minimal blast radius:** a struct with NO 4-byte member has align 1 → byte-identical
+even under far-data.  The MicroPython compact image grew only **+224 B** vs the §4f
+baseline (843424→843648, body 820160→820400; the alignment padding is +304 and the
+reverted-workaround code is −80) — well under the ~824416 "Program too big" point.
+
+### Why this works (the §4f bug, now at its source)
+Upstream `gc_collect_start` scans the mp_state roots with
+`gc_collect_root(ptrs + root_start/sizeof(void*), …)`, root_start =
+`offsetof(mp_state_ctx_t, thread.dict_locals)`.  PACKED that was 6 → void**-arith rounds
+to byte 4 → the whole root scan was 2 bytes out of phase (the §4f bug).  ALIGNED,
+`dict_locals` (a pointer) sits at a 4-aligned offset, so `root_start/4*4 == root_start`
+exactly and every root pointer is at a stride boundary → all found.  Likewise
+`gc_mark_subtree`'s `sizeof(void*)` stride now lands on every heap-object child
+(qstr_pool_t hashes/lengths/qstrs[] are 4-aligned).  So both §4f workarounds are
+redundant.
+
+### §4f workarounds REVERTED (external `~/projects/micropython`)
+- `py/gc.c` → **`git checkout`** (full revert to upstream): the `MICROPY_GC_SCAN_PTR_STRIDE`
+  macro and the byte-offset `gc_mark_subtree` loop are gone; stride is `sizeof(void*)` again.
+- `ports/dos8086/main.c` `gc_collect()` → the mp_state dual-aligned **rescan block removed**
+  (upstream gc_collect_start now scans it correctly).
+- **KEPT** the pre-existing C-stack dual-aligned scan in `gc_collect()` — backend FRAME
+  SLOTS are still only 2-aligned (§4g aligns struct member offsets, not stack slots), so a
+  far pointer in a stack slot can still sit at a 2-mod-4 frame offset.  Unrelated to §4f.
+
+### Verified on real Victor (`tools/run-victor-sasi.sh`, compact far-data, stackless, workarounds reverted)
+| test | heap | result |
+|---|---|---|
+| `build/mp-churn-lit.py` (minimal corrupting repro) | 16 KB | `R 124750` ✓ clean `D4`/`C5` — **DECISIVE** |
+| `build/mp-feature-probe.py` (23 std-surface checks) | 49 KB | **23/23 OK** ✓ — no regression |
+| `build/mp-churn-scale2.py` (churn 20→120) | 16 KB | `20 330`…`120 7980`,`DONE` ✓ |
+| `build/mp-churn-scale2.py` (churn 20→120) | 49 KB | stalls at churn(80) — see below |
+
+Gates (qbe repo): `make check` green; `tools/test-dos.sh` **222/222** (3 new
+`struct_align_probe` entries compact/large/huge; `scalar_array_probe` reworked from
+hardcoded packed offsets to model-independent offsetof relationships — it was the ONLY
+gated probe that asserted a packed layout, the entire blast radius).
+
+### The 49 KB-heap extreme-churn STALL is the UNCHANGED §4f perf cliff (NOT a regression)
+scale2 on the 49 KB heap stops after `60 2190` (values all correct) at churn(80) — and
+does so identically at RUN_SECS 300 and 600.  This is exactly the §4f "perf cliff":
+extreme churn on the big (3072-block) heap → `gc_block_stack` overflow
+(`MICROPY_ALLOC_GC_STACK_SIZE`=64) → repeated O(blocks) full-heap rescans in
+`gc_deal_with_stack_overflow`.  §4f's table only ever verified scale2 completing on the
+**16 KB** heap and explicitly noted it "does NOT finish in 700 emulated seconds" on 49 KB
+— so §4g matches §4f exactly here.  Correctness is unaffected (scale2 completes the full
+20→120 on 16 KB; the values printed on 49 KB are correct, it just doesn't finish).
+Reverting the §4f stride-2 amplifier should make the scan *faster*, but the fundamental
+cause (heap size + stack-overflow rescans) dominates and is untouched by alignment.
+
+### Known follow-up (unchanged from §4f — a perf cliff, correctness-unaffected)
+If heavy-GC programs on the big heap need to finish: raise `MICROPY_ALLOC_GC_STACK_SIZE`
+(cheap external port-config change, needs its own Victor check) to cut the O(blocks)
+rescans.  Otherwise the integer-feature surface, deep recursion (stackless), and moderate
+GC pressure are all verified-good on Victor.  No qbe/minic/i8086 source remains to change
+for this; pick whichever frontier a real consumer needs next.
+
+---
+
+# (ARCHIVED) §4f — churn GC corruption FIXED via SCANNER WORKAROUND (now superseded by §4g's compiler fix and reverted)
+
 # Next session (§4f — churn GC corruption FIXED: minic packed-struct 4-byte far pointers at 2-mod-4 offsets defeat MicroPython's sizeof(void*)-strided conservative GC scans; dual-aligned root re-scan + 2-byte gc_mark_subtree stride)
 
 ## 2026-06-08 §4f notes (§4d/§4e CLOSED — root cause found and fixed; verified on real Victor)
