@@ -1,4 +1,96 @@
-# Next session (§4p — FIND THE WRITER.  §4o nailed the churn(120) corruption to a FAR-DATA-SEGMENT-ALIGNMENT-sensitive wild write with a clean PERIOD-4 signature (FAIL iff far-data seg ≡ {0,3} mod 4), reproducible/maskable purely via `--stack-size` (relink-only).  This also CRACKS the §4k "instrumentation hides it" heisenbug — it was just the far-data segment's mod-4 flipping — so instrumentation is now usable by re-pinning a FAIL alignment with `--stack-size`.  Two armed approaches below.)
+# Next session (§4q — find WHY the X00 mark phase fails to mark the qstr-string chunk.  §4p NAILED THE MECHANISM: churn(120) NameError = `mp_load_global(MP_QSTR_churn)` misses because the "churn" qstr STRING was FREED-WHILE-LIVE during the churn(100) collection and reused — its recomputed hash then lands the lookup on an empty slot.  NOT a wild write (§4o's framing was wrong); it's a freed-while-live GC marking failure, layout-sensitive per §4o's period-4.  The exact failing lookup is fully understood; the open question is the marking link that breaks.)
+
+## 2026-06-09 §4p notes (CRACKED the failure mechanism: freed-while-live of the "churn" qstr string → lookup miss; instrumentation via SERIAL, MAME debugger ruled out)
+
+**§4p turned §4o's "layout-sensitive wild write" into a precise, fully-traced mechanism** using
+SERIAL instrumentation in the EXTERNAL micropython tree (all guarded by `-DMP_DBG_GLOBALS=1`;
+normal builds unaffected).  The MAME-debugger watchpoint path was investigated and RULED OUT
+(see below).  No qbe/minic source changed this session — pure diagnosis.
+
+### THE MECHANISM (airtight, multi-step, all serial-verified on real Victor)
+1. **The failure is a name LOOKUP miss, not a structural corruption.**  Instrumented
+   `py/runtime.c::mp_load_global`'s terse-NameError path to print the failing qstr + globals
+   map state.  Result on a FAIL run: `NFq=00DB` → qstr **219 = `churn`** (a MODULE global, not a
+   builtin — that's why it's not found in builtins either → NameError).
+2. **The globals TABLE is fully intact at the miss.**  Dumped every slot: `s03 k=000006DA
+   v=<fnptr>` — slot 3 holds exactly `MP_OBJ_NEW_QSTR(219)=(219<<3)|2=0x6DA` and churn's
+   function pointer.  `a=4 u=3`, table ptr unchanged.  So nothing overwrote the dict.
+3. **The lookup misses purely on the HASH.**  Globals is a hash map; `pos = qstr_hash(219) %
+   alloc`, then linear-probe until found or an EMPTY slot.  Slot 1 is empty; churn is at slot 3.
+   So the lookup finds churn IFF `qstr_hash(219)%4 ∈ {2,3}` (reaches slot 3 before empty slot 1)
+   and MISSES iff `∈ {0,1}`.  churn(20..100) all worked, churn(120) misses → **`qstr_hash(219)`
+   CHANGED**.
+4. **`qstr_hash` RECOMPUTES from the string** (`MICROPY_QSTR_BYTES_IN_HASH=0`, confirmed:
+   `qstr.ssa` `qstr_hash` calls `qstr_compute_hash(pool->qstrs[q], pool->lengths[q])`).  Dumped
+   the string: `ql=0005` (correct len 5) but `qs=0402BBB91000` — **the "churn" string bytes are
+   GARBAGE**: a reused-object header (a far type-pointer `0xB9BB:0x0204` + a length word `0x0010`).
+   So the "churn" string's heap memory was REALLOCATED to a new object.
+5. **=> The "churn" qstr string (packed in `qstr_last_chunk`, py/qstr.c) was FREED-WHILE-LIVE
+   during the churn(100) "X00" collection, then reused by churn(120)'s allocations**, overwriting
+   it → `qstr_hash` recomputes garbage → `pos∈{0,1}` → lookup hits empty slot 1 → NameError.
+   This is the §4f/§4o "freed-while-live qstr_pool" family — now CONFIRMED with the smoking-gun
+   reused-header bytes.  §4o's "wild write" framing was WRONG; it's a marking failure.
+6. **The string, gc_pool_start, gc_pool_end all share ONE segment** (`qp=BE0F1F50 gp=BE0F1500
+   ge=BE0FD200`), so `VERIFY_PTR`'s range check (`ptr>=gp && ptr<ge`) is correct for the string
+   itself — the freed-live is from the **MARK phase failing to mark the qstr-string chunk**, not
+   a VERIFY_PTR rejection of the string.  Layout-sensitive exactly per §4o (FAIL iff the *pool
+   start's* normalized segment ≡ {0,3} mod 4; period 64 bytes = one ATB byte = 4 blocks).
+
+### THE OPEN QUESTION FOR §4q — which marking LINK breaks?
+The "churn" string is reachable for marking via `last_pool` (root) → pool chunk → `qstrs[]` →
+the string-data chunk (`qstr_last_chunk`).  Strings are PACKED into a shared chunk (qstr.c
+`qstr_from_strn_helper`: `m_new` a chunk, append each string at `qstr_last_used`), so `qstrs[idx]`
+point INTO the chunk at non-block-aligned offsets; the chunk survives all-or-nothing via the ONE
+block-aligned pointer to its HEAD (the first string at `chunk_base`).  Statically every link
+"should" mark fine (all same-segment, `BLOCK_FROM_PTR` flat-sub and `PTR_FROM_BLOCK` flat-add are
+self-consistent with no 16-bit carry on this 49 KB heap — verified in `gc.ssa`).  So the break is
+a RUNTIME/alignment effect not visible statically.  §4q must instrument the MARK phase directly:
+- In `py/gc.c` `gc_sweep_free_blocks`, print the address of every block freed during the X00
+  collection; confirm the `qstr_last_chunk` block (whose addr = the healthy `qstr_str(219)` rounded
+  to its chunk HEAD) is among them → proves swept-while-live and gives the chunk's block #.
+- Then in `gc_collect_start`/`gc_mark_subtree`, trace whether that chunk block ever gets
+  `ATB_HEAD_TO_MARK`'d, and if the pool-chunk scan produces the chunk-base pointer and what block
+  `BLOCK_FROM_PTR(chunk_base)` computes.  The period-64 = ATB-byte hint points at a block↔ATB
+  index mismatch or a far-ptr representation divergence on ONE link of the chain.
+- **CAUTION**: the `dbg_churn_atb` ATB-kind probe added to the port `gc_collect` this session is
+  UNRELIABLE — it printed `k=0` (FREE) for the churn block in PASS runs too (impossible for a live
+  block), so its far-byte ATB read (`mp_state_ctx.mem.area.gc_alloc_table_start[blk/4]`) is itself
+  miscompiled/misreading.  FIX or replace that probe before trusting it; don't read the §4p `CB`
+  lines as truth.  (It may even hint at a SECOND minic far-array-index bug — worth a 2-line probe.)
+
+### MAME headless watchpoint — RULED OUT in this MAME (0.287); needs a source patch
+The §4o "approach 1" (debugscript `wpset`) does NOT work: MAME's `process_source_file()` only runs
+commands **while the CPU is stopped** (debugcpu.cpp), but `-debugger none`'s `wait_for_debugger`
+immediately `go()`s (and `DEBUG_FLAG_OSD_ENABLED` is always set, machine.cpp:95), so the
+debugscript is opened but NEVER executed → `wpset`/`trace` produce nothing (matches §4o's empty
+output).  gdbstub only supports the i486 reg map (`debuggdbstub.cpp`), NOT the Victor's 8088.
+A watchpoint's ACTION *does* run in `debug_watchpoint::triggered()` regardless of frontend, and
+`trace`/`tracelog` write to a file — so the ONLY missing piece is getting the initial `wpset` to
+run.  **Fix if pursued**: patch `~/projects/mame/src/osd/modules/debugger/none.cpp`
+`wait_for_debugger` to call `m_machine->debugger().console().process_source_file()` before `go()`,
+then rebuild MAME (slow full relink).  New harness `tools/run-victor-wp.sh` (committed) already
+drives `-debug -debugger none -debugscript` + captures the trace file; it's ready once none.cpp is
+patched.  Lower priority than the serial gc.c instrumentation above.
+
+### Reproduction cheat-sheet (verified this session)
+- Shipping clean FAIL image restored: `build/mp-link/mpython.exe` heap_seg **0xBA8B** body 817840.
+- The FAIL alignment is **NOT predictable from the .map** (it depends on the *runtime-normalized*
+  `gc_pool_start` segment mod 4, not `main_BSS` para mod 4 — those differ by a build-dependent
+  offset).  So after ANY instrumentation edit, SWEEP `--stack-size` over 4 paragraphs (relink-only,
+  to /tmp/*.exe) and run all 4; ~2 of 4 FAIL.  Recipe used:
+  `for ss in 16384 16400 16416 16432; do omf_link.py -o /tmp/hN.exe --stack-size $ss --gc-sections
+  --pack-code <objs>; done` then `run-victor-sasi.sh /tmp/hN.exe 240` (parallelises; ~2.5 wall-min
+  each, 4 parallel competes for cores so ~4 min).
+- Instrument via `MP_EXTRA_CPPFLAGS="-DMP_DBG_GLOBALS=1" tools/recompile-mp-tu.sh runtime …` then
+  `… main …` (relinks).  Image ceiling ~824416 body; the §4p probes (qstr dump + table dump) just
+  fit at ~820400 — keep probes lean.  `/tmp/mp_objs.txt` (109 objs) current.
+- The §4p instrumentation is LEFT IN PLACE (guarded) in `~/projects/micropython/py/runtime.c`
+  (`mp_load_global` NFq+qstr dump + `dbgp_s`/`dbgp_x` helpers) and `ports/dos8086/main.c`
+  (`dbg_churn_atb` + the older `dbg_dump_globals` under `MP_DBG_GC`).  Reuse for §4q.
+
+---
+
+# (§4p done above) Next session (§4p — FIND THE WRITER.  §4o nailed the churn(120) corruption to a FAR-DATA-SEGMENT-ALIGNMENT-sensitive wild write with a clean PERIOD-4 signature (FAIL iff far-data seg ≡ {0,3} mod 4), reproducible/maskable purely via `--stack-size` (relink-only).  This also CRACKS the §4k "instrumentation hides it" heisenbug — it was just the far-data segment's mod-4 flipping — so instrumentation is now usable by re-pinning a FAIL alignment with `--stack-size`.  Two armed approaches below.)
 
 ## 2026-06-09 §4o notes (BISECT cracked the heisenbug: period-4 far-data-segment-alignment sensitivity; instrumentation now unblocked)
 
