@@ -1,3 +1,172 @@
+# Next session (§4f — churn GC corruption FIXED: minic packed-struct 4-byte far pointers at 2-mod-4 offsets defeat MicroPython's sizeof(void*)-strided conservative GC scans; dual-aligned root re-scan + 2-byte gc_mark_subtree stride)
+
+## 2026-06-08 §4f notes (§4d/§4e CLOSED — root cause found and fixed; verified on real Victor)
+
+**The §4e "scan misalignment RULED OUT" was a FALSE NEGATIVE.**  The misalignment
+WAS the bug — in TWO scan sites — and §4e's single, partial `+2` patch to
+`gc_collect_start` fixed neither completely, which is why it "still corrupted."
+Lesson: a botched experiment that *appears* to refute a hypothesis is not
+evidence the hypothesis is wrong.
+
+### Root cause (SSA-confirmed)
+minic lays out struct members **packed**, with NO natural-alignment padding
+(`minic.y` `structaddmember`: `m->offset = size; size += SIZE(ctyp)`).  Under
+far-data a far pointer is **4 bytes** but `size_t` is **2 bytes**, so a 4-byte
+pointer that follows a `size_t`/`uint16_t` lands at a **2-mod-4 byte offset**
+(e.g. `mp_state_thread_t.dict_globals`@10, `qstr_pool_t.qstrs[]`@18).
+MicroPython's conservative GC scans stride by `sizeof(void *)` = 4, so each such
+pointer is **split across two read words and never recognised** → the block it
+roots is freed while live → use-after-free → garbage output + hang.  This is
+**far-data-specific**: in the medium model everything is 2-byte and 2-aligned,
+so pointers are always at `sizeof(void*)` multiples and the bug cannot occur
+(exactly as §4e point 4 predicted — a medium-model probe would NOT reproduce it).
+
+The generated `gc_collect_start` SSA proved it: `root_start =
+offsetof(mp_state_ctx_t, thread.dict_locals)` is **6**, but
+`gc_collect_root(ptrs + root_start / sizeof(void *), …)` does `void**`-pointer
+arithmetic that rounds the start DOWN to byte offset **4** (`6/4*4`), so the
+*entire* root scan is 2 bytes out of phase and recognises none of the 2-mod-4
+root pointers (`dict_globals`, the embedded `dict_main`, `last_pool`, …).
+
+### The fix — two sites, same cause (both in EXTERNAL `~/projects/micropython`)
+1. **`ports/dos8086/main.c` `gc_collect()`** — re-scan the `mp_state_ctx` root
+   section (offsets `thread.dict_locals` … `vm.qstr_last_chunk`) **byte-accurate
+   and at BOTH even alignments** (base and base+2), mirroring the dual-aligned
+   C-stack scan already there.  `gc_collect_root` only marks unmarked heads, so
+   this is purely additive on top of `gc_collect_start`'s (broken, ~no-op) scan.
+   → cleared the **hang/heap corruption** (churn-lit reached clean `D4`/`C5`).
+2. **`py/gc.c` `gc_mark_subtree()`** — the subtree (heap-object child) scan had
+   the *same* flaw: it strides `sizeof(void*)` from each block start, missing a
+   child pointer at a 2-mod-4 block offset.  After fix 1 the hang was gone but
+   print still emitted garbage (`\x01`) because `qstr_pool_t`'s
+   `hashes`@10/`lengths`@14/`qstrs[]`@18 (the interned-string pointers behind
+   `"R"`/`"DONE"`) were skipped → the string chunk was freed/reused.  Changed the
+   child scan to step by **`MICROPY_GC_SCAN_PTR_STRIDE`** (= **2** under
+   `FAR_DATA`, else `sizeof(void*)` — byte-identical on aligned targets).
+   → cleared the print garbage.
+
+NOT a minic/qbe bug: minic's packed layout is intentional and relied on
+throughout the tree.  The bug is MicroPython's conservative scanner assuming a
+pointer-aligned ABI; the fix adapts the scanner, exactly like the pre-existing
+dual-aligned C-stack scan.
+
+### Verified on real Victor (`tools/run-victor-sasi.sh`, compact far-data, stackless)
+| test | heap | result |
+|---|---|---|
+| `build/mp-churn-lit.py` (minimal corrupting repro) | 16 KB | `R 124750` ✓ clean `D4`/`C5` |
+| `build/mp-churn-disc.py` churn(80) (dict+comprehension+str) | 16 KB | `A 3720` ✓ |
+| `build/mp-churn-scale2.py` (full bisection, churn 20→120) | 16 KB | `20 330`…`120 7980`,`DONE` ✓ |
+| `build/mp-feature-probe.py` (23 checks, std surface) | 49 KB | **23/23 OK** ✓ (matches §4c) |
+
+Force a collection cheaply with `MP_HEAP_SIZE=16384 tools/recompile-mp-tu.sh
+main …`.  Committed image is back to the proper 49 KB heap: **843424 / body
+820160** (vs §4c 843344 / 820096 — +80 B for the two fixes; still under the
+~824416 "Program too big" point).  No qbe/minic/i8086 source changed, so
+`make check` and `tools/test-dos.sh` are unaffected (definitionally green).
+
+### Known follow-up (NOT corruption — a perf cliff)
+`scale2`'s **420-iteration extreme churn on the 49 KB heap** does NOT finish in
+700 emulated seconds (stalls mid-run), whereas the identical workload completes
+on a 16 KB heap and `feature-probe`'s moderate GC pressure is fast on 49 KB.
+The 2-byte stride does ~2× the candidate reads and a 49 KB heap (3072 blocks)
+collection is far slower; the likely amplifier is `gc_mark_subtree` finding more
+(incl. false-positive) pointers → `gc_block_stack` overflow
+(`MICROPY_ALLOC_GC_STACK_SIZE` = 64) → repeated O(blocks) full-heap rescans in
+`gc_deal_with_stack_overflow`.  Correctness is unaffected.  If heavy-GC programs
+on the big heap need to be fast, candidate mitigations (each needs its own
+Victor check): raise `MICROPY_ALLOC_GC_STACK_SIZE`; or have minic 4-byte-align
+far-pointer struct members so the `sizeof(void*)`-strided scans suffice (large,
+risky ABI change — the packed layout is relied on elsewhere).
+
+---
+
+# (ARCHIVED) §4e — churn GC corruption NARROWED to "a live heap object across a GC collection is freed"; NOT a scan-misalignment; collection completes; needs marking-completeness instrumentation
+
+## 2026-06-08 §4e notes (deep diagnostic pass on the §4d churn GC-pressure corruption — characterized, NOT yet fixed)
+**No tracked source changed.** All work was external-MicroPython instrumentation (since
+reverted) + scratch `build/mp-churn-*.py` repros + reading generated `build/mp-link/*.ssa`
+/ `*.asm`.  `make check` green; the MP image was rebuilt to the **byte-identical** committed
+baseline (843344 / body 820096).  `tools/test-dos.sh` unaffected (no qbe/minic/i8086 change).
+Full working notes in `/tmp/churn-investigation-notes.md` (not tracked).
+
+### What the bug IS (much sharper than §4d's "GC pressure corruption")
+- **A heap object that must stay LIVE across a GC collection is freed**, corrupting the heap
+  → garbage output + hang.  The collection itself **runs to completion** (all phases).
+- **Trigger = (heap forced to collect) AND (≥1 heap object live across that collection).**
+  With NOTHING live across the collection it is harmless.
+- **NOT cross-call specific, NOT comprehension/dict/str specific** — reproduces with a single
+  flat loop of plain list literals.  The §4d "churn(60) ok / churn(80) fail" boundary was just
+  "when does the 48 KB heap first fill enough to force a collection"; standalone churn(80)
+  passes ONLY because it never collects (its garbage < 48 KB).
+
+### The Victor experiments that pinned it (all real-Victor, 16 KB heap to force a collection early)
+- `build/mp-churn-disc.py` standalone `churn(80)` on the **48 KB** heap → PASSES (never collects).
+- Shrink heap to **16 KB** (recompile-mp-tu.sh MP_HEAP_SIZE knob), same `churn(80)` → HANGS.
+  => forcing one collection is the trigger; a single churn call suffices.
+- Port `gc_collect` instrumented with raw phase markers `[g s 1 2 e]` (no heap alloc):
+  output is **`[gs12e]` then hang** → gc_collect COMPLETES (start, both root scans, end),
+  returns, VM resumes, then corrupts.  NOT a GC-internal infinite loop.
+- `build/mp-churn-dead.py` (`[0,0,0,0,0,0,0,0]` as a bare auto-printed expr — nothing live) →
+  **SURVIVES 2+ collections, keeps printing cleanly.**  => corruption requires a LIVE object.
+- `build/mp-churn-lit.py` (`b=[...]; x=x+b[7]+i` at module scope — `b` is a live global) →
+  **`[gs12e]` then garbage `Y[ZXPRS` + hang.**  The minimal corrupting repro.
+
+### What is RULED OUT (verified in generated SSA + i8086 asm, free of Victor runs)
+- **Scan misalignment of the mp_state root section** — hypothesized the single-4-byte-stride
+  `gc_collect_start` scan skips root pointers shifted to odd-2-byte offsets by 2-byte `size_t`
+  fields inside embedded `mp_obj_dict_t`/`mp_obj_exception_t` (the port's C-stack scan already
+  scans BOTH 2-byte alignments for this reason; `gc_collect_start` does not).  **TESTED a
+  +2-alignment scan of the mp_state section → churn-lit STILL corrupts (`[gs12e]ZXPRS`).**
+  REFUTED and reverted.  With BOTH scans dual-2-byte-aligned, the live object is still lost.
+- **All GC bit/pointer codegen is correct:** `PTR_FROM_BLOCK` (block*16 in 16-bit, safe ≤4095
+  blocks), `BLOCK_FROM_PTR` (32-bit far-sub, same-segment), `VERIFY_PTR` (signed compares but
+  true heap ptrs share the heap segment so never wrongly rejected), `ATB_HEAD_TO_MARK`/
+  `MARK_TO_HEAD`/`ANY_TO_FREE` shifts (`mov ax,<k>; shl ax,cl` — §2k holds), the
+  `gc_sweep_free_blocks` free_tail state machine, `gc_deal_with_stack_overflow` (terminates),
+  `mp_state_mem_area_t` field offsets (table_start@0, byte_len@4, pool_start@6, pool_end@10,
+  last_free@14, last_used@16 — self-consistent), and `gc_get_ptr`.  Heap is a single
+  segment (`main_BSS:0x1200..0xD200`, 16-aligned, no 64 KB wrap).
+- So it is **NOT a missed root from scan alignment, NOT a GC-internal loop, NOT the obvious
+  block-math/ATB codegen.**  The live object is reachable on paper (e.g. global `b` via
+  `dict_main.map.table` → entry value, all at 4-byte-aligned offsets that a 4-byte-stride
+  trace covers) yet is freed.
+
+### THE GOAL FOR NEXT SESSION — instrument MARKING COMPLETENESS directly
+The contradiction ("reachable on paper but freed") means a marking/trace step is silently
+incomplete for a live object, in a way not explained by scan alignment.  Stop reasoning;
+**measure which live block is swept.**  Concrete plan:
+1. In the port `gc_collect` (or a patched `py/gc.c`), capture the address of the known-live
+   object before the collection (e.g. expose `MP_STATE_VM(dict_main).map.table` and a known
+   global's value pointer) and, after `gc_collect_end`, check whether that block's ATB kind is
+   FREE (i.e. it was swept while live).  Print a raw marker if so.  This directly confirms
+   freed-while-live and identifies WHICH object (the table array? the list? an intermediate?).
+2. Alternatively instrument `gc_sweep_free_blocks` to raw-print each freed block's address, and
+   `gc_mark`/`gc_mark_subtree` to print marked-block addresses + total marked count, for the
+   ONE collection in `build/mp-churn-lit.py` on the 16 KB heap.  Compare marked-set to the
+   expected live set; a live block absent from the marked set is the smoking gun.
+3. Suspect list (given codegen is clean): (a) `gc_mark_subtree` n_blocks undercount for a
+   MULTI-block live object so its tail words (holding child pointers) aren't traced — re-derive
+   on-target, not just from the SSA; (b) a far-pointer VALUE inside a live container read by the
+   trace as a non-block-aligned/garbage value (check the actual `loadfl` offsets vs entry
+   layout on-target); (c) the conservative C-stack scan range `[&stack_dummy, stack_top)`
+   genuinely not covering the slot holding the live root at the collection point (verify
+   `nbytes` and that the live `code_state`/value-stack slot is within range on-target —
+   churn-dead's in-progress list survives, so module-frame value-stack rooting works for the
+   transient case, but a RETAINED global may sit only in `dict_main`).
+4. FAST-LOOP idea: try to reproduce in a **medium-model DOS probe** that links `py/gc.c` with
+   minimal `mp_state` stubs, allocates cross-linked objects, drops most, forces `gc_collect`,
+   reallocates, and verifies a retained object's contents.  If it reproduces in medium model
+   (DOSBox, seconds/iteration), the 12-min Victor loop is no longer the bottleneck.  If it
+   does NOT reproduce in medium, the bug is **far-data-specific** (compact-model far heap),
+   which itself narrows it to the far load/store paths in the collection.
+- Repro scripts live in `build/mp-churn-{disc,lit,dead,loc,bisect}.py` (untracked).  Use
+  `MP_HEAP_SIZE=16384 tools/recompile-mp-tu.sh main ~/projects/micropython/ports/dos8086/main.c`
+  to force a collection in a single small loop (fast relink), then
+  `VICTOR_SRC=build/mp-churn-lit.py tools/run-victor-sasi.sh build/mp-link/mpython.exe 220`.
+  Restore the baseline image afterwards with `tools/build-micropython.sh --model=compact`
+  (843344 bytes).  HARNESS GOTCHA still applies: redirect to a file + poll, never pipe through
+  `tail`/`head` (see [[feedback-victor-harness-pipe-buffer]]).
+
 # Next session (§4d — TRY THIS: reduce the pre-existing churn(~80) GC-pressure corruption — the real compiler-bug candidate)
 
 ## 2026-06-08 §4c notes (§4b DONE: stackless-strict is the dos8086 port default — clean win, no compiler bug)
