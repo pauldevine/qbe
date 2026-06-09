@@ -1,3 +1,113 @@
+# Next session (§4i — IMPLEMENT THE FIX: offset-only 16-bit segment-preserving far-pointer arithmetic.  §4h root-caused the scale2 churn(80) stall to a REAL minic bug — `far_ptr + unsigned_index >= 0x8000` sign-extends → wild pointer; the §4f/§4g "perf cliff" framing was a FALSE hypothesis; no GC even runs before the stall.  Reduction probe + evidence committed; naive fix reverted because it regresses wraparound deltas.)
+
+## 2026-06-08 §4h notes (root-caused the churn stall to a far-pointer codegen bug; reduction probe committed; proper fix scoped, NOT yet landed)
+
+**The §4f/§4g "perf cliff" attribution was FALSIFIED.**  Those notes *hypothesised*
+(never instrumented) that scale2 stalling at churn(80) on the 49 KB heap was a
+`gc_block_stack` overflow → O(blocks) rescan perf cliff.  This session instrumented
+it and the hypothesis is wrong: **no garbage collection runs at all before the
+stall.**  So raising `MICROPY_ALLOC_GC_STACK_SIZE` (this session's original task)
+is moot and was abandoned.  The stall is a genuine compiler bug.
+
+### How it was found (the discipline paid off)
+1. Added a depth probe (`gc_block_stack` high-water "H<n>" print) + `g`/`G` markers
+   around the port `gc_collect` + an `o` overflow marker — all behind a config
+   macro, in the EXTERNAL tree (now reverted).  Ran scale2/loc80 on real Victor:
+   **zero `g`/`G`/`o`/`H`** ever printed → no collection, no overflow, no marking
+   before the hang.  (Markers proven present in `main.asm`/`gc.asm`; `gc_alloc`'s
+   only collect-trigger is gc.c:934/984, confirmed reachable.)  `MICROPY_GC_ALLOC_
+   THRESHOLD` is 0 at MINIMUM ROM level, so nothing forces an early collection.
+2. `build/mp-fill-probe.py` (forced fill, nothing retained) → `g G DE`: a
+   collection *does* run/complete once the heap fills, then the program raises.
+   `build/mp-churn-loc80.py` (per-iteration markers) → dies at churn(80) iter ~12
+   ≈ **~33 KB of monotonic allocation — just past 32 KB (offset 0x8000)** into the
+   single-segment heap.  16 KB heap completes (offsets < 0x4000); 49 KB breaks.
+   The "just past 0x8000" signature pointed straight at a 16-bit-offset sign flip.
+3. Reduced to `minic/dos/examples/gc_bigheap_probe.c` (compact far-data, DOSBox —
+   a SECONDS loop, no Victor).  Its SSA is the smoking gun.
+
+### THE BUG (committed repro: `gc_bigheap_probe.c`)
+minic's pointer-scale path (`minic.y`, `prom()` label `Scale:`) lowers
+`far_ptr + <variable index>` as a **flat 32-bit add of a SIGN-EXTENDED index**:
+it unconditionally `sext(r)`s a sub-long index before `=l mul`/`=l add`.  When the
+index is an UNSIGNED byte offset ≥ 0x8000 (top bit of the 16-bit offset set),
+`extsw` makes it negative, so `ptr + off` lands at a wild address BELOW the object.
+MicroPython's `gc_alloc` returns exactly this shape — gc.c:1020
+`ret_ptr = area->gc_pool_start + start_block * BYTES_PER_BLOCK` — so on a >32 KB
+heap, any block in the upper half (`start_block >= 2048`, offset ≥ 0x8000) is
+handed back at a bogus address → heap corruption.  Same family as
+`[[feedback-minic-unsigned-widen-extsw]]` (§2r), but at the pointer-scale site,
+not a cast.  Probe SSA: `%t155 =l extsw %t154` for `pool[off]`.
+
+### WHY a naive extuw fix is WRONG (do NOT just flip extsw→extuw)
+Tried `if (ISUNSIGNED(r->ctyp)) extuw else extsw` in the Scale path.  It fixed
+`gc_bigheap_probe` (ALL OK) and `make check` stayed green — but on Victor it
+**REGRESSED the common path**: MicroPython `feature-probe` went 23/23 → `ER list`
+/ `XX gen`, and scale2 raised immediately (`<class 'iterator'>`).  Reason: the
+flat-32-bit-add model is fundamentally wrong for far pointers.  `extsw` was
+"accidentally correct" for code that builds a *negative* `size_t` delta (16-bit
+wraparound, e.g. `ptr + (a - b)` with `a < b`): `extsw` of the wrapped 16-bit
+value reproduces the intended backward move, whereas `extuw` turns it into a huge
+forward jump.  So:
+- `extuw` ✔ true-large-offset (gc_alloc), ✘ wrapped-negative delta (list/gen).
+- `extsw` ✔ wrapped-negative delta, ✘ true-large-offset ≥ 0x8000 (gc_alloc).
+No single extension on a flat 32-bit add handles both.  **REVERTED** (minic.y back
+to unconditional `sext`; MicroPython image byte-restored to the §4g baseline
+843648 / body 820400; gate untouched, `make check` green).
+
+### THE FIX TO IMPLEMENT NEXT (§4i) — offset-only far-pointer arithmetic
+On 8086 compact/large, a far pointer's segment is FIXED per object (objects ≤ 64 KB)
+and arithmetic stays within the segment.  The correct lowering of `far_ptr ± idx`
+is **add/sub `idx` to the 16-bit OFFSET only, with 16-bit wraparound, segment
+preserved** — NOT a flat 32-bit add/sub.  That is correct for BOTH cases:
+- gc_alloc: `off(small) + start_block*16` (< 0x10000 within the segment) → right
+  offset, segment kept.
+- wrapped-negative: `off + 0xFFFF` wraps to `off-1`, segment kept.
+Recommended implementation: a dedicated backend op (e.g. `Oaddfo`/`Osubfo`, "far
+offset add/sub") that emits `add word <ptr-low>, idx16` with NO `adc`/`sbb` into
+the segment word — both CORRECT and SMALLER than today's `add ax,lo / adc dx,hi`.
+minic emits it for `far_ptr ± index` under compact/large (the `Scale:` else
+branch + the postinc/preinc far paths).  This is meaty: new op → `ops.h` + `all.h`
++ the IL-lexer perfect-hash regen (`tools/lexh.c`, the `K` constant) + `i8086/emit.c`
+handlers + minic emission, then `make check` + full `tools/test-dos.sh` + Victor
+re-verify (scale2 must reach `120 7980` / `DONE`; feature-probe 23/23; fill probe
+→ DONE).  Do NOT rush it at end-of-session — that's exactly why §4h reverted
+rather than shipped.  A pure-IR alternative (`(ptr & 0xFFFF0000) | ((ptr_lo+idx)
+& 0xFFFF)`) is correct but bloats every variable-index far-arith site (~5 insns);
+the image is already near the ~824 KB ceiling, so prefer the compact backend op.
+NOTE the **only-variable-index** scope: constant-index far arith goes through the
+`r->t == Con` path (`r->u.n *= sz`; a large *constant* index ≥ 0x8000 could carry
+into the segment too — handle if a real case appears, but it's rare).
+
+### Verify the fix with the committed repro
+`QBE_FAR_STATIC_DATA=1 tools/build-example.sh --model=compact minic/dos/examples/gc_bigheap_probe.c`
+then `tools/run-dos-exe.sh build/examples/gc_bigheap_probe/gc_bigheap_probe.exe`.
+BUGGY (today): `b>=2048` lines show wrong/zero `direct` + `FAIL`.  FIXED: every
+`direct=<0x41+i>` + `ALL OK`.  Then GATE it (compact/large/huge) — but build-example.sh
+must pass `-DFAR_DATA` first (see below), or keep the probe's self-`#define FAR_DATA`.
+
+### Incidental harness gap found (fix alongside §4i)
+`tools/build-example.sh` does NOT pass `-DFAR_DATA` to its cpp step (only
+`build-micropython.sh` does), so a probe built compact/large/huge gets 16-bit
+`uintptr_t`/`intptr_t` (stdint.h `#else` branch) instead of the 32-bit a far
+pointer needs.  `gc_bigheap_probe.c` self-`#define`s `FAR_DATA` to work around it.
+The clean fix: build-example.sh should add `-DFAR_DATA=1 -DDOS_FAR_DATA=1` for
+compact/large/huge — but VERIFY it doesn't shift existing far-data probe goldens
+(farglobal/fardata/farstruct_ptr reference these macros; stdint_probe is
+medium-only and asserts `sizeof==2`, so leave medium alone).
+
+### Build/run cheat-sheet (so next session doesn't re-derive it)
+- Victor harness GOTCHA (cost a run this session): do NOT pipe `run-victor-sasi.sh`
+  through `tr`/`tail`/`head` — the watchdog subshell inherits the pipe fd and
+  blocks ~WALL_SECS.  Redirect to a file, then filter: `... > /tmp/x.out 2>&1` then
+  `LC_ALL=C tr -cd '\11\12\15\40-\176' < /tmp/x.out`.  `-nothrottle` makes a 300
+  emulated-sec run finish in a couple wall minutes.  (See [[feedback-victor-harness-pipe-buffer]].)
+- Scratch repros (untracked `build/*.py`): `mp-fill-probe.py` (forced fill → `gGDE`),
+  `mp-churn-loc80.py` (per-iter localization → dies iter ~12), `mp-churn-scale2.py`
+  (the canonical 20→120 churn).
+
+---
+
 # Next session (§4g — ROOT-CAUSE FIX in the COMPILER: minic now far-data NATURAL-ALIGNS 4-byte struct members so MicroPython's sizeof(void*)-strided conservative GC works as-designed; §4f scanner workarounds REVERTED; verified on real Victor)
 
 ## 2026-06-08 §4g notes (the §4f workaround replaced by the real fix; user-chosen direction)
