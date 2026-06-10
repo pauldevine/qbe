@@ -3147,7 +3147,7 @@ expr(Node *n)
 		['^'] = "xor",
 		['L'] = "shl",
 		['R'] = "shr",
-		['<'] = "cslt",  /* meeeeh, wrong for pointers! */
+		['<'] = "cslt",  /* signed default; ptr/unsigned rewritten to cult/cule at the emit site */
 		['l'] = "csle",
 		['e'] = "ceq",
 		['n'] = "cne",
@@ -4349,8 +4349,18 @@ expr(Node *n)
 				fprintf(of, " cne%s ", ty);
 			else
 				fprintf(of, " %s%s ", otoa[o], ty);
-		} else if (strchr("<l", o) && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp))) {
-			/* Unsigned integer comparison */
+		} else if (strchr("<l", o) && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp)
+		           || KIND(s0.ctyp) == PTR || KIND(s1.ctyp) == PTR)) {
+			/* Unsigned integer comparison.  POINTER relational compares
+			 * (C11 6.5.8) are address comparisons and must be UNSIGNED
+			 * too: pointer types never carry the UNSIGNED flag, so
+			 * without the KIND==PTR check they fell through to the
+			 * signed cslt/csle below — wrong whenever the operands
+			 * straddle the sign bit (near offset >= 0x8000, or a far
+			 * pointer's segment word >= 0x8000 vs one below).  Harmless
+			 * by luck in images where every segment is >= 0x8000 (all
+			 * "negative", so signed ordering matches), but real; found
+			 * in §4o's VERIFY_PTR SSA audit. */
 			fprintf(of, " %s%s ", o == '<' ? "cult" : "cule", ty);
 		} else if ((o == '/' || o == '%')
 		           && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp))) {

@@ -318,6 +318,15 @@ RUNTIME_TESTS=(
 	# sufficient (the real guard is the isel pin itself + the Victor scale2 run).
 	"minic/dos/examples/shift_count_spill_probe.c:minic/dos/tests/shift_count_spill_probe.golden.txt:medium"
 	"minic/dos/examples/shift_count_spill_probe.c:minic/dos/tests/shift_count_spill_probe.golden.txt:compact"
+	# §4s pointer RELATIONAL compares are UNSIGNED (C11 6.5.8).  minic lowered
+	# ptr <,<=,>,>= to signed cslt/csle (pointers never carry the UNSIGNED type
+	# flag), inverting the result whenever the operands straddle the sign bit:
+	# near offset >= 0x8000 vs below, or far SEGMENT word >= 0x8000 vs below.
+	# Latent in the MicroPython images only because every segment there is
+	# >= 0x8000.  medium pins the near Kw path (cultw), compact the far-data Kl
+	# path (cultl); far-pointer cases discriminate under both.
+	"minic/dos/examples/ptr_relational_probe.c:minic/dos/tests/ptr_relational_probe.golden.txt:medium"
+	"minic/dos/examples/ptr_relational_probe.c:minic/dos/tests/ptr_relational_probe.golden.txt:compact"
 )
 
 # --- Stevie size budget ----------------------------------------------------

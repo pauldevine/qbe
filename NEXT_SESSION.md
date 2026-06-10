@@ -1,4 +1,54 @@
-# Next session (§4s — the churn(120) saga is CLOSED: §4r landed the i8086 variable-shift CX pin and VERIFIED it on real Victor at ALL FOUR mod-4 segment alignments (scale2 prints churn(20..120) correct + DONE everywhere).  Gate 230/230.  No designated successor — pick from the open lower-priority tracks: (a) the §4o LATENT minic bug: C pointer RELATIONAL compares (`<`,`<=`,`>`,`>=`) lower to SIGNED `cslel`/`csltl` but C requires unsigned — harmless today only because every segment is ≥0x8000; probe + fix (same family as §2r extsw/extuw); (b) huge-model `_qbe_huge_add` ≥0x8000 index gap (§4i scope note); (c) MicroPython feature/perf work now that GC is sound under churn; (d) clean up the §4p/§4q `-DMP_DBG_*` instrumentation left in the external micropython tree.)
+# Next session (§4t — §4s FIXED the §4o latent minic bug: pointer RELATIONAL compares now lower UNSIGNED (`cult`/`cule`), gate 230→232/232, MP image byte-count-identical, Victor scale2 still all-correct.  No designated successor — pick from the open lower-priority tracks: (a) huge-model `_qbe_huge_add` ≥0x8000 index gap (§4i scope note); (b) MicroPython feature/perf work now that GC is sound under churn; (c) clean up the §4p/§4q `-DMP_DBG_*` instrumentation left in the external micropython tree; (d) 211-commit upstream-qbe rebase, pure plumbing.)
+
+## 2026-06-09 §4s notes (FIXED the §4o latent minic signed pointer-relational-compare bug)
+
+**§4s closed open track (a) from §4r: C pointer relational compares (`<`,`<=`,`>`,`>=`) were
+lowered SIGNED; C11 6.5.8 requires unsigned (address comparison).**  One frontend fix, one new
+gated probe; no backend change needed.
+
+### The fix (minic/minic.y, emit site ~4352)
+The unsigned-compare branch in expr()'s Binop emission keyed ONLY on `ISUNSIGNED(s0/s1)`;
+pointer types never carry the UNSIGNED flag, so `p < q` fell through to signed `cslt`/`csle`.
+The branch now also fires on `KIND(s0.ctyp)==PTR || KIND(s1.ctyp)==PTR` → `cult`/`cule`.
+- `>`/`>=` are parse-time-normalized to swapped `<`/`<=` (mknode at the grammar rule), so the
+  one emit site covers all four operators.
+- prom() already returns the pointer operand's type for "ne<l" ops with operands untouched
+  (the §1i no-Scale rule), so KIND==PTR is reliably visible at the emit site.
+- Signed/unsigned INTEGER compares are untouched (the probe pins this).
+- i8086 backend already had Ocultw/Ocultl/Oculew/Oculel handlers (used by unsigned integer
+  compares) — frontend-only fix.  Also updated the stale `/* meeeeh, wrong for pointers! */`
+  comment on the otoa[] table.
+
+### New gated probe: `ptr_relational_probe.c` (medium + compact, one shared golden)
+- Far-pointer compares across the SEGMENT sign bit (`MK_FP(0x9000,4)` vs `MK_FP(0x7000,4)`,
+  all four operators + one false case) — far ptrs are Kl in EVERY model, so these discriminate
+  under medium AND compact.
+- Default `char *` compares from synthetic addresses 0x9000 vs 0x7000 — under medium that is
+  the near Kw path (offset sign bit); under compact the cast widens to a far ptr but the
+  expected output is identical, so one golden serves both models.
+- Regression guards: in-array ordering; `iident(-1) < iident(1)` and
+  `iident(-28672) < iident(0x7000)` must STAY signed (=1; unsigned would invert the latter).
+- **Verified bug-loud against the reverted fix**: exactly the 7 discriminating cases invert
+  (ok1-ok7), guards stay correct.  Opaque identity fns defeat const folding.
+
+### Verification (all green)
+- `make check` (SSA suite) green.  Gate **230 → 232/232** (new probe medium + compact).
+- Full MicroPython rebuild (build-micropython.sh --model=compact): body **818080 —
+  byte-count IDENTICAL to §4r** (signed vs unsigned compare emit the same instruction
+  lengths on i8086; only the jcc conditions changed, jl/jle → jb/jbe).
+- Real-Victor scale2: churn(20..120) all correct (`120 7980`, `DONE`) — the image-wide
+  compare-condition change (VERIFY_PTR etc.) is behaviorally clean on target.
+
+### Left open (no successor designated — pick by need)
+- huge-model `_qbe_huge_add` ≥0x8000 gap; reconfirmed this session that probe TUs still
+  don't get -DFAR_DATA from build-example.sh (only crt0 does) — the §4i scope note.
+- §4p/§4q `-DMP_DBG_SWEEP`/`-DMP_DBG_GLOBALS` instrumentation still in the external
+  micropython tree (guarded, normal builds unaffected).
+- MicroPython feature/perf work; 211-commit upstream-qbe rebase.
+
+---
+
+# (DONE in §4s above) Next session (§4s — the churn(120) saga is CLOSED: §4r landed the i8086 variable-shift CX pin and VERIFIED it on real Victor at ALL FOUR mod-4 segment alignments (scale2 prints churn(20..120) correct + DONE everywhere).  Gate 230/230.  No designated successor — pick from the open lower-priority tracks: (a) the §4o LATENT minic bug: C pointer RELATIONAL compares (`<`,`<=`,`>`,`>=`) lower to SIGNED `cslel`/`csltl` but C requires unsigned — harmless today only because every segment is ≥0x8000; probe + fix (same family as §2r extsw/extuw); (b) huge-model `_qbe_huge_add` ≥0x8000 index gap (§4i scope note); (c) MicroPython feature/perf work now that GC is sound under churn; (d) clean up the §4p/§4q `-DMP_DBG_*` instrumentation left in the external micropython tree.)
 
 ## 2026-06-09 §4r notes (THE FIX LANDED + VICTOR-VERIFIED at all 4 alignments — the 13-session churn(120) saga is CLOSED)
 
