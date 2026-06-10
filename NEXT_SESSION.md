@@ -1,4 +1,89 @@
-# Next session (§4t — §4s FIXED the §4o latent minic bug: pointer RELATIONAL compares now lower UNSIGNED (`cult`/`cule`), gate 230→232/232, MP image byte-count-identical, Victor scale2 still all-correct.  No designated successor — pick from the open lower-priority tracks: (a) huge-model `_qbe_huge_add` ≥0x8000 index gap (§4i scope note); (b) MicroPython feature/perf work now that GC is sound under churn; (c) clean up the §4p/§4q `-DMP_DBG_*` instrumentation left in the external micropython tree; (d) 211-commit upstream-qbe rebase, pure plumbing.)
+# Next session (§4u — §4t was a TRIPLE win: (1) per-FUNCTION text segments (QBE_TEXT_SEG_BUDGET=1 in build-micropython.sh) let --gc-sections strip 4101 segments → MP code 703553→452461 (-251 KB, -36%), body 835888→584320 — **~240 KB of headroom under the ~824 KB Victor ceiling**; (2) that headroom funded the last four MINIMUM-ROM gaps: filter/reversed/str.count/str %-format are ON and Victor-verified; (3) the %-format bring-up flushed out + FIXED a REAL i8086 emit bug — the Osub Kw two-address rescue hardcoded BX as scratch, so to==BX compiled `right_pad -= p` to a NO-OP (mp_print_strn right-pad infinite loop, "%-5d" hang).  Gate 232→234.  THE HEADROOM REOPENS PARKED DECISIONS (user's call): float (§4a's "needs a code-size campaign" premise is GONE — FLOAT body was 882944 at 56 KB granularity, per-function stripping should bring it FAR under the ceiling), bigger MP_STACK_SIZE (24576 was rejected ONLY for size; deep-generator robustness), bigger heap (segment-bound, ~60 KB max).  Also open: (a) huge `_qbe_huge_add` ≥0x8000 gap; (b) §4p/§4q -DMP_DBG_* cleanup in the external tree; (c) 211-commit upstream rebase.)
+
+## 2026-06-09 §4t notes (per-function gc-sections -251 KB; filter/reversed/str.count/%-format ON; Osub rescue-scratch fix)
+
+**§4t set out to enable the four documented MINIMUM-ROM feature gaps and ended up landing a
+size breakthrough plus a real backend fix.**  Sequence: feature flip → didn't fit → measured
+honestly → found the size lever → lever exposed a latent codegen bug on first-ever execution
+of the %-width path → probe + fix.  All Victor-verified.
+
+### 1. The features (external micropython tree, ports/dos8086/mpconfigport.h)
+- `MICROPY_PY_BUILTINS_FILTER/REVERSED/STR_COUNT/STR_OP_MODULO` all `(1)`.
+- **5 qstrs QDEF0-appended** to `ports/minimal/build/genhdr/qstrdefs.generated.h` (the §4a
+  recipe; pool 0 is unsorted+positional so appends are index-safe): `filter` 48677/6,
+  `reversed` 28321/8, `__reversed__` 65377/12, `%#x` 6779/3, `%#o` 6764/3 (hex()/oct()
+  format through %-modulo).  djb2 `hash*33^b & 0xFFFF` re-verified against count/__dir__/
+  __call__/float.  Exact-need check: preprocess every TU with the build's cpp flags, grep
+  MP_QSTR_, comm against the pool (source-grep over-counts config-gated refs).
+- Cost at the OLD 56 KB granularity: +10,944 (filter+reversed+count; objfilter/objreversed
+  whole-TU text ~3 KB each + objstr count +2.6 KB) +6,784 more for OP_MODULO — vs ~6.2 KB
+  headroom (baseline 818,160 = §4s 818,080 + 80 B qstr data).  DID NOT FIT → size lever.
+
+### 2. The size lever: per-function text segments (tools/build-micropython.sh)
+- `export QBE_TEXT_SEG_BUDGET=${QBE_TEXT_SEG_BUDGET:-1}` — asm_to_omf.py already splits
+  .text at function boundaries when over budget, and omf_link --pack-code was DESIGNED for
+  per-function granularity (its comment says so; word-aligned packing, no paragraph waste).
+  Budget=1 = every function its own segment → --gc-sections strips DEAD FUNCTIONS
+  (statics included) instead of whole-TU text blocks.
+- **dead-stripped 201 → 4101 segments; code 703553 → 452461; body 835888 → 584320.**
+  ~250 KB of the image was dead functions inside partially-used TUs (mpz, showbc, profile,
+  the gated-out emitters, half of objstr/runtime/vm helpers...).
+- Same default wired into `tools/recompile-mp-tu.sh` (a TU rebuilt with a different budget
+  would silently revert that TU to whole-TU granularity on relink).
+- asm_to_omf's GLOBAL default stays 56000: per-function segments WITHOUT --pack-code would
+  add paragraph padding per function (stevie links without gc-sections/pack-code).
+- Reachability is fixup-based, so a kept function's targets are kept by construction — a
+  dangling reference is impossible; the risk class is layout-sensitivity, hence the full
+  Victor re-verification (below).
+
+### 3. The bug: i8086 Osub Kw two-address rescue, scratch hardcoded to BX (i8086/emit.c)
+- First-ever Victor execution of the %-width path: `"%5d" % 7` printed correctly,
+  `"%-5d" % 7` HUNG.  py/mpprint.c `mp_print_strn`: str.format always passed width=-1, so
+  the pad>0 loops had never run on target before; %-modulo with width is what reached them.
+- Generated asm for `right_pad -= p` (SSA `sub %rp, %p`, rega: rp=SI, p=BX, dest=BX):
+  `push bx / mov bx, bx / mov bx, si / sub bx, bx / pop bx` — the "rescue" of arg[1]
+  through the HARDCODED BX scratch degenerates when to==arg[1]==BX: the save is a self-mov,
+  the dst-mov clobbers it, the op computes rp-rp=0, and `pop bx` discards even that.
+  right_pad never decrements → infinite vstr-append loop → hang.  Non-commutative sibling
+  of [[i8086-two-addr-arg1-alias]] (that fix swapped COMMUTATIVE operands only; sub can't
+  swap).  Second latent hole, same site: arg[0] in BX was clobbered by the save before
+  being read.  In practice the path serves Osub Kw (shifts/div/rem have dedicated early
+  handlers; add/and/or/xor commute).
+- **Fix:** the rescue scratch is now CHOSEN from {BX,CX,SI,DI}, skipping the destination
+  and arg[0].  emitf prints the op against the scratch; pop restores it; the bad/swap_bx
+  addressing unwind is untouched (BX itself is no longer disturbed when scr!=BX).
+- **Probe `sub_arg1_alias_probe.c` (medium+compact, gate 232→234):** pad_out2 (the
+  mp_print_strn right-pad shape + two extra loop-carried values) lands the sub's dest in
+  BX and is bug-loud — VERIFIED against the reverted fix: ok6/ok7/ok8 fail, all 8 pass
+  with the fix.  Guard-bounded so a regression prints wrong sums instead of hanging the
+  gate.  rega-dependent trigger ⇒ green probe is necessary-not-sufficient (the §4r
+  caveat); the real guard is the scratch chooser + the Victor %-format run.
+- minic gap noted en route: `static emit_fn ep = emit_n;` (file-scope fn-ptr initializer
+  to a function) dies "non-constant in case label" — worked around with runtime assign;
+  not reduced this session.
+
+### 4. Verification (all green)
+- `make check` green; gate **234/234** (new probe medium+compact).
+- MP image: 107/107 TUs, body 584320 (features ON, per-function stripping, fixed qbe).
+- Real Victor: `mp-feature-4t.py` — filter/filterN/reversed(list,range,str)/count/
+  %-format (%d %s %x, %5d %-5d %05d, %c %%, single-arg) + comprehension/dict/str.format/
+  slicing regressions ALL byte-exact vs host python3; clean D4/C5.
+- Real Victor: `mp-churn-scale2.py` churn(20..120) all correct + DONE on the new layout.
+- Probe scripts kept: `build/mp-feature-4t.py`, `build/mp-fmt-bisect.py`.
+
+### Reopened by the headroom (decisions for the user, not unilaterally taken)
+- **FLOAT**: §4a measured body 882944 at 56 KB granularity vs ~824416 ceiling and the user
+  parked it ("needs a code-size campaign").  Per-function stripping IS that campaign:
+  the integer image dropped 251 KB; the float delta was only ~59 KB.  Re-attempt recipe
+  unchanged (mpconfigport float comment + 2 QDEF0 lines, §4a).
+- **MP_STACK_SIZE 16384 → 24576**: §4c rejected 24576 ONLY because body 828224 exceeded
+  the load ceiling; now ~240 KB clear.  Bigger C stack = more deep-generator headroom
+  (generator resume still C-recurses under STACKLESS).
+- **Heap**: still segment-bound (~64 KB max for the single static array), not ceiling-bound.
+
+---
+
+# (DONE in §4t above) Next session (§4t — §4s FIXED the §4o latent minic bug: pointer RELATIONAL compares now lower UNSIGNED (`cult`/`cule`), gate 230→232/232, MP image byte-count-identical, Victor scale2 still all-correct.  No designated successor — pick from the open lower-priority tracks: (a) huge-model `_qbe_huge_add` ≥0x8000 index gap (§4i scope note); (b) MicroPython feature/perf work now that GC is sound under churn; (c) clean up the §4p/§4q `-DMP_DBG_*` instrumentation left in the external micropython tree; (d) 211-commit upstream-qbe rebase, pure plumbing.)
 
 ## 2026-06-09 §4s notes (FIXED the §4o latent minic signed pointer-relational-compare bug)
 

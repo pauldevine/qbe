@@ -76,6 +76,17 @@ MP_HEAP_SIZE=${MP_HEAP_SIZE:-49152}
 MP_DOS_TINY_STACK_CHECK=${MP_DOS_TINY_STACK_CHECK:-0}
 MP_DOS_STACKLESS_RECURSION_RAISE=${MP_DOS_STACKLESS_RECURSION_RAISE:-0}
 MP_EXTRA_CPPFLAGS=${MP_EXTRA_CPPFLAGS:-}
+# Per-FUNCTION text segments (§4t): with budget=1, asm_to_omf splits .text at
+# every function boundary, so omf_link --gc-sections strips each unreachable
+# function individually (statics included) instead of whole-TU text blocks,
+# and --pack-code re-packs the survivors back-to-back (word-aligned, no
+# paragraph waste).  On the curated MicroPython link this cut code 703553 →
+# 452461 bytes (-251 KB, -36%): the whole-TU granularity had been retaining
+# every dead function in any partially-used TU (mpz, showbc, profile, ...).
+# Only set here — the asm_to_omf default stays 56000 for builds that don't
+# link with --gc-sections --pack-code (per-function segments without packing
+# would ADD paragraph padding per function).
+export QBE_TEXT_SEG_BUDGET=${QBE_TEXT_SEG_BUDGET:-1}
 
 NORMALIZE='s/\bunsigned short int\b/unsigned short/g;s/\bunsigned long int\b/unsigned long/g;s/\bsigned short int\b/short/g;s/\bsigned long int\b/long/g;s/\blong long int\b/long long/g;s/\blong int\b/long/g;s/\bshort int\b/short/g;s/\bsigned char\b/char/g;s/\bsigned long long\b/long long/g;s/\bsigned long\b/long/g;s/\bsigned int\b/int/g'
 

@@ -4231,17 +4231,45 @@ end_load_block:
 				/* For non-commutative ops (sub, sar, shr, shl)
 				 * we couldn't swap operands if arg[1] aliases to;
 				 * the dst-mov below would clobber arg[1]'s live
-				 * value.  Save it via BX with push/pop so the
-				 * op consumes the preserved copy. */
+				 * value.  Save it in a scratch reg with push/pop
+				 * so the op consumes the preserved copy.
+				 *
+				 * The scratch must be distinct from BOTH the
+				 * destination (== arg[1] here) and arg[0].  It
+				 * was once hardcoded to BX: with to==BX the
+				 * "save" degenerated to `mov bx, bx`, the
+				 * dst-mov below clobbered it, and the trailing
+				 * `pop bx` discarded the op's result — so
+				 * `right_pad -= p` compiled to a no-op and
+				 * MicroPython's mp_print_strn right-pad loop
+				 * ("%-5d" % 7) spun forever.  An arg[0] living
+				 * in BX would likewise have been clobbered by
+				 * the save before being read.  Pinned by
+				 * sub_arg1_alias_probe.c (pad_out2). */
 				int rescue_arg1 = (!optab[i->op].commutes
 				    && !req(i->arg[1], R)
 				    && rtype(i->arg[1]) == RTmp
 				    && req(i->arg[1], i->to));
+				int scr = RBX;
 				if (rescue_arg1) {
-					fprintf(f, "\tpush bx\n");
-					fprintf(f, "\tmov bx, %s\n",
-						rname[i->arg[1].val]);
-					i->arg[1] = TMP(RBX);
+					int scrcand[4], k;
+					scrcand[0] = RBX;
+					scrcand[1] = RCX;
+					scrcand[2] = RSI;
+					scrcand[3] = RDI;
+					for (k = 0; k < 4; k++) {
+						scr = scrcand[k];
+						if (i->to.val == (uint)scr)
+							continue;
+						if (rtype(i->arg[0]) == RTmp
+						    && i->arg[0].val == (uint)scr)
+							continue;
+						break;
+					}
+					fprintf(f, "\tpush %s\n", rname[scr]);
+					fprintf(f, "\tmov %s, %s\n",
+						rname[scr], rname[i->arg[1].val]);
+					i->arg[1] = TMP(scr);
 				}
 				if (rtype(i->arg[0]) == RTmp
 				    && i->arg[0].val != i->to.val) {
@@ -4267,16 +4295,16 @@ end_load_block:
 						(long)slot(i->arg[0], fn));
 					i->arg[0] = i->to;
 				}
-				/* If we pushed BX, restore it after emitf prints
-				 * the op.  We mark that here so the deferred
-				 * `pop bx` is emitted at the right point. */
+				/* If we pushed the scratch, restore it after
+				 * emitf prints the op. */
 				if (rescue_arg1) {
-					/* emit the op now and pop bx after.  Easiest:
-					 * call emitf directly here, then pop, then
-					 * `return`.  We replicate the addressing-fixup
-					 * unwind that the normal code path would do. */
+					/* emit the op now and pop the scratch after.
+					 * Easiest: call emitf directly here, then pop,
+					 * then `return`.  We replicate the addressing-
+					 * fixup unwind that the normal code path
+					 * would do. */
 					emitf(fmt, i, fn, f);
-					fprintf(f, "\tpop bx\n");
+					fprintf(f, "\tpop %s\n", rname[scr]);
 					if (bad) {
 						swap_bx(&i->to, bad, fn);
 						swap_bx(&i->arg[0], bad, fn);

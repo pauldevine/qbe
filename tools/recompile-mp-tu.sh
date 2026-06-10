@@ -66,6 +66,10 @@ EOF
 fi
 "$MINIC" -m "$MODEL" < "$OUT_DIR/$base.pp.c" > "$OUT_DIR/$base.ssa" 2>"$OUT_DIR/$base.err" || { echo "MINIC_FAIL $base"; cat "$OUT_DIR/$base.err"; exit 1; }
 "$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$base.ssa" > "$OUT_DIR/$base.asm" 2>"$OUT_DIR/$base.err" || { echo "QBE_FAIL $base"; cat "$OUT_DIR/$base.err"; exit 1; }
+# Per-function text segments, matching build-micropython.sh (§4t) — a TU
+# rebuilt here must split .text identically or the relink silently reverts
+# that TU to whole-TU gc-sections granularity.
+QBE_TEXT_SEG_BUDGET=${QBE_TEXT_SEG_BUDGET:-1} \
 tools/asm_to_omf.py "--model=$MODEL" --far-static-data "$base" "$OUT_DIR/$base.asm" "$OUT_DIR/$base.omf.asm" 2>"$OUT_DIR/$base.err" || { echo "OMF_FAIL $base"; cat "$OUT_DIR/$base.err"; exit 1; }
 nasm -w-label-redef-late -f obj "$OUT_DIR/$base.omf.asm" -o "$OUT_DIR/$base.obj" 2>"$OUT_DIR/$base.err" || { echo "NASM_FAIL $base"; cat "$OUT_DIR/$base.err"; exit 1; }
 echo "$base.obj rebuilt"

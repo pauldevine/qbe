@@ -327,6 +327,17 @@ RUNTIME_TESTS=(
 	# path (cultl); far-pointer cases discriminate under both.
 	"minic/dos/examples/ptr_relational_probe.c:minic/dos/tests/ptr_relational_probe.golden.txt:medium"
 	"minic/dos/examples/ptr_relational_probe.c:minic/dos/tests/ptr_relational_probe.golden.txt:compact"
+	# §4t Osub Kw two-address rescue: when rega gives a non-commutative op's
+	# result the same register as arg[1], emit.c saves arg[1] through a scratch
+	# — which was HARDCODED to BX.  With to==BX the save degenerated to
+	# `mov bx, bx`, the dst-mov clobbered it, and the trailing `pop bx`
+	# discarded the result: `right_pad -= p` compiled to a NO-OP and
+	# MicroPython's mp_print_strn right-pad loop ("%-5d" % 7) hung on Victor.
+	# The scratch is now chosen distinct from both the dest and arg[0].
+	# pad_out2 recreates the allocation (rega-dependent: green probe is
+	# necessary-not-sufficient; the real guard is the scratch chooser itself).
+	"minic/dos/examples/sub_arg1_alias_probe.c:minic/dos/tests/sub_arg1_alias_probe.golden.txt:medium"
+	"minic/dos/examples/sub_arg1_alias_probe.c:minic/dos/tests/sub_arg1_alias_probe.golden.txt:compact"
 )
 
 # --- Stevie size budget ----------------------------------------------------
