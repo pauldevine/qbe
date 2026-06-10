@@ -9,18 +9,34 @@ set -eu
 
 MODEL="medium"
 SOFTFLOAT=0
+SPLITSTACK=0
 SOURCES=()
 for arg in "$@"; do
 	case "$arg" in
 		--model=*) MODEL="${arg#--model=}" ;;
 		--softfloat) SOFTFLOAT=1 ;;
+		--split-stack) SPLITSTACK=1 ;;
 		-h|--help)
-			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] [--softfloat] <source.c> [extra.c ...]" >&2
+			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] [--softfloat] [--split-stack] <source.c> [extra.c ...]" >&2
 			exit 0 ;;
 		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
 		*) SOURCES+=("$arg") ;;
 	esac
 done
+
+# --split-stack: SS gets its own segment (SS != DS).  Far-data models only:
+# qbe -s adds ss: overrides on register-indirect near derefs and omf_link
+# --separate-stack points the MZ header's SS at the STACK segment itself.
+QBE_SPLIT_FLAG=""
+LINK_SPLIT_FLAG=""
+if [ "$SPLITSTACK" = "1" ]; then
+	case "$MODEL" in
+		compact|large|huge) ;;
+		*) echo "$0: --split-stack requires --model=compact/large/huge" >&2; exit 2 ;;
+	esac
+	QBE_SPLIT_FLAG="-s"
+	LINK_SPLIT_FLAG="--separate-stack"
+fi
 
 if [ "${#SOURCES[@]}" -eq 0 ]; then
 	echo "usage: $0 [--model=<m>] <source.c> [extra.c ...]" >&2
@@ -84,7 +100,7 @@ cpp -P -nostdinc -isysroot/var/empty -DDOS -D__TURBOC__ \
 "$MINIC" -m "$MODEL" < "$pp" > "$OUT_DIR/$unit_base.ssa" 2>>"$ERR"
 
 # Stage 2: SSA → ASM
-"$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$unit_base.ssa" > "$OUT_DIR/$unit_base.asm" 2>>"$ERR"
+"$QBE" -t i8086 -m "$MODEL" $QBE_SPLIT_FLAG "$OUT_DIR/$unit_base.ssa" > "$OUT_DIR/$unit_base.asm" 2>>"$ERR"
 
 # Stage 3: ASM normalize (same sed/awk/perl pipeline as build-int86x-probe.sh).
 prefix="${unit_base}_"
@@ -202,6 +218,7 @@ nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR"
 	--map "$OUT_DIR/$base.map" \
 	--entry _start \
 	--stack-size 8192 \
+	$LINK_SPLIT_FLAG \
 	"$OUT_DIR/crt0_exe.obj" \
 	"${LINK_OBJS[@]}" \
 	"$OUT_DIR/libstub_exe.obj" 2>>"$ERR"

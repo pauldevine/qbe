@@ -60,24 +60,41 @@ QBE="$QBE_DIR/qbe"
 DOS_DIR="$QBE_DIR/minic/dos"
 OUT_DIR="$QBE_DIR/build/mp-link"
 mkdir -p "$OUT_DIR"
-# Default DOS stack = 24576.  The dos8086 port runs the STACKLESS-strict VM
+# Default DOS stack = 61440.  The dos8086 port runs the STACKLESS-strict VM
 # (ports/dos8086/mpconfigport.h §4b): deep Python recursion chains code_state
 # frames on the GC heap instead of the C stack — but deep GENERATOR recursion
 # still C-recurses on resume (objgenerator.c → mp_execute_bytecode, which
-# STACKLESS does NOT cover), so the C stack is the depth limit for generator
-# chains.  §4c had to pick 16384 because 24576 pushed the 56KB-granularity
-# image over the ~824416 Victor load ceiling; §4t's per-function gc-sections
-# (body 584320) removed that constraint, and §4u bumped to 24576.  The cap is
-# now DGROUP, not the image: stack lives in DGROUP alongside ~37KB of near
-# data+bss, so 64KB − ~37KB ≈ 28.4KB is the absolute max (32768 fails to
-# link); 24576 keeps ~3.8KB DGROUP slack.  8192 is too small (generator
-# resume overflows into DGROUP data and corrupts it).  Override with
-# MP_STACK_SIZE for a different target or a non-stackless build.
-MP_STACK_SIZE=${MP_STACK_SIZE:-24576}
-# Vestigial under the current config: MICROPY_STACK_CHECK is OFF, so
-# mp_stack_set_limit() is a no-op macro (py/stackctrl.h).  Kept for builds
-# that turn the check on.
-MP_STACK_LIMIT=${MP_STACK_LIMIT:-8192}
+# STACKLESS does NOT cover) at a §4v-MEASURED ~5.6 KB of C stack per level
+# (probe: VM-entry &param far addresses; the earlier "~2 KB/level" §4u
+# estimate was derived from overflow-luck endpoints, see below).  With the
+# §4v split stack (own SS segment) the old DGROUP cap (64KB − ~37KB data+bss
+# ≈ 28.4KB) is GONE; the cap is the 16-bit SP itself, so 61440 ≈ the max
+# (SP ≤ 65534) with a round margin.  ~61440/5772 ≈ 10 real generator levels.
+# HISTORY WARNING: every pre-§4v "frontier" measurement (gc(8)@16384,
+# gc(11)@24576) was stack OVERFLOW past the stack bottom into libstub's
+# unused _heap_buf in DGROUP — silent UB that happened to work.  Under the
+# split there is no landing pad (overflow wraps SP into the far-data
+# segments), so MICROPY_STACK_CHECK=1 (mpconfigport.h §4v) now raises a
+# clean RuntimeError at the limit instead.
+MP_STACK_SIZE=${MP_STACK_SIZE:-61440}
+# §4v split stack (default ON): the stack gets its OWN segment (SS != DS)
+# via qbe -s + omf_link --separate-stack + the libstub _dgroup_para DS
+# reloads.  This removes the DGROUP cap described above: DGROUP keeps its
+# full 64KB for near data+bss, and the stack can grow to the full 64KB SP
+# range (65535) independent of near-data size.  Set MP_SPLIT_STACK=0 to
+# fall back to the classic SS==DS layout (then the DGROUP cap applies).
+MP_SPLIT_STACK=${MP_SPLIT_STACK:-1}
+QBE_SPLIT_FLAG=""
+LINK_SPLIT_FLAG=""
+if [ "$MP_SPLIT_STACK" != "0" ]; then
+	QBE_SPLIT_FLAG="-s"
+	LINK_SPLIT_FLAG="--separate-stack"
+fi
+# Stack-check limit (REAL since §4v: MICROPY_STACK_CHECK=1).  mp_cstack_check
+# raises RuntimeError when (stack_top - SP) >= limit.  Default leaves 8 KB of
+# headroom under MP_STACK_SIZE: checks run at VM/parser entry, so up to one
+# ~5.6 KB resume frame plus libstub/ISR transients can land beyond the check.
+MP_STACK_LIMIT=${MP_STACK_LIMIT:-$((MP_STACK_SIZE - 8192))}
 MP_HEAP_SIZE=${MP_HEAP_SIZE:-49152}
 MP_DOS_TINY_STACK_CHECK=${MP_DOS_TINY_STACK_CHECK:-0}
 MP_DOS_STACKLESS_RECURSION_RAISE=${MP_DOS_STACKLESS_RECURSION_RAISE:-0}
@@ -174,7 +191,7 @@ EOF
 	# Empty SSA: minic accepted but emitted nothing (arch-gated-out TU).  Skip.
 	if [ ! -s "$ssa" ]; then continue; fi
 
-	if ! "$QBE" -t i8086 -m "$MODEL" "$ssa" > "$asm" 2>"$err"; then
+	if ! "$QBE" -t i8086 -m "$MODEL" $QBE_SPLIT_FLAG "$ssa" > "$asm" 2>"$err"; then
 		fail+=("$base (qbe)"); [ $KEEP_GOING -eq 0 ] && { echo "FAIL qbe: $base"; cat "$err"; exit 1; }; continue
 	fi
 	if ! "$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" $FARSTATIC_FLAG "$base" "$asm" "$omf" 2>"$err"; then
@@ -225,6 +242,7 @@ if "$QBE_DIR/tools/omf_link.py" \
 		--map "$OUT_DIR/mpython.map" \
 		--entry _start \
 		--stack-size "$MP_STACK_SIZE" \
+		$LINK_SPLIT_FLAG \
 		--gc-sections \
 		--pack-code \
 		"${OBJS[@]}" 2>"$OUT_DIR/link.err"; then

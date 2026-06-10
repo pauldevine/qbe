@@ -21,13 +21,17 @@ QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$QBE_DIR"
 MP="$HOME/projects/micropython"; DOSPORT="$MP/ports/dos8086"
 GENHDR="$MP/ports/minimal/build"; INC_DIR="minic/include"; STUB="build/mp-spike/stubinc"
-# MP_STACK_SIZE default MUST match build-micropython.sh (16384, the §4b stackless
-# default).  It was 24576 here, so a fast-loop relink reserved 8192 more stack than
-# the full build and pushed the image OVER the ~824416 "Program too big" load
-# ceiling (a clean gc.c relink came out 826032 vs the full build's 817840) — the
-# relinked .exe then would not load on Victor.  Override via the env var if needed.
-MINIC="minic/minic"; QBE="./qbe"; OUT_DIR="build/mp-link"; MODEL=compact; MP_STACK_SIZE=${MP_STACK_SIZE:-16384}
-MP_STACK_LIMIT=${MP_STACK_LIMIT:-8192}
+# MP_STACK_SIZE default MUST match build-micropython.sh (61440 since §4v) or a
+# fast-loop relink silently ships a different stack size (and hence a shifted
+# far-data layout) than the full build.  The old 16384-vs-24576 load-ceiling
+# concern died with §4t's per-function gc-sections (~240KB headroom).
+# MP_SPLIT_STACK must also match (default ON since §4v: qbe -s +
+# omf_link --separate-stack), as must MP_STACK_LIMIT (stack check ON).
+MINIC="minic/minic"; QBE="./qbe"; OUT_DIR="build/mp-link"; MODEL=compact; MP_STACK_SIZE=${MP_STACK_SIZE:-61440}
+MP_SPLIT_STACK=${MP_SPLIT_STACK:-1}
+QBE_SPLIT_FLAG=""; LINK_SPLIT_FLAG=""
+if [ "$MP_SPLIT_STACK" != "0" ]; then QBE_SPLIT_FLAG="-s"; LINK_SPLIT_FLAG="--separate-stack"; fi
+MP_STACK_LIMIT=${MP_STACK_LIMIT:-$((MP_STACK_SIZE - 8192))}
 MP_HEAP_SIZE=${MP_HEAP_SIZE:-49152}
 MP_DOS_TINY_STACK_CHECK=${MP_DOS_TINY_STACK_CHECK:-0}
 MP_DOS_STACKLESS_RECURSION_RAISE=${MP_DOS_STACKLESS_RECURSION_RAISE:-0}
@@ -65,7 +69,7 @@ __attribute__((noreturn)) void mp_raise_recursion_depth(void) {
 EOF
 fi
 "$MINIC" -m "$MODEL" < "$OUT_DIR/$base.pp.c" > "$OUT_DIR/$base.ssa" 2>"$OUT_DIR/$base.err" || { echo "MINIC_FAIL $base"; cat "$OUT_DIR/$base.err"; exit 1; }
-"$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$base.ssa" > "$OUT_DIR/$base.asm" 2>"$OUT_DIR/$base.err" || { echo "QBE_FAIL $base"; cat "$OUT_DIR/$base.err"; exit 1; }
+"$QBE" -t i8086 -m "$MODEL" $QBE_SPLIT_FLAG "$OUT_DIR/$base.ssa" > "$OUT_DIR/$base.asm" 2>"$OUT_DIR/$base.err" || { echo "QBE_FAIL $base"; cat "$OUT_DIR/$base.err"; exit 1; }
 # Per-function text segments, matching build-micropython.sh (§4t) — a TU
 # rebuilt here must split .text identically or the relink silently reverts
 # that TU to whole-TU gc-sections granularity.
@@ -74,4 +78,4 @@ tools/asm_to_omf.py "--model=$MODEL" --far-static-data "$base" "$OUT_DIR/$base.a
 nasm -w-label-redef-late -f obj "$OUT_DIR/$base.omf.asm" -o "$OUT_DIR/$base.obj" 2>"$OUT_DIR/$base.err" || { echo "NASM_FAIL $base"; cat "$OUT_DIR/$base.err"; exit 1; }
 echo "$base.obj rebuilt"
 OBJS=(); while IFS= read -r l; do OBJS+=("$l"); done < /tmp/mp_objs.txt
-tools/omf_link.py -o "$OUT_DIR/mpython.exe" --map "$OUT_DIR/mpython.map" --entry _start --stack-size "$MP_STACK_SIZE" --gc-sections --pack-code "${OBJS[@]}" 2>&1 | grep -E "image|stripped"
+tools/omf_link.py -o "$OUT_DIR/mpython.exe" --map "$OUT_DIR/mpython.map" --entry _start --stack-size "$MP_STACK_SIZE" $LINK_SPLIT_FLAG --gc-sections --pack-code "${OBJS[@]}" 2>&1 | grep -E "image|stripped"

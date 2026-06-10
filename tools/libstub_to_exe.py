@@ -52,6 +52,16 @@ segment {code_seg} class=CODE align=2 use16
 segment _DATA class=DATA align=2 use16
 segment _BSS class=BSS align=2 use16
 group DGROUP _DATA _BSS
+
+; Paragraph base of DGROUP, patched at load time by the MZ relocation the
+; `dw DGROUP` segment-base fixup produces.  Helpers that must (re)load
+; DS = DGROUP read it via a cs: override (`mov ds, [cs:_dgroup_para]`)
+; instead of the historical `push ss / pop ds` — under omf_link's
+; --separate-stack the stack has its own segment, so SS is NOT a synonym
+; for DGROUP.  Lives in the code segment so cs: reaches it even while DS
+; is swapped away (which is exactly when these sites run).
+segment {code_seg}
+_dgroup_para: dw DGROUP
 """
 
 # malloc/free are replaced with .EXE-specific versions that allocate
@@ -155,7 +165,9 @@ _malloc:
     add ax, 2                   ; payload
 
 .alloc_done:
-    mov dx, ss                  ; DGROUP segment (far-data ABI)
+    mov dx, [cs:_dgroup_para]   ; DGROUP segment (far-data ABI; the heap
+                                ; lives in DGROUP _BSS — NOT `mov dx, ss`,
+                                ; which breaks under --separate-stack)
     pop bx
     pop di
     pop si
@@ -838,13 +850,15 @@ _far_fprintf:
     shl ax, 1
     add si, ax
     add si, 12                    ; first vararg at bp+14 = bp + 1*2 + 12
-    push word [si]
+    push word [ss:si]             ; caller stack (ss: — split-stack safe)
     loop .ffpr_pusharg
 
     ; Push fmt (far, as-is from caller)
     push word [bp+12]             ; fmt.seg
     push word [bp+10]             ; fmt.off
-    ; Push dest as far ptr: seg=SS (=DGROUP), off=local output buffer
+    ; Push dest as far ptr: seg=SS, off=local output buffer.  The buffer
+    ; is [bp-N] stack storage, so SS IS its segment (also correct under
+    ; --separate-stack, where SS != DGROUP).
     mov ax, ss
     push ax                       ; dest.seg
     lea ax, [bp - _FP_BUFSZ]
@@ -856,7 +870,7 @@ _far_fprintf:
     mov dx, si
     xor cx, cx
 .ffpr_strlen:
-    cmp byte [si], 0
+    cmp byte [ss:si], 0           ; output buffer is stack-resident
     je .ffpr_strlen_done
     inc si
     inc cx
@@ -865,10 +879,14 @@ _far_fprintf:
     test cx, cx
     jz .ffpr_ok
 
-    mov si, [bp+6]                ; FILE*.off (seg always SS=DGROUP)
-    mov bx, [si]                  ; handle
+    mov si, [bp+6]                ; FILE*.off (slot lives in DGROUP)
+    mov bx, [si]                  ; handle (DS=DGROUP)
+    push ds
+    push ss
+    pop ds                        ; DS=SS: AH=40h buf is stack-resident
     mov ah, 0x40
     int 0x21
+    pop ds                        ; (pop does not touch CF)
     jc .ffpr_err
 
 .ffpr_ok:
@@ -904,7 +922,7 @@ _far_printf:
     shl ax, 1
     add si, ax
     add si, 8                     ; first vararg at bp+10 = bp + 1*2 + 8
-    push word [si]
+    push word [ss:si]             ; caller stack (ss: — split-stack safe)
     loop .fpr_pusharg
 
     ; Push fmt (far, as-is from caller)
@@ -922,7 +940,7 @@ _far_printf:
     mov dx, si
     xor cx, cx
 .fpr_strlen:
-    cmp byte [si], 0
+    cmp byte [ss:si], 0           ; output buffer is stack-resident
     je .fpr_strlen_done
     inc si
     inc cx
@@ -932,8 +950,12 @@ _far_printf:
     jz .fpr_ok
 
     mov bx, 1                     ; stdout
+    push ds
+    push ss
+    pop ds                        ; DS=SS: AH=40h buf is stack-resident
     mov ah, 0x40
     int 0x21
+    pop ds                        ; (pop does not touch CF)
     jc .fpr_err
 
 .fpr_ok:
@@ -1025,6 +1047,14 @@ _file_slots: resb (_NUM_FILES * _FILE_SZ)
 # ----------------------------------------------------------------------------
 FAR_SPRINTF_EXE = """
 
+segment _BSS
+; Static DGROUP scratch for the far fmt copy.  Was a [bp-N] stack buffer,
+; but the engine reads it with `lodsb` (DS:SI) — DS-relative — which only
+; reached the stack while SS==DS.  A DGROUP static keeps the DS-relative
+; engine correct under --separate-stack.  printf state (_spr_*) is global
+; already, so libstub printf was never reentrant; this changes nothing.
+_fsp_fmtbuf: resb 256
+
 segment LIBSTUB_TEXT
 
 %define _FSP_FMTBUF_SZ 256
@@ -1033,7 +1063,6 @@ global _far_sprintf
 _far_sprintf:
     push bp
     mov bp, sp
-    sub sp, _FSP_FMTBUF_SZ
     push si
     push di
     push bx
@@ -1042,14 +1071,14 @@ _far_sprintf:
 
     ; Stack: [bp+6..9] dest (far), [bp+10..13] fmt (far), [bp+14] varargs.
 
-    ; --- Copy far fmt into local DGROUP scratch buffer ---
+    ; --- Copy far fmt into the DGROUP scratch buffer ---
     mov si, [bp+10]                 ; fmt.off
     mov ax, [bp+12]                 ; fmt.seg
     mov es, ax
-    lea di, [bp - _FSP_FMTBUF_SZ]
+    mov di, _fsp_fmtbuf
 .fsp_cpfmt:
     mov al, [es:si]
-    mov [di], al                    ; DS=DGROUP here, writes via DS:DI
+    mov [di], al                    ; DS=DGROUP, scratch is DGROUP _BSS
     inc si
     inc di
     test al, al
@@ -1059,8 +1088,9 @@ _far_sprintf:
     mov di, [bp+6]                  ; DI = dest.off
     mov ax, [bp+8]
     mov es, ax                      ; ES = dest.seg  (stosb → ES:DI = far dest)
-    lea si, [bp - _FSP_FMTBUF_SZ]   ; SI = fmt scratch (DGROUP)
-    lea bx, [bp+14]                 ; BX = vararg ptr (DGROUP via SS=DS)
+    mov si, _fsp_fmtbuf             ; SI = fmt scratch (DGROUP)
+    lea bx, [bp+14]                 ; BX = vararg ptr (caller stack — every
+                                    ; [bx] read below uses ss:)
 
 .fsp_top:
     lodsb
@@ -1197,7 +1227,7 @@ _far_sprintf:
 
     ; ---- %c ----
 .fsp_do_chr:
-    mov ax, [bx]
+    mov ax, [ss:bx]
     add bx, 2
     push ax
     mov cx, [_spr_width]
@@ -1233,8 +1263,8 @@ _far_sprintf:
     mov cx, [_spr_prec]
 .fsp_str_have_cap:
 
-    mov si, [bx]                    ; src.off
-    mov ax, [bx+2]                  ; src.seg
+    mov si, [ss:bx]                 ; src.off (vararg on caller stack)
+    mov ax, [ss:bx+2]               ; src.seg
     add bx, 4
 
     push ds
@@ -1255,13 +1285,18 @@ _far_sprintf:
 .fsp_str_scan_done:
     pop si                          ; SI = src.off (start), DX = length
 
-    ; Access DGROUP state vars via ss: override (DS = src.seg right now,
-    ; but DS=SS in medium model so [ss:label] reaches DGROUP).
-    mov cx, [ss:_spr_width]
+    ; Read DGROUP state vars through a brief DS=DGROUP window (DS =
+    ; src.seg right now).  The old `[ss:label]` override only reached
+    ; DGROUP while SS==DS — wrong under --separate-stack.
+    push ds
+    mov ds, [cs:_dgroup_para]
+    mov cx, [_spr_width]
+    mov ax, [_spr_flags]
+    pop ds                          ; DS = src.seg again
     cmp cx, dx
     jbe .fsp_str_no_pad
     sub cx, dx
-    test word [ss:_spr_flags], 1
+    test ax, 1
     jnz .fsp_str_pad_after
 
     ; pad before
@@ -1298,13 +1333,13 @@ _far_sprintf:
 .fsp_do_signed:
     test word [_spr_flags], 4
     jnz .fsp_sgn_long
-    mov ax, [bx]
+    mov ax, [ss:bx]
     add bx, 2
     cwd
     jmp .fsp_sgn_common
 .fsp_sgn_long:
-    mov ax, [bx]
-    mov dx, [bx+2]
+    mov ax, [ss:bx]
+    mov dx, [ss:bx+2]
     add bx, 4
 .fsp_sgn_common:
     mov byte [_spr_signc], 0
@@ -1323,13 +1358,13 @@ _far_sprintf:
 .fsp_do_unsigned:
     test word [_spr_flags], 4
     jnz .fsp_uns_long
-    mov ax, [bx]
+    mov ax, [ss:bx]
     add bx, 2
     xor dx, dx
     jmp .fsp_uns_common
 .fsp_uns_long:
-    mov ax, [bx]
-    mov dx, [bx+2]
+    mov ax, [ss:bx]
+    mov dx, [ss:bx+2]
     add bx, 4
 .fsp_uns_common:
     mov byte [_spr_signc], 0
@@ -1346,13 +1381,13 @@ _far_sprintf:
 .fsp_hex_dispatch:
     test word [_spr_flags], 4
     jnz .fsp_hex_long
-    mov ax, [bx]
+    mov ax, [ss:bx]
     add bx, 2
     xor dx, dx
     jmp .fsp_hex_common
 .fsp_hex_long:
-    mov ax, [bx]
-    mov dx, [bx+2]
+    mov ax, [ss:bx]
+    mov dx, [ss:bx+2]
     add bx, 4
 .fsp_hex_common:
     mov byte [_spr_signc], 0
@@ -1366,8 +1401,8 @@ _far_sprintf:
     or word [_spr_flags], 2         ; zero-fill
     and word [_spr_flags], 0xFFEF   ; lowercase hex
     mov word [_spr_width], 8        ; pad to 8 hex digits
-    mov ax, [bx]
-    mov dx, [bx+2]
+    mov ax, [ss:bx]
+    mov dx, [ss:bx+2]
     add bx, 4
     mov byte [_spr_signc], 0
     mov cx, 16
@@ -1378,13 +1413,13 @@ _far_sprintf:
 .fsp_do_octal:
     test word [_spr_flags], 4
     jnz .fsp_oct_long
-    mov ax, [bx]
+    mov ax, [ss:bx]
     add bx, 2
     xor dx, dx
     jmp .fsp_oct_common
 .fsp_oct_long:
-    mov ax, [bx]
-    mov dx, [bx+2]
+    mov ax, [ss:bx]
+    mov dx, [ss:bx+2]
     add bx, 4
 .fsp_oct_common:
     mov byte [_spr_signc], 0
@@ -1567,21 +1602,24 @@ _far_puts:
     mov bx, 1                     ; stdout handle
     mov ah, 0x40
     int 0x21
-    push ss
-    pop ds                        ; restore DS = DGROUP (= SS)
+    mov ds, [cs:_dgroup_para]     ; restore DS = DGROUP (split-stack safe)
     jc .fps_err
 
 .fps_nl:
-    ; Emit CR LF via a stack-resident 2-byte buffer.  DS is back to
-    ; DGROUP=SS at this point.  8086 has no `push imm16`, stage via AX.
+    ; Emit CR LF via a stack-resident 2-byte buffer.  The buffer lives on
+    ; the stack, so AH=40h's DS:DX needs DS = SS (NOT DGROUP — distinct
+    ; under --separate-stack).  Caller DS is restored by the exit pops.
+    ; 8086 has no `push imm16`, stage via AX.
     mov ax, 0x0A0D                ; little-endian: byte 0x0D (CR), byte 0x0A (LF)
     push ax
-    mov dx, sp                    ; DS=SS so DS:DX -> the pushed word
+    mov dx, sp                    ; SS:DX -> the pushed word
+    push ss
+    pop ds                        ; DS = SS for the stack-resident buffer
     mov bx, 1
     mov cx, 2
     mov ah, 0x40
     int 0x21
-    pop ax                        ; discard scratch word
+    pop ax                        ; discard scratch word (flags preserved)
     jc .fps_err
 
     xor ax, ax                    ; success
@@ -1729,8 +1767,7 @@ _far_fopen:
     mov dx, [bp+6]                ; name.off
     mov ax, 0x3D00
     int 0x21
-    push ss
-    pop ds                        ; restore DS=DGROUP
+    mov ds, [cs:_dgroup_para]     ; restore DS=DGROUP (split-stack safe)
     jc .ffop_fail
     mov byte [si+3], 0            ; flags: read mode
     jmp .ffop_install
@@ -1742,8 +1779,7 @@ _far_fopen:
     xor cx, cx                    ; attribute = normal
     mov ah, 0x3C                  ; create / truncate
     int 0x21
-    push ss
-    pop ds
+    mov ds, [cs:_dgroup_para]     ; restore DS=DGROUP (split-stack safe)
     jc .ffop_fail
     mov byte [si+3], 2            ; flags: bit1 = writing
     jmp .ffop_install
@@ -1755,8 +1791,7 @@ _far_fopen:
     mov dx, [bp+6]
     mov ax, 0x3D02
     int 0x21
-    push ss
-    pop ds
+    mov ds, [cs:_dgroup_para]     ; restore DS=DGROUP (split-stack safe)
     jnc .ffop_seek_end
     ; Create new (file didn't exist).
     mov ax, [bp+8]
@@ -1765,8 +1800,7 @@ _far_fopen:
     xor cx, cx
     mov ah, 0x3C
     int 0x21
-    push ss
-    pop ds
+    mov ds, [cs:_dgroup_para]     ; restore DS=DGROUP (split-stack safe)
     jc .ffop_fail
     mov byte [si+3], 2
     jmp .ffop_install
@@ -1787,7 +1821,8 @@ _far_fopen:
     mov word [si+4], 0            ; buf_pos
     mov word [si+6], 0            ; buf_len
     mov ax, si                    ; AX = slot offset in DGROUP
-    mov dx, ss                    ; DX = DGROUP segment (= SS at runtime)
+    mov dx, [cs:_dgroup_para]     ; DX = DGROUP segment (slot lives in
+                                  ; DGROUP; NOT ss — split-stack safe)
     jmp .ffop_done
 
 .ffop_fail:
@@ -1860,10 +1895,15 @@ _far_fputc:
     mov bx, [si]                  ; handle (DS=DGROUP at entry)
     mov ax, [bp+6]                ; c (low byte)
     push ax                       ; scratch 1-byte buffer on stack
-    mov dx, sp                    ; DS:DX -> our byte (DS=SS=DGROUP)
+    mov dx, sp                    ; SS:DX -> our byte
+    push ds
+    push ss
+    pop ds                        ; DS = SS: buffer is stack-resident
+                                  ; (≠ DGROUP under --separate-stack)
     mov cx, 1
     mov ah, 0x40
     int 0x21
+    pop ds                        ; (pop does not touch CF)
     pop ax                        ; discard scratch
     jc .ffpc_err
 
@@ -1923,8 +1963,7 @@ _far_fputs:
     mov dx, si                    ; DS:DX = (s.seg):(s.off)
     mov ah, 0x40
     int 0x21
-    push ss
-    pop ds                        ; restore DS=DGROUP
+    mov ds, [cs:_dgroup_para]     ; restore DS=DGROUP (split-stack safe)
     jc .ffps_err
 
 .ffps_ok:
@@ -2090,8 +2129,7 @@ _far_fread:
     mov dx, [bp+6]                ; buf.off
     mov ah, 0x3F
     int 0x21
-    push ss
-    pop ds                        ; restore DS=DGROUP
+    mov ds, [cs:_dgroup_para]     ; restore DS=DGROUP (split-stack safe)
     jc .ffr_err
 
     ; AX = bytes actually read.  Convert to item count.
@@ -2147,8 +2185,7 @@ _far_fwrite:
     mov dx, [bp+6]                ; buf.off
     mov ah, 0x40
     int 0x21
-    push ss
-    pop ds                        ; restore DS=DGROUP
+    mov ds, [cs:_dgroup_para]     ; restore DS=DGROUP (split-stack safe)
     jc .ffw_err
 
     ; AX = bytes actually written.  Convert to item count.

@@ -338,6 +338,15 @@ RUNTIME_TESTS=(
 	# necessary-not-sufficient; the real guard is the scratch chooser itself).
 	"minic/dos/examples/sub_arg1_alias_probe.c:minic/dos/tests/sub_arg1_alias_probe.golden.txt:medium"
 	"minic/dos/examples/sub_arg1_alias_probe.c:minic/dos/tests/sub_arg1_alias_probe.golden.txt:compact"
+	# §4v split stack (SS != DS): built with --split-stack (qbe -s ss:
+	# overrides on register-indirect near derefs + omf_link --separate-stack
+	# + libstub _dgroup_para DS reloads).  Exercises escaped &local writes,
+	# stack struct member chains, _far_sprintf into a stack buffer, fn-ptr
+	# callbacks with stack ptrs, setjmp/longjmp, and pins malloc seg ==
+	# DGROUP seg != stack seg (ok8 is the discriminator: a default link
+	# prints ok8 0).
+	"minic/dos/examples/split_stack_probe.c:minic/dos/tests/split_stack_probe.golden.txt:compact"
+	"minic/dos/examples/split_stack_probe.c:minic/dos/tests/split_stack_probe.golden.txt:large"
 )
 
 # --- Stevie size budget ----------------------------------------------------
@@ -415,8 +424,12 @@ run_runtime_probe() {
 	# Soft-float probes link the single-precision soft-float helper library.
 	sfflag=""
 	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe) sfflag="--softfloat" ;; esac
+	# Split-stack probe builds with SS in its own segment (qbe -s +
+	# omf_link --separate-stack); its ok8 asserts stack seg != DGROUP seg.
+	ssflag=""
+	case "$base" in split_stack_probe) ssflag="--split-stack" ;; esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
-		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag "$QBE_DIR/$src" >/dev/null
+		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag $ssflag "$QBE_DIR/$src" >/dev/null
 	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
 	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
 }

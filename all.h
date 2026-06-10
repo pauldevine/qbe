@@ -81,6 +81,13 @@ struct Target {
 	char apple;
 	char windows;
 	enum MemModel memmodel; /* Memory model (for 8086) */
+	char splitstack; /* SS != DS (i8086 far-data only, qbe -s): the C
+	                  * stack lives in its own segment, so register-
+	                  * indirect NEAR derefs — which are always stack-
+	                  * derived under far-data (globals are far-accessed,
+	                  * all C pointers are far) — need an ss: override.
+	                  * [bp] addressing is SS-relative by hardware
+	                  * default and direct [_sym] stays DS (DGROUP). */
 	int wordsz; /* byte width of Kw on this target (4 for 32/64-bit
 	             * targets; 2 for i8086, where the backend emits
 	             * `storew`/`loadw` as 16-bit `mov word`) */

@@ -1,4 +1,119 @@
-# Next session (§4v — DESIGNATED by the user 2026-06-09: move the C stack OUT of DGROUP into its OWN segment (the classic SS≠DS split), as an OPT-IN omf_link flag for far-data builds.  Payoff: the stack cap goes from ~28.4 KB (64 KB DGROUP minus 37118 data+bss) to a full ~64 KB → ≈30 generator-recursion levels at the §4u-measured ~2 KB/level (vs 11 today), and DGROUP gets back 24 KB of near-data slack.  The backend is ALREADY half-ready: `i8086/emit.c` stamps **SS** (not DS) into the segment word of `&local` far pointers, so the language-level far-pointer path is split-correct as-is.  The work is (1) the linker flag, (2) ~15 SS==DGROUP idioms in the libstub EPILOGUE, (3) ONE real investigation — the far→near narrowing path that derefs stack addresses DS-relative.  Feasibility surveyed end of §4u; full plan below.  §4u is DONE: stack default 24576, body 592512, frontier 7→11, gate 234/234.)
+# Next session (§4v is DONE 2026-06-10 — split stack LANDED + Victor-verified, and the bring-up EXPOSED then FIXED the real generator-depth story: per-resume C-stack cost is ~5.6 KB (NOT ~2 KB), every pre-§4v "frontier" was silent stack overflow into libstub's unused `_heap_buf`, and MICROPY_STACK_CHECK=1 now raises a clean RuntimeError at the true limit.  MP_STACK_SIZE default 61440 (the 16-bit SP is the only cap left).  Gate 236/236; feature-4t byte-exact; churn scale2 clean; recsum(60) clean.  No designated successor — open tracks at the §4v notes' end.)
+
+## 2026-06-10 §4v notes (split stack SS≠DS landed end-to-end; the generator "frontier" was always overflow-UB; stack check ON)
+
+**§4v shipped the user-designated SS≠DS split across all four toolchain layers, and the
+MicroPython bring-up turned into a root-cause hunt that REWROTE the §4c/§4u stack-depth
+story.**  Headline numbers: MP_STACK_SIZE 24576 → **61440** (the DGROUP cap is gone; the
+16-bit SP is the only cap), measured generator-resume cost **~5772 B/level** (probe-derived,
+below), true frontier at 61440 ≈ 8 levels with a **clean RuntimeError** at the cliff
+(MICROPY_STACK_CHECK=1), body 632112 (~190 KB under the ~824 KB ceiling).
+
+### 1. The toolchain split (qbe + omf_link + libstub + harnesses)
+- **`tools/omf_link.py --separate-stack`** — MZ header SS = the STACK segment's own
+  para_base, SP = stack size; layout byte-identical to default (the flag only changes the
+  header words + swaps the 64 KB check to data+bss-only).  Default linking byte-identical
+  (relink-at-same-args cmp'd IDENTICAL).
+- **`qbe -s`** (main.c flag → `T.splitstack`, i8086 far-data models only) — new
+  `i8086/emit.c::near_seg()` puts an `ss:` override on every register-indirect NEAR deref:
+  the isel Kw-narrowing of Oaddr-of-slot addresses (`lea bx, [bp-N]; mov [bx]`) is
+  DS-relative on stock 8086, correct only while SS==DS.  Audited: under far-data EVERY
+  register-held near address is stack-derived (globals are FARSTORAGE, all C pointers are
+  far, no `__near`), pinned by a transitive setter-trace over all 107 generated MP TUs
+  (2620 `[ss:` sites, every one slot/lea-derived).  Applied in emit_memref, the emitf
+  `Ref:`/`%M` RMem/RTmp cases, and the Kl Oload/Ostorel register-indirect paths; RSlot
+  `[bp±N]` is SS-relative by hardware and RCon `[_sym]` stays DS — no prefix.  Default
+  (-s absent) output byte-identical; `make check` green.
+- **`tools/libstub_to_exe.py`** — new loader-relocated `_dgroup_para: dw DGROUP` word in
+  the code segment ([cs:]-readable while DS is swapped away).  Fixed every "SS as a synonym
+  for DGROUP" idiom: `_malloc`/`_far_fopen` segment returns (`mov dx, ss` →
+  `mov dx, [cs:_dgroup_para]`), 8× `push ss/pop ds` DS-restores (`mov ds, [cs:_dgroup_para]`),
+  `_far_sprintf`'s `[ss:_spr_*]` state reads (brief DS=DGROUP window).  THE PLAN'S SURVEY
+  UNDER-COUNTED a whole class: **stack-resident INT 21h DS:DX buffers** (`_far_fputc`
+  scratch byte, `_far_puts` CRLF word, `_far_printf`/`_far_fprintf` output buffers) need a
+  DS=SS bracket, and `_far_sprintf`'s engine read its fmt scratch via `lodsb` (DS) and its
+  varargs via `[bx]` (DS) — fmt scratch moved to a DGROUP static (`_fsp_fmtbuf`; printf was
+  never reentrant anyway), vararg reads got `[ss:bx]`.  Conversely the survey OVER-listed
+  `mov ax, ss` at the printf dest-formation sites (the dest is a [bp-N] STACK buffer — SS is
+  CORRECT there) and far-setjmp (stores no SS at all; SS is process-constant).  libstub.asm's
+  own `push ss/pop ds` (int86x/intdosx) are near-pointer medium-only paths — left alone.
+- **Harness plumbing** — `build-example.sh --split-stack`; `build-micropython.sh` +
+  `recompile-mp-tu.sh` default `MP_SPLIT_STACK=1` (and their MP_STACK_SIZE defaults are now
+  BOTH 61440 — found+fixed a stale 16384 in recompile-mp-tu.sh that §4u missed, which would
+  have silently relinked fast-loop images at the wrong size).
+- **New gated probe `split_stack_probe.c`** (compact + large, built with --split-stack):
+  escaped `&local` writes, stack-struct member chains, far_sprintf into a stack buffer,
+  fn-ptr callback with stack ptr, setjmp/longjmp, malloc-seg == DGROUP-seg != stack-seg
+  (ok8 is the discriminator: a default link prints `ok8 0`).  Gate **234 → 236/236**.
+
+### 2. THE INVESTIGATION — what "broke" on Victor was never the split
+- Step A equivalence run at 24576: feature-4t byte-exact, churn scale2 clean (GC fine under
+  split), but `mp-gen-sweep.py` died at gc(5) with garbage serial + NameError-with-corrupt-
+  qstr (later variants: empty-text exceptions, machine REBOOTS) — while the IDENTICAL image
+  relinked without --separate-stack reached the §4u "frontier 11".
+- A long forensic chain (MAME reset-vector breakpoint with register tracelog + stack-window
+  `save` + BP-chain walk + full instruction trace; the **none.cpp one-line patch from §4p is
+  now APPLIED and `tools/run-victor-wp.sh` WORKS** — wait_for_debugger now runs
+  process_source_file, so headless `-debugscript` wpset/bpset/tracelog/save all fire) kept
+  landing post-derailment (wild PCs executing the vector table; DOS internals poisoned).
+- **The breakthrough was cheap**: the failing image FITS IN DOSBOX (612 KB loads!), turning
+  5-minute Victor cycles into 30-second loops, and a guarded VM-entry probe
+  (`-DMP_DBG_VM=1`, py/vm.c prints a param's far address per mp_execute_bytecode entry)
+  gave the smoking gun directly:
+  ```
+  V7A7548B0  (module exec)        V7A7530D0  (resume depth 1)
+  V7A751A44  (depth 2, -0x168C)   V7A7503B8  (depth 3, -0x168C)
+  V7A75ED2C  (depth 4 — SP WRAPPED BELOW 0)   V7A75D6A0  (depth 5) ...
+  ```
+  **Generator resume costs 0x168C ≈ 5772 bytes of C stack per level** (gen_instance
+  iternext → gen_resume → mp_execute_bytecode chain), not the ~2 KB §4u inferred.  At
+  24576 the SP wraps below 0 at C-depth 4 and the frames land 30+ KB past the stack
+  segment, trampling the FAR_DATA/heap/qstr segments → every downstream symptom.
+- **Why non-split "worked": the §4c/§4u frontiers were overflow luck.**  Under SS==DS the
+  stack bottom sat at DGROUP offset ~0x91FE with libstub's UNUSED 34 KB `_heap_buf` right
+  below it — overflowing frames silently landed there.  "gc(8) hangs at 16384 / gc(11) at
+  24576" measured where the LUCK ran out, not where the stack did.  (§4u's own warning —
+  "do NOT read a clean-wrong-value as graceful" — applied to its frontier number too.)
+- The earlier stack-size sweeps (fail@5 for 24–36K, fail@7 at 40960, clean at 61952) and
+  the wild writes/reboots all follow from "frames land at stack_seg:wrapped-offset": what
+  they hit depends on how much segment lies between the wrap point and the live data.
+
+### 3. The fix beyond the split: stack check ON + honest sizing
+- `ports/dos8086/mpconfigport.h`: **MICROPY_STACK_CHECK (1)** — mp_cstack_check's
+  `stack_top - &dummy >= limit` is same-segment offset math, split-safe.  main.c's
+  duplicate `mp_raise_recursion_depth` now guarded `#if !(MICROPY_STACK_CHECK || ...)`
+  (py/runtime.c provides it when the check is on).
+- `MP_STACK_SIZE` default **61440** (SP ≤ 65534 is the only cap now);
+  `MP_STACK_LIMIT` default **MP_STACK_SIZE − 8192** (checks run at VM/parser entry, so one
+  ~5.6 KB resume frame + libstub/ISR transients can land past the last check).
+- **Victor verification (all green, shipping image body 632112):** gen-sweep prints 4–8
+  correct then `RuntimeError: maximum recursion depth exceeded` WITH AN INTACT TRACEBACK
+  (the §4c "wrong 99 with clean exit" class is gone for good); feature-4t byte-exact vs
+  host python3; churn scale2 all correct + DONE; plain recsum(60) = 1830 (STACKLESS heap
+  frames unaffected by the check).  Gate 236/236; `make check` green.
+
+### Instrumentation kept (all guarded, external micropython tree)
+- py/vm.c `-DMP_DBG_VM=1` VM-entry stack probe + main.c `mp_dbg_vm_enter` printer.
+- py/gc.c `-DMP_DBG_SWEEP_WATCH='"name"'` (the §4p watch qstr is now parameterized;
+  default "churn") + a `GCS` print at gc_collect_start.
+- ~/projects/mame patched none.cpp (debugscript works headless) — REBUILD REQUIRED if MAME
+  is updated; `tools/run-victor-wp.sh` is now a working watchpoint/breakpoint/trace harness
+  (bpset+tracelog+save all verified this session).
+
+### Open tracks (no §4w designated)
+- **Generator-resume frame diet**: 5772 B/level is the new depth bottleneck (≈8 levels at
+  61440).  mp_execute_bytecode + gen_resume frame bloat under minic (everything
+  slot-resident, no register pairs) is the lever; halving it roughly doubles depth.
+- **FLOAT** (recipe §4a/§4t, ~59 KB delta vs ~190 KB headroom).
+- huge `_qbe_huge_add` ≥0x8000 gap (§4i); §4p/§4q/§4v `-DMP_DBG_*` cleanup in the external
+  tree; 211-commit upstream-qbe rebase.
+- Latent minic note (found via a dead-end probe, NOT reduced): `jmp_buf bufs[6]` —
+  array-of-jmp_buf cross-frame longjmp misbehaved identically under split and non-split;
+  possibly the §2m array_vartyp stride family.  Reduce before trusting arrays of jmp_buf.
+
+---
+
+# (DONE in §4v above) Next session (§4v — DESIGNATED by the user 2026-06-09: move the C stack OUT of DGROUP into its OWN segment (the classic SS≠DS split), as an OPT-IN omf_link flag for far-data builds.  Payoff: the stack cap goes from ~28.4 KB (64 KB DGROUP minus 37118 data+bss) to a full ~64 KB → ≈30 generator-recursion levels at the §4u-measured ~2 KB/level (vs 11 today), and DGROUP gets back 24 KB of near-data slack.  The backend is ALREADY half-ready: `i8086/emit.c` stamps **SS** (not DS) into the segment word of `&local` far pointers, so the language-level far-pointer path is split-correct as-is.  The work is (1) the linker flag, (2) ~15 SS==DGROUP idioms in the libstub EPILOGUE, (3) ONE real investigation — the far→near narrowing path that derefs stack addresses DS-relative.  Feasibility surveyed end of §4u; full plan below.  §4u is DONE: stack default 24576, body 592512, frontier 7→11, gate 234/234.)
 
 ## §4v plan (gathered 2026-06-09 at end of §4u; survey done, implementation not started)
 

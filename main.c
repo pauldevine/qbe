@@ -156,11 +156,17 @@ main(int ac, char *av[])
 	char *f, *sep;
 	int c, m;
 	enum MemModel memmodel = Mflat; /* Will be set properly after target selection */
+	int splitstack = 0;
 
 	T = Deftgt;
 	outf = stdout;
-	while ((c = getopt(ac, av, "hd:m:o:t:")) != -1)
+	while ((c = getopt(ac, av, "hd:m:o:st:")) != -1)
 		switch (c) {
+		case 's':
+			/* Split stack (SS != DS); i8086 far-data models only.
+			 * Applied after target selection, like -m. */
+			splitstack = 1;
+			break;
 		case 'd':
 			for (; *optarg; optarg++)
 				if (isalpha(*optarg)) {
@@ -223,6 +229,7 @@ main(int ac, char *av[])
 			fprintf(hf, "\n");
 			fprintf(hf, "\t%-11s memory model for i8086:\n", "-m <model>");
 			fprintf(hf, "\t%-11s tiny, small, medium, compact, large, huge\n", "");
+			fprintf(hf, "\t%-11s split stack (SS != DS; i8086 far-data models)\n", "-s");
 			fprintf(hf, "\t%-11s dump debug information\n", "-d <flags>");
 			exit(c != 'h');
 		}
@@ -233,6 +240,19 @@ main(int ac, char *av[])
 			fprintf(stderr, "warning: memory model only applies to i8086 target\n");
 		}
 		T.memmodel = memmodel;
+	}
+
+	/* Apply split-stack: only meaningful for i8086 far-data models,
+	 * where every register-indirect near deref is stack-derived. */
+	if (splitstack) {
+		if (strcmp(T.name, "i8086") != 0
+		    || (T.memmodel != Mcompact && T.memmodel != Mlarge
+		        && T.memmodel != Mhuge)) {
+			fprintf(stderr, "error: -s (split stack) requires "
+			        "-t i8086 with -m compact/large/huge\n");
+			exit(1);
+		}
+		T.splitstack = 1;
 	}
 
 	do {

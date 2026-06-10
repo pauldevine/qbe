@@ -220,6 +220,35 @@ emit_shift_val(const char *reg, Ref r0, Fn *fn, FILE *f)
 		fprintf(f, "\tmov %s, word [bp%+ld]\n", reg, (long)slot(r0, fn));
 }
 
+/* Segment override for a register-indirect NEAR dereference.  Under
+ * `qbe -s` (split stack; far-data models only) the C stack lives in
+ * its own segment (SS != DS), and every register-held NEAR address is
+ * stack-derived — under far-data, globals are far-accessed and all C
+ * pointers are far Kl, so the only near addresses are isel's narrowed
+ * Oaddr-of-slot values — making the deref SS-relative.  [bp±N] (RSlot)
+ * is SS-relative by 8086 addressing default and [_sym] (RCon CAddr)
+ * stays DS (DGROUP global); neither takes a prefix. */
+static const char *
+near_seg(Ref r, Fn *fn)
+{
+	Mem *m;
+
+	if (!T.splitstack)
+		return "";
+	if (rtype(r) == RTmp)
+		return "ss:";
+	if (rtype(r) == RMem) {
+		m = &fn->mem[r.val];
+		if (m->offset.type == CAddr)
+			return "";	/* symbol-based: DGROUP global, DS */
+		if ((!req(m->base, R) && rtype(m->base) == RTmp)
+		    || (req(m->base, R) && !req(m->index, R)
+		        && rtype(m->index) == RTmp))
+			return "ss:";
+	}
+	return "";
+}
+
 /* Render just the memory operand text (no leading tab, no instruction
  * mnemonic) so callers can compose it into custom instruction sequences.
  * Mirrors the %M handler in emitf. */
@@ -228,7 +257,7 @@ emit_memref(Ref r, Fn *fn, FILE *f)
 {
 	Con *pc;
 	if (rtype(r) == RTmp)
-		fprintf(f, "[%s]", rname[r.val]);
+		fprintf(f, "[%s%s]", near_seg(r, fn), rname[r.val]);
 	else if (rtype(r) == RSlot)
 		fprintf(f, "[bp%+ld]", (long)slot(r, fn));
 	else if (rtype(r) == RCon) {
@@ -244,7 +273,7 @@ emit_memref(Ref r, Fn *fn, FILE *f)
 		int has_offset = (m->offset.type != CUndef);
 		int has_base = !req(m->base, R);
 		int has_index = !req(m->index, R);
-		fputc('[', f);
+		fprintf(f, "[%s", near_seg(r, fn));
 		if (has_base) {
 			if (rtype(m->base) == RTmp)
 				fprintf(f, "%s", rname[m->base.val]);
@@ -922,7 +951,7 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 				int has_base = !req(m->base, R);
 				int has_index = !req(m->index, R);
 
-				fprintf(f, "word [");
+				fprintf(f, "word [%s", near_seg(r, fn));
 
 				/* Emit base register if present */
 				if (has_base) {
@@ -982,7 +1011,7 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 				int has_base = !req(m->base, R);
 				int has_index = !req(m->index, R);
 
-				fputc('[', f);
+				fprintf(f, "[%s", near_seg(r, fn));
 
 				/* Emit base register if present */
 				if (has_base) {
@@ -1029,7 +1058,7 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 				}
 				break;
 			case RTmp:
-				fprintf(f, "[%s]", rname[r.val]);
+				fprintf(f, "[%s%s]", near_seg(r, fn), rname[r.val]);
 				break;
 			case RSlot:
 				offset = slot(r, fn);
@@ -2107,11 +2136,13 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
 				}
 			} else if (rtype(r0) == RTmp) {
-				/* Load from address in register */
+				/* Load from address in register (split stack:
+				 * register-held near addresses are stack-derived,
+				 * so the deref takes an ss: override). */
 				if (strcmp(rname[r0.val], "bx") != 0)
 					fprintf(f, "\tmov bx, %s\n", rname[r0.val]);
-				fprintf(f, "\tmov ax, word [bx]\n");
-				fprintf(f, "\tmov dx, word [bx+2]\n");
+				fprintf(f, "\tmov ax, word [%sbx]\n", near_seg(r0, fn));
+				fprintf(f, "\tmov dx, word [%sbx+2]\n", near_seg(r0, fn));
 			} else if (rtype(r0) == RMem) {
 				/* Complex addressing mode */
 				Mem *m = &fn->mem[r0.val];
@@ -2119,11 +2150,11 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					if (strcmp(rname[m->base.val], "bx") != 0)
 						fprintf(f, "\tmov bx, %s\n", rname[m->base.val]);
 					if (m->offset.type == CBits) {
-						fprintf(f, "\tmov ax, word [bx+%"PRIi64"]\n", m->offset.bits.i);
-						fprintf(f, "\tmov dx, word [bx+%"PRIi64"]\n", m->offset.bits.i + 2);
+						fprintf(f, "\tmov ax, word [%sbx+%"PRIi64"]\n", near_seg(r0, fn), m->offset.bits.i);
+						fprintf(f, "\tmov dx, word [%sbx+%"PRIi64"]\n", near_seg(r0, fn), m->offset.bits.i + 2);
 					} else {
-						fprintf(f, "\tmov ax, word [bx]\n");
-						fprintf(f, "\tmov dx, word [bx+2]\n");
+						fprintf(f, "\tmov ax, word [%sbx]\n", near_seg(r0, fn));
+						fprintf(f, "\tmov dx, word [%sbx+2]\n", near_seg(r0, fn));
 					}
 				}
 			} else if (rtype(r0) == RCon) {
@@ -2309,17 +2340,19 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(r1, fn));
 					fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(r1, fn) + 2);
 				} else if (rtype(r1) == RTmp) {
-					fprintf(f, "\tmov word [bx], ax\n");
-					fprintf(f, "\tmov word [bx+2], dx\n");
+					/* Split stack: register-held near dest addresses
+					 * are stack-derived — ss: override. */
+					fprintf(f, "\tmov word [%sbx], ax\n", near_seg(r1, fn));
+					fprintf(f, "\tmov word [%sbx+2], dx\n", near_seg(r1, fn));
 				} else if (rtype(r1) == RMem) {
 					Mem *m = &fn->mem[r1.val];
 					if (!req(m->base, R) && rtype(m->base) == RTmp) {
 						if (m->offset.type == CBits) {
-							fprintf(f, "\tmov word [bx+%"PRIi64"], ax\n", m->offset.bits.i);
-							fprintf(f, "\tmov word [bx+%"PRIi64"], dx\n", m->offset.bits.i + 2);
+							fprintf(f, "\tmov word [%sbx+%"PRIi64"], ax\n", near_seg(r1, fn), m->offset.bits.i);
+							fprintf(f, "\tmov word [%sbx+%"PRIi64"], dx\n", near_seg(r1, fn), m->offset.bits.i + 2);
 						} else {
-							fprintf(f, "\tmov word [bx], ax\n");
-							fprintf(f, "\tmov word [bx+2], dx\n");
+							fprintf(f, "\tmov word [%sbx], ax\n", near_seg(r1, fn));
+							fprintf(f, "\tmov word [%sbx+2], dx\n", near_seg(r1, fn));
 						}
 					}
 				} else if (rtype(r1) == RCon) {
