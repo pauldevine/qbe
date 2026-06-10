@@ -80,8 +80,19 @@ MAME_PID=""
 WATCHDOG_PID=""
 cleanup() {
 	[ -n "$MAME_PID" ] && kill -9 "$MAME_PID" 2>/dev/null || true
-	[ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
+	retire_watchdog
 	rm -rf "$WORK"
+}
+# Killing the watchdog subshell alone ORPHANS its `sleep`, which inherits our
+# stdout: a caller that pipes us (e.g. `... | tail`) then blocks on pipe EOF
+# until the full wall budget expires (~18 min) even though we exited.  Kill
+# the subshell's children (the sleep) first.
+retire_watchdog() {
+	if [ -n "$WATCHDOG_PID" ]; then
+		pkill -P "$WATCHDOG_PID" 2>/dev/null || true
+		kill "$WATCHDOG_PID" 2>/dev/null || true
+	fi
+	WATCHDOG_PID=""
 }
 trap cleanup EXIT INT TERM
 
@@ -140,8 +151,7 @@ WATCHDOG_PID=$!
 wait "$MAME_PID" 2>/dev/null || true   # -seconds_to_run forces a non-zero exit; ignore
 
 # MAME finished on its own (or the watchdog killed it) — retire the watchdog.
-kill "$WATCHDOG_PID" 2>/dev/null || true
-WATCHDOG_PID=""
+retire_watchdog
 MAME_PID=""
 
 if [ ! -s "$CAP" ]; then

@@ -1,4 +1,67 @@
-# Next session (§4r — FIX the i8086 variable-shift codegen bug §4q ROOT-CAUSED.  §4q CRACKED THE 13-SESSION SAGA: the churn chunk is freed-while-live because `gc_mark_subtree`'s child-check `ATB_GET_KIND` = `(atb >> (2*(block&3))) & 3` is MISCOMPILED — the variable Kw shift reads its count from a register the preceding `extub` (atb-byte zero-extend) clobbered, so it computes `atb >> atb` instead of `atb >> shift`, mis-classifies the chunk's HEAD as non-HEAD, skips marking → freed-while-live → reused → NameError.  Register-allocation-dependent ⇒ CODE-LAYOUT-sensitive (the heisenbug).  NOT segment-sensitive — §4o's period-4 only governs whether the reused-garbage hash misses the lookup slot (NameError manifestation).  FIX RECIPE = mirror amd64/isel.c `selshift`: pin a variable shift count to RCX via `Ocopy RCX<-count` + a clobber-marker; i8086 `selshift` currently does neither.)
+# Next session (§4s — the churn(120) saga is CLOSED: §4r landed the i8086 variable-shift CX pin and VERIFIED it on real Victor at ALL FOUR mod-4 segment alignments (scale2 prints churn(20..120) correct + DONE everywhere).  Gate 230/230.  No designated successor — pick from the open lower-priority tracks: (a) the §4o LATENT minic bug: C pointer RELATIONAL compares (`<`,`<=`,`>`,`>=`) lower to SIGNED `cslel`/`csltl` but C requires unsigned — harmless today only because every segment is ≥0x8000; probe + fix (same family as §2r extsw/extuw); (b) huge-model `_qbe_huge_add` ≥0x8000 index gap (§4i scope note); (c) MicroPython feature/perf work now that GC is sound under churn; (d) clean up the §4p/§4q `-DMP_DBG_*` instrumentation left in the external micropython tree.)
+
+## 2026-06-09 §4r notes (THE FIX LANDED + VICTOR-VERIFIED at all 4 alignments — the 13-session churn(120) saga is CLOSED)
+
+**§4r implemented the §4q fix recipe exactly and the saga is over.**  Two qbe changes, one
+new gated probe, one harness fix:
+
+### The fix (i8086/isel.c + i8086/emit.c)
+- **`i8086/isel.c::selshift`** — a variable (non-RCon) shift count is now PINNED to CX,
+  mirroring `amd64/isel.c` selshift: emit (program order) `Ocopy CX <- count`, the shift with
+  `arg[1]=TMP(RCX)`, then a no-dest `Ocopy <- CX` clobber-marker so rega keeps CX busy across
+  the shift (and the dest out of CX).  The front copy is a REAL instruction spill/rega lower
+  correctly — when the count is spilled, the copy's arg is rewritten to the slot and the
+  reload happens at the copy, not via emit.c's stale `rname[r1.val]` read.  Immediate (RCon)
+  counts keep all the old emit paths (0/1 direct, 2–8 unroll, >8 via CL with push/pop).
+- **`i8086/emit.c::emitins`** — early-return for `Ocopy` with `to == R` (the clobber-marker),
+  same as amd64's emit.  Without it the marker would hit the generic `mov %=, %0` omap entry.
+- Kw emit handler needs NO change: with the count pinned, `r1.val == RCX` skips the stale
+  `mov cx, <reg>`; the (now-redundant) `push cx`/`pop cx` bracket is harmless.  The Kl
+  (32-bit) variable-shift handler likewise sees `rname[r1.val]=="cx"` and skips its mov; its
+  jcxz/loop consumes CX directly.  Verified in regenerated `build/mp-link/gc.asm`: at the §4q
+  smoking-gun site the count moves to CX immediately after the `imul`, BEFORE the extub can
+  reuse AX — `atb >> atb` is gone.
+
+### Verification (the §4q checklist, all green)
+- `make check` (SSA suite) green.
+- **Gate 228 → 230/230** with the new probe (below); stevie size budget still ok.
+- Full MicroPython rebuild (107/107 TUs): body 817840 → **818080** (+240 B, under the
+  ~824416 ceiling).
+- **Real-Victor scale2 at the shipping link: churn(20..120) ALL correct — `120 7980`,
+  `DONE`.**  The NameError is gone.
+- **`--stack-size` 4-paragraph alignment sweep (16384/16400/16416/16432): ALL FOUR mod-4
+  segment classes PASS** (under §4q, the marking miss was alignment-independent and ~2 of 4
+  alignments manifested NameError).  Ran in parallel, one MAME each, ~4 min wall.
+
+### New gated probe: `shift_count_spill_probe.c` (medium + compact)
+Recreates the gc_mark_subtree shape — packed 2-bit ATB-style table scan where the count is
+`2*(block&3)` (imul product), the value is a byte load (extub), under register pressure from
+live loop-carried values — cross-checked against shift-free expectations (byte composition /
+doubling, so a shift miscompile can't corrupt both sides).  Plus: `1<<n` (need_val_load),
+count 0 / count≥8, `x>>x` (the exact §4q wrong formula must differ), Kl variable shifts both
+directions, signed sar.  **Caveat pinned in the gate comment: the original miscompile was
+layout-sensitive, so a green probe alone is necessary-not-sufficient — the real guard is the
+isel pin itself + the Victor scale2 run.**
+
+### Harness fix: `tools/run-victor-sasi.sh` watchdog orphan (cost ~30 min twice this session)
+`kill "$WATCHDOG_PID"` killed the watchdog SUBSHELL but orphaned its `sleep`, which inherits
+the script's stdout: any caller that PIPES the script (`... | tail -30`) then blocks on pipe
+EOF until the full wall budget (~18 min) expires even though the run finished.  New
+`retire_watchdog()` (`pkill -P` the subshell's children first) used at both the normal-exit
+site and `cleanup()`.  Symptom to remember: "MAME exited but the harness prints nothing for
+many minutes" = NOT a hang, it was the orphan sleep.
+
+### Left open (no successor designated — pick by need)
+- §4o LATENT minic bug: pointer relational compares are SIGNED (`cslel`/`csltl`); C requires
+  unsigned.  Harmless in current images (every segment ≥ 0x8000) but real; own probe + fix.
+- The §4p/§4q `-DMP_DBG_SWEEP`/`-DMP_DBG_GLOBALS` instrumentation is still in the external
+  micropython tree (guarded, normal builds unaffected) — remove or keep as debugging kit.
+- huge-model `_qbe_huge_add` ≥0x8000 gap; `build-example.sh` -DFAR_DATA scope note (§4i).
+- 211-commit upstream-qbe rebase (pure plumbing, deferred).
+
+---
+
+# (DONE in §4r above) Next session (§4r — FIX the i8086 variable-shift codegen bug §4q ROOT-CAUSED.  §4q CRACKED THE 13-SESSION SAGA: the churn chunk is freed-while-live because `gc_mark_subtree`'s child-check `ATB_GET_KIND` = `(atb >> (2*(block&3))) & 3` is MISCOMPILED — the variable Kw shift reads its count from a register the preceding `extub` (atb-byte zero-extend) clobbered, so it computes `atb >> atb` instead of `atb >> shift`, mis-classifies the chunk's HEAD as non-HEAD, skips marking → freed-while-live → reused → NameError.  Register-allocation-dependent ⇒ CODE-LAYOUT-sensitive (the heisenbug).  NOT segment-sensitive — §4o's period-4 only governs whether the reused-garbage hash misses the lookup slot (NameError manifestation).  FIX RECIPE = mirror amd64/isel.c `selshift`: pin a variable shift count to RCX via `Ocopy RCX<-count` + a clobber-marker; i8086 `selshift` currently does neither.)
 
 ## 2026-06-09 §4q notes (ROOT-CAUSED the saga: i8086 variable-shift count-operand clobber in gc_mark_subtree's ATB_GET_KIND)
 

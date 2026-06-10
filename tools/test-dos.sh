@@ -307,6 +307,17 @@ RUNTIME_TESTS=(
 	# runtime (just offsetof prints); layout-independent, identical compact/large.
 	"minic/dos/examples/gc_offset_probe.c:minic/dos/tests/gc_offset_probe.golden.txt:compact"
 	"minic/dos/examples/gc_offset_probe.c:minic/dos/tests/gc_offset_probe.golden.txt:large"
+	# §4r variable-shift count pin (selshift CX pin, mirroring amd64).  The §4q
+	# root cause of the churn(120) saga: emit.c read a variable shift count from
+	# a register rega had spilled-and-reused (gc_mark_subtree's ATB_GET_KIND
+	# computed `atb >> atb`), so a live HEAD block was never marked and the
+	# "churn" qstr was freed-while-live.  Recreates the gc_mark_subtree shape
+	# (packed 2-bit table, imul count, extub value, register pressure) + Kw/Kl
+	# variable-shift edge cases with shift-free expectations.  NOTE: the original
+	# miscompile was layout-sensitive — a green probe alone is necessary, not
+	# sufficient (the real guard is the isel pin itself + the Victor scale2 run).
+	"minic/dos/examples/shift_count_spill_probe.c:minic/dos/tests/shift_count_spill_probe.golden.txt:medium"
+	"minic/dos/examples/shift_count_spill_probe.c:minic/dos/tests/shift_count_spill_probe.golden.txt:compact"
 )
 
 # --- Stevie size budget ----------------------------------------------------

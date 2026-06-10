@@ -248,18 +248,42 @@ static void
 selshift(Ins i, Fn *fn)
 {
 	Ins *i0;
+	Ref r1;
 
 	/* x86 shift instructions are special:
 	 * - Shift count can be immediate: shl ax, 5
 	 * - Or must be in CL register: shl ax, cl
-	 *
-	 * The emit phase will handle moving the count to CL if needed.
 	 */
 
+	r1 = i.arg[1];
+	if (rtype(r1) == RCon) {
+		/* Immediate count: emit handles it without touching CX
+		 * (0/1 direct, 2-8 unrolled, >8 via CL with push/pop). */
+		emiti(i);
+		i0 = curi;
+		fixarg(&i0->arg[0], Kw, i0, fn);
+		fixarg(&i0->arg[1], Kw, i0, fn);
+		return;
+	}
+
+	/* Variable count: pin it to CX here, mirroring amd64's selshift.
+	 * Emit (in program order) `copy CX <- count`, the shift with
+	 * arg[1]=CX, then a no-dest `copy <- CX` marker so rega knows CX
+	 * is busy across the shift (keeps the dest out of CX and the
+	 * count live).  Without the pin, emit.c reads the count from
+	 * whatever register rega last noted, but rega may have spilled
+	 * the count and reused that register for an adjacent op — the
+	 * §4q gc_mark_subtree ATB_GET_KIND miscompile: an intervening
+	 * extub clobbered AX and the shift computed `atb >> atb`.  The
+	 * front copy is a real instruction spill/rega lower correctly
+	 * (reloading from the spill slot when needed). */
+	i.arg[1] = TMP(RCX);
+	emit(Ocopy, Kw, R, TMP(RCX), R);
 	emiti(i);
 	i0 = curi;
+	emit(Ocopy, Kw, TMP(RCX), r1, R);
 	fixarg(&i0->arg[0], Kw, i0, fn);
-	fixarg(&i0->arg[1], Kw, i0, fn);
+	fixarg(&curi->arg[0], Kw, curi, fn);
 }
 
 static void

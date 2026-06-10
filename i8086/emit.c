@@ -1089,6 +1089,12 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		return;
 	}
 
+	/* A copy with no destination is an isel-inserted register-liveness
+	 * marker (selshift's CX clobber pin, same shape as amd64) — not a
+	 * real move.  Emit nothing. */
+	if (i->op == Ocopy && req(i->to, R))
+		return;
+
 	/* Special handling for shift operations.  8086 supports only
 	 *   shl/shr/sar reg, 1
 	 *   shl/shr/sar reg, cl
