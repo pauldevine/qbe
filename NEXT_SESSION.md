@@ -1,4 +1,74 @@
-# Next session (§4v — no designated successor; §4u is DONE: `MP_STACK_SIZE` default is 24576 (body 584320→592512, exactly +8192; DGROUP 37118+24576=61694, ~3.8 KB slack), Victor-verified.  KEY FINDING: the generator-recursion frontier moved 7 → 11 (+4 levels ≈ 2 KB of C stack per resume level, measured by the new `build/mp-gen-sweep.py`); `sum(gc(15))` is STILL beyond the frontier — beyond-frontier behavior is stack-overflow UB with MICROPY_STACK_CHECK off (wrong-value-clean at one layout, hang at another), NOT "graceful degradation" as §4c framed it.  Gate 234/234.  Open tracks to pick from: (a) FLOAT — §4t's per-function stripping removed the size objection (float delta was only ~59 KB vs ~232 KB headroom; recipe in §4a/§4t notes); (b) MICROPY_STACK_CHECK=1 — would turn beyond-frontier UB into a clean RuntimeError and make `mp_stack_set_limit` real (today it's a no-op macro); cost = a check per call, needs size+perf look; (c) huge-model `_qbe_huge_add` ≥0x8000 gap (§4i scope note); (d) §4p/§4q `-DMP_DBG_*` cleanup in the external micropython tree; (e) 211-commit upstream-qbe rebase.)
+# Next session (§4v — DESIGNATED by the user 2026-06-09: move the C stack OUT of DGROUP into its OWN segment (the classic SS≠DS split), as an OPT-IN omf_link flag for far-data builds.  Payoff: the stack cap goes from ~28.4 KB (64 KB DGROUP minus 37118 data+bss) to a full ~64 KB → ≈30 generator-recursion levels at the §4u-measured ~2 KB/level (vs 11 today), and DGROUP gets back 24 KB of near-data slack.  The backend is ALREADY half-ready: `i8086/emit.c` stamps **SS** (not DS) into the segment word of `&local` far pointers, so the language-level far-pointer path is split-correct as-is.  The work is (1) the linker flag, (2) ~15 SS==DGROUP idioms in the libstub EPILOGUE, (3) ONE real investigation — the far→near narrowing path that derefs stack addresses DS-relative.  Feasibility surveyed end of §4u; full plan below.  §4u is DONE: stack default 24576, body 592512, frontier 7→11, gate 234/234.)
+
+## §4v plan (gathered 2026-06-09 at end of §4u; survey done, implementation not started)
+
+**Scope guard: opt-in, far-data only.**  Medium-model programs (stevie) pass near 2-byte
+`char *` to stack buffers; those derefs are DS-relative by ABI, so SS must stay ==DGROUP
+there.  The split is a new `omf_link.py --separate-stack` flag that only
+`build-micropython.sh` (and future far-data consumers) pass.  Default linking is
+byte-identical — the gate's existing 234 entries must not move.
+
+1. **`tools/omf_link.py --separate-stack`** (easy).  Today the STACK segment is laid inside
+   DGROUP and the MZ header gets SS=DGROUP para, SP=offset-within-DGROUP+size
+   (`omf_link.py:1237-1255` — the comment documents the SS==DS invariant and its reason;
+   stack seg created ~line 850; the `sp_full > 0xFFFF` check is the 64 KB cap §4u hit).
+   Under the flag: do NOT group STACK into DGROUP; SS = stack seg's own para_base,
+   SP = stack_size (validation already caps at 65535).  DGROUP's 64 KB check then covers
+   data+bss only.
+2. **libstub EPILOGUE: every "SS as a synonym for DGROUP" idiom** (mechanical but must be
+   EXHAUSTIVE — a miss is a wild segment).  Inventory from the §4u survey grep:
+   - `tools/libstub_to_exe.py`: line 158 `mov dx, ss` (_malloc returns the near-heap's
+     segment — the [[libstub-null-ptr-dx]]-era fix); 848 + 914 `mov ax, ss` (far-ptr
+     formation for DGROUP scratch); 1260 `mov cx, [ss:_spr_width]` (SS-override read of a
+     DGROUP global); 1570/1732/1745/1758/1768/1926/2093/2150 `push ss / pop ds` (restore
+     DS=DGROUP after a segment swap); 1790 `mov dx, ss` (comment literally says "= SS at
+     runtime").  Line 1626 `mov [es:bx+4], ss` is far-setjmp saving the REAL SS — correct
+     under split, leave it (verify longjmp restores it).
+   - `minic/dos/libstub.asm`: 2586 + 2671 `push ss` (audit); 2532 is near-setjmp's real-SS
+     save (legit); 2514 is just a comment.
+   - **Fix pattern**: stash the DGROUP paragraph ONCE at startup in a `dw` inside the
+     libstub CODE segment, read via `cs:` override (`mov ds, [cs:_dgroup_para]`) — the
+     standard DOS idiom; works even when DS is currently swapped away (which is exactly
+     when these sites run).  crt0 itself doesn't touch SS (grep-verified; DOS loader sets
+     SS:SP from the header) and sets DS=DGROUP — unaffected.
+3. **THE INVESTIGATION — far→near narrowing of stack addresses** (`i8086/emit.c:1265-1267`
+   documents it: a far stack address "narrowed back to Kw because it feeds a near deref").
+   A pointer to a local held in a register and deref'd as `[bx]` is implicitly DS-relative
+   — correct today ONLY because SS==DS.  Under split this is a latent-invariant bug of the
+   §4o/§4r family.  Options, in preference order: (a) prove the shape can't fire under
+   compact far-data (grep the generated `build/mp-link/*.asm` for near derefs fed by `lea`
+   of bp slots; read the minic `NEAR_DATA()` gates and the gvn/copy narrowing sites); (b)
+   suppress the narrowing for slot-derived addresses when a new split-stack target flag is
+   set; (c) `ss:` override on provably-stack-derived near derefs (hardest, avoid).  Do NOT
+   ship the flag until this is closed one way or the other.
+4. **New gated probe `split_stack_probe.c`** (compact + large): `&local` escaping to a
+   callee that writes through it; a stack struct's member address through a chain; a stack
+   buffer filled by `_far_sprintf` and read back; fn-ptr callback receiving a stack ptr;
+   setjmp/longjmp across frames with stack ptrs live; malloc'd-vs-stack far-ptr compare
+   (different segments under split — pins that nothing assumes one segment).  Plus
+   `_malloc`'s returned segment must still be DGROUP (the site-1 fix).
+5. **MicroPython bring-up, two steps** (the §4o lesson: change one variable at a time):
+   - Step A — EQUIVALENCE: `--separate-stack` at the SAME `MP_STACK_SIZE=24576`.  Victor:
+     `mp-feature-4t.py` byte-exact, churn scale2 clean, `mp-gen-sweep.py` frontier STILL 11
+     (same stack size ⇒ same frontier; any drift = a missed SS assumption).
+   - Step B — RAISE: bump `MP_STACK_SIZE` (try 49152, then ~61440; SP cap 65535) and
+     re-sweep the generator frontier — expect ~2 KB/level scaling (≈24 / ≈30 levels).
+     Re-run feature-4t + churn scale2 at the final size.  Update the build-micropython.sh
+     comment block (it currently documents the DGROUP cap as binding — that dies with the
+     split).
+   - The MP conservative GC stack scan is split-safe by construction (`mp_stack_set_top`
+     takes `&stack_dummy` as a FAR pointer whose segment is SS via the emit.c path above;
+     VERIFY_PTR range-checks against the heap segment only) — but it's on the step-A
+     verification list anyway, churn scale2 exercises it.
+6. **Gate**: `tools/test-dos.sh` 234 existing entries byte-identical (flag is opt-in);
+   +new probe entries.  `make check` green.  Commit at green per the milestone convention.
+- **Composing follow-up (separate, cheap, do after)**: `MICROPY_STACK_CHECK=1` turns the
+  (now further-out) overflow cliff into a clean `RuntimeError` and makes
+  `mp_stack_set_limit` real (§4u confirmed it's a no-op macro today).  Split for depth,
+  check for safety at the new edge.
+- Other open tracks unchanged: FLOAT (size objection gone, ~59 KB delta vs ~232 KB
+  headroom, recipe §4a/§4t); huge `_qbe_huge_add` ≥0x8000 gap (§4i); §4p/§4q `-DMP_DBG_*`
+  cleanup in the external tree; 211-commit upstream-qbe rebase.
 
 ## 2026-06-09 §4u notes (MP_STACK_SIZE 16384 → 24576; generator frontier measured 7 → 11; gc(15) is still UB-deep)
 
