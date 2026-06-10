@@ -318,6 +318,19 @@ RUNTIME_TESTS=(
 	# sufficient (the real guard is the isel pin itself + the Victor scale2 run).
 	"minic/dos/examples/shift_count_spill_probe.c:minic/dos/tests/shift_count_spill_probe.golden.txt:medium"
 	"minic/dos/examples/shift_count_spill_probe.c:minic/dos/tests/shift_count_spill_probe.golden.txt:compact"
+	# §4w Kl/Ks stack-slot coloring (spill.c::colorklslots).  i8086 forces every
+	# Kl temp slot-resident; pre-§4w each owned a PRIVATE 2-word slot, making
+	# frame size proportional to the Kl temp COUNT (mp_execute_bytecode: 1261
+	# temps = 5464-byte frame = the ~5.6KB/level generator-resume cost measured
+	# in §4v).  §4w colors the interference graph so disjoint live ranges SHARE
+	# slots (same fn: 12 colors, 472B frame).  The probe is bug-loud on an
+	# interference miss (two overlapping temps sharing a slot = value bleed):
+	# 14 longs live across a call, short disjoint chains (these DO share), a
+	# loop-carried long swap cycle (pins the phi-web no-share rule — pmgen would
+	# otherwise need a slot<->slot Oswap emit doesn't implement), longs live
+	# across in-loop calls, and a pointer ping-pong walk (far Kl under compact).
+	"minic/dos/examples/kl_slot_color_probe.c:minic/dos/tests/kl_slot_color_probe.golden.txt:medium"
+	"minic/dos/examples/kl_slot_color_probe.c:minic/dos/tests/kl_slot_color_probe.golden.txt:compact"
 	# §4s pointer RELATIONAL compares are UNSIGNED (C11 6.5.8).  minic lowered
 	# ptr <,<=,>,>= to signed cslt/csle (pointers never carry the UNSIGNED type
 	# flag), inverting the result whenever the operands straddle the sign bit:

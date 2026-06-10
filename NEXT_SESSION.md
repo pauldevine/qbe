@@ -1,4 +1,75 @@
-# Next session (§4v is DONE 2026-06-10 — split stack LANDED + Victor-verified, and the bring-up EXPOSED then FIXED the real generator-depth story: per-resume C-stack cost is ~5.6 KB (NOT ~2 KB), every pre-§4v "frontier" was silent stack overflow into libstub's unused `_heap_buf`, and MICROPY_STACK_CHECK=1 now raises a clean RuntimeError at the true limit.  MP_STACK_SIZE default 61440 (the 16-bit SP is the only cap left).  Gate 236/236; feature-4t byte-exact; churn scale2 clean; recsum(60) clean.  No designated successor — open tracks at the §4v notes' end.)
+# Next session (§4w is DONE 2026-06-10 — the generator frame diet LANDED via Kl/Ks stack-slot COLORING (user-designated track): `spill.c::colorklslots()` assigns the i8086 forced Kl/Ks slots by interference-graph coloring so disjoint live ranges SHARE slots, instead of one private 2-word slot per temp.  mp_execute_bytecode: 1261 Kl temps / 12 colors → frame 5464 → 472 bytes (11.6×); generator resume ~5772 → ~665 B/level; Victor frontier 8 → ~80 levels (75 clean, 85 = clean CAUGHT RuntimeError, sweep 4–30 all correct + DONE).  Bonus: MP body 632112 → 612048 (−20 KB; small frames re-enable 8-bit [bp-N] displacements).  Gate 236 → 238/238 (new kl_slot_color_probe medium+compact); make check green; feature-4t byte-exact; churn scale2 clean.  No designated successor — open tracks at the §4w notes' end.)
+
+## 2026-06-10 §4w notes (Kl/Ks slot coloring: the generator frame diet — one spill.c pass, 10× depth)
+
+**§4w attacked the §4v-measured ~5772 B/level generator-resume cost and the entire cost
+turned out to be ONE allocation policy.**  Under i8086, every Kl (32-bit long / far-pointer)
+and Ks temp is forced slot-resident ([[i8086-kl-load-loses-high]] — rega has no register-pair
+concept), and `spill.c`'s eager pass gave EVERY such temp a private 2-word slot for the whole
+function.  Frame size therefore grew with the Kl temp COUNT: `mp_execute_bytecode` has 1261
+Kl temps = 5044 bytes of slots on a 5464-byte frame, while its **maximum simultaneous Kl
+liveness is ~10** (instrumented measurement; real C locals are only 541 bytes of allocas).
+
+### The change (`spill.c::colorklslots()`, i8086-only, replaces the eager carve loop)
+- Builds the interference graph over candidate temps (Kl/Ks, `slot == -1` — i.e. excluding
+  ABI-aliased params (negative slots) and isel fast-local alloca temps) via one backward
+  liveness walk per block off filllive's `b->out` (still pristine at that point; spill's main
+  loop hasn't replaced in/out yet), then greedy-colors and assigns `slot = locs + 2*color`.
+  `slot4 = slot8 = 2*ncolors` so later lazy Kw spill slots continue past the colored region.
+- **Conservative interference rules** (each is load-bearing):
+  - a def interferes with everything live across it (standard);
+  - a def interferes with its own instruction's args — the i8086 emit handlers are
+    multi-instruction sequences that may write the dest slot's two words while still reading
+    arg slots;
+  - a phi def interferes with the block's live-in, the block's other phi defs, AND every phi
+    argument of the block: rega's `pmgen` orders edge parallel-copies by comparing refs
+    (RSlot included), and a slot shared between a phi def and a phi arg of the same block
+    could force a slot↔slot cycle that emit's `Oswap` handler does not implement (it only
+    swaps registers — verified, it silently emits NOTHING for slot operands).
+- Sharing is safe by construction everywhere else: slot writes happen only at the owning
+  temp's def (interference covers them), `pmgen`'s ref-equality ordering turns any remaining
+  src/dst slot aliasing into correct read-before-write sequencing, and Ocopy Kl slot→slot
+  already exists (the §2x param self-copy path).
+- `QBE_SLOT_DBG=1` env prints per-function `kl=<n> colors=<c>` stats.
+
+### Measured results
+- `mp_execute_bytecode`: **frame 5464 → 472 bytes** (12 colors); `mp_obj_gen_resume`
+  112 → 40; `gen_wrap_call` 92 → 68; `build_slice_stack_allocated` 118 → 46.
+- Full MP rebuild (107/107 TUs): body **632112 → 612048 (−20 KB)**, code 452461 → 434851 —
+  the frame diet collaterally shrinks CODE because small `[bp-N]` offsets fit 8-bit signed
+  displacements again.
+- **Victor, all green**: `mp-feature-4t.py` byte-exact; `mp-churn-scale2.py` churn(20..120)
+  all correct + DONE (GC clean over the completely-reshaped frames); `mp-gen-sweep.py`
+  **4–30 ALL correct + DONE** (the §4v image errored at 9); targeted frontier probe:
+  **gc(75) = 2850 clean, gc(85/95/105) = RuntimeError CAUGHT by try/except, then DONE** —
+  the stack check + exception unwind work perfectly at the new cliff.  Per-level cost
+  ≈ 53248 (MP_STACK_LIMIT) / ~80 ≈ **~665 B/level** (was ~5772): **~10× depth**.
+- Gate **236 → 238/238** (new `kl_slot_color_probe.c`, medium + compact: 14 longs live
+  across a call, disjoint chains that DO share, a loop-carried long swap cycle pinning the
+  phi no-share rule, longs live across in-loop calls, pointer ping-pong).  `make check`
+  green (coloring is gated behind the i8086-only force_kl_slot flag; other targets
+  byte-identical by construction).
+
+### Notes / leftovers from the session
+- `MP_STACK_LIMIT` headroom is still 8192, sized in §4v for one ~5.6 KB overshoot frame;
+  with ~665 B frames it could drop to ~2048 and buy ~9 more levels.  Not changed — margin
+  is cheap and the frontier is no longer the bottleneck.
+- Probe scripts kept (untracked): `build/mp-gen-frontier-4w.py`, `build/mp-gen-sweep-deep.py`.
+- The deep sweep (4..200) timed out at gc(48) on wall clock, not stack — the sweep is O(n²)
+  resumes on a 5 MHz 8088; use targeted depths for frontier hunting.
+
+### Open tracks (no §4x designated)
+- **FLOAT** (recipe §4a/§4t, ~59 KB delta vs now ~210 KB headroom).
+- Latent minic note (§4v, NOT reduced): `jmp_buf bufs[6]` array-of-jmp_buf cross-frame
+  longjmp misbehaved; possibly the §2m array_vartyp stride family.  Reduce before trusting.
+- huge `_qbe_huge_add` ≥0x8000 gap (§4i); `-DMP_DBG_*` cleanup in the external tree;
+  211-commit upstream-qbe rebase.
+- Possible follow-on in the same vein: Kw spill slots still never share (lazy `slot()`
+  carve); irrelevant for MP (Kl dominates) but a small frame lever elsewhere.
+
+---
+
+# (DONE in §4v below) Next session (§4v is DONE 2026-06-10 — split stack LANDED + Victor-verified, and the bring-up EXPOSED then FIXED the real generator-depth story: per-resume C-stack cost is ~5.6 KB (NOT ~2 KB), every pre-§4v "frontier" was silent stack overflow into libstub's unused `_heap_buf`, and MICROPY_STACK_CHECK=1 now raises a clean RuntimeError at the true limit.  MP_STACK_SIZE default 61440 (the 16-bit SP is the only cap left).  Gate 236/236; feature-4t byte-exact; churn scale2 clean; recsum(60) clean.)
 
 ## 2026-06-10 §4v notes (split stack SS≠DS landed end-to-end; the generator "frontier" was always overflow-UB; stack check ON)
 
