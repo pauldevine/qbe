@@ -1,6 +1,50 @@
-# Next session (§4u — DESIGNATED by the user 2026-06-09: bump `MP_STACK_SIZE` 16384 → 24576 (build-micropython.sh default).  §4c picked 16384 ONLY because 24576 → body 828224 > the ~824416 load ceiling; §4t's per-function gc-sections (body 584320) removed that constraint entirely, and the user judged the bigger C stack "more clear day-to-day value than float" (deep GENERATOR recursion still C-recurses on resume — objgenerator.c mp_execute_bytecode — which STACKLESS does NOT cover; at 16384 `sum(gc(15))` returns a WRONG value 99 with a clean exit, §4c).  Plan below.  Float stays available-not-scheduled; heap is segment-bound (~60 KB max), not ceiling-bound.)
+# Next session (§4v — no designated successor; §4u is DONE: `MP_STACK_SIZE` default is 24576 (body 584320→592512, exactly +8192; DGROUP 37118+24576=61694, ~3.8 KB slack), Victor-verified.  KEY FINDING: the generator-recursion frontier moved 7 → 11 (+4 levels ≈ 2 KB of C stack per resume level, measured by the new `build/mp-gen-sweep.py`); `sum(gc(15))` is STILL beyond the frontier — beyond-frontier behavior is stack-overflow UB with MICROPY_STACK_CHECK off (wrong-value-clean at one layout, hang at another), NOT "graceful degradation" as §4c framed it.  Gate 234/234.  Open tracks to pick from: (a) FLOAT — §4t's per-function stripping removed the size objection (float delta was only ~59 KB vs ~232 KB headroom; recipe in §4a/§4t notes); (b) MICROPY_STACK_CHECK=1 — would turn beyond-frontier UB into a clean RuntimeError and make `mp_stack_set_limit` real (today it's a no-op macro); cost = a check per call, needs size+perf look; (c) huge-model `_qbe_huge_add` ≥0x8000 gap (§4i scope note); (d) §4p/§4q `-DMP_DBG_*` cleanup in the external micropython tree; (e) 211-commit upstream-qbe rebase.)
 
-## §4u plan (do this first; gathered 2026-06-09 at end of §4t, not yet started)
+## 2026-06-09 §4u notes (MP_STACK_SIZE 16384 → 24576; generator frontier measured 7 → 11; gc(15) is still UB-deep)
+
+**§4u landed the user-designated stack bump and measured exactly what it bought.**  One file
+changed (`tools/build-micropython.sh`); no qbe/minic/external-tree change.
+
+### The change
+- `MP_STACK_SIZE=${MP_STACK_SIZE:-16384}` → `24576`, with the stale comment block REWRITTEN
+  (it cited the dead §4c load-ceiling premise 828224 > ~824416; the binding cap is now DGROUP:
+  data+bss 37118 + stack 24576 = 61694 of 64 KB, ~3.8 KB slack, 32768 fails to link).  The
+  stale `--stack-size` comment at the omf_link call site got the same correction.
+- **`MP_STACK_LIMIT` left at 8192 and documented vestigial**: `MICROPY_STACK_CHECK` is OFF, so
+  `mp_stack_set_limit()` is the no-op macro in py/stackctrl.h (`(void)(limit)`) — scaling it
+  would change nothing.  Turning STACK_CHECK ON is a separate track (open list above).
+- Build: 107/107 TUs, body **592512** = §4t's 584320 + 8192 exactly; image 610160.
+  Cross-check: relink of the SAME objects at `--stack-size 16384` reproduces §4t's 584320
+  byte-for-byte, so the only delta is the stack.
+
+### The frontier measurement (the real §4u deliverable)
+- New sweep probe **`build/mp-gen-sweep.py`** (kept, untracked): prints `i sum(gc(i))` for
+  i=4.., where `gc` is the §4c recursive generator — each level C-recurses on resume
+  (objgenerator.c → mp_execute_bytecode; STACKLESS does NOT cover resume).
+- **At 16384 (relink-only image): depths 4–7 correct, gc(8) HANGS.**
+- **At 24576 (shipping image): depths 4–11 correct, gc(12) HANGS.**
+- So +8192 bytes bought +4 levels → **~2 KB of C stack per generator-resume level**, and the
+  bump verifiably took effect at runtime.
+- **`sum(gc(15))` (the §4c case) is BEYOND the frontier at BOTH sizes.**  The §4c report
+  ("returns wrong 99 with a clean exit at 16384, degrades gracefully") was a LAYOUT ACCIDENT,
+  not a property: with MICROPY_STACK_CHECK off, beyond-frontier = stack overflow into DGROUP
+  data = UB.  The standalone `mp-gen-probe.py` at 16384 happened to come back with 99; the
+  sweep at 16384 hangs at gc(8); the 24576 image hangs at gc(12)/gc(15).  Do NOT read a
+  clean-wrong-value as "graceful" — if graceful is wanted, that's MICROPY_STACK_CHECK=1.
+
+### Verification (all green)
+- `build/mp-feature-4t.py` on real Victor: **byte-exact vs host python3** (filter/reversed/
+  count/%-format + comprehension/dict/str.format/slicing), clean D4/C5.
+- `build/mp-churn-scale2.py` on real Victor: churn(20..120) all correct (`120 7980`, `DONE`)
+  — the stack bump shifts every far-data segment; GC stays clean on the new layout (§4r's
+  CX-pin fix holding).
+- Gate `tools/test-dos.sh` **234/234** (no qbe/minic change, as expected).
+
+---
+
+# (DONE in §4u above) Next session (§4u — DESIGNATED by the user 2026-06-09: bump `MP_STACK_SIZE` 16384 → 24576 (build-micropython.sh default).  §4c picked 16384 ONLY because 24576 → body 828224 > the ~824416 load ceiling; §4t's per-function gc-sections (body 584320) removed that constraint entirely, and the user judged the bigger C stack "more clear day-to-day value than float" (deep GENERATOR recursion still C-recurses on resume — objgenerator.c mp_execute_bytecode — which STACKLESS does NOT cover; at 16384 `sum(gc(15))` returns a WRONG value 99 with a clean exit, §4c).  Plan below.  Float stays available-not-scheduled; heap is segment-bound (~60 KB max), not ceiling-bound.)
+
+## §4u plan (executed 2026-06-09, see notes above)
 - **Change:** `tools/build-micropython.sh` `MP_STACK_SIZE=${MP_STACK_SIZE:-16384}` → `24576`,
   and REWRITE the stale comment block above it (it still says "a bigger stack would push the
   image over the Victor load ceiling" with the §4c 820096/828224 numbers — that premise died

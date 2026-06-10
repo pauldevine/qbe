@@ -60,17 +60,23 @@ QBE="$QBE_DIR/qbe"
 DOS_DIR="$QBE_DIR/minic/dos"
 OUT_DIR="$QBE_DIR/build/mp-link"
 mkdir -p "$OUT_DIR"
-# Default DOS stack = 16384.  The dos8086 port runs the STACKLESS-strict VM
+# Default DOS stack = 24576.  The dos8086 port runs the STACKLESS-strict VM
 # (ports/dos8086/mpconfigport.h §4b): deep Python recursion chains code_state
-# frames on the GC heap instead of the C stack, so the C stack stays shallow.
-# A bigger stack would push the compact far-data image over the Victor load
-# ceiling (24576 → body 828224 > ~824416 "Program too big"); 16384 → body
-# 820096 loads with margin and gives recsum(30) a clean run.  8192 is too small
-# — deep GENERATOR recursion still C-recurses (mp_execute_bytecode on resume,
-# which STACKLESS does NOT cover) and overflows an 8 KB stack into DGROUP data,
-# corrupting it; 16384 degrades that case gracefully instead.  Override with
-# MP_STACK_SIZE for a larger-RAM target or a non-stackless build.
-MP_STACK_SIZE=${MP_STACK_SIZE:-16384}
+# frames on the GC heap instead of the C stack — but deep GENERATOR recursion
+# still C-recurses on resume (objgenerator.c → mp_execute_bytecode, which
+# STACKLESS does NOT cover), so the C stack is the depth limit for generator
+# chains.  §4c had to pick 16384 because 24576 pushed the 56KB-granularity
+# image over the ~824416 Victor load ceiling; §4t's per-function gc-sections
+# (body 584320) removed that constraint, and §4u bumped to 24576.  The cap is
+# now DGROUP, not the image: stack lives in DGROUP alongside ~37KB of near
+# data+bss, so 64KB − ~37KB ≈ 28.4KB is the absolute max (32768 fails to
+# link); 24576 keeps ~3.8KB DGROUP slack.  8192 is too small (generator
+# resume overflows into DGROUP data and corrupts it).  Override with
+# MP_STACK_SIZE for a different target or a non-stackless build.
+MP_STACK_SIZE=${MP_STACK_SIZE:-24576}
+# Vestigial under the current config: MICROPY_STACK_CHECK is OFF, so
+# mp_stack_set_limit() is a no-op macro (py/stackctrl.h).  Kept for builds
+# that turn the check on.
 MP_STACK_LIMIT=${MP_STACK_LIMIT:-8192}
 MP_HEAP_SIZE=${MP_HEAP_SIZE:-49152}
 MP_DOS_TINY_STACK_CHECK=${MP_DOS_TINY_STACK_CHECK:-0}
@@ -211,9 +217,9 @@ printf '%s\n' "${OBJS[@]}" > /tmp/mp_objs.txt
 # few <=64KB buckets, reclaiming the per-function paragraph padding (~5KB on the
 # core subset — see NEXT_SESSION.md §2p).  Safe because every code reference is
 # an offset-aware OMF fixup and near jumps stay intra-function.
-# The VM recurses through C frames for Python calls; 8KB corrupted the return
-# path at recsum(8) on Victor.  24KB is the largest tested setting with current
-# image size that still loads reliably (28KB reports "Program too big").
+# The VM recurses through C frames for generator resumes; 8KB corrupted the
+# return path at recsum(8) on Victor.  The stack cap is DGROUP (see the
+# MP_STACK_SIZE comment above), not image size.
 if "$QBE_DIR/tools/omf_link.py" \
 		-o "$OUT_DIR/mpython.exe" \
 		--map "$OUT_DIR/mpython.map" \
