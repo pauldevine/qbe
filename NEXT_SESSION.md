@@ -1,4 +1,31 @@
-# Next session (§4u — §4t was a TRIPLE win: (1) per-FUNCTION text segments (QBE_TEXT_SEG_BUDGET=1 in build-micropython.sh) let --gc-sections strip 4101 segments → MP code 703553→452461 (-251 KB, -36%), body 835888→584320 — **~240 KB of headroom under the ~824 KB Victor ceiling**; (2) that headroom funded the last four MINIMUM-ROM gaps: filter/reversed/str.count/str %-format are ON and Victor-verified; (3) the %-format bring-up flushed out + FIXED a REAL i8086 emit bug — the Osub Kw two-address rescue hardcoded BX as scratch, so to==BX compiled `right_pad -= p` to a NO-OP (mp_print_strn right-pad infinite loop, "%-5d" hang).  Gate 232→234.  THE HEADROOM REOPENS PARKED DECISIONS (user's call): float (§4a's "needs a code-size campaign" premise is GONE — FLOAT body was 882944 at 56 KB granularity, per-function stripping should bring it FAR under the ceiling), bigger MP_STACK_SIZE (24576 was rejected ONLY for size; deep-generator robustness), bigger heap (segment-bound, ~60 KB max).  Also open: (a) huge `_qbe_huge_add` ≥0x8000 gap; (b) §4p/§4q -DMP_DBG_* cleanup in the external tree; (c) 211-commit upstream rebase.)
+# Next session (§4u — DESIGNATED by the user 2026-06-09: bump `MP_STACK_SIZE` 16384 → 24576 (build-micropython.sh default).  §4c picked 16384 ONLY because 24576 → body 828224 > the ~824416 load ceiling; §4t's per-function gc-sections (body 584320) removed that constraint entirely, and the user judged the bigger C stack "more clear day-to-day value than float" (deep GENERATOR recursion still C-recurses on resume — objgenerator.c mp_execute_bytecode — which STACKLESS does NOT cover; at 16384 `sum(gc(15))` returns a WRONG value 99 with a clean exit, §4c).  Plan below.  Float stays available-not-scheduled; heap is segment-bound (~60 KB max), not ceiling-bound.)
+
+## §4u plan (do this first; gathered 2026-06-09 at end of §4t, not yet started)
+- **Change:** `tools/build-micropython.sh` `MP_STACK_SIZE=${MP_STACK_SIZE:-16384}` → `24576`,
+  and REWRITE the stale comment block above it (it still says "a bigger stack would push the
+  image over the Victor load ceiling" with the §4c 820096/828224 numbers — that premise died
+  with §4t's per-function stripping).  Expected body ≈ 584320 + 8192 ≈ 592.5 KB (§4c measured
+  the 16384→24576 delta as ~+8.1 KB) — vastly under the ~824 KB ceiling.
+- **Hard cap check (why 24576, not more):** stack lives in DGROUP; DGROUP data+bss is
+  **37118** in the §4t image, so 64 KB − 37118 ≈ 28.4 KB is the absolute max (32768 famously
+  fails to link, §4c).  24576 leaves ~3.8 KB DGROUP slack — keep it; do NOT chase 28K.
+- **`MP_STACK_LIMIT` (default 8192, sed-patched into main.c `mp_stack_set_limit`):** decide
+  whether to scale it with the stack (e.g. 16384) — read ports/dos8086/main.c to see what it
+  actually gates first (MICROPY_STACK_CHECK is OFF, so it may be vestigial).
+- **Victor verification:**
+  1. `build/mp-gen-probe.py` — the §4c generator-depth bisect; at 16384 the `sum(gc(15))`
+     case prints a WRONG value (99 instead of 120) with clean exit.  At 24576 expect 120; if
+     still wrong, find the new depth frontier (gc(N) sweep) and DOCUMENT it — the point of
+     the bump is moving the frontier, not magic.
+  2. `build/mp-feature-4t.py` — byte-exact vs host python3 (regression).
+  3. `VICTOR_SRC=build/mp-churn-scale2.py … 240` — churn(20..120) + DONE (GC regression;
+     the stack bump shifts every far-data segment, the §4o lesson says re-verify, though
+     §4r's fix made the old alignment sensitivity moot).
+- **Gate:** `tools/test-dos.sh` must stay 234/234 (no qbe/minic change expected — this is a
+  harness-default + external-tree-free change; only build-micropython.sh moves).
+- Commit at green per the milestone convention.
+
+# (§4t notes follow) §4t was a TRIPLE win: (1) per-FUNCTION text segments (QBE_TEXT_SEG_BUDGET=1 in build-micropython.sh) let --gc-sections strip 4101 segments → MP code 703553→452461 (-251 KB, -36%), body 835888→584320 — **~240 KB of headroom under the ~824 KB Victor ceiling**; (2) that headroom funded the last four MINIMUM-ROM gaps: filter/reversed/str.count/str %-format are ON and Victor-verified; (3) the %-format bring-up flushed out + FIXED a REAL i8086 emit bug — the Osub Kw two-address rescue hardcoded BX as scratch, so to==BX compiled `right_pad -= p` to a NO-OP (mp_print_strn right-pad infinite loop, "%-5d" hang).  Gate 232→234.  Other reopened-but-unscheduled: float (§4a's "needs a code-size campaign" premise is GONE — FLOAT body was 882944 at 56 KB granularity); bigger heap (segment-bound, ~60 KB max).  Also open: (a) huge `_qbe_huge_add` ≥0x8000 gap; (b) §4p/§4q -DMP_DBG_* cleanup in the external tree; (c) 211-commit upstream rebase.
 
 ## 2026-06-09 §4t notes (per-function gc-sections -251 KB; filter/reversed/str.count/%-format ON; Osub rescue-scratch fix)
 
