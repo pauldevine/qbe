@@ -49,7 +49,12 @@ loadsz(Ins *l)
 	case Oloadsb: case Oloadub: return 1;
 	case Oloadsh: case Oloaduh: return 2;
 	case Oloadsw: case Oloaduw: return T.wordsz;
-	case Oload: return KWIDE(l->cls) ? 2 * T.wordsz : T.wordsz;
+	case Oload:
+		/* Ks is IEEE single: always 4 bytes, even where the word size
+		 * is 2 (i8086) — mirror of the Ostores case in storesz. */
+		if (l->cls == Ks)
+			return 4;
+		return KWIDE(l->cls) ? 2 * T.wordsz : T.wordsz;
 	}
 	die("unreachable");
 }
@@ -95,9 +100,19 @@ cast(Ref *r, int cls, Loc *l)
 	if (cls0 == cls || (cls == Kw && cls0 == Kl))
 		return;
 	if (KWIDE(cls0) < KWIDE(cls)) {
-		if (cls0 == Ks)
-			*r = iins(Kw, Ocast, *r, R, l);
-		*r = iins(Kl, Oextuw, *r, R, l);
+		if (cls0 == Ks && T.wordsz == 2) {
+			/* i8086: Ks is already Kl-wide (32-bit, slot-resident
+			 * DX:AX pair); the Kw detour below is lossless only
+			 * when w is 4 bytes — here it would TRUNCATE the float
+			 * to its low 16 bits (§4x: medium-model decimal_exp
+			 * read inf out of a forwarded float store).  The i8086
+			 * Kl move block handles Ocast Ks<->Kl directly. */
+			*r = iins(Kl, Ocast, *r, R, l);
+		} else {
+			if (cls0 == Ks)
+				*r = iins(Kw, Ocast, *r, R, l);
+			*r = iins(Kl, Oextuw, *r, R, l);
+		}
 		if (cls == Kd)
 			*r = iins(Kd, Ocast, *r, R, l);
 	} else {

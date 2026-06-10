@@ -2839,13 +2839,20 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	if (INRANGE(i->op, Ocmps, Ocmps1)) {
 		int dst_in_ax_c = (rtype(i->to) == RTmp && i->to.val == RAX);
 		int dst_in_dx_c = (rtype(i->to) == RTmp && i->to.val == RDX);
+		/* CX is this handler's mapping scratch and is normally bracketed
+		 * unconditionally — but when rega assigns the compare RESULT to
+		 * CX, store_ax_to writes CX and a `pop cx` would overwrite it
+		 * with the stale pre-compare value (§4x: objfloat's modulo
+		 * sign-fix `(lhs<0) != (rhs<0)` read garbage and fired on
+		 * 7.5 % 2.0 -> 3.5; bool(0.0) -> True). */
+		int dst_in_cx_c = (rtype(i->to) == RTmp && i->to.val == RCX);
 		int save_ax_c = !dst_in_ax_c && g_live_ax_after;
 		int save_dx_c = !dst_in_dx_c && g_live_dx_after;
 		r0 = i->arg[0];
 		r1 = i->arg[1];
 
 		if (save_ax_c) fprintf(f, "\tpush ax\n");
-		fprintf(f, "\tpush cx\n");
+		if (!dst_in_cx_c) fprintf(f, "\tpush cx\n");
 		if (save_dx_c) fprintf(f, "\tpush dx\n");
 
 		emit_push_long(r1, fn, f);   /* b: higher address */
@@ -2901,7 +2908,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 
 		store_ax_to(i->to, fn, f);
 		if (save_dx_c) fprintf(f, "\tpop dx\n");
-		fprintf(f, "\tpop cx\n");
+		if (!dst_in_cx_c) fprintf(f, "\tpop cx\n");
 		if (save_ax_c) fprintf(f, "\tpop ax\n");
 		return;
 	}
@@ -3026,10 +3033,13 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		{
 		int dst_in_ax_t = (rtype(i->to) == RTmp && i->to.val == RAX);
 		int dst_in_dx_t = (rtype(i->to) == RTmp && i->to.val == RDX);
+		/* same CX-dest hazard as the Ocmps handler above (§4x): a Kw
+		 * result rega placed in CX must not be popped over. */
+		int dst_in_cx_t = (rtype(i->to) == RTmp && i->to.val == RCX);
 		int save_ax_t = !dst_in_ax_t && g_live_ax_after;
 		int save_dx_t = !dst_in_dx_t && g_live_dx_after;
 		if (save_ax_t) fprintf(f, "\tpush ax\n");
-		fprintf(f, "\tpush cx\n");
+		if (!dst_in_cx_t) fprintf(f, "\tpush cx\n");
 		if (save_dx_t) fprintf(f, "\tpush dx\n");
 
 		emit_push_long(r0, fn, f);   /* the Ks operand (slot) */
@@ -3056,7 +3066,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 
 		if (save_dx_t) fprintf(f, "\tpop dx\n");
-		fprintf(f, "\tpop cx\n");
+		if (!dst_in_cx_t) fprintf(f, "\tpop cx\n");
 		if (save_ax_t) fprintf(f, "\tpop ax\n");
 		}
 		return;
@@ -3074,10 +3084,17 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		r0 = i->arg[0];
 		if (i->cls == Ks || i->cls == Kw) {
 			if (rtype(r0) == RSlot && rtype(i->to) == RSlot) {
+				/* AX is scratch here and rega doesn't know (§4x:
+				 * dec_exp lived in AX across this cast; the clobber
+				 * fed -16624 into powf and decimal_exp returned inf).
+				 * Same bracket discipline as the Kl Ocopy path. */
+				int save_ax_bc = g_live_ax_after;
+				if (save_ax_bc) fprintf(f, "\tpush ax\n");
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn) + 2);
+				if (save_ax_bc) fprintf(f, "\tpop ax\n");
 			} else if (i->cls == Kw && rtype(r0) == RSlot && rtype(i->to) == RTmp) {
 				if (strcmp(rname[i->to.val], "ax") != 0)
 					fprintf(f, "\tmov %s, word [bp%+ld]\n", rname[i->to.val], (long)slot(r0, fn));

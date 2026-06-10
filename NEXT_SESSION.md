@@ -1,4 +1,125 @@
-# Next session (§4w is DONE 2026-06-10 — the generator frame diet LANDED via Kl/Ks stack-slot COLORING (user-designated track): `spill.c::colorklslots()` assigns the i8086 forced Kl/Ks slots by interference-graph coloring so disjoint live ranges SHARE slots, instead of one private 2-word slot per temp.  mp_execute_bytecode: 1261 Kl temps / 12 colors → frame 5464 → 472 bytes (11.6×); generator resume ~5772 → ~665 B/level; Victor frontier 8 → ~80 levels (75 clean, 85 = clean CAUGHT RuntimeError, sweep 4–30 all correct + DONE).  Bonus: MP body 632112 → 612048 (−20 KB; small frames re-enable 8-bit [bp-N] displacements).  Gate 236 → 238/238 (new kl_slot_color_probe medium+compact); make check green; feature-4t byte-exact; churn scale2 clean.  No designated successor — open tracks at the §4w notes' end.)
+# Next session (§4x is DONE 2026-06-10 — **MicroPython FLOAT is ON and Victor-verified** (user-designated track): `MICROPY_FLOAT_IMPL_FLOAT` flipped per the §4a recipe; body 650272 — the float delta is only **+38 KB** over §4w's 612048 at per-function gc-sections granularity (not §4a's 59 KB at 56 KB granularity), ~174 KB under the ~824 KB ceiling.  First-ever float EXECUTION (§4a only ever linked) flushed out FOUR real toolchain bugs, all fixed + gate-pinned: (1) **minic `coerce_arg` had no int↔float argument conversion** (C11 6.5.2.2p7) — parsenum.c's `powf(5, -dec_exp)` passed raw int words as binary32 denormals, sf_powf saw `powf(eps,eps)≈1.0`, so EVERY float literal mis-parsed (1.5→7.5) and mp_parse hung on Victor; fix = swtof/sltof int→float-param, stosi float→int-param (probe `float_arg_coerce_probe`).  (2) **i8086 Ocmps/Ostosi emit brackets pushed/popped CX unconditionally** — a compare/convert result rega placed in CX was popped over with stale garbage: objfloat's modulo sign-fix misfired (`7.5 % 2.0`→3.5) and `bool(0.0)`→True; fix = dst_in_cx skip, mirror of the AX/DX skips (probe `float_cmp_cx_probe`, verified bug-loud).  (3) **load.c forwarded a stored float through a `Kw` cast** — lossless when w=4B, a TRUNCATION on i8086 (w=2B): medium-model `mp_decimal_exp` read its float as 16 bits (+ `loadsz` claimed a Ks `Oload` is wordsz=2 bytes); fix = direct `cast Ks→Kl` when `T.wordsz==2` + `loadsz` Ks=4 (target-general, stock targets byte-identical).  (4) **i8086 soft-float `Ocast` slot→slot used AX as scratch with no liveness bracket** — clobbered a live `dec_exp` in AX → `powf(5, -16624)` → inf; fix = `g_live_ax_after` bracket, same discipline as the Kl Ocopy path.  Bugs 3+4 were caught by the GATE (the new probe's medium entry failed while compact passed — far-data routes around load-forwarding).  **Full 29-line float probe byte-exact vs host python3 on real Victor**; feature-4t byte-exact; churn scale2 + gen sweep clean; gate 238→242/242; make check green.  No designated successor — open tracks at the §4x notes' end.)
+
+## 2026-06-10 §4x notes (FLOAT flip: +38 KB, four real bugs — minic arg conversion, emit CX clobber, load.c Ks truncation, Ocast AX clobber)
+
+**§4x flipped `MICROPY_FLOAT_IMPL` → FLOAT (the §4a/§4t recipe) and the bring-up found the
+recipe itself was fine — what broke was code that had NEVER EXECUTED: §4a verified the LINK
+only.**  Sequence: flip → measure (fits easily) → first Victor run hung in mp_parse → bisect
+→ minic arg-conversion gap → fixed → 27/29 probe lines pass → two float-compare failures →
+backend CX clobber → fixed → 29/29 byte-exact → the GATE then failed the new probe's
+medium entry (compact passed) → load.c Ks-forwarding truncation + Ocast AX clobber → fixed
+→ gate green.
+
+### Bug 3 — load.c forwards a float store through a Kw cast (load.c, target-general)
+- Gate caught it: `float_arg_coerce_probe` medium FAILED its two `decimal_exp` lines with
+  `7f800000` (inf) while compact passed — far-data stores (`storefs`) are not load-forwarded,
+  so only MEDIUM exercises the forwarding path.  (Process note: the original "medium golden"
+  run had actually run the compact exe — medium and compact builds share
+  `build/examples/<name>/`, and the golden was captured after a compact rebuild.  The gate
+  rebuilds per entry and told the truth.)
+- `load.c::cast()` widens a forwarded Ks value to Kl via `cast Ks→Kw; extuw` — lossless
+  when w is 4 bytes, but on i8086 (w=2B) the Kw cast TRUNCATES the float to its low 16
+  bits: post-isel showed `%ld =w cast %t0; =l extuw` — sign+exponent gone.  Fix: when
+  `T.wordsz==2`, emit a direct `cast Ks→Kl` (both 32-bit; the §3q emit handles Ocast in
+  the Kl move block).  Also `loadsz()` claimed a Ks `Oload` is `T.wordsz` bytes (2 on
+  i8086) — now returns 4, the mirror of storesz's `Ostores` case.  Both changes are
+  byte-identical on stock targets (wordsz==4 ⇒ same values).
+### Bug 4 — i8086 soft-float Ocast slot→slot clobbers AX (i8086/emit.c)
+- With bug 3 fixed the IR was right but medium still returned inf.  Hand-trace found it:
+  the Ks-result `Ocast` slot→slot branch copies through AX with NO liveness bracket; rega
+  had `dec_exp` live in AX across it, so the @l7 negate computed `-(float bits)` = -16624
+  and `powf(5, -16624) = 0` → division → inf.  (The print-instrumented variant "worked" —
+  layout-sensitive, the §4q heisenbug class.)  Fix: `g_live_ax_after` push/pop bracket,
+  exactly the Kl Ocopy discipline.  Pre-existing since §3q — first exposed now because
+  float literals + union puns + live ints across casts only EXECUTE under FLOAT.
+- The probe's `dexp1`/`dexp2` lines pin both fixes under medium in the gate.
+
+### The flip (external micropython tree + genhdr)
+- `ports/dos8086/mpconfigport.h`: `MICROPY_FLOAT_IMPL_FLOAT` + `MICROPY_PY_BUILTINS_COMPLEX (0)`
+  + `MICROPY_FLOAT_USE_NATIVE_FLT16 (0)`; the dead "won't fit" comment block rewritten.
+- `ports/minimal/build/genhdr/qstrdefs.generated.h`: the two §4a QDEF0 appends
+  (`float` 17461/5, `__float__` 28725/9; djb2 hashes re-verified).
+- `MICROPY_FLOAT_FORMAT_IMPL` defaults to APPROX under IMPL_FLOAT, so `mp_large_float_t`
+  = float and the mantissa is uint32_t — no 64-bit anywhere.
+- **Size: body 612048 → 650272 (+38 KB), image 669408** (final, all four fixes in) —
+  per-function gc-sections strips the unused soft-libm/objfloat surface far better than
+  §4a's 56 KB-granularity 59 KB estimate.  ~174 KB headroom remains.
+
+### Bug 1 — minic `coerce_arg` int↔float argument conversion gap (minic/minic.y)
+- Victor run of ANY float literal hung between D1 and D2 (inside mp_parse).  Bisect:
+  the four medium-only soft-float suites (softfloat/softlibm/softtrig/double_float)
+  all pass **golden-exact under compact** in DOSBox → the `_sf_*` layer was innocent.
+- Standalone repro of py/parsenum.c's float path (`build/parsefloat_probe.c`, compact,
+  DOSBox 30-second loop): `mp_decimal_exp(15.0f, -1)` returned 7.5 — the
+  `res.f /= powf(5, -dec_exp)` was a NO-OP.  The SSA showed why:
+  `call $sf_powf(w 5, w %t46, ...)` — **integer args passed raw to float params**.
+  `coerce_arg` explicitly bailed on any float involvement ("a real conversion, not a
+  width fix"), so the callee read two denormals (~1e-44) and `powf(eps, eps) ≈ 1.0`.
+  Every float literal parsed to mantissa·2^dec_exp instead of mantissa·10^dec_exp;
+  the Victor hang was downstream of the same garbage (gone with the fix).
+- **Fix**: `coerce_arg` now implements C11 6.5.2.2p7 — int arg → float param emits
+  `swtof`/`sltof` (by arg KIND); float arg → int param emits `stosi` with the param's
+  result class (`l` for long — the §3z Ostosi-Kl path; `dtosi` FAILS QBE's typecheck
+  since no Kd exists on this target — first attempt taught that); float→float returns
+  unchanged.  Covers the direct (fnproto) AND indirect (fpproto) call paths — both go
+  through coerce_arg.
+- **Probe `float_arg_coerce_probe.c`** (medium + compact, --softfloat, one shared golden):
+  int Con/var/negative/long → float param; both arg positions mixed; float → int and
+  long params; powf(5,1)/powf(10,2); the exact parsenum decimal_exp dance; int→int
+  regression.  All values dyadic-exact, printed as IEEE bit patterns.
+
+### Bug 2 — i8086 Ocmps/Ostosi CX-dest clobber (i8086/emit.c)
+- With bug 1 fixed: 27/29 float-probe lines byte-exact on Victor, but `7.5 % 2.0` → 3.5
+  and `bool(0.0)` → True.  objfloat.c SSA was CORRECT (`clts/clts/cnew`); the generated
+  asm had the smoking gun: `mov cx, ax` (store_ax_to, dest=CX) immediately followed by
+  `pop cx` — the soft-float compare lowers to `call far _sf_cmp` at EMIT time with a
+  push/pop CX bracket that skipped AX and DX when they were the destination but pushed
+  CX UNCONDITIONALLY.  A compare result rega placed in CX was overwritten with the stale
+  pre-compare CX; `(lhs<0) != (rhs<0)` then compared against garbage and the sign-fix
+  `lhs += rhs` fired on positive operands (1.5+2.0=3.5).  Same hazard in Ostosi/Ostoui
+  (`mov cx, ax` via the generic reg-dest move, then `pop cx`).
+- **Fix**: `dst_in_cx` skip for the CX bracket in both handlers, the exact mirror of the
+  existing dst_in_ax/dst_in_dx skips.  (The Oswtof family stores to Ks slots — always
+  slot-resident — so it has no reg dest and is safe; the Kl compare family already used
+  kl_save_axdx which skips the dest.)
+- **Probe `float_cmp_cx_probe.c`** (medium + compact, --softfloat): the objfloat modulo
+  dance VERBATIM (fmodf + copysignf + the sign-fix compare) over 5 sign combinations,
+  the bool(0.0) shape, and a float→int convert pair.  **Verified bug-loud against the
+  unfixed emit**: m3 lost its sign-fix (1.5 vs -0.5), b0 printed garbage `12`, c0 798
+  vs 298.  Caveat pinned in the gate comment: rega-dependent trigger ⇒ green probe is
+  necessary-not-sufficient; the real guard is the dst_in_cx skip itself.
+
+### Verification (all green)
+- **Real Victor: `build/mp-float-probe.py` (29 lines) BYTE-EXACT vs host python3** —
+  add/sub/mul/div, true division (`1/2` = 0.5), floordiv (incl. negative), modulo, neg,
+  abs, pow (incl. negative exponent), float and mixed int/float comparisons, int()/float()
+  conversions, round (incl. ndigits), float() string parsing, literals (1e3/2.5e-1),
+  %-format width/precision, .format, inf/nan semantics, min/max/sum, list comprehension,
+  bool, dict float keys, user fn.  Values chosen dyadic-exact so host doubles print
+  identically.  Clean D4/C5.
+- Real Victor regressions on the shipping image: `mp-feature-4t.py` byte-exact;
+  `mp-churn-scale2.py` churn(20..120) all correct + DONE; `mp-gen-sweep.py` 4–30 all
+  correct + DONE (the §4w frontier unaffected).
+- Gate **238 → 242/242** (float_arg_coerce_probe + float_cmp_cx_probe, each
+  medium + compact); `make check` green.
+- DOSBox note: the 669 KB image no longer fits DOSBox's 640 KB — the fast loop for float
+  work is standalone compact probes (parsenum repro ran in 30-second cycles).
+
+### Open tracks (no §4y designated)
+- The four older soft-float suites (softfloat/softlibm/softtrig/double_float) are still
+  gated medium-only; they PASS under compact (verified this session, used as the bisect
+  baseline) — adding compact entries is cheap gate-thickening if wanted.
+- Latent minic note (§4v, NOT reduced): `jmp_buf bufs[6]` array-of-jmp_buf cross-frame
+  longjmp misbehaved; possibly the §2m array_vartyp stride family.  Reduce before trusting.
+- huge `_qbe_huge_add` ≥0x8000 gap (§4i); `-DMP_DBG_*` cleanup in the external tree;
+  211-commit upstream-qbe rebase.
+- Kw spill slots still never share (lazy `slot()` carve) — small frame lever, irrelevant
+  for MP.
+- `MP_STACK_LIMIT` headroom still 8192 (§4w note: could drop to ~2048 for ~9 more levels).
+
+---
+
+# (DONE in §4x above) Next session (§4w is DONE 2026-06-10 — the generator frame diet LANDED via Kl/Ks stack-slot COLORING (user-designated track): `spill.c::colorklslots()` assigns the i8086 forced Kl/Ks slots by interference-graph coloring so disjoint live ranges SHARE slots, instead of one private 2-word slot per temp.  mp_execute_bytecode: 1261 Kl temps / 12 colors → frame 5464 → 472 bytes (11.6×); generator resume ~5772 → ~665 B/level; Victor frontier 8 → ~80 levels (75 clean, 85 = clean CAUGHT RuntimeError, sweep 4–30 all correct + DONE).  Bonus: MP body 632112 → 612048 (−20 KB; small frames re-enable 8-bit [bp-N] displacements).  Gate 236 → 238/238 (new kl_slot_color_probe medium+compact); make check green; feature-4t byte-exact; churn scale2 clean.  No designated successor — open tracks at the §4w notes' end.)
 
 ## 2026-06-10 §4w notes (Kl/Ks slot coloring: the generator frame diet — one spill.c pass, 10× depth)
 

@@ -2647,26 +2647,51 @@ fnproto_find(char *name)
 }
 
 /* Coerce a call argument value `s' to the declared parameter type `ptyp'
- * (C11 6.5.2.2p4).  Only integer-scalar width mismatches are handled — the
- * case that shifts the stack-argument layout; pointer/float/aggregate
- * arguments keep their own type. */
+ * (C11 6.5.2.2p7).  Integer-scalar width mismatches are fixed (the case that
+ * shifts the stack-argument layout), and int<->float mismatches get the REAL
+ * C argument conversion; pointer and by-value aggregate arguments keep their
+ * own type. */
 static Symb
 coerce_arg(Symb s, unsigned ptyp)
 {
-	int arg_int, par_int;
 	char ac, pc;
 
-	/* Width-coerce any scalar arg whose IR class differs from the declared
-	 * param's: pointers/functions are integers at the IR level (`w' near,
-	 * `l' far), so an integer literal NULL/0 (always `w') handed to a far
-	 * pointer param must widen to `l' or the 2-byte push shifts every later
-	 * stack arg (the mp_arg_parse_all(0, NULL, ...) hang).  Only floats and
-	 * by-value aggregates are excluded (aggregates cross by pointer via
-	 * eval_arg/emit_arg; mixing float<->int here would be a real conversion,
-	 * not a width fix). */
-	arg_int = !ISFLOAT(s.ctyp) && !is_aggr(s.ctyp);
-	par_int = !ISFLOAT(ptyp) && !is_aggr(ptyp);
-	if (!arg_int || !par_int)
+	/* By-value aggregates cross by pointer via eval_arg/emit_arg. */
+	if (is_aggr(s.ctyp) || is_aggr(ptyp))
+		return s;
+	/* Integer argument to a prototyped FLOAT parameter: a real conversion,
+	 * not a width fix.  Without it the raw integer word lands in the
+	 * callee's binary32 slot and reads back as a denormal (~1e-44) — e.g.
+	 * parsenum.c's powf(5, -dec_exp) became powf(eps, eps) ~= 1.0, so the
+	 * decimal-exponent scaling of every MicroPython float literal was a
+	 * silent no-op (§4x). */
+	if (ISFLOAT(ptyp) && !ISFLOAT(s.ctyp)) {
+		fprintf(of, "\t%%t%d =%c %s ", tmp, irtyp_ret(ptyp),
+		    KIND(s.ctyp) == LNG ? "sltof" : "swtof");
+		psymb(s);
+		fprintf(of, "\n");
+		s.t = Tmp;
+		s.ctyp = ptyp;
+		s.u.n = tmp++;
+		return s;
+	}
+	/* Float argument to a prototyped INTEGER parameter.  The source is
+	 * always single-precision (Ks) on this target, so the op is stosi for
+	 * any integer dest width — a Kl result takes the full _sf_to_int DX:AX
+	 * (the §3z Ostosi-with-Kl-result path); dtosi would fail QBE's
+	 * typecheck (it wants a Kd operand, which never exists here). */
+	if (!ISFLOAT(ptyp) && ISFLOAT(s.ctyp)) {
+		fprintf(of, "\t%%t%d =%c %s ", tmp, irtyp_ret(ptyp),
+		    "stosi");
+		psymb(s);
+		fprintf(of, "\n");
+		s.t = Tmp;
+		s.ctyp = ptyp;
+		s.u.n = tmp++;
+		return s;
+	}
+	/* float -> float: single precision only on this target, nothing to fix. */
+	if (ISFLOAT(ptyp))
 		return s;
 	ac = irtyp_ret(s.ctyp);   /* 'w' or 'l' */
 	pc = irtyp_ret(ptyp);

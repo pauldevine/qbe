@@ -95,6 +95,22 @@ RUNTIME_TESTS=(
 	# one of these the curated MicroPython core links (objfloat **, parsenum
 	# 1eN, round(x,n)); exact integer-exponent fast path + exp2/log2 core.
 	"minic/dos/examples/softtrig_probe.c:minic/dos/tests/softtrig_probe.golden.txt:medium"
+	# Call-argument int<->float conversion (C11 6.5.2.2p7, §4x): an integer
+	# argument to a prototyped float param must convert (swtof/sltof), not
+	# pass its raw word as a binary32 denormal; float arg to int/long param
+	# converts via stosi.  MicroPython surface: parsenum.c mp_decimal_exp's
+	# powf(5, -dec_exp) was powf(eps, eps) ~= 1.0 — every float literal
+	# mis-parsed (1.5 -> 7.5).
+	"minic/dos/examples/float_arg_coerce_probe.c:minic/dos/tests/float_arg_coerce_probe.golden.txt:medium"
+	"minic/dos/examples/float_arg_coerce_probe.c:minic/dos/tests/float_arg_coerce_probe.golden.txt:compact"
+	# Soft-float compare/convert result in CX (§4x): the Ocmps/Ostosi emit
+	# brackets pushed/popped CX unconditionally, so a result rega placed in
+	# CX was popped over with stale garbage (objfloat.c modulo sign-fix fired
+	# on 7.5 % 2.0 -> 3.5; bool(0.0) -> True on Victor).  rega-dependent
+	# trigger: green probe is necessary-not-sufficient, the real guard is the
+	# dst_in_cx skip in i8086/emit.c.  Verified bug-loud vs the unfixed emit.
+	"minic/dos/examples/float_cmp_cx_probe.c:minic/dos/tests/float_cmp_cx_probe.golden.txt:medium"
+	"minic/dos/examples/float_cmp_cx_probe.c:minic/dos/tests/float_cmp_cx_probe.golden.txt:compact"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:compact"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:large"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:huge"
@@ -436,7 +452,7 @@ run_runtime_probe() {
 	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe|gc_bigheap_probe|gc_churn_probe) farstatic=1 ;; esac
 	# Soft-float probes link the single-precision soft-float helper library.
 	sfflag=""
-	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe) sfflag="--softfloat" ;; esac
+	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe|float_arg_coerce_probe|float_cmp_cx_probe) sfflag="--softfloat" ;; esac
 	# Split-stack probe builds with SS in its own segment (qbe -s +
 	# omf_link --separate-stack); its ok8 asserts stack seg != DGROUP seg.
 	ssflag=""
