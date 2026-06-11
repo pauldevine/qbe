@@ -1,4 +1,107 @@
-# Next session (§4y is DONE 2026-06-10 — **the emit-bracket audit is now a STANDING TOOL and it found + fixed the §1h two-div-one-call bug** (user-designated track).  New machinery: `QBE_EMIT_CHK=1` makes `i8086/emit.c` precede every emitted IR instruction with `; CHK <op> to=<dest> live=<regs>` carrying the EXACT post-rega GPR live-after set (per-function CFG fixpoint over {ax,cx,dx,bx,si,di}; ret blocks read AX/DX; the only implicit pair-use is the Kl `copy R1` call-result — `argcls` can NOT discriminate because `Km == Kl` lies about address operands on a 16-bit target), plus `; CHKT` terminator markers and a `cons=` cross-check of the §2w conservative tracker; off-mode output byte-identical.  `tools/check_emit_brackets.py` symbolically executes each marked region (symbolic regs, push/pop stack, tracked [bp+N] cells, calls clobber AX/CX/DX per ABI) and flags (a) any live non-dest GPR whose final value is not the entry value, (b) a register DEST that ends holding its entry value (the §4x pop-over-the-result shape), (c) ES/DS not entry-valued (DGROUP invariants), (d) a dropped/malformed Oswap exchange.  VALIDATED by reverting the §4x fixes: catches all three emit-side shapes (Ocmps/cnes/stosi CX-dest incl. in real objfloat divmod, Ocast AX).  `tools/run-emit-audit.sh` sweeps 107 MP TUs (compact) + every gate probe under its gate model (~440 asm, ~110k regions).  **THE FIND: Kw `Odiv`/`Orem`/`Oudiv`/`Ourem` clobber BOTH AX (dividend staging + quotient) and DX (cwd / xor + remainder) with NO liveness bracket** — the §1h "two divisions feeding one call corrupt the first result" found-not-fixed bug, 21 live-clobber sites in the shipping MP image (mp_format_mantissa = every float print, mp_map_lookup = every dict access, mp_lexer_to_next, gc, objint, ringbuf...).  Fixed with liveness-gated dest-skipped push/pop brackets (+ slot-dest result stores the old code silently lacked).  Probe `div_live_clobber_probe` (medium+compact, verified bug-loud: y=4 printed 3 unfixed); audit corpus CLEAN after fix; gate 242→244/244; make check green; MP body 650272→650352 (+80 B); Victor float probe + feature-4t byte-exact, churn scale2 + gen sweep clean.  No designated successor — open tracks at the §4y notes' end.)
+# Next session (§4z is DONE 2026-06-11 — **the GC heap is SPLIT and 2.3× bigger: MICROPY_GC_SPLIT_HEAP=1 + a second 65,024-byte area in its own far segment; total heap 49,152 + 65,024 = 114,176 bytes, Victor-verified byte-exact vs host python3** (user-designated track: "increase the heap size").  The flip itself was config + ~30 lines (mpconfigport `MICROPY_GC_SPLIT_HEAP (1)` + `MP_GC_HEAP2_SIZE (65024)`; new `ports/dos8086/gcheap2.c` holding `char mp_gc_heap2[...]` — its OWN TU because minic puts a TU's far BSS in one shared `<tu>_BSS` segment capped at 64 KB and main_BSS already holds heap[]+REPL buffers; main.c `gc_add()` after `gc_init()`; build-micropython.sh `MP_HEAP2_SIZE` knob + `-DMP_GC_HEAP2_SIZE` + PORT_SRCS).  py/gc.c's split-heap machinery is 8086-clean AS-IS (no qbe/emit change): uintptr_t is 32-bit under FAR_DATA, each area's pool lives inside ONE <64 KB segment so `gc_get_ptr_area`'s unsigned 32-bit far-pointer range compares are correct even against cross-segment garbage words, and BLOCK_FROM_PTR/PTR_FROM_BLOCK stay same-segment.  **THE BUG the bring-up found is a minic frontend hole: `extern char a[65024];` with a BARE-NUMBER dimension registered as a SCALAR** — the LR machine routes `IDENT [ NUM ]` through `ext_decllist`'s op-'B' node (kr_array_node), which the EXTERN list walkers didn't handle, so references LOADED the first byte instead of decaying to the address; `gc_add` received 0:0 and `gc_setup_area` zeroed the interrupt vector table (wedge between the C2/C3 boot markers).  A parenthesized dimension `[(65024)]` dodges it (reduces via the dedicated `'[' expr ']'` rule) — which is why this never bit before.  FIXED at 4 sites in minic.y: the file-scope `EXTERN type ext_decllist` walker, the function-local `dcls EXTERN type ext_decllist` walker, the file-scope non-extern multi-decl (`int a, b[10];` used to emit a WRONG-SIZE scalar global for b), and the dedicated sized-extern rule now records arraybytes so `sizeof` answers correctly.  Probe `extern_array_decay_probe.c` (medium + compact; bug-loud: unfixed minic dies "dereference of a non-pointer").  Gate **244→246/246**; `make check` green; grammar conflicts unchanged (action-only edits; baseline is 115 s/r — the "111" in older notes is stale).  Body 650,352 → **717,168** (+65,024 heap2 + ~1.8 KB split-heap gc code), ~107 KB under the ~824 KB ceiling.  **Victor: heap-split stress probe BYTE-EXACT vs host python3** (220×400 B = 88 KB live strings spilling deep into area 2, integrity-verified; 8 churn rounds across repeated MULTI-AREA collects; 120-string post-churn reallocation; graceful MemoryError-with-traceback verified at genuine exhaustion); feature-4t byte-exact; churn scale2 all correct + DONE; float probe byte-exact.  No designated successor — open tracks at the §4z notes' end.)
+
+## 2026-06-11 §4z notes (split GC heap: 114 KB total; the extern-array-decay minic hole; DOSBox fast loop rediscovered)
+
+**§4z executed the user-designated "increase the heap size" track via `MICROPY_GC_SPLIT_HEAP`,
+and the bring-up surfaced one real minic frontend bug plus two process lessons worth keeping.**
+
+### The change (external tree + build harness)
+- `ports/dos8086/mpconfigport.h`: `MICROPY_GC_SPLIT_HEAP (1)`; `MP_GC_HEAP2_SIZE` default
+  65024 (`#ifndef`-guarded so the build's `-D` wins).
+- **`ports/dos8086/gcheap2.c` (new TU)** — `char mp_gc_heap2[MP_GC_HEAP2_SIZE];`.  One TU per
+  extra area is the load-bearing trick: minic/asm_to_omf put a TU's far BSS in ONE shared
+  `<tu>_BSS` segment (≤64 KB), and main_BSS already carries heap[] 49152 + repl_hist 4096 +
+  repl_edit_saved 512.  The gc_add() reference from main.c keeps the segment alive under
+  --gc-sections.
+- `main.c`: `gc_add(mp_gc_heap2, mp_gc_heap2 + MP_GC_HEAP2_SIZE)` right after gc_init.
+- `tools/build-micropython.sh`: `MP_HEAP2_SIZE` env knob → `-DMP_GC_HEAP2_SIZE` (all TUs),
+  gcheap2.c in PORT_SRCS (108 TUs now).
+- **Why the split-heap gc.c needs NO backend work** (checked before flipping): uintptr_t =
+  unsigned long under FAR_DATA (stdint.h), so the `(uintptr_t)ptr & ~(BYTES_PER_BLOCK-1)`
+  masks keep the segment word; each area is one array inside one far segment, so per-area
+  pointer subtraction cancels segments exactly; `gc_get_ptr_area` bounds checks are §4s
+  `cult/cule` unsigned 32-bit compares, and a pointer with ANY other segment word falls
+  outside [S:lo, S:hi) because every pool spans <64 KB; the area struct that gc_add carves
+  from the start of the new region is reached through ordinary far loads/stores.
+- Sizes: body 650,352 → 717,168; total GC heap 114,176 (was 49,152).  DOS reports ~107 KB
+  of load-ceiling headroom remaining.
+
+### THE BUG — minic extern-array decay (minic/minic.y, 4 sites)
+- First Victor boot wedged between C2 and C3.  Bring-up markers (temporary gz_s/gz_h prints
+  in gc.c) showed `gc_add` receiving `start=0x00000018-0x18 = 0`, `end=0xFFFFFE00` (0 +
+  65024 sign-extended): **`mp_gc_heap2` evaluated to a LOADED BYTE, not an address** — the
+  area struct landed at 0:0 and gc_setup_area memset the IVT.
+- Root cause chain: `extern char a[65024];` (bare NUM dim) does NOT reduce through the
+  dedicated `EXTERN type IDENT '[' expr ']' ';'` rule — `IDENT '[' NUM ']'` is captured by
+  `ext_decl`/`ext_decllist` (the K&R multi-name machinery) as an op-'B' node from
+  kr_array_node, and BOTH extern list walkers handled only 'F'/'G'/'A'/'P': 'B' fell into
+  the scalar else-branch (`t = base`, isarray=0).  `[(65024)]` parses via the expr rule and
+  works — pure historical luck that every prior extern array in the tree had parens or no
+  size.
+- Fixes: (1) file-scope `EXTERN type ext_decllist ';'` — 'B' → IDIR + isarray=1 +
+  var_set_arraybytes; (2) same in the function-local `dcls EXTERN type ext_decllist ';'`;
+  (3) file-scope NON-extern multi-decl (`int a, b[10];`) — 'B' used to emit a one-element
+  zero block AND register a scalar (wrong size + no decay), now emits `z total` + arraybytes;
+  (4) the dedicated sized-extern rule now const_evals the dim into arraybytes so
+  `sizeof(extern_arr)` stops answering pointer-size.  Action-only edits — conflict count
+  unchanged (115 s/r baseline; the "111 s/r" in old notes is stale).
+- **Probe `extern_array_decay_probe.c`** (medium + compact): bare-NUM extern, parenthesized
+  extern, multi-name extern with sized array, function-local extern, `int ga, gb[10];`,
+  pointer-identity (`name == &name[0]`), sizeof×4.  Single-TU linkable: uses emit at main's
+  closing brace while symbols are still extern-state; real definitions follow at EOF
+  (varadd upgrades extern→definition).  Bug-loud vs unfixed minic: hard compile error.
+- Gate **244 → 246/246**; `make check` green.
+
+### Verification (all green, shipping image body 717,168)
+- **Victor `build/mp-heap-split-probe.py` BYTE-EXACT vs host python3**: 220 strings ×
+  400 B = 88 KB live (≫ area-1's 47.6 KB pool — deep area-2 occupancy), per-element
+  integrity, 8 churn rounds (each triggering multi-area collects observed via the
+  bring-up markers in earlier runs), 120-string reallocation after the drop, DONE.
+- Victor regressions: `mp-feature-4t.py` byte-exact; `mp-churn-scale2.py` 20..120 all
+  correct + DONE; `mp-float-probe.py` byte-exact.
+- Graceful exhaustion verified TWICE (DOSBox small config + Victor with an over-sized
+  200-string build): scan-fail → collect → rescan → `MemoryError: memory allocation
+  failed` with intact traceback and clean C5 exit — the gc returns NULL properly when
+  both areas are genuinely full/fragmented.
+
+### Process lessons (cost real wall-clock; keep)
+- **The "hang" after the first collect was 5 MHz 8088 SLOWNESS.**  The original probe
+  printed nothing between `tot` and `churn DONE`; 30 rounds × 50 string-builds exceeded
+  even a 700 s window, reading as a hang.  Phase markers showed every collect healthy.
+  Rule: Victor-bound probes MUST print progress per phase/round — silence is unreadable.
+- **DOSBox fast loop for SPLIT-HEAP work**: `MP_HEAP_SIZE=8192 MP_HEAP2_SIZE=12288
+  MP_STACK_SIZE=16384 tools/build-micropython.sh --model=compact` → ~600 KB image that
+  LOADS IN DOSBOX (PROG.PY goes next to the exe; run-dos-exe.sh mounts the exe dir).
+  Small areas exercise every split path (multi-area alloc, cross-area mark/sweep,
+  area-list walks, exhaustion) in 30-second cycles.  This proved the GC end-to-end while
+  the Victor runs were still ambiguous.
+- **My own debug counter hit a LIVE minic bug**: `size_t k, nf = 0;` declared inside the
+  per-area loop hoisted `nf = 0` to FUNCTION ENTRY (SSA: one `storew 0, %nf`), so nf
+  accumulated across areas and printed an impossible 1539-of-999.  This is the
+  [[minic-decl-init-hoisting]] class surviving in the MULTI-DECLARATOR form (`T a, b = X;`
+  inside a block) — the earlier fix covered the single-declarator stmt rule.  NOT fixed
+  this session (debug-only victim); reduced + documented as an open track.
+
+### Open tracks (no §5a designated)
+- **minic multi-declarator init hoisting** (NEW, from this session's debug code): `T a,
+  b = 0;` inside a block/loop body runs the init once at function entry, not per
+  iteration/at the decl point.  Single-declarator form was fixed long ago
+  ([[minic-decl-init-hoisting]]); the list form (`emit_local_multi_decl*`?) was not.
+  Reduce: `for(...){ size_t k, nf = 0; ... }` — nf keeps its prior value.
+- **Third GC area** if a consumer wants it: gcheap3.c clone (+~64 KB → body ~782 KB,
+  ~42 KB ceiling margin) — mechanical now; also heap1 could grow ~11 KB inside main_BSS.
+  GC pause cost grows with area count (gc_get_ptr_area walks the list per scanned word).
+- MicroPython `math` module (sqrtf + trig in softfloat.c, §4x recipe).
+- The four older soft-float suites still medium-only in the gate; they pass under compact
+  (§4x) — cheap thickening.
+- Upstream sync: 3 commits (`c081897..e786f06`).
+- Carried: `jmp_buf bufs[6]` latent minic note (§4v, unreduced); huge `_qbe_huge_add`
+  ≥0x8000 gap (§4i); `-DMP_DBG_*` cleanup in the external tree; Kw spill-slot sharing;
+  MP_STACK_LIMIT 8192→~2048 lever.
+
+---
+
+# (DONE in §4z above) Next session (§4y is DONE 2026-06-10 — **the emit-bracket audit is now a STANDING TOOL and it found + fixed the §1h two-div-one-call bug** (user-designated track).  New machinery: `QBE_EMIT_CHK=1` makes `i8086/emit.c` precede every emitted IR instruction with `; CHK <op> to=<dest> live=<regs>` carrying the EXACT post-rega GPR live-after set (per-function CFG fixpoint over {ax,cx,dx,bx,si,di}; ret blocks read AX/DX; the only implicit pair-use is the Kl `copy R1` call-result — `argcls` can NOT discriminate because `Km == Kl` lies about address operands on a 16-bit target), plus `; CHKT` terminator markers and a `cons=` cross-check of the §2w conservative tracker; off-mode output byte-identical.  `tools/check_emit_brackets.py` symbolically executes each marked region (symbolic regs, push/pop stack, tracked [bp+N] cells, calls clobber AX/CX/DX per ABI) and flags (a) any live non-dest GPR whose final value is not the entry value, (b) a register DEST that ends holding its entry value (the §4x pop-over-the-result shape), (c) ES/DS not entry-valued (DGROUP invariants), (d) a dropped/malformed Oswap exchange.  VALIDATED by reverting the §4x fixes: catches all three emit-side shapes (Ocmps/cnes/stosi CX-dest incl. in real objfloat divmod, Ocast AX).  `tools/run-emit-audit.sh` sweeps 107 MP TUs (compact) + every gate probe under its gate model (~440 asm, ~110k regions).  **THE FIND: Kw `Odiv`/`Orem`/`Oudiv`/`Ourem` clobber BOTH AX (dividend staging + quotient) and DX (cwd / xor + remainder) with NO liveness bracket** — the §1h "two divisions feeding one call corrupt the first result" found-not-fixed bug, 21 live-clobber sites in the shipping MP image (mp_format_mantissa = every float print, mp_map_lookup = every dict access, mp_lexer_to_next, gc, objint, ringbuf...).  Fixed with liveness-gated dest-skipped push/pop brackets (+ slot-dest result stores the old code silently lacked).  Probe `div_live_clobber_probe` (medium+compact, verified bug-loud: y=4 printed 3 unfixed); audit corpus CLEAN after fix; gate 242→244/244; make check green; MP body 650272→650352 (+80 B); Victor float probe + feature-4t byte-exact, churn scale2 + gen sweep clean.  No designated successor — open tracks at the §4y notes' end.)
 
 ## 2026-06-10 repo-state update (post-§4y housekeeping — PR #24 merged; two stale open-track notes corrected)
 

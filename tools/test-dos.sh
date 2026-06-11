@@ -111,6 +111,14 @@ RUNTIME_TESTS=(
 	# green probe is necessary-not-sufficient, the audit is the real guard.
 	"minic/dos/examples/div_live_clobber_probe.c:minic/dos/tests/div_live_clobber_probe.golden.txt:medium"
 	"minic/dos/examples/div_live_clobber_probe.c:minic/dos/tests/div_live_clobber_probe.golden.txt:compact"
+	# Extern/multi-decl sized-array declarators (§4z): a BARE-NUM dimension
+	# (extern char a[65024];) reduces through ext_decllist as an op-B node
+	# the EXTERN walkers treated as a SCALAR — references then LOADED the
+	# first byte instead of decaying to the address (MicroPython gc_add got
+	# seg 0:0 and zeroed the IVT).  Also pins the file-scope int a, b[10];
+	# op-B gap (wrong-size scalar global) and sizeof on sized extern arrays.
+	"minic/dos/examples/extern_array_decay_probe.c:minic/dos/tests/extern_array_decay_probe.golden.txt:medium"
+	"minic/dos/examples/extern_array_decay_probe.c:minic/dos/tests/extern_array_decay_probe.golden.txt:compact"
 	# Soft-float compare/convert result in CX (§4x): the Ocmps/Ostosi emit
 	# brackets pushed/popped CX unconditionally, so a result rega placed in
 	# CX was popped over with stale garbage (objfloat.c modulo sign-fix fired

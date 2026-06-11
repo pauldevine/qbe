@@ -6762,12 +6762,15 @@ externdcl: EXTERN type IDENT ';'
          | EXTERN type IDENT '[' expr ']' ';'
 {
 	/* Extern array with size - register as pointer.  The dimension may be
-	   any constant expression (e.g. `extern char buf[(32) + 1];`); the
-	   size is not needed for an extern (no storage is allocated here), so
-	   the folded value is discarded. */
+	   any constant expression (e.g. `extern char buf[(32) + 1];`); no
+	   storage is allocated here, but the total byte size is recorded so
+	   sizeof on the extern array answers correctly.  NOTE a bare-NUM
+	   dimension does NOT reduce here - it goes through ext_decllist as a
+	   B node (see the multi-name rule below). */
 	if ($2 == NIL)
 		die("invalid void extern array");
 	varaddextern($3->u.v, IDIR($2), 1);
+	var_set_arraybytes($3->u.v, SIZE($2) * const_eval($5));
 }
          | EXTERN STRUCT IDENT IDENT ';'
 {
@@ -6839,7 +6842,13 @@ externdcl: EXTERN type IDENT ';'
 			t = FUNC($2);
 		} else if (n->op == 'G') {
 			t = FUNC(IDIR($2));
-		} else if (n->op == 'A') {
+		} else if (n->op == 'A' || n->op == 'B') {
+			/* B = sized array declarator (the bare-NUM dimension form
+			 * reduces through ext_decl, NOT the dedicated rule above).
+			 * Before this branch existed it fell into the scalar else:
+			 * the symbol registered as a plain base-type scalar, so a
+			 * reference LOADED its first bytes instead of decaying to
+			 * the array address (gc_add got seg 0 and wrote the IVT). */
 			if ($2 == NIL)
 				die("invalid void extern array");
 			t = IDIR($2);
@@ -6852,7 +6861,9 @@ externdcl: EXTERN type IDENT ';'
 				die("invalid void extern declaration");
 			t = $2;
 		}
-		varaddextern(n->u.v, t, n->op == 'A' ? 1 : 0);
+		varaddextern(n->u.v, t, (n->op == 'A' || n->op == 'B') ? 1 : 0);
+		if (n->op == 'B')
+			var_set_arraybytes(n->u.v, SIZE($2) * n->l->u.n);
 	}
 }
          ;
@@ -7322,6 +7333,21 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 			strcpy(ini[nglo], buf);
 			strcpy(gloname[nglo], n->u.v);
 			varadd(n->u.v, nglo++, t, 1);
+		} else if (n->op == 'B') {
+			/* Sized array declarator in a multi-name file-scope decl,
+			 * e.g. int a, b 10 elements.  Emit a real zero block of the
+			 * full array size (the scalar else-branch used to emit one
+			 * element and register a scalar - wrong size AND no decay). */
+			int total = SIZE(parsed_type) * n->l->u.n;
+			t = IDIR(parsed_type);
+			if (nglo == NGlo)
+				die("too many globals");
+			sprintf(buf, "align %d { z %d }", iralign(parsed_type), total);
+			ini[nglo] = alloc(strlen(buf) + 1);
+			strcpy(ini[nglo], buf);
+			strcpy(gloname[nglo], n->u.v);
+			varadd(n->u.v, nglo++, t, 1);
+			var_set_arraybytes(n->u.v, total);
 		} else {
 			if (nglo == NGlo)
 				die("too many globals");
@@ -7916,11 +7942,13 @@ dcls:
 			t = FUNC($3);
 		else if (n->op == 'G')
 			t = FUNC(IDIR($3));
-		else if (n->op == 'A' || n->op == 'P')
+		else if (n->op == 'A' || n->op == 'B' || n->op == 'P')
 			t = IDIR($3);
 		else
 			t = $3;
-		varaddextern(n->u.v, t, n->op == 'A' ? 1 : 0);
+		varaddextern(n->u.v, t, (n->op == 'A' || n->op == 'B') ? 1 : 0);
+		if (n->op == 'B')
+			var_set_arraybytes(n->u.v, SIZE($3) * n->l->u.n);
 	}
 }
     | dcls type IDENT '[' expr ']' ';'
