@@ -1,0 +1,11 @@
+off_child=4
+off_child2=8
+sizeof_gcobj=12
+scan_obj ok
+off_outer_p=8
+scan_outer ok
+scan_arr ok
+off_small_b=1
+off_small_c=3
+sizeof_small=4
+readback ok

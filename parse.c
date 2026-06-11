@@ -1188,7 +1188,11 @@ parsedat(void cb(Dat *), Lnk *lnk)
 		case Tw: d.type = DW; break;
 		case Th: d.type = DH; break;
 		case Tb: d.type = DB; break;
-		case Ts: d.type = DW; break;
+		/* A single-precision float data item is 4 bytes.  On a normal
+		 * target DW is 4 bytes; on i8086 (wordsz==2) DW is the 2-byte
+		 * `int` width, so a float must use DL (the §ll `.long` = 4-byte
+		 * directive) to avoid truncation. */
+		case Ts: d.type = (T.wordsz == 2) ? DL : DW; break;
 		case Td: d.type = DL; break;
 		case Tz: d.type = DZ; break;
 		}
@@ -1462,8 +1466,12 @@ printfn(Fn *fn, FILE *f)
 		case Jrets:
 		case Jretd:
 		case Jretc:
+		case Jretfw:
+		case Jretfl:
+		case Jretf0:
 			fprintf(f, "\t%s", jtoa[b->jmp.type]);
-			if (b->jmp.type != Jret0 || !req(b->jmp.arg, R)) {
+			if ((b->jmp.type != Jret0 && b->jmp.type != Jretf0)
+			    || !req(b->jmp.arg, R)) {
 				fprintf(f, " ");
 				printref(b->jmp.arg, fn, f);
 			}

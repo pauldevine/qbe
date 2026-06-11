@@ -1,42 +1,62 @@
 #!/bin/bash
-# Build a single DOS example .EXE from minic/dos/examples/ (or any path).
+# Build a DOS example .EXE from minic/dos/examples/ (or any path).
 # Modeled on tools/build-int86x-probe.sh, parameterized by source file.
 #
-# Usage: tools/build-example.sh path/to/source.c
+# Usage: tools/build-example.sh path/to/source.c [path/to/extra.c ...]
 # Output: build/examples/<name>/<name>.exe
 
 set -eu
 
 MODEL="medium"
-SRC=""
+SOFTFLOAT=0
+SPLITSTACK=0
+SOURCES=()
 for arg in "$@"; do
 	case "$arg" in
 		--model=*) MODEL="${arg#--model=}" ;;
+		--softfloat) SOFTFLOAT=1 ;;
+		--split-stack) SPLITSTACK=1 ;;
 		-h|--help)
-			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] <source.c>" >&2
+			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] [--softfloat] [--split-stack] <source.c> [extra.c ...]" >&2
 			exit 0 ;;
 		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
-		*)
-			if [ -z "$SRC" ]; then SRC="$arg"
-			else echo "$0: extra argument: $arg" >&2; exit 2
-			fi ;;
+		*) SOURCES+=("$arg") ;;
 	esac
 done
 
-if [ -z "$SRC" ]; then
-	echo "usage: $0 [--model=<m>] <source.c>" >&2
+# --split-stack: SS gets its own segment (SS != DS).  Far-data models only:
+# qbe -s adds ss: overrides on register-indirect near derefs and omf_link
+# --separate-stack points the MZ header's SS at the STACK segment itself.
+QBE_SPLIT_FLAG=""
+LINK_SPLIT_FLAG=""
+if [ "$SPLITSTACK" = "1" ]; then
+	case "$MODEL" in
+		compact|large|huge) ;;
+		*) echo "$0: --split-stack requires --model=compact/large/huge" >&2; exit 2 ;;
+	esac
+	QBE_SPLIT_FLAG="-s"
+	LINK_SPLIT_FLAG="--separate-stack"
+fi
+
+if [ "${#SOURCES[@]}" -eq 0 ]; then
+	echo "usage: $0 [--model=<m>] <source.c> [extra.c ...]" >&2
 	exit 2
 fi
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-if [ ! -f "$SRC" ]; then
-	SRC="$QBE_DIR/$SRC"
-fi
-if [ ! -f "$SRC" ]; then
-	echo "$0: cannot find source file" >&2
-	exit 2
-fi
+for i in "${!SOURCES[@]}"; do
+	src="${SOURCES[$i]}"
+	if [ ! -f "$src" ]; then
+		src="$QBE_DIR/$src"
+	fi
+	if [ ! -f "$src" ]; then
+		echo "$0: cannot find source file: ${SOURCES[$i]}" >&2
+		exit 2
+	fi
+	SOURCES[$i]="$src"
+done
 
+SRC="${SOURCES[0]}"
 base="$(basename "$SRC" .c)"
 OUT_DIR="$QBE_DIR/build/examples/$base"
 MINIC="$QBE_DIR/minic/minic"
@@ -64,21 +84,29 @@ mkdir -p "$OUT_DIR"
 ERR="$OUT_DIR/build.err"
 : > "$ERR"
 
+# compile_unit <source.c> <base>: run stages 1-4 (cpp → minic → qbe → asm
+# normalize → OMF wrap → nasm) on one C translation unit, producing
+# "$OUT_DIR/<base>.obj".  Used for the main source and (with --softfloat) for
+# the soft-float helper library.
+compile_unit() {
+	local unit_src="$1" unit_base="$2"
+	local pp asm_clean prefix
+
 # Stage 1: C → preprocessed → SSA
-pp="$OUT_DIR/$base.pp.c"
+pp="$OUT_DIR/$unit_base.pp.c"
 cpp -P -nostdinc -isysroot/var/empty -DDOS -D__TURBOC__ \
-	"-I$INC_DIR" "-I$(dirname "$SRC")" \
-	"$SRC" 2>"$ERR" | tr -d '\r\032' | sed "$NORMALIZE_TYPES" > "$pp"
-"$MINIC" -m "$MODEL" < "$pp" > "$OUT_DIR/$base.ssa" 2>>"$ERR"
+	"-I$INC_DIR" "-I$(dirname "$unit_src")" \
+	"$unit_src" 2>>"$ERR" | tr -d '\r\032' | sed "$NORMALIZE_TYPES" > "$pp"
+"$MINIC" -m "$MODEL" < "$pp" > "$OUT_DIR/$unit_base.ssa" 2>>"$ERR"
 
 # Stage 2: SSA → ASM
-"$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$base.ssa" > "$OUT_DIR/$base.asm" 2>>"$ERR"
+"$QBE" -t i8086 -m "$MODEL" $QBE_SPLIT_FLAG "$OUT_DIR/$unit_base.ssa" > "$OUT_DIR/$unit_base.asm" 2>>"$ERR"
 
 # Stage 3: ASM normalize (same sed/awk/perl pipeline as build-int86x-probe.sh).
-prefix="${base}_"
-asm_clean="$OUT_DIR/$base.nasm.asm"
+prefix="${unit_base}_"
+asm_clean="$OUT_DIR/$unit_base.nasm.asm"
 grep -v -E '^\.(text|data|bss|balign|section|globl|type|size|local|file|ident|string|p2align|model|code)' \
-		"$OUT_DIR/$base.asm" \
+		"$OUT_DIR/$unit_base.asm" \
 	| sed -e 's/; TODO: 32-bit op [0-9]*/; XXX 32-bit op stub - codegen incomplete/' \
 	      -e 's/^[[:space:]]*\.ascii "\(.*\)"$/.nasm_str \1/' \
 	| awk '
@@ -149,10 +177,28 @@ FARSTATIC_FLAG=""
 if [ "${QBE_FAR_STATIC_DATA:-0}" = "1" ]; then
 	FARSTATIC_FLAG="--far-static-data"
 fi
-"$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" $FARSTATIC_FLAG "$base" \
-	"$OUT_DIR/$base.asm" "$OUT_DIR/$base.omf.asm" 2>>"$ERR"
-nasm -w-label-redef-late -f obj "$OUT_DIR/$base.omf.asm" \
-	-o "$OUT_DIR/$base.obj" 2>>"$ERR"
+"$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" $FARSTATIC_FLAG "$unit_base" \
+	"$OUT_DIR/$unit_base.asm" "$OUT_DIR/$unit_base.omf.asm" 2>>"$ERR"
+nasm -w-label-redef-late -f obj "$OUT_DIR/$unit_base.omf.asm" \
+	-o "$OUT_DIR/$unit_base.obj" 2>>"$ERR"
+}
+
+# Compile the requested translation units.  The first source controls the
+# output directory and executable basename; every source contributes one .obj.
+OBJ_FILES=()
+for unit_src in "${SOURCES[@]}"; do
+	unit_base="$(basename "$unit_src" .c)"
+	compile_unit "$unit_src" "$unit_base"
+	OBJ_FILES+=("$OUT_DIR/$unit_base.obj")
+done
+
+# Optionally compile the soft-float helper library (single-precision Ks ops are
+# lowered by the i8086 backend to `call far _sf_*`; this provides those symbols).
+LINK_OBJS=("${OBJ_FILES[@]}")
+if [ "$SOFTFLOAT" = "1" ]; then
+	compile_unit "$DOS_DIR/softfloat.c" softfloat
+	LINK_OBJS+=("$OUT_DIR/softfloat.obj")
+fi
 
 # Stage 5: crt0_exe.obj and libstub_exe.obj
 # Far-data models need crt0_exe to build argv as 4-byte far ptrs to
@@ -172,8 +218,9 @@ nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR"
 	--map "$OUT_DIR/$base.map" \
 	--entry _start \
 	--stack-size 8192 \
+	$LINK_SPLIT_FLAG \
 	"$OUT_DIR/crt0_exe.obj" \
-	"$OUT_DIR/$base.obj" \
+	"${LINK_OBJS[@]}" \
 	"$OUT_DIR/libstub_exe.obj" 2>>"$ERR"
 
 echo "  OK: $OUT_DIR/$base.exe ($(wc -c <"$OUT_DIR/$base.exe") bytes)"

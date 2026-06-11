@@ -24,11 +24,21 @@
 /* #define	TURBOC	*/	/* Use Borland Turbo C.  Otherwise, the code
 			 * uses Microsoft C.
 			 */
+/*
+ * Victor 9000/Sirius 1 MS-DOS 3.1 is not IBM PC compatible.  It has
+ * no INT 10h/INT 16h PC BIOS console services after DOS is running;
+ * console I/O goes through the Victor DOS console driver, which emulates
+ * Zenith/Heath Z-19/VT52-style escape sequences.
+ */
+#define	VICTOR9000
+
+#ifndef VICTOR9000
 #define	BIOS	/* Display uses the BIOS routines, rather than
-			 * depending on an ANSI driver.  More
-			 * self-contained, and supports colors and
-			 * the following param (only legal if BIOS defined).
-			 */
+		 * depending on an ANSI driver.  More self-contained,
+		 * and supports colors and the following param (only
+		 * legal if BIOS defined).
+		 */
+#endif
 #endif
 
 /*

@@ -1,0 +1,5 @@
+t1=00abcdef
+t2=00abcdef
+prod=00800020
+prod2=00123450
+sp=-15

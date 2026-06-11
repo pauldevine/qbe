@@ -76,59 +76,10 @@ static struct {
 	{ Oalloc8,  0, "; alloc8 (stack slot allocated in prologue)" },
 	{ Oalloc16, 0, "; alloc16 (stack slot allocated in prologue)" },
 
-	/* 8087 FPU operations - Single precision (float - 32-bit) */
-	{ Oload,   Ks, "fld dword %M0" },      /* Load float */
-	{ Ostores, Ks, "fstp dword %M1" },     /* Store float and pop */
-	{ Oadd,    Ks, "faddp" },              /* ST(0) += ST(1), pop */
-	{ Osub,    Ks, "fsubp" },              /* ST(0) -= ST(1), pop */
-	{ Omul,    Ks, "fmulp" },              /* ST(0) *= ST(1), pop */
-	{ Odiv,    Ks, "fdivp" },              /* ST(0) /= ST(1), pop */
-	{ Oneg,    Ks, "fchs" },               /* ST(0) = -ST(0) */
-
-	/* 8087 FPU operations - Double precision (double - 64-bit) */
-	{ Oload,   Kd, "fld qword %M0" },      /* Load double */
-	{ Ostored, Kd, "fstp qword %M1" },     /* Store double and pop */
-	{ Oadd,    Kd, "faddp" },              /* ST(0) += ST(1), pop */
-	{ Osub,    Kd, "fsubp" },              /* ST(0) -= ST(1), pop */
-	{ Omul,    Kd, "fmulp" },              /* ST(0) *= ST(1), pop */
-	{ Odiv,    Kd, "fdivp" },              /* ST(0) /= ST(1), pop */
-	{ Oneg,    Kd, "fchs" },               /* ST(0) = -ST(0) */
-
-	/* 8087 FPU type conversions and copy */
-	{ Ocopy,   Ks, "; fp copy (nop - already on FP stack)" },  /* FP copy is a nop for stack */
-	{ Ocopy,   Kd, "; fp copy (nop - already on FP stack)" },
-	{ Otruncd,  Ks, "; truncd: double to float (handled by load/store size)" },
-	{ Oexts,   Kd, "; exts: float to double (handled by load/store size)" },
-
-	/* 8087 int to float conversions */
-	{ Oswtof,  Ks, "fild word %M0" },     /* Load signed word, convert to float */
-	{ Oswtof,  Kd, "fild word %M0" },     /* Load signed word, convert to double */
-	{ Ouwtof,  Ks, "fild word %M0" },     /* Load unsigned word, convert to float */
-	{ Ouwtof,  Kd, "fild word %M0" },     /* Load unsigned word, convert to double */
-
-	/* 8087 float to int conversions */
-	{ Ostosi,  Kw, "fistp word %M1" },    /* Convert float to signed int, store and pop */
-	{ Ostoui,  Kw, "fistp word %M1" },    /* Convert float to unsigned int, store and pop */
-	{ Odtosi,  Kw, "fistp word %M1" },    /* Convert double to signed int, store and pop */
-	{ Odtoui,  Kw, "fistp word %M1" },    /* Convert double to unsigned int, store and pop */
-
-	/* 8087 FPU comparisons */
-	{ Oceqs,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsete %B=\n\tmovzx %=, %B=" },
-	{ Ocges,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsetae %B=\n\tmovzx %=, %B=" },
-	{ Ocgts,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tseta %B=\n\tmovzx %=, %B=" },
-	{ Ocles,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsetbe %B=\n\tmovzx %=, %B=" },
-	{ Oclts,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsetb %B=\n\tmovzx %=, %B=" },
-	{ Ocnes,   Ks, "fcompp\n\tfstsw ax\n\tsahf\n\tsetne %B=\n\tmovzx %=, %B=" },
-
-	{ Oceqd,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsete %B=\n\tmovzx %=, %B=" },
-	{ Ocged,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsetae %B=\n\tmovzx %=, %B=" },
-	{ Ocgtd,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tseta %B=\n\tmovzx %=, %B=" },
-	{ Ocled,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsetbe %B=\n\tmovzx %=, %B=" },
-	{ Ocltd,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsetb %B=\n\tmovzx %=, %B=" },
-	{ Ocned,   Kd, "fcompp\n\tfstsw ax\n\tsahf\n\tsetne %B=\n\tmovzx %=, %B=" },
-
-	/* 8087 type conversions */
-	/* Note: Conversions will be handled in isel.c through load/store operations */
+	/* Single-precision soft-float (Ks) and all double (Kd) operations are
+	 * lowered to _sf_* helper calls / die() in i8086_emitins below — the
+	 * target has no 8087, so there are NO floating-point op-table rows.
+	 * See [[softfloat-spike]]. */
 
 	{ NOp, 0, 0 }
 };
@@ -269,6 +220,35 @@ emit_shift_val(const char *reg, Ref r0, Fn *fn, FILE *f)
 		fprintf(f, "\tmov %s, word [bp%+ld]\n", reg, (long)slot(r0, fn));
 }
 
+/* Segment override for a register-indirect NEAR dereference.  Under
+ * `qbe -s` (split stack; far-data models only) the C stack lives in
+ * its own segment (SS != DS), and every register-held NEAR address is
+ * stack-derived — under far-data, globals are far-accessed and all C
+ * pointers are far Kl, so the only near addresses are isel's narrowed
+ * Oaddr-of-slot values — making the deref SS-relative.  [bp±N] (RSlot)
+ * is SS-relative by 8086 addressing default and [_sym] (RCon CAddr)
+ * stays DS (DGROUP global); neither takes a prefix. */
+static const char *
+near_seg(Ref r, Fn *fn)
+{
+	Mem *m;
+
+	if (!T.splitstack)
+		return "";
+	if (rtype(r) == RTmp)
+		return "ss:";
+	if (rtype(r) == RMem) {
+		m = &fn->mem[r.val];
+		if (m->offset.type == CAddr)
+			return "";	/* symbol-based: DGROUP global, DS */
+		if ((!req(m->base, R) && rtype(m->base) == RTmp)
+		    || (req(m->base, R) && !req(m->index, R)
+		        && rtype(m->index) == RTmp))
+			return "ss:";
+	}
+	return "";
+}
+
 /* Render just the memory operand text (no leading tab, no instruction
  * mnemonic) so callers can compose it into custom instruction sequences.
  * Mirrors the %M handler in emitf. */
@@ -277,7 +257,7 @@ emit_memref(Ref r, Fn *fn, FILE *f)
 {
 	Con *pc;
 	if (rtype(r) == RTmp)
-		fprintf(f, "[%s]", rname[r.val]);
+		fprintf(f, "[%s%s]", near_seg(r, fn), rname[r.val]);
 	else if (rtype(r) == RSlot)
 		fprintf(f, "[bp%+ld]", (long)slot(r, fn));
 	else if (rtype(r) == RCon) {
@@ -293,7 +273,7 @@ emit_memref(Ref r, Fn *fn, FILE *f)
 		int has_offset = (m->offset.type != CUndef);
 		int has_base = !req(m->base, R);
 		int has_index = !req(m->index, R);
-		fputc('[', f);
+		fprintf(f, "[%s", near_seg(r, fn));
 		if (has_base) {
 			if (rtype(m->base) == RTmp)
 				fprintf(f, "%s", rname[m->base.val]);
@@ -469,6 +449,169 @@ kl_restore_axdx(AxDxSave s, FILE *f)
 	if (s.save_ax) fprintf(f, "\tpop ax\n");
 }
 
+/* --- QBE_EMIT_CHK: emit-bracket audit markers (§4y) ---------------------
+ *
+ * The i8086 emit handlers synthesize multi-instruction sequences that use
+ * scratch registers rega knows nothing about; every one of them must either
+ * bracket the scratch with push/pop or prove it dead.  Getting that wrong is
+ * a recurring bug class (§2l Kl logops, §4r shift count, §4t Osub rescue,
+ * §4x Ocmps CX-dest + Ocast AX).  With QBE_EMIT_CHK=1 in the environment,
+ * every emitted IR instruction is preceded by a comment
+ *     ; CHK <op> to=<dest> live=<regs>
+ * carrying the EXACT set of GPRs live after the instruction (block-level
+ * CFG fixpoint + per-instruction backward walk over the post-rega IR), and
+ * every block terminator by `; CHKT <type> live=<regs>`.
+ * tools/check_emit_brackets.py symbolically executes each marked region and
+ * flags any live non-dest register whose value does not survive.  Output is
+ * byte-identical when the variable is unset. */
+
+#define CHK_ISGPR(v)  ((v) >= RAX && (v) <= RDI)
+#define CHK_BIT(v)    (1u << ((v) - RAX))
+
+static int chk_on = -1;            /* getenv("QBE_EMIT_CHK"), resolved once */
+static uint *chk_livein;           /* per-block live-in masks, by b->id */
+static uint chk_nblk;              /* capacity of chk_livein */
+
+/* Exact gen/kill transfer for one instruction (backward). */
+static uint
+chk_ins_live(Ins *i, Fn *fn, uint live)
+{
+	int a;
+	Ref r, bse, idx;
+
+	if (rtype(i->to) == RTmp && CHK_ISGPR(i->to.val))
+		live &= ~CHK_BIT(i->to.val);
+	if (iscall(i->op))
+		live &= ~(CHK_BIT(RAX) | CHK_BIT(RCX) | CHK_BIT(RDX));
+	for (a = 0; a < 2; a++) {
+		r = i->arg[a];
+		if (rtype(r) == RTmp && CHK_ISGPR(r.val))
+			live |= CHK_BIT(r.val);
+		else if (rtype(r) == RMem) {
+			bse = fn->mem[r.val].base;
+			idx = fn->mem[r.val].index;
+			if (rtype(bse) == RTmp && CHK_ISGPR(bse.val))
+				live |= CHK_BIT(bse.val);
+			if (rtype(idx) == RTmp && CHK_ISGPR(idx.val))
+				live |= CHK_BIT(idx.val);
+		}
+	}
+	/* Exact pair rule (NARROWER than compute_axdx_liveafter's blanket
+	 * "Kl touches AX/DX", which deliberately over-approximates uses to
+	 * keep save brackets in place — fine for gating, but it would
+	 * manufacture false live registers for the audit): the only implicit
+	 * register-pair READ is the Kl call-result copy `%t =l copy R1`,
+	 * whose high word travels in DX.  argcls() can NOT discriminate here
+	 * because Km == Kl, so a store/load ADDRESS operand in AX would also
+	 * read as "Kl arg" — on i8086 near-data an address is 16-bit and has
+	 * no DX half.  Handler-internal DX scratch writes are exactly what
+	 * the checker audits, so they must not be modeled as uses either. */
+	if (i->op == Ocopy && i->cls == Kl
+	 && rtype(i->arg[0]) == RTmp && i->arg[0].val == RAX)
+		live |= CHK_BIT(RDX);
+	return live;
+}
+
+/* Live-out of a block = union of successor live-ins; ret blocks read the
+ * return value registers (AX, and DX for wide/float returns). */
+static uint
+chk_blk_liveout(Blk *b)
+{
+	uint out = 0;
+
+	if (!b->s1 && !b->s2)
+		return CHK_BIT(RAX) | CHK_BIT(RDX);
+	if (b->s1)
+		out |= chk_livein[b->s1->id];
+	if (b->s2)
+		out |= chk_livein[b->s2->id];
+	return out;
+}
+
+/* Backward transfer over a whole block (terminator + instructions). */
+static uint
+chk_blk_livein(Blk *b, Fn *fn)
+{
+	uint live;
+	int n;
+
+	live = chk_blk_liveout(b);
+	if (b->jmp.type == Jjnz && rtype(b->jmp.arg) == RTmp
+	 && CHK_ISGPR(b->jmp.arg.val))
+		live |= CHK_BIT(b->jmp.arg.val);
+	for (n = b->nins - 1; n >= 0; n--)
+		live = chk_ins_live(&b->ins[n], fn, live);
+	return live;
+}
+
+static void
+chk_fixpoint(Fn *fn)
+{
+	Blk *b;
+	uint in;
+	int changed;
+
+	if (fn->nblk > chk_nblk) {
+		chk_nblk = fn->nblk;
+		chk_livein = realloc(chk_livein, chk_nblk * sizeof *chk_livein);
+		if (!chk_livein)
+			die("emit: out of memory for CHK liveness");
+	}
+	if (getenv("QBE_EMIT_CHK_DBG"))
+		for (b = fn->start; b; b = b->link)
+			fprintf(stderr, "CHKDBG blk %s id=%d nblk=%d s1=%s s2=%s\n",
+			    b->name, b->id, fn->nblk,
+			    b->s1 ? b->s1->name : "-",
+			    b->s2 ? b->s2->name : "-");
+	for (b = fn->start; b; b = b->link)
+		chk_livein[b->id] = 0;
+	do {
+		changed = 0;
+		for (b = fn->start; b; b = b->link) {
+			in = chk_blk_livein(b, fn);
+			if (in != chk_livein[b->id]) {
+				chk_livein[b->id] = in;
+				changed = 1;
+			}
+		}
+	} while (changed);
+}
+
+static void
+chk_print_live(uint live, FILE *f)
+{
+	static const char *nm[] = { "ax", "cx", "dx", "bx", "si", "di" };
+	int r, first = 1;
+
+	for (r = 0; r < 6; r++)
+		if (live & (1u << r)) {
+			fprintf(f, "%s%s", first ? "" : ",", nm[r]);
+			first = 0;
+		}
+	if (first)
+		fputc('-', f);
+}
+
+static void
+chk_mark_ins(Ins *i, Fn *fn, uint liveafter, FILE *f)
+{
+	fprintf(f, "\t; CHK %s cls=%d to=", optab[i->op].name, i->cls);
+	if (rtype(i->to) == RTmp && CHK_ISGPR(i->to.val))
+		fputs(rname[i->to.val], f);
+	else if (rtype(i->to) == RTmp)
+		fputs("R?", f);
+	else if (rtype(i->to) == RSlot)
+		fputs("slot", f);
+	else
+		fputc('-', f);
+	fputs(" live=", f);
+	chk_print_live(liveafter, f);
+	fprintf(f, " cons=%d%d%d", g_live_ax_after, g_live_dx_after,
+	    g_live_bx_after);
+	fputc('\n', f);
+	(void)fn;
+}
+
 /* When a Kl op uses AX/DX as scratch (Oadd/Osub/Omul), an arg that
  * rega placed in AX or DX is silently lost: `mov ax, r0` overwrites
  * a r1-in-AX; `xor dx, dx` zeros a r1-in-DX.  Subsequent references
@@ -515,6 +658,46 @@ static void
 kl_unstage_arg(ArgStage s, FILE *f)
 {
 	if (s.pushed) fprintf(f, "\tpop %s\n", s.scratch_reg);
+}
+
+/* Helpers for the Kl (32-bit) Omul handler's 32x32->32 multiply.
+ * The 8086 only has a 16x16->32 mul, so a 32-bit product's low 32 bits
+ * are formed from three 16-bit partials:
+ *   result = a_lo*b_lo + ((a_lo*b_hi + a_hi*b_lo) << 16)   (mod 2^32)
+ * Unsigned `mul` is used for every partial: the low 32 bits of a*b are
+ * identical for signed and unsigned operands, so summing unsigned
+ * partials over the FULL operand words is correct regardless of whether
+ * the operands were sign- or zero-extended.  (The old handler did a
+ * single 16x16 `imul` of the low words, which corrupted the high result
+ * word for a zero-extended operand whose low word had bit 15 set — e.g.
+ * (U32)0xCCCD * x — because imul sign-extended it.)
+ * Operands are RSlot or RCon only (spill.c force_kl_slot evicts every Kl
+ * temp to a slot, so an RTmp Kl operand cannot occur). */
+static void
+klmul_movax(Ref r, int hi, Fn *fn, FILE *f)
+{
+	int64_t v;
+	if (rtype(r) == RSlot)
+		fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r, fn) + (hi ? 2 : 0));
+	else if (rtype(r) == RCon) {
+		v = fn->con[r.val].bits.i;
+		fprintf(f, "\tmov ax, %d\n", (int)((hi ? (v >> 16) : v) & 0xFFFF));
+	} else
+		die("i8086: Omul Kl operand is not slot/const");
+}
+
+static void
+klmul_byword(Ref r, int hi, Fn *fn, FILE *f)
+{
+	int64_t v;
+	if (rtype(r) == RSlot)
+		fprintf(f, "\tmul word [bp%+ld]\n", (long)slot(r, fn) + (hi ? 2 : 0));
+	else if (rtype(r) == RCon) {
+		v = fn->con[r.val].bits.i;
+		fprintf(f, "\tmov bx, %d\n", (int)((hi ? (v >> 16) : v) & 0xFFFF));
+		fprintf(f, "\tmul bx\n");
+	} else
+		die("i8086: Omul Kl operand is not slot/const");
 }
 
 /* Emit a Kl RCon value into AX:DX.  CBits gets the literal split into
@@ -737,6 +920,49 @@ emit_push_long(Ref r, Fn *fn, FILE *f)
 	}
 }
 
+/* True when this exe model uses far code (so soft-float helpers, like the
+ * div32 helpers, are reached with `call far`). */
+static int
+sf_farcall(void)
+{
+	return T.memmodel == Mmedium || T.memmodel == Mcompact
+	    || T.memmodel == Mlarge  || T.memmodel == Mhuge;
+}
+
+/* Soft-float (no 8087): a binary op `to = a <helper> b` where the result is
+ * a 32-bit single-precision bit pattern stored to the Ks slot `to`.  Pushes
+ * the two 32-bit operands cdecl (a at the lower address), far-calls the
+ * libstub-style helper (result in DX:AX), and stores DX:AX to the slot.
+ * AX/CX/DX are caller-save and preserved around the call (AX/DX gated on
+ * liveness; the destination is always a slot so it never aliases them).
+ * Mirrors the _qbe_div32* sequence ([[softfloat-spike]]). */
+static void
+emit_sf_binop(const char *helper, Ref r0, Ref r1, Ref to, Fn *fn, FILE *f)
+{
+	int save_ax = g_live_ax_after;
+	int save_dx = g_live_dx_after;
+
+	if (rtype(to) != RSlot)
+		die("i8086: soft-float result must be slot-resident (op %s)", helper);
+
+	if (save_ax) fprintf(f, "\tpush ax\n");
+	fprintf(f, "\tpush cx\n");
+	if (save_dx) fprintf(f, "\tpush dx\n");
+
+	emit_push_long(r1, fn, f);   /* arg b: higher address */
+	emit_push_long(r0, fn, f);   /* arg a: lower address = first cdecl arg */
+
+	fprintf(f, "\tcall%s %s\n", sf_farcall() ? " far" : "", helper);
+	fprintf(f, "\tadd sp, 8\n");
+
+	fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(to, fn));
+	fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(to, fn) + 2);
+
+	if (save_dx) fprintf(f, "\tpop dx\n");
+	fprintf(f, "\tpop cx\n");
+	if (save_ax) fprintf(f, "\tpop ax\n");
+}
+
 /* Detect if a Ref-as-memory-operand uses AX/CX/DX as the base register.
  * 8086 only allows BX/BP/SI/DI as memory base.  Returns the offending
  * register (RAX/RCX/RDX) or 0 if no fixup is needed.
@@ -888,7 +1114,7 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 				int has_base = !req(m->base, R);
 				int has_index = !req(m->index, R);
 
-				fprintf(f, "word [");
+				fprintf(f, "word [%s", near_seg(r, fn));
 
 				/* Emit base register if present */
 				if (has_base) {
@@ -948,7 +1174,7 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 				int has_base = !req(m->base, R);
 				int has_index = !req(m->index, R);
 
-				fputc('[', f);
+				fprintf(f, "[%s", near_seg(r, fn));
 
 				/* Emit base register if present */
 				if (has_base) {
@@ -995,7 +1221,7 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 				}
 				break;
 			case RTmp:
-				fprintf(f, "[%s]", rname[r.val]);
+				fprintf(f, "[%s%s]", near_seg(r, fn), rname[r.val]);
 				break;
 			case RSlot:
 				offset = slot(r, fn);
@@ -1054,6 +1280,12 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		return;
 	}
+
+	/* A copy with no destination is an isel-inserted register-liveness
+	 * marker (selshift's CX clobber pin, same shape as amd64) — not a
+	 * real move.  Emit nothing. */
+	if (i->op == Ocopy && req(i->to, R))
+		return;
 
 	/* Special handling for shift operations.  8086 supports only
 	 *   shl/shr/sar reg, 1
@@ -1273,9 +1505,18 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	 * pointers in small/medium model).  Let it fall through to the
 	 * format-string `lea %=, %M0` template — rega allocates a single
 	 * register and the omap entry is `Ki` (matches both Kw and Kl). */
-	if ((i->cls == Kl && i->op != Oaddr && i->op != Oloadfl) || i->op == Ostorel
+	/* Single-precision soft-float (Ks) values are 32-bit bit patterns
+	 * carried exactly like Kl (slot-resident DX:AX pairs), so their
+	 * load / copy / store reuse the Kl 32-bit move handlers below
+	 * (Ostores shares the Ostorel case).  Their arithmetic, comparison,
+	 * and conversion are lowered to _sf_* helper calls further down
+	 * ([[softfloat-spike]]). */
+	if ((i->cls == Kl && i->op != Oaddr && i->op != Oloadfl
+	     && i->op != Ostosi && i->op != Ostoui) || i->op == Ostorel
 	    || i->op == Ovargp
-	    || INRANGE(i->op, Oceql, Ocultl)) {
+	    || INRANGE(i->op, Oceql, Ocultl)
+	    || (i->cls == Ks && (i->op == Oload || i->op == Ocopy))
+	    || i->op == Ostores) {
 		/*
 		 * 32-bit operations on 16-bit x86 require multi-instruction sequences.
 		 * 32-bit values are stored as two consecutive 16-bit words in memory
@@ -1438,56 +1679,116 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			}
 			return;
 
+		case Oaddfo:
+		case Osubfo:
+			/*
+			 * Far-pointer OFFSET add/sub: result = far_ptr ± offset,
+			 * with the 16-bit OFFSET word wrapping and the SEGMENT word
+			 * preserved (NO adc/sbb into the segment).  On 8086
+			 * compact/large a far pointer's segment is fixed per object
+			 * (objects <= 64 KB) and arithmetic stays in-segment, so
+			 * adding only arg1's low 16 bits to the offset is the correct
+			 * lowering — and is correct for BOTH a true large offset
+			 * (>= 0x8000, e.g. gc_alloc's start_block*16 on a >32 KB heap)
+			 * AND a 16-bit-wrapped "negative" size_t delta (off + 0xFFFF
+			 * -> off-1), which a flat 32-bit add of a sign- or
+			 * zero-extended index gets wrong in opposite directions.
+			 * See [[project-far-ptr-unsigned-index-bug]].
+			 *
+			 * arg1's HIGH word is deliberately ignored: that is exactly
+			 * the part that would (wrongly) carry into the segment.  AX/DX
+			 * are scratch (rega doesn't model the clobber, so bracket with
+			 * kl_save_axdx); stage an AX/DX-resident RTmp arg1 like Osub.
+			 */
+			{
+			const char *fopc = (i->op == Oaddfo) ? "add" : "sub";
+			int dst_in_dx_fo = (rtype(i->to) == RTmp && i->to.val == RDX);
+			ArgStage r1s = kl_stage_arg(r1, r0, i->to, f);
+			AxDxSave s_fo = kl_save_axdx(i->to, f);
+
+			/* Load the far pointer (arg0) into DX:AX (DX=segment, AX=offset). */
+			if (rtype(r0) == RSlot) {
+				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
+				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
+			} else if (rtype(r0) == RCon) {
+				load32_axdx_con(&fn->con[r0.val], f);
+			} else if (rtype(r0) == RTmp) {
+				if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+				fprintf(f, "\txor dx, dx\n");
+			}
+
+			/* Add/subtract ONLY arg1's low word to/from AX (the offset);
+			 * leave DX (the segment) untouched — no adc/sbb. */
+			if (rtype(r1) == RSlot) {
+				fprintf(f, "\t%s ax, word [bp%+ld]\n", fopc, (long)slot(r1, fn));
+			} else if (rtype(r1) == RCon) {
+				Con *pc = &fn->con[r1.val];
+				if (pc->type == CAddr)
+					die("i8086: addfo/subfo offset is an address — far-pointer index must be a plain integer");
+				fprintf(f, "\t%s ax, %d\n", fopc, (int)(pc->bits.i & 0xFFFF));
+			} else if (rtype(r1) == RTmp) {
+				const char *r1n = r1s.scratch_reg ? r1s.scratch_reg : rname[r1.val];
+				fprintf(f, "\t%s ax, %s\n", fopc, r1n);
+			}
+
+			/* Store result DX:AX (segment word unchanged). */
+			if (rtype(i->to) == RSlot) {
+				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
+			} else if (rtype(i->to) == RTmp) {
+				if (dst_in_dx_fo)
+					fprintf(f, "\tmov dx, ax\n");
+				else if (strcmp(rname[i->to.val], "ax") != 0)
+					fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
+			}
+
+			kl_restore_axdx(s_fo, f);
+			kl_unstage_arg(r1s, f);
+			}
+			return;
+
 		case Omul:
 			/*
-			 * 32-bit multiplication: dest = src0 * src1
-			 * imul writes DX:AX unconditionally; preserve AX/DX across.
+			 * 32-bit multiplication: dest = src0 * src1 (low 32 bits).
+			 * Proper 32x32->32 via three 16x16 unsigned partials (see
+			 * klmul_movax/klmul_byword).  CAddr is rejected: multiplying
+			 * a pointer is C-illegal, so it's unreachable from realistic
+			 * frontend output, and bits.i for a CAddr is only the addend
+			 * (segment lives in the relocation) — die() makes any such
+			 * bug loud rather than silently dropping the segment word.
+			 * mul writes DX:AX, and we use CX (plus BX for a const
+			 * multiplier) as scratch; rega models none of these, so
+			 * preserve AX/DX (kl_save_axdx) and push/pop CX (+BX).
 			 */
 			{
 			int dst_in_dx_mul = (rtype(i->to) == RTmp && i->to.val == RDX);
-			ArgStage r1s = kl_stage_arg(r1, r0, i->to, f);
-			AxDxSave s_mul = kl_save_axdx(i->to, f);
+			int need_bx = (rtype(r1) == RCon);
+			AxDxSave s_mul;
 
-			/* Load src0 low word to AX.  CAddr is rejected: multiplying
-			 * a pointer is C-illegal, so this path is unreachable from
-			 * realistic frontend output.  bits.i for a CAddr is just the
-			 * addend (segment lives in the relocation), so silently
-			 * accepting it would drop the seg word and produce wrong
-			 * results — die() makes the bug loud instead.  Same family
-			 * of CAddr-portability fixes as Oadd/Osub/Oand/Oor/Oxor/cmp/
-			 * push: see [[caddr-arith-portable]] and siblings. */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-			} else if (rtype(r0) == RCon) {
-				if (fn->con[r0.val].type == CAddr)
-					die("i8086: Omul Kl with CAddr arg0 — pointer multiplication is not a valid C operation");
-				int64_t val = fn->con[r0.val].bits.i;
-				fprintf(f, "\tmov ax, %d\n", (int)(val & 0xFFFF));
-			} else if (rtype(r0) == RTmp) {
-				{ if (strcmp(rname[r0.val], "ax") != 0) fprintf(f, "\tmov ax, %s\n", rname[r0.val]); }
-			}
+			if ((rtype(r0) == RCon && fn->con[r0.val].type == CAddr)
+			 || (rtype(r1) == RCon && fn->con[r1.val].type == CAddr))
+				die("i8086: Omul Kl with CAddr arg — pointer multiplication is not a valid C operation");
 
-			/* Multiply by src1 low word (result in DX:AX) */
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\timul word [bp%+ld]\n", (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				if (fn->con[r1.val].type == CAddr)
-					die("i8086: Omul Kl with CAddr arg1 — pointer multiplication is not a valid C operation");
-				int64_t val = fn->con[r1.val].bits.i;
-				/* Hoist the constant through BX with save/restore: BX may
-				 * hold a live SSA temp that rega doesn't expect us to
-				 * clobber.  Mirrors the Kw Omul const path (emit.c:3488)
-				 * and the same pattern used by Oadd/Osub Kl. */
-				fprintf(f, "\tpush bx\n");
-				fprintf(f, "\tmov bx, %d\n", (int)(val & 0xFFFF));
-				fprintf(f, "\timul bx\n");
-				fprintf(f, "\tpop bx\n");
-			} else if (rtype(r1) == RTmp) {
-				const char *r1n = r1s.scratch_reg ? r1s.scratch_reg : rname[r1.val];
-				fprintf(f, "\timul %s\n", r1n);
-			}
+			s_mul = kl_save_axdx(i->to, f);
+			fprintf(f, "\tpush cx\n");
+			if (need_bx) fprintf(f, "\tpush bx\n");
 
-			/* Store result */
+			/* cx = (a_hi*b_lo + a_lo*b_hi) low 16 — the high cross sum */
+			klmul_movax(r0, 1, fn, f);   /* ax = a_hi */
+			klmul_byword(r1, 0, fn, f);  /* dx:ax = a_hi*b_lo */
+			fprintf(f, "\tmov cx, ax\n");
+			klmul_movax(r0, 0, fn, f);   /* ax = a_lo */
+			klmul_byword(r1, 1, fn, f);  /* dx:ax = a_lo*b_hi */
+			fprintf(f, "\tadd cx, ax\n");
+			/* dx:ax = a_lo*b_lo (full low product) */
+			klmul_movax(r0, 0, fn, f);
+			klmul_byword(r1, 0, fn, f);
+			fprintf(f, "\tadd dx, cx\n");  /* result high word */
+
+			if (need_bx) fprintf(f, "\tpop bx\n");
+			fprintf(f, "\tpop cx\n");
+
+			/* Store result DX:AX */
 			if (rtype(i->to) == RSlot) {
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
@@ -1500,7 +1801,6 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			}
 
 			kl_restore_axdx(s_mul, f);
-			kl_unstage_arg(r1s, f);
 			}
 			return;
 
@@ -1817,6 +2117,15 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			}
 			return;
 
+		case Ocast:
+			/*
+			 * Bitwise reinterpret with a 32-bit (Kl) result.  On i8086
+			 * both Kl (long) and Ks (float) are 32 bits, so a float<->long
+			 * `cast` (e.g. produced when load-forwarding folds a union
+			 * pun) is just a 32-bit move — share the Ocopy path.  (A Ks
+			 * result `cast` doesn't enter this Kl block; it is handled in
+			 * the conversion switch below.)
+			 */
 		case Ocopy:
 			/*
 			 * 32-bit copy.
@@ -1990,11 +2299,13 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
 				}
 			} else if (rtype(r0) == RTmp) {
-				/* Load from address in register */
+				/* Load from address in register (split stack:
+				 * register-held near addresses are stack-derived,
+				 * so the deref takes an ss: override). */
 				if (strcmp(rname[r0.val], "bx") != 0)
 					fprintf(f, "\tmov bx, %s\n", rname[r0.val]);
-				fprintf(f, "\tmov ax, word [bx]\n");
-				fprintf(f, "\tmov dx, word [bx+2]\n");
+				fprintf(f, "\tmov ax, word [%sbx]\n", near_seg(r0, fn));
+				fprintf(f, "\tmov dx, word [%sbx+2]\n", near_seg(r0, fn));
 			} else if (rtype(r0) == RMem) {
 				/* Complex addressing mode */
 				Mem *m = &fn->mem[r0.val];
@@ -2002,11 +2313,11 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					if (strcmp(rname[m->base.val], "bx") != 0)
 						fprintf(f, "\tmov bx, %s\n", rname[m->base.val]);
 					if (m->offset.type == CBits) {
-						fprintf(f, "\tmov ax, word [bx+%"PRIi64"]\n", m->offset.bits.i);
-						fprintf(f, "\tmov dx, word [bx+%"PRIi64"]\n", m->offset.bits.i + 2);
+						fprintf(f, "\tmov ax, word [%sbx+%"PRIi64"]\n", near_seg(r0, fn), m->offset.bits.i);
+						fprintf(f, "\tmov dx, word [%sbx+%"PRIi64"]\n", near_seg(r0, fn), m->offset.bits.i + 2);
 					} else {
-						fprintf(f, "\tmov ax, word [bx]\n");
-						fprintf(f, "\tmov dx, word [bx+2]\n");
+						fprintf(f, "\tmov ax, word [%sbx]\n", near_seg(r0, fn));
+						fprintf(f, "\tmov dx, word [%sbx+2]\n", near_seg(r0, fn));
 					}
 				}
 			} else if (rtype(r0) == RCon) {
@@ -2048,6 +2359,7 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			}
 			return;
 
+		case Ostores:   /* soft-float store: 32-bit, same as Ostorel */
 		case Ostorel:
 			/*
 			 * 32-bit store to memory
@@ -2191,17 +2503,19 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(r1, fn));
 					fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(r1, fn) + 2);
 				} else if (rtype(r1) == RTmp) {
-					fprintf(f, "\tmov word [bx], ax\n");
-					fprintf(f, "\tmov word [bx+2], dx\n");
+					/* Split stack: register-held near dest addresses
+					 * are stack-derived — ss: override. */
+					fprintf(f, "\tmov word [%sbx], ax\n", near_seg(r1, fn));
+					fprintf(f, "\tmov word [%sbx+2], dx\n", near_seg(r1, fn));
 				} else if (rtype(r1) == RMem) {
 					Mem *m = &fn->mem[r1.val];
 					if (!req(m->base, R) && rtype(m->base) == RTmp) {
 						if (m->offset.type == CBits) {
-							fprintf(f, "\tmov word [bx+%"PRIi64"], ax\n", m->offset.bits.i);
-							fprintf(f, "\tmov word [bx+%"PRIi64"], dx\n", m->offset.bits.i + 2);
+							fprintf(f, "\tmov word [%sbx+%"PRIi64"], ax\n", near_seg(r1, fn), m->offset.bits.i);
+							fprintf(f, "\tmov word [%sbx+%"PRIi64"], dx\n", near_seg(r1, fn), m->offset.bits.i + 2);
 						} else {
-							fprintf(f, "\tmov word [bx], ax\n");
-							fprintf(f, "\tmov word [bx+2], dx\n");
+							fprintf(f, "\tmov word [%sbx], ax\n", near_seg(r1, fn));
+							fprintf(f, "\tmov word [%sbx+2], dx\n", near_seg(r1, fn));
 						}
 					}
 				} else if (rtype(r1) == RCon) {
@@ -2663,605 +2977,296 @@ emitins(Ins *i, Fn *fn, FILE *f)
 	}
 
 	/*
-	 * Special handling for 8087 FPU operations (Ks = float, Kd = double)
+	 * ===== Single-precision software floating point (no 8087) =====
 	 *
-	 * The 8087 uses a stack-based architecture with registers ST(0) through ST(7).
-	 * Operations typically work on ST(0) and ST(1), with results left on ST(0).
+	 * The Victor 9000 / target has no 8087, so Ks (single-precision,
+	 * IEEE-754 binary32) values are 32-bit bit patterns carried exactly
+	 * like Kl (slot-resident DX:AX pairs).  Their load / copy / store were
+	 * handled by the Kl 32-bit move handlers above; here we lower the
+	 * arithmetic, comparison, and conversion ops to far calls to the
+	 * libstub-style _sf_* helpers (built by minic from minic/dos/softfloat.c,
+	 * linked via build-example.sh --softfloat).  Each helper takes its
+	 * 32-bit arg(s) cdecl on the stack and returns a 32-bit result in DX:AX
+	 * (sf_cmp returns -1/0/1, or 2 for unordered/NaN, in AX).
 	 *
-	 * For binary operations (add, sub, mul, div):
-	 *   1. Load first operand -> ST(0)
-	 *   2. Load second operand -> ST(0), first becomes ST(1)
-	 *   3. Execute operation with pop (e.g., faddp) -> result in ST(0)
-	 *   4. Store result (fstp) -> pops ST(0) to memory
-	 *
-	 * Memory sizes:
-	 *   - Float (Ks): 4 bytes (dword)
-	 *   - Double (Kd): 8 bytes (qword)
+	 * Double precision (Kd) is NOT implemented — every double op dies loudly.
+	 * See [[softfloat-spike]].
 	 */
-	if (i->cls == Ks || i->cls == Kd) {
-		int isdbl = (i->cls == Kd);
-		char *szp = isdbl ? "qword" : "dword";  /* size prefix */
-		int sz = isdbl ? 8 : 4;  /* byte size */
 
+	/* (1) Float comparisons.  These carry result class Kw but compare Ks
+	 * operands, so they are detected by op-range (Ocmps..Ocmps1), not cls.
+	 * isel routes them here via selfp.  Lower to `call far _sf_cmp` then
+	 * map the -1/0/1/2 result to the op's boolean. */
+	if (INRANGE(i->op, Ocmpd, Ocmpd1))
+		die("i8086: double (Kd) compare not implemented — single-precision soft-float only");
+	if (INRANGE(i->op, Ocmps, Ocmps1)) {
+		int dst_in_ax_c = (rtype(i->to) == RTmp && i->to.val == RAX);
+		int dst_in_dx_c = (rtype(i->to) == RTmp && i->to.val == RDX);
+		/* CX is this handler's mapping scratch and is normally bracketed
+		 * unconditionally — but when rega assigns the compare RESULT to
+		 * CX, store_ax_to writes CX and a `pop cx` would overwrite it
+		 * with the stale pre-compare value (§4x: objfloat's modulo
+		 * sign-fix `(lhs<0) != (rhs<0)` read garbage and fired on
+		 * 7.5 % 2.0 -> 3.5; bool(0.0) -> True). */
+		int dst_in_cx_c = (rtype(i->to) == RTmp && i->to.val == RCX);
+		int save_ax_c = !dst_in_ax_c && g_live_ax_after;
+		int save_dx_c = !dst_in_dx_c && g_live_dx_after;
 		r0 = i->arg[0];
 		r1 = i->arg[1];
 
+		if (save_ax_c) fprintf(f, "\tpush ax\n");
+		if (!dst_in_cx_c) fprintf(f, "\tpush cx\n");
+		if (save_dx_c) fprintf(f, "\tpush dx\n");
+
+		emit_push_long(r1, fn, f);   /* b: higher address */
+		emit_push_long(r0, fn, f);   /* a: first cdecl arg */
+		fprintf(f, "\tcall%s _sf_cmp\n", sf_farcall() ? " far" : "");
+		fprintf(f, "\tadd sp, 8\n");
+
+		/* AX holds sf_cmp's signed result; move to CX (scratch, saved)
+		 * and build the 0/1 boolean in AX per the comparison op. */
+		fprintf(f, "\tmov cx, ax\n");
+		fprintf(f, "\txor ax, ax\n");
+		switch (i->op) {
+		case Oceqs:
+			fprintf(f, "\tcmp cx, 0\n\tjne .Lsfc_done_%p\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			break;
+		case Ocnes:
+			fprintf(f, "\tcmp cx, 0\n\tje .Lsfc_done_%p\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			break;
+		case Oclts:
+			fprintf(f, "\tcmp cx, 0\n\tjge .Lsfc_done_%p\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			break;
+		case Ocles:
+			fprintf(f, "\tcmp cx, 0\n\tjg .Lsfc_done_%p\n", (void*)i);
+			fprintf(f, "\tcmp cx, 2\n\tje .Lsfc_done_%p\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			break;
+		case Ocgts:
+			fprintf(f, "\tcmp cx, 1\n\tjne .Lsfc_done_%p\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			break;
+		case Ocges:
+			/* true iff cmp in {0,1} (ordered and a>=b); NaN(2) is false */
+			fprintf(f, "\tcmp cx, 0\n\tje .Lsfc_true_%p\n", (void*)i);
+			fprintf(f, "\tcmp cx, 1\n\tjne .Lsfc_done_%p\n", (void*)i);
+			fprintf(f, ".Lsfc_true_%p:\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			break;
+		case Ocos:   /* ordered: neither operand is NaN */
+			fprintf(f, "\tcmp cx, 2\n\tje .Lsfc_done_%p\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			break;
+		case Ocuos:  /* unordered: some operand is NaN */
+			fprintf(f, "\tcmp cx, 2\n\tjne .Lsfc_done_%p\n", (void*)i);
+			fprintf(f, "\tmov ax, 1\n");
+			break;
+		default:
+			die("i8086: unexpected soft-float compare op %d", i->op);
+		}
+		fprintf(f, ".Lsfc_done_%p:\n", (void*)i);
+
+		store_ax_to(i->to, fn, f);
+		if (save_dx_c) fprintf(f, "\tpop dx\n");
+		if (!dst_in_cx_c) fprintf(f, "\tpop cx\n");
+		if (save_ax_c) fprintf(f, "\tpop ax\n");
+		return;
+	}
+
+	/* (2) Ks arithmetic / negation.  (Ks load/copy/store already returned
+	 * via the Kl 32-bit handlers above.)  Kd value ops die.  Oloadfs (a Ks
+	 * far load) is excluded: it is a 32-bit far-pointer load, handled with
+	 * the other far ops in the main switch below (shares Oloadfl). */
+	if ((i->cls == Ks && i->op != Oloadfs) || i->cls == Kd) {
+		if (i->cls == Kd)
+			die("i8086: double (Kd) soft-float not implemented — single-precision only (op %d)", i->op);
+		r0 = i->arg[0];
+		r1 = i->arg[1];
 		switch (i->op) {
 		case Oadd:
+			emit_sf_binop("_sf_add", r0, r1, i->to, fn, f);
+			return;
 		case Osub:
+			emit_sf_binop("_sf_sub", r0, r1, i->to, fn, f);
+			return;
 		case Omul:
+			emit_sf_binop("_sf_mul", r0, r1, i->to, fn, f);
+			return;
 		case Odiv:
-			/*
-			 * Binary FP operation: result = arg0 op arg1
-			 * Load both operands, perform operation, store result
-			 */
-			/* Load first operand to ST(0) */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			} else if (rtype(r0) == RCon) {
-				/* FP constant - need to load from memory */
-				Con *c = &fn->con[r0.val];
-				if (c->type == CAddr) {
-					fprintf(f, "\tfld %s [", szp);
-					emitaddr(c, f);
-					fprintf(f, "]\n");
-				} else {
-					/* Integer constant treated as FP bits */
-					die("i8086: FP immediate arg0 unsupported (op %d) — minic should hoist FP literals to data segment", i->op);
-				}
-			}
-
-			/* Load second operand to ST(0), first becomes ST(1) */
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				Con *c = &fn->con[r1.val];
-				if (c->type == CAddr) {
-					fprintf(f, "\tfld %s [", szp);
-					emitaddr(c, f);
-					fprintf(f, "]\n");
-				} else {
-					die("i8086: FP immediate arg1 unsupported (op %d) — minic should hoist FP literals to data segment", i->op);
-				}
-			}
-
-			/* Perform operation: ST(1) op ST(0), pop, result in ST(0) */
-			switch (i->op) {
-			case Oadd:
-				fprintf(f, "\tfaddp st(1), st\n");
-				break;
-			case Osub:
-				/* fsubp: ST(1) - ST(0), pop */
-				fprintf(f, "\tfsubp st(1), st\n");
-				break;
-			case Omul:
-				fprintf(f, "\tfmulp st(1), st\n");
-				break;
-			case Odiv:
-				/* fdivp: ST(1) / ST(0), pop */
-				fprintf(f, "\tfdivp st(1), st\n");
-				break;
-			default:
-				break;
-			}
-
-			/* Store result from ST(0) to destination */
-			if (rtype(i->to) == RSlot) {
-				fprintf(f, "\tfstp %s [bp%+ld]\n", szp, (long)slot(i->to, fn));
-			}
+			emit_sf_binop("_sf_div", r0, r1, i->to, fn, f);
 			return;
-
 		case Oneg:
-			/*
-			 * Unary negation: result = -arg0
-			 * Load, change sign, store
-			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			}
-			fprintf(f, "\tfchs\n");
-			if (rtype(i->to) == RSlot) {
-				fprintf(f, "\tfstp %s [bp%+ld]\n", szp, (long)slot(i->to, fn));
-			}
-			return;
-
-		case Oload:
-			/*
-			 * Load FP value from memory to FP stack slot
-			 * In register-less mode, we store immediately to destination
-			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			} else if (rtype(r0) == RCon) {
-				Con *c = &fn->con[r0.val];
-				if (c->type == CAddr) {
-					fprintf(f, "\tfld %s [", szp);
-					emitaddr(c, f);
-					fprintf(f, "]\n");
-				}
-			}
-			/* Store to destination slot */
-			if (rtype(i->to) == RSlot) {
-				fprintf(f, "\tfstp %s [bp%+ld]\n", szp, (long)slot(i->to, fn));
+			/* Negate = flip the IEEE sign bit (bit 31 = bit 15 of the
+			 * high word).  Pure memory op, no helper, no AX/DX clobber
+			 * of any concern beyond the scratch we save. */
+			if (rtype(r0) != RSlot || rtype(i->to) != RSlot)
+				die("i8086: soft-float neg operands must be slot-resident");
+			{
+			int save_ax_n = g_live_ax_after;
+			if (save_ax_n) fprintf(f, "\tpush ax\n");
+			fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
+			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
+			fprintf(f, "\txor ax, 0x8000\n");
+			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn) + 2);
+			if (save_ax_n) fprintf(f, "\tpop ax\n");
 			}
 			return;
-
-		case Ostores:
-		case Ostored:
-			/*
-			 * Store FP value from arg0 to memory location in arg1
-			 */
-			/* Load source to FPU stack */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			} else if (rtype(r0) == RCon) {
-				Con *c = &fn->con[r0.val];
-				if (c->type == CAddr) {
-					fprintf(f, "\tfld %s [", szp);
-					emitaddr(c, f);
-					fprintf(f, "]\n");
-				} else {
-					/* Store FP constant bits directly */
-					die("i8086: store of FP immediate unsupported — minic should hoist FP literals to data segment");
-				}
-			}
-			/* Store to destination address */
-			if (rtype(r1) == RSlot) {
-				fprintf(f, "\tfstp %s [bp%+ld]\n", szp, (long)slot(r1, fn));
-			} else if (rtype(r1) == RCon) {
-				Con *c = &fn->con[r1.val];
-				if (c->type == CAddr) {
-					fprintf(f, "\tfstp %s [", szp);
-					emitaddr(c, f);
-					fprintf(f, "]\n");
-				}
-			}
-			return;
-
-		case Ocopy:
-			/*
-			 * Copy FP value from source to destination
-			 * Load from source, store to destination
-			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			} else if (rtype(r0) == RCon) {
-				Con *c = &fn->con[r0.val];
-				if (c->type == CAddr) {
-					fprintf(f, "\tfld %s [", szp);
-					emitaddr(c, f);
-					fprintf(f, "]\n");
-				} else if (c->type == CBits) {
-					/* FP constant encoded as bits - store to temp then load */
-					if (isdbl) {
-						int64_t bits = c->bits.i;
-						fprintf(f, "\tmov word [bp-2], %d\n", (int)(bits & 0xFFFF));
-						fprintf(f, "\tmov word [bp-4], %d\n", (int)((bits >> 16) & 0xFFFF));
-						fprintf(f, "\tmov word [bp-6], %d\n", (int)((bits >> 32) & 0xFFFF));
-						fprintf(f, "\tmov word [bp-8], %d\n", (int)((bits >> 48) & 0xFFFF));
-						fprintf(f, "\tfld qword [bp-8]\n");
-					} else {
-						int32_t bits = (int32_t)c->bits.i;
-						fprintf(f, "\tmov word [bp-2], %d\n", (int)(bits & 0xFFFF));
-						fprintf(f, "\tmov word [bp-4], %d\n", (int)((bits >> 16) & 0xFFFF));
-						fprintf(f, "\tfld dword [bp-4]\n");
-					}
-				}
-			}
-			if (rtype(i->to) == RSlot) {
-				fprintf(f, "\tfstp %s [bp%+ld]\n", szp, (long)slot(i->to, fn));
-			}
-			return;
-
 		case Oexts:
-			/*
-			 * Extend float to double: load as float, store as double
-			 * The 8087 internally uses 80-bit extended precision,
-			 * so conversion is implicit in load/store sizes
-			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tfld dword [bp%+ld]\n", (long)slot(r0, fn));
-			}
-			if (rtype(i->to) == RSlot) {
-				fprintf(f, "\tfstp qword [bp%+ld]\n", (long)slot(i->to, fn));
-			}
-			return;
-
 		case Otruncd:
-			/*
-			 * Truncate double to float: load as double, store as float
-			 */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tfld qword [bp%+ld]\n", (long)slot(r0, fn));
-			}
-			if (rtype(i->to) == RSlot) {
-				fprintf(f, "\tfstp dword [bp%+ld]\n", (long)slot(i->to, fn));
-			}
-			return;
-
-		/* FP comparisons - return integer result */
-		case Oceqs:
-		case Oceqd:
-			/*
-			 * Floating point equality comparison
-			 * Load both operands, compare, get flags, set result
-			 */
-			if (rtype(r0) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			if (rtype(r1) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r1, fn));
-
-			/* Compare ST(0) with ST(1) and pop both */
-			fprintf(f, "\tfcompp\n");
-			/* Transfer FPU status word to AX */
-			fprintf(f, "\tfstsw ax\n");
-			/* Transfer AH flags to CPU flags */
-			fprintf(f, "\tsahf\n");
-			/* Set result based on zero flag (equal) */
-			fprintf(f, "\tmov ax, 0\n");
-			fprintf(f, "\tje .Lceq_true_%p\n", (void*)i);
-			fprintf(f, "\tjmp .Lceq_done_%p\n", (void*)i);
-			fprintf(f, ".Lceq_true_%p:\n", (void*)i);
-			fprintf(f, "\tmov ax, 1\n");
-			fprintf(f, ".Lceq_done_%p:\n", (void*)i);
-
-			store_ax_to(i->to, fn, f);
-			return;
-
-		case Ocnes:
-		case Ocned:
-			/* Not equal */
-			if (rtype(r0) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			if (rtype(r1) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r1, fn));
-			fprintf(f, "\tfcompp\n");
-			fprintf(f, "\tfstsw ax\n");
-			fprintf(f, "\tsahf\n");
-			fprintf(f, "\tmov ax, 0\n");
-			fprintf(f, "\tjne .Lcne_true_%p\n", (void*)i);
-			fprintf(f, "\tjmp .Lcne_done_%p\n", (void*)i);
-			fprintf(f, ".Lcne_true_%p:\n", (void*)i);
-			fprintf(f, "\tmov ax, 1\n");
-			fprintf(f, ".Lcne_done_%p:\n", (void*)i);
-			store_ax_to(i->to, fn, f);
-			return;
-
-		case Ocgts:
-		case Ocgtd:
-			/* Greater than: ST(1) > ST(0) after loading arg0, arg1 */
-			if (rtype(r0) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			if (rtype(r1) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r1, fn));
-			fprintf(f, "\tfcompp\n");
-			fprintf(f, "\tfstsw ax\n");
-			fprintf(f, "\tsahf\n");
-			/* After fcompp with arg0, arg1: flags set for ST(1) vs ST(0) = arg0 vs arg1 */
-			fprintf(f, "\tmov ax, 0\n");
-			fprintf(f, "\tja .Lcgt_true_%p\n", (void*)i);  /* above = greater (unsigned compare of FP status) */
-			fprintf(f, "\tjmp .Lcgt_done_%p\n", (void*)i);
-			fprintf(f, ".Lcgt_true_%p:\n", (void*)i);
-			fprintf(f, "\tmov ax, 1\n");
-			fprintf(f, ".Lcgt_done_%p:\n", (void*)i);
-			store_ax_to(i->to, fn, f);
-			return;
-
-		case Ocges:
-		case Ocged:
-			/* Greater or equal */
-			if (rtype(r0) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			if (rtype(r1) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r1, fn));
-			fprintf(f, "\tfcompp\n");
-			fprintf(f, "\tfstsw ax\n");
-			fprintf(f, "\tsahf\n");
-			fprintf(f, "\tmov ax, 0\n");
-			fprintf(f, "\tjae .Lcge_true_%p\n", (void*)i);  /* above or equal */
-			fprintf(f, "\tjmp .Lcge_done_%p\n", (void*)i);
-			fprintf(f, ".Lcge_true_%p:\n", (void*)i);
-			fprintf(f, "\tmov ax, 1\n");
-			fprintf(f, ".Lcge_done_%p:\n", (void*)i);
-			store_ax_to(i->to, fn, f);
-			return;
-
-		case Oclts:
-		case Ocltd:
-			/* Less than */
-			if (rtype(r0) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			if (rtype(r1) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r1, fn));
-			fprintf(f, "\tfcompp\n");
-			fprintf(f, "\tfstsw ax\n");
-			fprintf(f, "\tsahf\n");
-			fprintf(f, "\tmov ax, 0\n");
-			fprintf(f, "\tjb .Lclt_true_%p\n", (void*)i);  /* below = less than */
-			fprintf(f, "\tjmp .Lclt_done_%p\n", (void*)i);
-			fprintf(f, ".Lclt_true_%p:\n", (void*)i);
-			fprintf(f, "\tmov ax, 1\n");
-			fprintf(f, ".Lclt_done_%p:\n", (void*)i);
-			store_ax_to(i->to, fn, f);
-			return;
-
-		case Ocles:
-		case Ocled:
-			/* Less or equal */
-			if (rtype(r0) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			if (rtype(r1) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r1, fn));
-			fprintf(f, "\tfcompp\n");
-			fprintf(f, "\tfstsw ax\n");
-			fprintf(f, "\tsahf\n");
-			fprintf(f, "\tmov ax, 0\n");
-			fprintf(f, "\tjbe .Lcle_true_%p\n", (void*)i);  /* below or equal */
-			fprintf(f, "\tjmp .Lcle_done_%p\n", (void*)i);
-			fprintf(f, ".Lcle_true_%p:\n", (void*)i);
-			fprintf(f, "\tmov ax, 1\n");
-			fprintf(f, ".Lcle_done_%p:\n", (void*)i);
-			store_ax_to(i->to, fn, f);
-			return;
-
-		case Ocos:
-		case Ocod:
-			/* Ordered (neither is NaN) */
-			if (rtype(r0) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			if (rtype(r1) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r1, fn));
-			fprintf(f, "\tfcompp\n");
-			fprintf(f, "\tfstsw ax\n");
-			fprintf(f, "\tsahf\n");
-			/* Parity flag is set if unordered (NaN) */
-			fprintf(f, "\tmov ax, 1\n");
-			fprintf(f, "\tjnp .Lcord_done_%p\n", (void*)i);  /* not parity = ordered */
-			fprintf(f, "\txor ax, ax\n");
-			fprintf(f, ".Lcord_done_%p:\n", (void*)i);
-			store_ax_to(i->to, fn, f);
-			return;
-
-		case Ocuos:
-		case Ocuod:
-			/* Unordered (at least one is NaN) */
-			if (rtype(r0) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r0, fn));
-			if (rtype(r1) == RSlot)
-				fprintf(f, "\tfld %s [bp%+ld]\n", szp, (long)slot(r1, fn));
-			fprintf(f, "\tfcompp\n");
-			fprintf(f, "\tfstsw ax\n");
-			fprintf(f, "\tsahf\n");
-			/* Parity flag is set if unordered (NaN) */
-			fprintf(f, "\tmov ax, 0\n");
-			fprintf(f, "\tjp .Lcuord_true_%p\n", (void*)i);  /* parity = unordered */
-			fprintf(f, "\tjmp .Lcuord_done_%p\n", (void*)i);
-			fprintf(f, ".Lcuord_true_%p:\n", (void*)i);
-			fprintf(f, "\tmov ax, 1\n");
-			fprintf(f, ".Lcuord_done_%p:\n", (void*)i);
-			store_ax_to(i->to, fn, f);
-			return;
-
-		default:
-			/* Fall through to check for int/float conversions or generic handling */
+			die("i8086: float<->double conversion not implemented — single-precision soft-float only");
+		case Oswtof:
+		case Ouwtof:
+		case Osltof:
+		case Oultof:
+		case Ocast:
+			/* int->float / bitcast: result class is Ks but the lowering
+			 * lives in the conversion switch below — fall through. */
 			break;
+		default:
+			die("i8086: unsupported soft-float (Ks) op %d", i->op);
 		}
 	}
 
 	/*
-	 * Integer to/from floating point conversions
-	 * These are handled separately because they cross between Ks/Kd and Kw/Kl classes
+	 * (3) Integer <-> floating point conversions.
+	 *   int -> float   : _sf_from_int (signed 32-bit -> Ks, result DX:AX)
+	 *   float -> int   : _sf_to_int   (Ks -> signed 32-bit, low word to Kw)
+	 * Double-precision conversions die.
 	 */
 	switch (i->op) {
-	case Oswtof:
-		/*
-		 * Signed word to float/double
-		 * fild loads a signed integer and converts to FP
-		 */
+	case Oswtof:   /* signed 16-bit -> float */
+	case Ouwtof:   /* unsigned 16-bit -> float */
+	case Osltof:   /* signed 32-bit -> float */
 		r0 = i->arg[0];
-		if (rtype(r0) == RSlot) {
-			fprintf(f, "\tfild word [bp%+ld]\n", (long)slot(r0, fn));
-		} else if (rtype(r0) == RTmp) {
-			/* Need to store register to temp location first */
-			fprintf(f, "\tpush %s\n", rname[r0.val]);
-			fprintf(f, "\tfild word [sp]\n");
-			fprintf(f, "\tadd sp, 2\n");
-		}
-		/* Store result based on destination class */
-		if (rtype(i->to) == RSlot) {
-			if (i->cls == Kd)
-				fprintf(f, "\tfstp qword [bp%+ld]\n", (long)slot(i->to, fn));
-			else
-				fprintf(f, "\tfstp dword [bp%+ld]\n", (long)slot(i->to, fn));
-		}
-		return;
+		if (i->cls == Kd)
+			die("i8086: int->double not implemented — single-precision soft-float only");
+		if (rtype(i->to) != RSlot)
+			die("i8086: soft-float conversion result must be slot-resident");
+		{
+		int save_ax_f = g_live_ax_after;
+		int save_dx_f = g_live_dx_after;
+		if (save_ax_f) fprintf(f, "\tpush ax\n");
+		fprintf(f, "\tpush cx\n");
+		if (save_dx_f) fprintf(f, "\tpush dx\n");
 
-	case Ouwtof:
-		/*
-		 * Unsigned word to float/double
-		 * 8087 only has signed integer loads, so we need to handle unsigned specially
-		 * For 16-bit unsigned, extend to 32-bit signed and load as dword
-		 */
-		r0 = i->arg[0];
-		if (rtype(r0) == RSlot) {
-			/* Load as word, zero-extend mentally (push 0 for high word) */
-			fprintf(f, "\tpush word ptr 0\n");
-			fprintf(f, "\tpush word [bp%+ld]\n", (long)slot(r0, fn));
-			fprintf(f, "\tfild dword [sp]\n");
-			fprintf(f, "\tadd sp, 4\n");
-		} else if (rtype(r0) == RTmp) {
-			fprintf(f, "\tpush word ptr 0\n");
-			fprintf(f, "\tpush %s\n", rname[r0.val]);
-			fprintf(f, "\tfild dword [sp]\n");
-			fprintf(f, "\tadd sp, 4\n");
-		}
-		if (rtype(i->to) == RSlot) {
-			if (i->cls == Kd)
-				fprintf(f, "\tfstp qword [bp%+ld]\n", (long)slot(i->to, fn));
+		/* Build the signed 32-bit argument in DX:AX (saved copies of the
+		 * caller's AX/DX are already on the stack, so AX/DX are free). */
+		if (i->op == Osltof) {
+			if (rtype(r0) == RSlot) {
+				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
+				fprintf(f, "\tmov dx, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
+			} else
+				die("i8086: sltof source must be slot-resident");
+		} else {
+			if (rtype(r0) == RSlot)
+				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
+			else if (rtype(r0) == RTmp) {
+				if (strcmp(rname[r0.val], "ax") != 0)
+					fprintf(f, "\tmov ax, %s\n", rname[r0.val]);
+			} else
+				die("i8086: wtof source must be slot or reg");
+			if (i->op == Oswtof)
+				fprintf(f, "\tcwd\n");          /* sign-extend AX -> DX:AX */
 			else
-				fprintf(f, "\tfstp dword [bp%+ld]\n", (long)slot(i->to, fn));
+				fprintf(f, "\txor dx, dx\n");   /* zero-extend (unsigned) */
 		}
-		return;
+		fprintf(f, "\tpush dx\n");
+		fprintf(f, "\tpush ax\n");
+		fprintf(f, "\tcall%s _sf_from_int\n", sf_farcall() ? " far" : "");
+		fprintf(f, "\tadd sp, 4\n");
+		fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+		fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
 
-	case Osltof:
-		/*
-		 * Signed long (32-bit) to float/double
-		 */
-		r0 = i->arg[0];
-		if (rtype(r0) == RSlot) {
-			fprintf(f, "\tfild dword [bp%+ld]\n", (long)slot(r0, fn));
-		}
-		if (rtype(i->to) == RSlot) {
-			if (i->cls == Kd)
-				fprintf(f, "\tfstp qword [bp%+ld]\n", (long)slot(i->to, fn));
-			else
-				fprintf(f, "\tfstp dword [bp%+ld]\n", (long)slot(i->to, fn));
+		if (save_dx_f) fprintf(f, "\tpop dx\n");
+		fprintf(f, "\tpop cx\n");
+		if (save_ax_f) fprintf(f, "\tpop ax\n");
 		}
 		return;
 
 	case Oultof:
-		/*
-		 * Unsigned long (32-bit) to float/double
-		 * Need to handle as 64-bit signed to avoid sign issues
-		 */
-		r0 = i->arg[0];
-		if (rtype(r0) == RSlot) {
-			/* Push 0 for high 32 bits, then the unsigned 32-bit value */
-			fprintf(f, "\tpush word ptr 0\n");
-			fprintf(f, "\tpush word ptr 0\n");
-			fprintf(f, "\tpush word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-			fprintf(f, "\tpush word [bp%+ld]\n", (long)slot(r0, fn));
-			fprintf(f, "\tfild qword [sp]\n");
-			fprintf(f, "\tadd sp, 8\n");
-		}
-		if (rtype(i->to) == RSlot) {
-			if (i->cls == Kd)
-				fprintf(f, "\tfstp qword [bp%+ld]\n", (long)slot(i->to, fn));
-			else
-				fprintf(f, "\tfstp dword [bp%+ld]\n", (long)slot(i->to, fn));
-		}
-		return;
+		die("i8086: unsigned-32->float not implemented (sf_from_int is signed) — single-precision soft-float only");
 
-	case Ostosi:
-		/*
-		 * Float to signed word
-		 * fistp stores and pops FP stack as integer
-		 */
+	case Ostosi:   /* float -> signed int (low word) */
+	case Ostoui:   /* float -> unsigned int (low word); truncation matches */
 		r0 = i->arg[0];
-		if (rtype(r0) == RSlot) {
-			fprintf(f, "\tfld dword [bp%+ld]\n", (long)slot(r0, fn));
+		{
+		int dst_in_ax_t = (rtype(i->to) == RTmp && i->to.val == RAX);
+		int dst_in_dx_t = (rtype(i->to) == RTmp && i->to.val == RDX);
+		/* same CX-dest hazard as the Ocmps handler above (§4x): a Kw
+		 * result rega placed in CX must not be popped over. */
+		int dst_in_cx_t = (rtype(i->to) == RTmp && i->to.val == RCX);
+		int save_ax_t = !dst_in_ax_t && g_live_ax_after;
+		int save_dx_t = !dst_in_dx_t && g_live_dx_after;
+		if (save_ax_t) fprintf(f, "\tpush ax\n");
+		if (!dst_in_cx_t) fprintf(f, "\tpush cx\n");
+		if (save_dx_t) fprintf(f, "\tpush dx\n");
+
+		emit_push_long(r0, fn, f);   /* the Ks operand (slot) */
+		fprintf(f, "\tcall%s _sf_to_int\n", sf_farcall() ? " far" : "");
+		fprintf(f, "\tadd sp, 4\n");
+
+		/* Result S32 in DX:AX.  A Kw destination takes the low word (AX);
+		 * a Kl destination (float -> 32-bit long, e.g. mp_float_hash's
+		 * (mp_int_t)val) takes the full DX:AX into its slot.  Move into dst
+		 * BEFORE restoring the overlapping caller-save. */
+		if (i->cls == Kl) {
+			/* Kl float->long results are slot-resident (Kl invariant). */
+			if (rtype(i->to) != RSlot)
+				die("i8086: stosi/stoui Kl result must be slot-resident");
+			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn) + 2);
+		} else if (rtype(i->to) == RSlot)
+			fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+		else if (rtype(i->to) == RTmp && !dst_in_ax_t) {
+			if (dst_in_dx_t)
+				fprintf(f, "\tmov dx, ax\n");
+			else
+				fprintf(f, "\tmov %s, ax\n", rname[i->to.val]);
 		}
-		if (rtype(i->to) == RSlot) {
-			fprintf(f, "\tfistp word [bp%+ld]\n", (long)slot(i->to, fn));
-		} else if (rtype(i->to) == RTmp) {
-			fprintf(f, "\tsub sp, 2\n");
-			fprintf(f, "\tfistp word [sp]\n");
-			fprintf(f, "\tpop %s\n", rname[i->to.val]);
+
+		if (save_dx_t) fprintf(f, "\tpop dx\n");
+		if (!dst_in_cx_t) fprintf(f, "\tpop cx\n");
+		if (save_ax_t) fprintf(f, "\tpop ax\n");
 		}
 		return;
 
 	case Odtosi:
-		/*
-		 * Double to signed word
-		 */
-		r0 = i->arg[0];
-		if (rtype(r0) == RSlot) {
-			fprintf(f, "\tfld qword [bp%+ld]\n", (long)slot(r0, fn));
-		}
-		if (rtype(i->to) == RSlot) {
-			fprintf(f, "\tfistp word [bp%+ld]\n", (long)slot(i->to, fn));
-		} else if (rtype(i->to) == RTmp) {
-			fprintf(f, "\tsub sp, 2\n");
-			fprintf(f, "\tfistp word [sp]\n");
-			fprintf(f, "\tpop %s\n", rname[i->to.val]);
-		}
-		return;
-
-	case Ostoui:
-		/*
-		 * Float to unsigned word
-		 * 8087 only has signed integer store, need to handle range
-		 * For simplicity, treat as signed (works for values < 32768)
-		 */
-		r0 = i->arg[0];
-		if (rtype(r0) == RSlot) {
-			fprintf(f, "\tfld dword [bp%+ld]\n", (long)slot(r0, fn));
-		}
-		/* Store as dword to handle full unsigned range, take low word */
-		fprintf(f, "\tsub sp, 4\n");
-		fprintf(f, "\tfistp dword [sp]\n");
-		if (rtype(i->to) == RSlot) {
-			fprintf(f, "\tpop word [bp%+ld]\n", (long)slot(i->to, fn));
-			fprintf(f, "\tadd sp, 2\n");
-		} else if (rtype(i->to) == RTmp) {
-			fprintf(f, "\tpop %s\n", rname[i->to.val]);
-			fprintf(f, "\tadd sp, 2\n");
-		}
-		return;
-
 	case Odtoui:
-		/*
-		 * Double to unsigned word
-		 */
-		r0 = i->arg[0];
-		if (rtype(r0) == RSlot) {
-			fprintf(f, "\tfld qword [bp%+ld]\n", (long)slot(r0, fn));
-		}
-		fprintf(f, "\tsub sp, 4\n");
-		fprintf(f, "\tfistp dword [sp]\n");
-		if (rtype(i->to) == RSlot) {
-			fprintf(f, "\tpop word [bp%+ld]\n", (long)slot(i->to, fn));
-			fprintf(f, "\tadd sp, 2\n");
-		} else if (rtype(i->to) == RTmp) {
-			fprintf(f, "\tpop %s\n", rname[i->to.val]);
-			fprintf(f, "\tadd sp, 2\n");
-		}
-		return;
+		die("i8086: double->int not implemented — single-precision soft-float only");
 
 	case Ocast:
 		/*
-		 * Bitwise cast between integer and floating point
-		 * For Kw->Ks or Ks->Kw: 32-bit reinterpret
-		 * For Kl->Kd or Kd->Kl: 64-bit reinterpret
+		 * Bitwise reinterpret between integer and single-precision float
+		 * (32-bit) — pure byte copy, no FPU.  Kd/Kl (64-bit) bitcasts are
+		 * unsupported (double).
 		 */
 		r0 = i->arg[0];
-		if (i->cls == Ks) {
-			/* Integer to float bitcast */
-			if (rtype(r0) == RSlot) {
-				/* Just copy the bytes */
+		if (i->cls == Ks || i->cls == Kw) {
+			if (rtype(r0) == RSlot && rtype(i->to) == RSlot) {
+				/* AX is scratch here and rega doesn't know (§4x:
+				 * dec_exp lived in AX across this cast; the clobber
+				 * fed -16624 into powf and decimal_exp returned inf).
+				 * Same bracket discipline as the Kl Ocopy path. */
+				int save_ax_bc = g_live_ax_after;
+				if (save_ax_bc) fprintf(f, "\tpush ax\n");
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
 				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
 				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn) + 2);
-			}
-		} else if (i->cls == Kd) {
-			/* Long to double bitcast */
-			if (rtype(r0) == RSlot && rtype(i->to) == RSlot) {
-				for (int j = 0; j < 4; j++) {
-					fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn) + j*2);
-					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn) + j*2);
-				}
-			}
-		} else if (i->cls == Kw) {
-			/* Float to integer bitcast */
-			if (rtype(r0) == RSlot) {
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
-				if (rtype(i->to) == RSlot)
-					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
-				else if (rtype(i->to) == RTmp)
-					{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
-				fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn) + 2);
-				if (rtype(i->to) == RSlot)
-					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn) + 2);
-			}
-		} else if (i->cls == Kl) {
-			/* Double to long bitcast */
-			if (rtype(r0) == RSlot && rtype(i->to) == RSlot) {
-				for (int j = 0; j < 4; j++) {
-					fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn) + j*2);
-					fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn) + j*2);
-				}
-			}
+				if (save_ax_bc) fprintf(f, "\tpop ax\n");
+			} else if (i->cls == Kw && rtype(r0) == RSlot && rtype(i->to) == RTmp) {
+				if (strcmp(rname[i->to.val], "ax") != 0)
+					fprintf(f, "\tmov %s, word [bp%+ld]\n", rname[i->to.val], (long)slot(r0, fn));
+				else
+					fprintf(f, "\tmov ax, word [bp%+ld]\n", (long)slot(r0, fn));
+			} else
+				die("i8086: unsupported soft-float bitcast operand shape");
+		} else {
+			die("i8086: double (Kd/Kl) bitcast not implemented — single-precision soft-float only");
 		}
 		return;
 	}
@@ -3386,6 +3391,14 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		return;
 
+	case Oloadfs:
+		/*
+		 * Load single-precision float (Ks) through a far pointer.  A Ks
+		 * value is a 32-bit IEEE bit pattern, carried exactly like Kl
+		 * (slot-resident DX:AX pair), so share the Oloadfl handler — the
+		 * load is class-agnostic 32 bits.  See [[storefar-lacks-storefl]]
+		 * extended to Ks ([[softfloat-spike]]).
+		 */
 	case Oloadfl:
 		/*
 		 * Load 32-bit long through far pointer.
@@ -3551,6 +3564,13 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		}
 		return;
 
+	case Ostorefs:
+		/*
+		 * Store single-precision float (Ks) through a far pointer.  A Ks
+		 * value is a 32-bit IEEE bit pattern, written exactly like Kl, so
+		 * share the Ostorefl handler — the store is class-agnostic 32 bits.
+		 * See [[storefar-lacks-storefl]] extended to Ks ([[softfloat-spike]]).
+		 */
 	case Ostorefl:
 		/*
 		 * Store 32-bit long through far pointer.
@@ -3711,9 +3731,23 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * cwd              ; sign-extend AX into DX:AX
 		 * idiv divisor
 		 * ; quotient in AX, remainder in DX
-		 */
+		 *
+		 * AX and DX are BOTH implicitly clobbered (dividend staging /
+		 * cwd / quotient+remainder) and rega doesn't model that — a
+		 * live temp parked in either was silently destroyed (the §1h
+		 * found-not-fixed two-div-one-call bug; §4y checker found 21
+		 * sites in the MP image, e.g. mp_format_mantissa and
+		 * mp_map_lookup).  Bracket them, liveness-gated, dest-skipped
+		 * — same discipline as the Kl div helper-call path above. */
+		int dst_in_ax_dv = (rtype(i->to) == RTmp && i->to.val == RAX);
+		int dst_in_dx_dv = (rtype(i->to) == RTmp && i->to.val == RDX);
+		int save_ax_dv = !dst_in_ax_dv && g_live_ax_after;
+		int save_dx_dv = !dst_in_dx_dv && g_live_dx_after;
 		r0 = i->arg[0]; /* dividend */
 		r1 = i->arg[1]; /* divisor */
+
+		if (save_ax_dv) fprintf(f, "\tpush ax\n");
+		if (save_dx_dv) fprintf(f, "\tpush dx\n");
 
 		/* HAZARD: idiv/div implicitly use DX:AX as the dividend, so a divisor
 		 * that rega placed in AX or DX is destroyed by the `mov ax, dividend`
@@ -3742,52 +3776,52 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tcwd\n");
 			fprintf(f, "\tidiv bx\n");
 			fprintf(f, "\tpop bx\n");
-			if (i->op == Odiv) {
-				if (rtype(i->to) == RTmp && i->to.val != RAX)
-					{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
-			} else {
-				if (rtype(i->to) == RTmp)
-					fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
+		} else {
+			/* Move dividend to AX if not already there */
+			if (rtype(r0) != RTmp || r0.val != RAX) {
+				fprintf(f, "\tmov ax, ");
+				if (rtype(r0) == RTmp)
+					fprintf(f, "%s\n", rname[r0.val]);
+				else if (rtype(r0) == RCon)
+					fprintf(f, "%"PRIi64"\n", fn->con[r0.val].bits.i);
+				else
+					fprintf(f, "?\n");
 			}
-			return;
+
+			/* Sign-extend AX into DX:AX */
+			fprintf(f, "\tcwd\n");
+
+			/* Perform signed division.  8086 idiv requires a reg/mem operand;
+			 * an immediate is illegal.  Hoist constant divisors through BX. */
+			if (rtype(r1) == RTmp)
+				fprintf(f, "\tidiv %s\n", rname[r1.val]);
+			else if (rtype(r1) == RCon) {
+				fprintf(f, "\tpush bx\n");
+				fprintf(f, "\tmov bx, %"PRIi64"\n", fn->con[r1.val].bits.i);
+				fprintf(f, "\tidiv bx\n");
+				fprintf(f, "\tpop bx\n");
+			} else
+				fprintf(f, "\tidiv ?\n");
 		}
 
-		/* Move dividend to AX if not already there */
-		if (rtype(r0) != RTmp || r0.val != RAX) {
-			fprintf(f, "\tmov ax, ");
-			if (rtype(r0) == RTmp)
-				fprintf(f, "%s\n", rname[r0.val]);
-			else if (rtype(r0) == RCon)
-				fprintf(f, "%"PRIi64"\n", fn->con[r0.val].bits.i);
-			else
-				fprintf(f, "?\n");
-		}
-
-		/* Sign-extend AX into DX:AX */
-		fprintf(f, "\tcwd\n");
-
-		/* Perform signed division.  8086 idiv requires a reg/mem operand;
-		 * an immediate is illegal.  Hoist constant divisors through BX. */
-		if (rtype(r1) == RTmp)
-			fprintf(f, "\tidiv %s\n", rname[r1.val]);
-		else if (rtype(r1) == RCon) {
-			fprintf(f, "\tpush bx\n");
-			fprintf(f, "\tmov bx, %"PRIi64"\n", fn->con[r1.val].bits.i);
-			fprintf(f, "\tidiv bx\n");
-			fprintf(f, "\tpop bx\n");
-		} else
-			fprintf(f, "\tidiv ?\n");
-
-		/* Move result to destination */
+		/* Move result to destination BEFORE the bracket pops (a dest
+		 * that overlaps a saved reg has its save skipped above). */
 		if (i->op == Odiv) {
 			/* Quotient is in AX */
-			if (rtype(i->to) == RTmp && i->to.val != RAX)
+			if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			else if (rtype(i->to) == RTmp && i->to.val != RAX)
 				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		} else {
 			/* Remainder is in DX */
-			if (rtype(i->to) == RTmp)
+			if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn));
+			else if (rtype(i->to) == RTmp)
 				fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
 		}
+
+		if (save_dx_dv) fprintf(f, "\tpop dx\n");
+		if (save_ax_dv) fprintf(f, "\tpop ax\n");
 		return;
 	}
 
@@ -3797,9 +3831,18 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * xor dx, dx       ; zero-extend into DX:AX
 		 * div divisor
 		 * ; quotient in AX, remainder in DX
-		 */
+		 *
+		 * Same implicit AX/DX clobber as the signed path above —
+		 * bracket them, liveness-gated, dest-skipped (§4y). */
+		int dst_in_ax_du = (rtype(i->to) == RTmp && i->to.val == RAX);
+		int dst_in_dx_du = (rtype(i->to) == RTmp && i->to.val == RDX);
+		int save_ax_du = !dst_in_ax_du && g_live_ax_after;
+		int save_dx_du = !dst_in_dx_du && g_live_dx_after;
 		r0 = i->arg[0]; /* dividend */
 		r1 = i->arg[1]; /* divisor */
+
+		if (save_ax_du) fprintf(f, "\tpush ax\n");
+		if (save_dx_du) fprintf(f, "\tpush dx\n");
 
 		/* HAZARD (see signed path above): a divisor in AX/DX is destroyed by
 		 * the `mov ax, dividend` / `xor dx, dx` DX:AX setup.  Stage it to BX. */
@@ -3824,52 +3867,51 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\txor dx, dx\n");
 			fprintf(f, "\tdiv bx\n");
 			fprintf(f, "\tpop bx\n");
-			if (i->op == Oudiv) {
-				if (rtype(i->to) == RTmp && i->to.val != RAX)
-					{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
-			} else {
-				if (rtype(i->to) == RTmp)
-					fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
-			}
-			return;
-		}
-
-		/* Move dividend to AX if not already there */
-		if (rtype(r0) != RTmp || r0.val != RAX) {
-			fprintf(f, "\tmov ax, ");
-			if (rtype(r0) == RTmp)
-				fprintf(f, "%s\n", rname[r0.val]);
-			else if (rtype(r0) == RCon)
-				fprintf(f, "%"PRIi64"\n", fn->con[r0.val].bits.i);
-			else
-				fprintf(f, "?\n");
-		}
-
-		/* Zero-extend into DX:AX */
-		fprintf(f, "\txor dx, dx\n");
-
-		/* Perform unsigned division.  Same constant-hoist as idiv above. */
-		if (rtype(r1) == RTmp) {
-			fprintf(f, "\tdiv %s\n", rname[r1.val]);
-		} else if (rtype(r1) == RCon) {
-			fprintf(f, "\tpush bx\n");
-			fprintf(f, "\tmov bx, %"PRIi64"\n", fn->con[r1.val].bits.i);
-			fprintf(f, "\tdiv bx\n");
-			fprintf(f, "\tpop bx\n");
 		} else {
-			fprintf(f, "\tdiv ?\n");
+			/* Move dividend to AX if not already there */
+			if (rtype(r0) != RTmp || r0.val != RAX) {
+				fprintf(f, "\tmov ax, ");
+				if (rtype(r0) == RTmp)
+					fprintf(f, "%s\n", rname[r0.val]);
+				else if (rtype(r0) == RCon)
+					fprintf(f, "%"PRIi64"\n", fn->con[r0.val].bits.i);
+				else
+					fprintf(f, "?\n");
+			}
+
+			/* Zero-extend into DX:AX */
+			fprintf(f, "\txor dx, dx\n");
+
+			/* Perform unsigned division.  Same constant-hoist as idiv above. */
+			if (rtype(r1) == RTmp) {
+				fprintf(f, "\tdiv %s\n", rname[r1.val]);
+			} else if (rtype(r1) == RCon) {
+				fprintf(f, "\tpush bx\n");
+				fprintf(f, "\tmov bx, %"PRIi64"\n", fn->con[r1.val].bits.i);
+				fprintf(f, "\tdiv bx\n");
+				fprintf(f, "\tpop bx\n");
+			} else {
+				fprintf(f, "\tdiv ?\n");
+			}
 		}
 
-		/* Move result to destination */
+		/* Move result to destination BEFORE the bracket pops. */
 		if (i->op == Oudiv) {
 			/* Quotient is in AX */
-			if (rtype(i->to) == RTmp && i->to.val != RAX)
+			if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			else if (rtype(i->to) == RTmp && i->to.val != RAX)
 				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		} else {
 			/* Remainder is in DX */
-			if (rtype(i->to) == RTmp)
+			if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn));
+			else if (rtype(i->to) == RTmp)
 				fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
 		}
+
+		if (save_dx_du) fprintf(f, "\tpop dx\n");
+		if (save_ax_du) fprintf(f, "\tpop ax\n");
 		return;
 	}
 
@@ -4424,17 +4466,45 @@ end_load_block:
 				/* For non-commutative ops (sub, sar, shr, shl)
 				 * we couldn't swap operands if arg[1] aliases to;
 				 * the dst-mov below would clobber arg[1]'s live
-				 * value.  Save it via BX with push/pop so the
-				 * op consumes the preserved copy. */
+				 * value.  Save it in a scratch reg with push/pop
+				 * so the op consumes the preserved copy.
+				 *
+				 * The scratch must be distinct from BOTH the
+				 * destination (== arg[1] here) and arg[0].  It
+				 * was once hardcoded to BX: with to==BX the
+				 * "save" degenerated to `mov bx, bx`, the
+				 * dst-mov below clobbered it, and the trailing
+				 * `pop bx` discarded the op's result — so
+				 * `right_pad -= p` compiled to a no-op and
+				 * MicroPython's mp_print_strn right-pad loop
+				 * ("%-5d" % 7) spun forever.  An arg[0] living
+				 * in BX would likewise have been clobbered by
+				 * the save before being read.  Pinned by
+				 * sub_arg1_alias_probe.c (pad_out2). */
 				int rescue_arg1 = (!optab[i->op].commutes
 				    && !req(i->arg[1], R)
 				    && rtype(i->arg[1]) == RTmp
 				    && req(i->arg[1], i->to));
+				int scr = RBX;
 				if (rescue_arg1) {
-					fprintf(f, "\tpush bx\n");
-					fprintf(f, "\tmov bx, %s\n",
-						rname[i->arg[1].val]);
-					i->arg[1] = TMP(RBX);
+					int scrcand[4], k;
+					scrcand[0] = RBX;
+					scrcand[1] = RCX;
+					scrcand[2] = RSI;
+					scrcand[3] = RDI;
+					for (k = 0; k < 4; k++) {
+						scr = scrcand[k];
+						if (i->to.val == (uint)scr)
+							continue;
+						if (rtype(i->arg[0]) == RTmp
+						    && i->arg[0].val == (uint)scr)
+							continue;
+						break;
+					}
+					fprintf(f, "\tpush %s\n", rname[scr]);
+					fprintf(f, "\tmov %s, %s\n",
+						rname[scr], rname[i->arg[1].val]);
+					i->arg[1] = TMP(scr);
 				}
 				if (rtype(i->arg[0]) == RTmp
 				    && i->arg[0].val != i->to.val) {
@@ -4460,16 +4530,16 @@ end_load_block:
 						(long)slot(i->arg[0], fn));
 					i->arg[0] = i->to;
 				}
-				/* If we pushed BX, restore it after emitf prints
-				 * the op.  We mark that here so the deferred
-				 * `pop bx` is emitted at the right point. */
+				/* If we pushed the scratch, restore it after
+				 * emitf prints the op. */
 				if (rescue_arg1) {
-					/* emit the op now and pop bx after.  Easiest:
-					 * call emitf directly here, then pop, then
-					 * `return`.  We replicate the addressing-fixup
-					 * unwind that the normal code path would do. */
+					/* emit the op now and pop the scratch after.
+					 * Easiest: call emitf directly here, then pop,
+					 * then `return`.  We replicate the addressing-
+					 * fixup unwind that the normal code path
+					 * would do. */
 					emitf(fmt, i, fn, f);
-					fprintf(f, "\tpop bx\n");
+					fprintf(f, "\tpop %s\n", rname[scr]);
 					if (bad) {
 						swap_bx(&i->to, bad, fn);
 						swap_bx(&i->arg[0], bad, fn);
@@ -4548,11 +4618,19 @@ end_load_block:
 	}
 }
 
+static uint *chk_la_buf;   /* per-instruction live-after masks */
+static uint chk_la_cap;
+
 void
 i8086_emitfn(Fn *fn, FILE *f)
 {
 	Blk *b;
 	Ins *i;
+
+	if (chk_on == -1)
+		chk_on = (getenv("QBE_EMIT_CHK") != 0);
+	if (chk_on)
+		chk_fixpoint(fn);
 
 	/* Emit memory model header (once per output file) */
 	emit_model_header(f);
@@ -4604,16 +4682,46 @@ i8086_emitfn(Fn *fn, FILE *f)
 		}
 		compute_axdx_liveafter(b, fn, la_ax_buf, la_dx_buf, la_bx_buf);
 
+		if (chk_on) {
+			/* Exact per-instruction live-after for the audit markers:
+			 * backward walk seeded from the CFG-fixpoint live-out. */
+			uint cl;
+			int n;
+			if (b->nins > chk_la_cap) {
+				chk_la_cap = b->nins;
+				chk_la_buf = realloc(chk_la_buf,
+					chk_la_cap * sizeof *chk_la_buf);
+				if (!chk_la_buf)
+					die("emit: out of memory for CHK buffer");
+			}
+			cl = chk_blk_liveout(b);
+			if (b->jmp.type == Jjnz && rtype(b->jmp.arg) == RTmp
+			 && CHK_ISGPR(b->jmp.arg.val))
+				cl |= CHK_BIT(b->jmp.arg.val);
+			for (n = b->nins - 1; n >= 0; n--) {
+				chk_la_buf[n] = cl;
+				cl = chk_ins_live(&b->ins[n], fn, cl);
+			}
+		}
+
 		for (i = b->ins; i < &b->ins[b->nins]; i++) {
 			int idx = (int)(i - b->ins);
 			g_live_ax_after = la_ax_buf[idx];
 			g_live_dx_after = la_dx_buf[idx];
 			g_live_bx_after = la_bx_buf[idx];
+			if (chk_on)
+				chk_mark_ins(i, fn, chk_la_buf[idx], f);
 			emitins(i, fn, f);
 		}
 		g_live_ax_after = 1;
 		g_live_dx_after = 1;
 		g_live_bx_after = 1;
+
+		if (chk_on) {
+			fprintf(f, "\t; CHKT %d live=", b->jmp.type);
+			chk_print_live(chk_blk_liveout(b), f);
+			fputc('\n', f);
+		}
 
 		/* Emit jump */
 		switch (b->jmp.type) {

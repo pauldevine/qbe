@@ -1,0 +1,5 @@
+neg_ne=1
+neg_eq=0
+pos_ne=0
+sign_neg=1
+sign_pos=0

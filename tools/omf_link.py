@@ -619,12 +619,14 @@ class Linker:
     def __init__(self, modules: List[Module],
                  stack_size: int, entry_symbol: str,
                  gc_sections: bool = False,
-                 pack_code: bool = False):
+                 pack_code: bool = False,
+                 separate_stack: bool = False):
         self.modules = modules
         self.stack_size = stack_size
         self.entry_symbol = entry_symbol
         self.gc_sections = gc_sections
         self.pack_code = pack_code
+        self.separate_stack = separate_stack
         # Set of (module_idx, mod_seg_idx) reachable from the entry symbol.
         # None means "no dead-strip" (every segment is live).
         self.live_segs: Optional[set] = None
@@ -1006,6 +1008,12 @@ class Linker:
     def _frame_para(self, m: Module, mi: int, fix: Fixup,
                     target_out_idx: int, target_offset_in_out: int) -> int:
         """Return paragraph base of the frame for this fixup."""
+        def containing_group_para(out_idx: int) -> Optional[int]:
+            for og in self.out_groups.values():
+                if out_idx in og.member_out_segs:
+                    return min(self.out_segs[i].para_base for i in og.member_out_segs)
+            return None
+
         method = fix.frame_method
         if method == 0:  # segment
             mod_seg_idx = fix.frame_index
@@ -1021,7 +1029,19 @@ class Linker:
             sym = self.symbols[ext_name]
             out_idx, _ = self.seg_map[(sym.module_idx, sym.seg_idx)]
             return self.out_segs[out_idx].para_base
-        if method in (4, 5):  # preceding-frame / target-frame
+        if method == 5:  # target-frame
+            # NASM commonly emits target-frame fixups for `mov ax, [_data]`.
+            # In the generated instruction there is no segment override, so
+            # the CPU uses DS.  For grouped DATA/BSS, DS is DGROUP, not the
+            # physical target segment.  Use the group frame for 16-bit offset
+            # fixups to DATA/BSS members so the patched displacement is
+            # DGROUP-relative.
+            if fix.location in (1, 5):
+                para = containing_group_para(target_out_idx)
+                if para is not None:
+                    return para
+            return self.out_segs[target_out_idx].para_base
+        if method == 4:  # preceding-frame
             return self.out_segs[target_out_idx].para_base
         die('unsupported frame method %d' % method)
         return 0
@@ -1216,16 +1236,25 @@ class Linker:
         bytes_in_last = total_image % 512
         total_pages = (total_image + 511) // 512
 
-        # We want SS == DS == DGROUP so that "near char *" works
+        # Default: SS == DS == DGROUP so that "near char *" works
         # consistently for both stack-local buffers and DGROUP globals.
         # The C runtime (strcpy's stosb, etc.) treats near pointers as
         # DS-relative; if SS != DS, a stack pointer passed as `char *`
         # writes to the wrong segment.  Lay the STACK segment immediately
         # after DGROUP's BSS so it's reachable as a 16-bit offset from
         # DGROUP's frame, then set SS=DGROUP and SP=stack-top-within-DGROUP.
+        #
+        # --separate-stack (far-data builds only): SS = the STACK segment's
+        # own paragraph base, SP = stack_size, freeing the full 64KB DGROUP
+        # for data+bss and the full 64KB stack segment for the stack.  Only
+        # valid when the WHOLE toolchain agrees SS != DS: qbe must emit ss:
+        # overrides on register-indirect near derefs (qbe -s) and libstub
+        # must reload DS from [cs:_dgroup_para], never `push ss / pop ds`.
+        # Near-data models (medium) pass 2-byte DS-relative pointers to
+        # stack buffers by ABI — they must NOT use this flag.
         dgroup = self.out_groups.get('DGROUP')
         stack_seg = self.out_segs[self.stack_seg_idx]
-        if dgroup and dgroup.member_out_segs:
+        if dgroup and dgroup.member_out_segs and not self.separate_stack:
             dgroup_para = min(self.out_segs[i].para_base
                               for i in dgroup.member_out_segs)
             stack_off_in_dgroup = (stack_seg.para_base - dgroup_para) * 16
@@ -1236,6 +1265,18 @@ class Linker:
             ss_para = dgroup_para
             sp = sp_full & 0xFFFF
         else:
+            if dgroup and dgroup.member_out_segs:
+                # Separate stack: the DGROUP 64KB invariant now covers
+                # data+bss only (the stack no longer eats into it).
+                dgroup_para = min(self.out_segs[i].para_base
+                                  for i in dgroup.member_out_segs)
+                dgroup_end = max(self.out_segs[i].byte_base
+                                 + self.out_segs[i].length
+                                 for i in dgroup.member_out_segs)
+                dgroup_bytes = dgroup_end - dgroup_para * 16
+                if dgroup_bytes > 0x10000:
+                    die('DGROUP data+bss overflows 64KB (%d bytes).'
+                        % dgroup_bytes)
             ss_para = stack_seg.para_base
             sp = self.stack_size & 0xFFFF
 
@@ -1339,6 +1380,10 @@ def main() -> None:
     ap.add_argument('--pack-code', dest='pack_code', action='store_true',
                     help='coalesce live CODE segments into <=64KB buckets, '
                          'removing per-function paragraph padding')
+    ap.add_argument('--separate-stack', dest='separate_stack',
+                    action='store_true',
+                    help='give the stack its own segment (SS != DS); '
+                         'far-data builds compiled with `qbe -s` only')
     ap.add_argument('objs', nargs='+', help='input .obj files')
     args = ap.parse_args()
 
@@ -1361,7 +1406,8 @@ def main() -> None:
 
     linker = Linker(modules, args.stack_size, args.entry,
                     gc_sections=args.gc_sections,
-                    pack_code=args.pack_code)
+                    pack_code=args.pack_code,
+                    separate_stack=args.separate_stack)
     linker.link(args.output, args.map_path)
 
 

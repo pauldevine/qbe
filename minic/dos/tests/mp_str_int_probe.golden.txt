@@ -1,0 +1,3 @@
+sizeof_member=123
+direct=abc
+callback=123

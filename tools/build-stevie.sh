@@ -54,6 +54,12 @@ MINIC="$QBE_DIR/minic/minic"
 INC_DIR="$QBE_DIR/minic/include"
 QBE="$QBE_DIR/qbe"
 DOS_DIR="$QBE_DIR/minic/dos"
+STEVIE_STACK_SIZE="${STEVIE_STACK_SIZE:-4096}"
+STEVIE_CPPFLAGS="${STEVIE_CPPFLAGS:-}"
+EXTRA_CPPFLAGS=()
+if [ -n "$STEVIE_CPPFLAGS" ]; then
+	read -r -a EXTRA_CPPFLAGS <<< "$STEVIE_CPPFLAGS"
+fi
 
 # Type/decl normalization sed scripts shared with minic_cpp_v2.
 NORMALIZE_TYPES='
@@ -127,6 +133,7 @@ for src in "${SOURCES[@]}"; do
 	# both through; minic's lexer treats 0x1a as a stray byte and
 	# silently bails.  Strip both before handing off.
 	if ! cpp -P -nostdinc -isysroot/var/empty -DDOS -D__TURBOC__ \
+			${EXTRA_CPPFLAGS[@]+"${EXTRA_CPPFLAGS[@]}"} \
 			"-I$INC_DIR" "-I$SRC_DIR" \
 			"$SRC_DIR/$src" 2>"$err" \
 			| tr -d '\r\032' \
@@ -323,7 +330,7 @@ if [ $EXE -eq 1 ]; then
 		-o "$OUT_DIR/stevie.exe" \
 		--map "$OUT_DIR/stevie.map" \
 		--entry _start \
-		--stack-size 8192 \
+		--stack-size "$STEVIE_STACK_SIZE" \
 		"${OBJS[@]}" 2>>"$OUT_DIR/link.err"; then
 		echo "  OK: $OUT_DIR/stevie.exe ($(wc -c <"$OUT_DIR/stevie.exe") bytes)"
 	else

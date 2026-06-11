@@ -121,6 +121,162 @@ tcmp1(const void *pa, const void *pb)
 	return c ? c : tcmp0(pa, pb);
 }
 
+static void
+kedge(uchar *adj, int nc, int a, int b)
+{
+	size_t i;
+
+	if (a == b)
+		return;
+	i = (size_t)a*nc + b;
+	adj[i>>3] |= 1 << (i&7);
+	i = (size_t)b*nc + a;
+	adj[i>>3] |= 1 << (i&7);
+}
+
+/* i8086 only: assign stack slots to the slot-resident Kl/Ks temps by
+ * interference-graph coloring so temps with disjoint live ranges SHARE
+ * a slot.  The naive alternative (one private 2-word slot per temp,
+ * what this pass replaces) makes frame size proportional to the number
+ * of Kl temps in the function: MicroPython's mp_execute_bytecode had
+ * 1261 Kl temps = 5044 bytes of frame for a maximum simultaneous
+ * liveness of ~10 — and that frame is the per-level cost of generator
+ * recursion ([[gen-frame-diet]]).
+ *
+ * Interference rules (conservative):
+ *   - a def interferes with everything live across it (standard);
+ *   - a def interferes with its own instruction's args: the i8086 emit
+ *     handlers are multi-instruction sequences that may write the dest
+ *     slot's two words while still reading arg slots;
+ *   - a phi def interferes with the block's live-in, with the block's
+ *     other phi defs, AND with every phi argument of the block: rega's
+ *     pmgen orders the edge parallel-copies by comparing slot refs, and
+ *     a slot shared between a phi def and a phi arg of the same block
+ *     could otherwise force a slot<->slot cycle that emit's Oswap
+ *     handler does not implement (it only swaps registers).
+ * Temps that already own a slot — incoming Kl params aliased to their
+ * ABI slot (negative), isel fast-local alloca address temps — keep it
+ * and do not participate.
+ */
+static void
+colorklslots(Fn *fn)
+{
+	int t, n, c, nc, color, maxcolor;
+	int *cidx, *cand, *col, *used;
+	uchar *adj;
+	BSet live[1];
+	Blk *b;
+	Ins *i;
+	Phi *p, *q;
+	Mem *m;
+	uint a;
+	size_t bit;
+
+	cidx = emalloc(ntmp * sizeof cidx[0]);
+	nc = 0;
+	for (t=0; t<ntmp; t++)
+		cidx[t] = (t >= Tmp0
+		    && (tmp[t].cls == Kl || tmp[t].cls == Ks)
+		    && tmp[t].slot == -1) ? nc++ : -1;
+	if (nc == 0) {
+		free(cidx);
+		return;
+	}
+	cand = emalloc(nc * sizeof cand[0]);
+	for (t=0; t<ntmp; t++)
+		if (cidx[t] >= 0)
+			cand[cidx[t]] = t;
+	adj = emalloc(((size_t)nc*nc + 7) / 8);
+	bsinit(live, ntmp);
+
+	for (b=fn->start; b; b=b->link) {
+		bscopy(live, b->out);
+		if (rtype(b->jmp.arg) == RTmp)
+			bsset(live, b->jmp.arg.val);
+		for (i=&b->ins[b->nins]; i!=b->ins;) {
+			i--;
+			if (rtype(i->to) == RTmp) {
+				t = i->to.val;
+				bsclr(live, t);
+				if (cidx[t] >= 0) {
+					for (n=0; bsiter(live, &n); n++)
+						if (cidx[n] >= 0)
+							kedge(adj, nc, cidx[t], cidx[n]);
+					for (n=0; n<2; n++)
+						if (rtype(i->arg[n]) == RTmp
+						 && cidx[i->arg[n].val] >= 0)
+							kedge(adj, nc, cidx[t],
+								cidx[i->arg[n].val]);
+				}
+			}
+			for (n=0; n<2; n++)
+				switch (rtype(i->arg[n])) {
+				case RMem:
+					m = &fn->mem[i->arg[n].val];
+					if (rtype(m->base) == RTmp)
+						bsset(live, m->base.val);
+					if (rtype(m->index) == RTmp)
+						bsset(live, m->index.val);
+					break;
+				case RTmp:
+					bsset(live, i->arg[n].val);
+					break;
+				}
+		}
+		for (p=b->phi; p; p=p->link) {
+			if (rtype(p->to) != RTmp || cidx[p->to.val] < 0)
+				continue;
+			c = cidx[p->to.val];
+			for (n=0; bsiter(live, &n); n++)
+				if (cidx[n] >= 0)
+					kedge(adj, nc, c, cidx[n]);
+			for (q=b->phi; q; q=q->link) {
+				if (q != p && rtype(q->to) == RTmp
+				 && cidx[q->to.val] >= 0)
+					kedge(adj, nc, c, cidx[q->to.val]);
+				for (a=0; a<q->narg; a++)
+					if (rtype(q->arg[a]) == RTmp
+					 && cidx[q->arg[a].val] >= 0)
+						kedge(adj, nc, c,
+							cidx[q->arg[a].val]);
+			}
+		}
+	}
+
+	col = emalloc(nc * sizeof col[0]);
+	used = emalloc(nc * sizeof used[0]);
+	for (c=0; c<nc; c++)
+		used[c] = -1;
+	maxcolor = -1;
+	for (c=0; c<nc; c++) {
+		for (n=0; n<c; n++) {
+			bit = (size_t)c*nc + n;
+			if (adj[bit>>3] & (1 << (bit&7)))
+				used[col[n]] = c;
+		}
+		for (color=0; used[color] == c; color++)
+			;
+		col[c] = color;
+		if (color > maxcolor)
+			maxcolor = color;
+	}
+
+	for (c=0; c<nc; c++)
+		tmp[cand[c]].slot = locs + 2*col[c];
+	slot8 = 2*(maxcolor+1);
+	slot4 = slot8;
+
+	if (getenv("QBE_SLOT_DBG"))
+		fprintf(stderr, "SLOTDBG %s: kl=%d colors=%d slot8=%d locs=%d\n",
+			fn->name, nc, maxcolor+1, slot8, locs);
+
+	free(cidx);
+	free(cand);
+	free(adj);
+	free(col);
+	free(used);
+}
+
 static Ref
 slot(int t)
 {
@@ -136,7 +292,12 @@ slot(int t)
 		 *
 		 * invariant: slot4 <= slot8
 		 */
-		if (KWIDE(tmp[t].cls)) {
+		/* On i8086, Ks (single-precision float) is a 32-bit soft-float
+		 * bit pattern carried like Kl (a DX:AX pair), so it needs a
+		 * 2-word slot even though KWIDE(Ks)==0.  See i8086 soft-float
+		 * lowering ([[softfloat-spike]]). */
+		if (KWIDE(tmp[t].cls)
+		 || (tmp[t].cls == Ks && strcmp(T.name, "i8086") == 0)) {
 			s = slot8;
 			if (slot4 == slot8)
 				slot4 += 2;
@@ -391,15 +552,16 @@ spill(Fn *fn)
 		 * originally-passed value.  Done here (after isel) rather than
 		 * in abi.c because isel overloads a non-(-1) tmp[].slot to mean
 		 * "fast-local alloca address" and would materialize &param. */
+		/* Ks (single-precision float) is also a 32-bit slot-resident
+		 * value on i8086 (soft-float carries it as a DX:AX pair), so
+		 * force it slot-resident exactly like Kl. */
 		for (b=fn->start, i=b->ins; i<&b->ins[b->nins]; i++)
-			if (i->op == Oload && i->cls == Kl
+			if (i->op == Oload && (i->cls == Kl || i->cls == Ks)
 			 && rtype(i->to) == RTmp
 			 && rtype(i->arg[0]) == RSlot
 			 && rsval(i->arg[0]) < 0)
 				tmp[i->to.val].slot = rsval(i->arg[0]);
-		for (t=Tmp0; t<ntmp; t++)
-			if (tmp[t].cls == Kl)
-				slot(t);
+		colorklslots(fn);
 	}
 
 	for (bp=&fn->rpo[fn->nblk]; bp!=fn->rpo;) {
@@ -463,14 +625,14 @@ spill(Fn *fn)
 			if (!bshas(v, t))
 				b->jmp.arg = slot(t);
 		}
-		/* i8086: evict Kl temps from v before it becomes b->out.
-		 * Otherwise rega's block-entry loop sees Kl temps in
-		 * b->out and allocates registers for them — defeating
-		 * the slot-resident-Kl invariant. */
+		/* i8086: evict Kl/Ks temps from v before it becomes b->out.
+		 * Otherwise rega's block-entry loop sees them in b->out and
+		 * allocates registers for them — defeating the slot-resident
+		 * invariant (Ks has no register class at all: NFPR==0). */
 		if (force_kl_slot) {
 			int kt = Tmp0;
 			while (bsiter(v, &kt)) {
-				if (tmp[kt].cls == Kl) {
+				if (tmp[kt].cls == Kl || tmp[kt].cls == Ks) {
 					bsclr(v, kt);
 					slot(kt);
 				}
@@ -554,7 +716,7 @@ spill(Fn *fn)
 				int kt;
 				kt = Tmp0;
 				while (bsiter(v, &kt)) {
-					if (tmp[kt].cls == Kl) {
+					if (tmp[kt].cls == Kl || tmp[kt].cls == Ks) {
 						bsclr(v, kt);
 						slot(kt);
 					}
@@ -562,7 +724,7 @@ spill(Fn *fn)
 				}
 				kt = Tmp0;
 				while (bsiter(u, &kt)) {
-					if (tmp[kt].cls == Kl)
+					if (tmp[kt].cls == Kl || tmp[kt].cls == Ks)
 						bsclr(u, kt);
 					kt++;
 				}
@@ -582,12 +744,12 @@ spill(Fn *fn)
 			reloads(u, v);
 			if (!req(i->to, R)) {
 				t = i->to.val;
-				/* i8086: rewrite Kl dest directly to its slot.
+				/* i8086: rewrite Kl/Ks dest directly to its slot.
 				 * The emit handler writes both AX and DX to
 				 * slot+0/slot+2 via the two-word path, so we
 				 * skip the lossy Ostorel RTmp→RSlot. */
 				if (force_kl_slot && t >= Tmp0
-				 && tmp[t].cls == Kl) {
+				 && (tmp[t].cls == Kl || tmp[t].cls == Ks)) {
 					i->to = slot(t);
 				} else {
 					store(i->to, tmp[t].slot);

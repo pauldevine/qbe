@@ -230,15 +230,18 @@ selcall(Fn *fn, Ins *i0, Ins *icall)
 	 * written directly into the reserved slots via SLOT() refs.
 	 */
 
-	/* 4. Handle return value (get result from AX after call) */
+	/* 4. Handle return value (get result from AX / DX:AX after call) */
 	if (!req(icall->to, R)) {
-		/* Function returns a value */
-		if (KBASE(icall->cls) == 0) {
-			/* Integer return in AX */
+		/* Function returns a value.  KBASE==0 covers integer Kw (AX)
+		 * and Kl (DX:AX).  Ks (single-precision soft-float) also
+		 * returns its 32-bit pattern in DX:AX and is captured exactly
+		 * like Kl via the Kl-shaped Ocopy Ks handler ([[softfloat-spike]]);
+		 * KBASE(Ks)==1 so it must be admitted explicitly.  Double (Kd)
+		 * is unsupported. */
+		if (KBASE(icall->cls) == 0 || icall->cls == Ks) {
 			emit(Ocopy, icall->cls, icall->to, TMP(RAX), R);
-			cty |= 1;  /* 1 GP register returned */
+			cty |= 1;  /* result in AX / DX:AX */
 		}
-		/* No FP support yet */
 	}
 
 	/* 3. Emit the call (far call for medium/large/huge models) */
@@ -415,19 +418,24 @@ selret(Blk *b, Fn *fn)
 		emit(Ocopy, Kw, TMP(RAX), r0, R);
 		cty = 1;  /* 1 GP register used (AX) */
 		b->jmp.type = farret ? Jretfw : Jret0;
-	} else if (j == Jretl) {
-		/* Always route through Ofarseg/Ofaroff: Ocopy Kw on a Kl source
-		 * extracts only the low word (rega has no register-pair concept
-		 * on 8086), so the fallback path produced `mov dx, [slot+0]` for
-		 * the high half: duplicate low word in DX:AX, segment lost.
-		 * Surfaced 2026-05-23 (j) by fnptrprobe.c via an indirect call
-		 * returning `char *` (Kl) in compact mode. */
+	} else if (j == Jretl || j == Jrets) {
+		/* Kl (long / far pointer) AND Ks (single-precision soft-float)
+		 * both return their 32-bit value in DX:AX.  A Ks value is the
+		 * float's bit pattern carried like a Kl pair (low word in AX,
+		 * high word in DX) — see the i8086 soft-float lowering
+		 * ([[softfloat-spike]]).  Always route through Ofarseg/Ofaroff:
+		 * Ocopy Kw on a Kl source extracts only the low word (rega has
+		 * no register-pair concept on 8086), so the fallback path
+		 * produced `mov dx, [slot+0]` for the high half: duplicate low
+		 * word in DX:AX, segment lost.  Surfaced 2026-05-23 (j) by
+		 * fnptrprobe.c via an indirect call returning `char *` (Kl) in
+		 * compact mode. */
 		emit(Ofarseg, Kw, TMP(RDX), r0, R);
 		emit(Ofaroff, Kw, TMP(RAX), r0, R);
 		cty = 2;  /* 2 GP registers used (DX:AX) */
 		b->jmp.type = farret ? Jretfl : Jret0;
 	} else {
-		/* No support for float returns yet - convert to void return */
+		/* No support for double (Kd) returns — single-precision only. */
 		b->jmp.type = farret ? Jretf0 : Jret0;
 		return;
 	}

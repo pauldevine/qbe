@@ -303,8 +303,24 @@ copyref(Fn *fn, Blk *b, Ins *i)
 	int64_t v;
 	int w, z;
 
-	if (i->op == Ocopy)
+	if (i->op == Ocopy) {
+		/* On i8086 (T.wordsz == 2) the integer classes have different
+		 * byte widths (w = 2 bytes, l = 4 bytes), so a class-narrowing
+		 * copy (`=w copy` of an `l`/`s` temp) is a real 16-bit
+		 * truncation, NOT a register-aliasing no-op as on word-uniform
+		 * targets.  Folding it away lets a w-context use (e.g. a jnz on
+		 * the result of `(int)(x >> 31)`) reference the wider temp;
+		 * spill then keeps that value in a 4-byte slot and rega never
+		 * reloads its low word into the branch register, so the branch
+		 * tests garbage.  Keep the copy so the backend emits the
+		 * explicit low-word move. */
+		if (T.wordsz == 2
+		&& i->cls == Kw
+		&& rtype(i->arg[0]) == RTmp
+		&& fn->tmp[i->arg[0].val].cls != Kw)
+			return R;
 		return i->arg[0];
+	}
 
 	/* op identity value */
 	if (optab[i->op].hasid

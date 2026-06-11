@@ -98,6 +98,11 @@ bool_t	nochangename;	/* if TRUE, don't change the Filename */
 			nonascii++;
 		}
 
+		if (c == CR) {
+			nchars++;
+			continue;
+		}
+
 		/*
 		 * If we reached the end of the line, OR we ran out of
 		 * space for it, then process the complete line.
@@ -268,8 +273,20 @@ LPTR	*start, *end;
 
 	lines = nchars = 0;
 	do {
+#ifdef VICTOR9000
+		fputs(p->linep->s, f);
+		if (P(P_CR)) {
+			fputc(CR, f);
+			fputc(NL, f);
+			nchars += strlen(p->linep->s) + 2;
+		} else {
+			fputc(NL, f);
+			nchars += strlen(p->linep->s) + 1;
+		}
+#else
 		fprintf(f, "%s\n", p->linep->s);
 		nchars += strlen(p->linep->s) + 1;
+#endif
 		lines++;
 
 		/*

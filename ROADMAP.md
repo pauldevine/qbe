@@ -3,8 +3,9 @@
 **Project:** C11/C17 + GNU-extensions C Compiler for 8086 DOS using QBE Backend
 **Standard:** C11 feature set + GNU extensions (`__attribute__`, inline `__asm__`, `__far`); equivalently C17-level (C17 added no new language features over C11).  No C23 language features.  C only — no C++.
 **Original Timeline:** 10-12 weeks to production release
-**Actual Progress:** ~97% Complete (as of 2026-05-25)
-**Last Updated:** 2026-05-25
+**Actual Progress:** Original compiler goal COMPLETE; now in an open-ended hardening phase driven by a real-world MicroPython port (as of 2026-06-07)
+**Real target hardware:** Victor 9000 / Sirius 1 (~896 KB RAM), not the IBM-PC 640 KB ceiling
+**Last Updated:** 2026-06-07
 
 ---
 
@@ -12,9 +13,11 @@
 
 This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Actual Current Status" section below tracks what's actually shipped against that plan; the long Phase 1–4 sections that follow it are the original plan, preserved for reference but not edited as work landed.
 
+**The original 4-phase plan is done.** Since ~2026-05-28 the project has been in a *hardening phase*: porting **MicroPython** as a real-world stress test on real Victor 9000 hardware. Each MicroPython failure is reduced to a focused `minic/dos/examples/*_probe.c`, the underlying compiler/backend/runtime bug is fixed, and the probe is added to the `tools/test-dos.sh` gate (now **215/215**). Day-to-day status lives in `CLAUDE.md` and `NEXT_SESSION.md`; this file is the high-level reconciliation.
+
 ---
 
-## Actual Current Status (Updated 2026-05-25, post session jj)
+## Actual Current Status (Updated 2026-06-07)
 
 **Component Status:**
 
@@ -31,8 +34,10 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 | **Function Pointers** | ✅ Complete | Full support with typedef | i8086/README.md:321 |
 | **Struct Bitfields** | ✅ Complete | Packing and read/write | i8086/README.md:322 |
 | **DOS Runtime** | ✅ **COMPLETE** | crt0_exe.asm + real printf/sprintf, freelist malloc/free, file I/O | minic/dos/libstub.asm |
-| **Memory Models** | ✅ Tiny + Medium + Compact + Large + Huge incl. >64K arrays + 32-bit far load/store (Small .EXE still broken) | Per-model runtime gate at **59/59** in tools/test-dos.sh.  Tiny .COM (tinyprobe via inline-asm INT 21h); medium (mediumprobe + mathprobe + dosapi_probe); compact (cstrprobe + compactprobe_extra + fnptrprobe + farretprobe + stdio_far_probe + caddr_arith_probe + caddr_logop_probe + caddr_cmp_probe + caddr_div_probe + kl_shift_probe + phase_bprime_probe + huge_stack_arith_probe + storefl_probe + loadfb_alias_probe); large + huge run those compact probes verbatim plus dos_far_probe / stdio_far_probe / mediumprobe / mathprobe / dosapi_probe.  Huge >64K data covered by hugeprobe.c (`static char arr[80000]` across paragraph-aligned `_HUGE_<sym>` segments).  Huge stack ptr arith goes through `_qbe_huge_add` (Phase B carveout removed in session gg).  `long` through a far pointer round-trips full 32 bits via `Oloadfl`/`Ostorefl` (session hh).  Narrow far-loads survive back-to-back use via `kl_save_axdx` bracket (session jj).  Small .EXE still hangs DOSBox (libstub_to_exe ret→retf rewrite mismatches small's near-call ABI). | tools/build-com-test.sh, tools/build-stevie.sh, tools/build-example.sh |
+| **Memory Models** | ✅ Tiny + Medium + Compact + Large + Huge incl. >64K arrays + 32-bit far load/store (Small .EXE still broken) | Per-model runtime gate at **215/215** in tools/test-dos.sh (was 59/59 at 2026-05-25; grown by the MicroPython-driven probes).  Huge >64K data via paragraph-aligned `_HUGE_<sym>` segments; huge stack ptr arith via `_qbe_huge_add`; `long` and `float` through a far pointer round-trip full 32 bits via `Oloadfl`/`Ostorefl` / `Oloadfs`/`Ostorefs`.  Small .EXE still hangs DOSBox (libstub_to_exe ret→retf rewrite mismatches small's near-call ABI). | tools/build-com-test.sh, tools/build-stevie.sh, tools/build-example.sh |
 | **DOS API Library** | ✅ **COMPLETE** | int86/int86x/intdos/intdosx/segread + video/keyboard/mouse wrappers | minic/dos/libstub.asm, minic/include/dos.h |
+| **Soft-Float (no-8087)** | ✅ **MODEL-COMPLETE** | Native `float` (Ks) lowered to `_sf_*` helper calls (no 8087 needed); arithmetic/compare/int↔float (medium) + far-data load/store via `loadfs`/`storefs` (compact/large/huge).  Double (Kd) deliberately unimplemented — single-precision only. | minic/dos/softfloat.c, i8086/emit.c, softfloat_probe.c / float_fardata_probe.c |
+| **MicroPython Port** | ⚠️ **In hardening** | Builds (106/106 TUs), links, and runs on a real Victor 9000 over a SASI disk.  Language surface working: classes/inheritance, generators, exceptions/finally, comprehensions, closures, string methods, slicing, `str()`/`repr()`, dict/list rendering, GC.  Bounded by image-size ceiling and a deep-recursion stack tradeoff. | MICROPYTHON_PORT.md, tools/build-micropython.sh, tools/run-victor-sasi.sh |
 
 **Phase Completion (vs original plan):**
 - Phase 0 (Validation): ✅ **100% COMPLETE**
@@ -40,6 +45,7 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 - Phase 2 (8087 FPU): ✅ **100% COMPLETE** (PR #11)
 - Phase 3 (DOS Integration): ✅ **~95% COMPLETE** (runtime, API wrappers, examples, full memory-model matrix incl. far DOS-API + far stdio FILE* under large/huge all done; small .EXE ABI mismatch + tiny .COM stevie shrink still pending)
 - Phase 4 (C11 Features): ✅ **100% COMPLETE** (PR #12)
+- Phase 5 (MicroPython hardening, not in original plan): ⚠️ **In progress** — see the dedicated section below
 
 **Completed Features NOT in Original Roadmap:**
 - ✅ Inline assembly with clobber lists
@@ -48,18 +54,51 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 - ✅ Variadic function support
 - ✅ OMF link toolchain (`tools/omf_link.py`, `tools/asm_to_omf.py`, `tools/libstub_to_exe.py`)
 - ✅ Stevie editor (`stevie.exe`) ports cleanly as the flagship integration test
+- ✅ Soft-float (no-8087 single-precision `float`), model-complete incl. far-data
+- ✅ MicroPython port — builds, links, and runs on real Victor 9000 hardware
 
-**What's Actually Missing:**
-1. **Small .EXE architecturally broken** — `tools/libstub_to_exe.py` rewrites every `ret` to `retf`, which mismatches small model's near-call ABI → DOSBox hangs.  Needs either near+far libstub variants or model-conditional `ret` rewrite.  See `[[per-model-gate]]`.
-2. ~~**Tiny .COM stevie still over 64 KB**~~ — **PARKED**: Stevie is a medium-model program by design and ships as `.EXE` (148 KB).  Path A near-pointer narrowing already landed (commit 5125e70, 98KB→81KB); further shrink isn't worth chasing.  The tiny-model pipeline itself stays gated by `com_smoke.c` / `long_math.c` / `fileio.c` / `tinyprobe.c` in `tools/test-dos.sh`, which catches codegen + libstub regressions.
-3. ~~**Latent Kl-CAddr arith sites**~~ — **CLOSED 2026-05-25 (ee)**: full Kl-CAddr matrix portable across compact/large/huge.  Oloadf*/Ostoref*/Oadd/Osub fixed in `141f2e8`; Oand/Oor/Oxor via `emit32_logop_axdx_con` (bb); cmp32_high/low covers all 10 Kl Oc*l (cc); emit_push_long covers Odiv/Orem Kl (dd); Omul Kl + CAddr now die()s defensively (ee) — pointer multiplication is C-illegal, so the path is unreachable from realistic frontend output but bug-loud if ever hit.  Ocopy Kl was already CAddr-safe.
-4. ~~**Huge Phase B storel-via-Kl-slot gap**~~ — **CLOSED 2026-05-25 (ff)**: Ostorel and Oload Kl with RSlot ptr arg now branch on `fn->arg_slot_top` — spilled-Kl-ptr slots deref through ES:BX (far-data) or BX (near-data) while ABI direct-slot writes (call args / params) keep the old direct-bytes semantics.  Phase B Var-operand carveout in `huge_ptr_binop` also REMOVED in session gg; stack pointer arith under huge now normalises through `_qbe_huge_add` identically to global arith.  Pinned by `phase_bprime_probe.c` + `huge_stack_arith_probe.c`.
-5. ~~**storefar/loadfar lacks 32-bit width**~~ — **CLOSED 2026-05-25 (hh)**: new backend ops `Oloadfl` + `Ostorefl` (ops.h + all.h + load.c) with i8086/emit.c handlers; minic.y `loadfar`/`storefar` + 3 inline `storef*` sites gain `'l'` branch; lexer perfect-hash K regenerated.  `long` through an opaque far pointer now round-trips full 32 bits under compact/large/huge.  Pinned by `storefl_probe.c`.  See `[[storefl-portable]]`.
-6. ~~**i8086 compact loadfb AX-aliasing**~~ — **CLOSED 2026-05-25 (jj)**: `Oloadfb`/`Oloadfh`/`Oloadfw` now wrap with `kl_save_axdx`/`kl_restore_axdx`, same bracket `Oloadfl` already used.  Back-to-back narrow far-loads on the same printf line no longer alias via AX.  Probe `loadfb_alias_probe.c` (6 asserts × compact/large/huge).  See `[[loadfb-alias-portable]]`.
-7. ~~**Phase B'' narrower stores**~~ — **CLOSED as PROVEN UNREACHABLE 2026-05-28 (pp)**: the symmetric Phase B' gap for `Ostorew`/`Ostoreh`/`Ostoreb` cannot be produced by the current pipeline — `spill.c::force_kl_slot` is Kl-only (Kw pointers never slot-resident; rega always materialises a narrow store's address into a register), far-data narrow writes route through `storef*`/`storel`, and isel's Oaddr rewrite turns address-taken locals into `lea reg; mov [reg]`.  Symmetric fix written + SSA-green but reverted rather than ship untested-unreachable code.  Revisit only if Kw temps ever become slot-resident.  Track (pp) in NEXT_SESSION_PROMPT.md.
-8. **Polish on the legacy examples** — 16 older `dos_putchar`-style files in `minic/dos/examples/` predate the `<dos.h>` API; modern dialect now demonstrated by `mouse_demo.c` / `vga_pixels.c` / `kbtest.c` / `cprobe.c` / `cstrprobe.c`.
+**What's Actually Missing (compiler / backend / toolchain):**
+1. **Small .EXE architecturally broken** — `tools/libstub_to_exe.py` rewrites every `ret` to `retf`, which mismatches small model's near-call ABI → DOSBox hangs.  Needs either near+far libstub variants or model-conditional `ret` rewrite.  See `[[per-model-gate]]`.  *This is the only open item from the original-plan backend list; the rest below are closed.*
+2. **211-commit upstream-qbe rebase** — pure plumbing; deferred until the i8086 backend stabilises.
+3. **Polish on the legacy examples** — 16 older `dos_putchar`-style files in `minic/dos/examples/` predate the `<dos.h>` API; modern dialect now demonstrated by `mouse_demo.c` / `vga_pixels.c` / `kbtest.c` / `cprobe.c` / `cstrprobe.c`.
+
+**Parked / proven-out (kept for history):**
+- ~~Tiny .COM stevie shrink~~ — **PARKED**: stevie is a medium-model program by design, ships as `.EXE` (148 KB).  Tiny pipeline still gated by `com_smoke.c` etc.
+- ~~Latent Kl-CAddr arith matrix~~ — **CLOSED 2026-05-25 (aa–ee)**: full Kl-CAddr matrix portable across compact/large/huge.
+- ~~Huge Phase B / B' storel-via-Kl-slot~~ — **CLOSED (ff/gg)**: spilled-Kl-ptr slots deref through ES:BX; Var-operand carveout removed.
+- ~~storefar/loadfar lacks 32-bit width~~ — **CLOSED (hh)**: `Oloadfl`/`Ostorefl`; `long` round-trips full 32 bits through a far ptr.
+- ~~i8086 compact loadfb AX-aliasing~~ — **CLOSED (jj)**: narrow far-loads bracketed with `kl_save_axdx`.
+- ~~Phase B'' narrower stores~~ — **CLOSED as PROVEN UNREACHABLE 2026-05-28 (pp)**: cannot be produced by the current rega/isel; symmetric fix written, SSA-green, then reverted rather than ship untested-unreachable code.
 
 **Note on tiny model:** Stevie itself doesn't fit in .COM (currently ~87KB; see `[[minic-pointer-bloat]]` for history) and that's expected — stevie is a medium-model program by design. The tiny-model pipeline is gated end-to-end by `tools/test-dos.sh` against `minic/dos/tests/com_smoke.c` at a 4 KB ceiling, which catches regressions in libstub size, codegen bloat, or the memref-base rega hint without holding stevie hostage to the 64 KB cap.
+
+---
+
+## Phase 5: MicroPython Port (hardening) ⚠️ IN PROGRESS
+
+**Goal:** Use a real, large, third-party C program (MicroPython) as a stress test to flush out remaining compiler/backend/runtime bugs — and ultimately run Python on a real Victor 9000.
+**Status:** ⚠️ MicroPython builds, links, and runs interactively on real Victor 9000 hardware; an open-ended list of edge-case bugs is being driven out one reduced probe at a time.
+
+**Method (the working loop):**
+1. Run a real MicroPython feature/script on the compact far-data Victor build.
+2. When it fails, reduce the failure to a tiny `minic/dos/examples/*_probe.c`.
+3. Fix the underlying QBE / MiniC / i8086 / runtime bug.
+4. Add the reduced probe to `tools/test-dos.sh` before relying on the behavior.
+5. Watch image size against the ~896 KB Victor load ceiling.
+
+**Working today (verified on real Victor hardware):**
+- Build/link: 106/106 translation units → OMF objects → linked `.exe`, under the ceiling.
+- Bring-up keystones: `static`-linkage emission, `setjmp`/`longjmp` (NLR), per-symbol code-segment splitting, far-data placement, GC.
+- Language surface: classes & inheritance, generators, exceptions/finally + tracebacks, list/dict/filter comprehensions, closures & `nonlocal`, kwargs/defaults, tuple unpacking, string methods, slicing, `str()`/`repr()`, dict/list rendering, allocation churn / GC.
+- Interactive REPL with a DOS-native line editor (history, arrow keys) and disk-loaded `PROG.PY`.
+
+**Open MicroPython-side items:**
+1. **Enable floats** (`MICROPY_FLOAT_IMPL_FLOAT`) — the far-data soft-float backend is now ready (§3w); next is turning it on in the MicroPython build and running a float feature probe on Victor.  *Risk:* pulls in `objfloat.c` + float formatting and may bump the image-size ceiling.
+2. **Image-size ceiling (~896 KB)** — builds run close to it; this constrains heap size and how many features ship at once.  No free shrink lever found; gains come from feature/config trims or dead-stripping.
+3. **Deep-recursion frontier** — bounded by a transient-C-stack vs. image-size tradeoff, not a clean compiler bug.  `MICROPY_STACKLESS_STRICT` fixes recursion depth but doesn't fit the ceiling as the default build.
+4. **Config-gated features** (e.g. `%` string formatting, extended `[::-1]` slices, `str.count`) are MicroPython minimal-config decisions, not compiler gaps — enable per need vs. image budget.
+
+**Reference docs:** `MICROPYTHON_PORT.md`, `NEXT_SESSION.md` (per-session detail), `CLAUDE.md` (live status header).
 
 ---
 
@@ -1079,8 +1118,8 @@ The following features were implemented but were not part of the original roadma
 
 ---
 
-**Roadmap Version:** 3.6 (Kl-CAddr matrix closed; Phase B' + carveout lifted; 32-bit far load/store portable; narrow far-load AX clobber closed)
-**Last Updated:** 2026-05-25
+**Roadmap Version:** 4.0 (original 4-phase compiler goal complete; reframed around the MicroPython hardening phase + soft-float model-complete)
+**Last Updated:** 2026-06-07
 **Original Date:** 2025-11-21
-**Actual Status:** ~97% Complete (Phases 0, 1, 2, 4 done; Phase 3 ~96%; tiny/medium/compact/large/huge all runtime-verified in DOSBox via **59/59** per-model probe gate; huge >64K data via `_HUGE_<sym>` segments; huge stack ptr arith via `_qbe_huge_add`; `long` through a far pointer round-trips full 32 bits via `Oloadfl`/`Ostorefl`; narrow far-loads no longer alias via AX)
-**Next Priority:** (1) small .EXE ABI mismatch (libstub ret→retf rewrite, `[[per-model-gate]]`); (2) ~~Phase B'' narrower stores~~ CLOSED as proven unreachable 2026-05-28 (pp); (3) 211-commit upstream-qbe rebase (track i, deferred); (4) real-consumer exploration — self-host minic (k), stevie under compact/large/huge (l), larger test program (m).  ✅ Closed 2026-05-25: minic signed `>>` (aa); Kl-CAddr Oand/Oor/Oxor (bb); Kl-CAddr cmp32 (cc); Kl-CAddr emit_push_long div/rem (dd); Omul Kl CAddr defensive die() (ee); Phase B' storel/loadl Kl spilled-ptr slot (ff); Phase B Var-operand carveout lifted + 2 latent BX-clobber bugs (gg); storefl/loadfl 32-bit width through far ptr (hh); narrow Oloadf{b,h,w} AX clobber (jj).  Tiny .COM stevie shrink **PARKED** (`[[minic-pointer-bloat]]`).
+**Actual Status:** Original compiler goal (Phases 0–4) COMPLETE.  tiny/medium/compact/large/huge runtime-verified via a **215/215** per-model probe gate; soft-float single-precision is model-complete (medium + far-data, no 8087); MicroPython builds, links, and runs interactively on real Victor 9000 hardware.  Now in an open-ended hardening phase (Phase 5) where MicroPython surfaces edge-case bugs that get reduced to gated probes and fixed.
+**Next Priority:** (1) **Enable MicroPython floats** (`MICROPY_FLOAT_IMPL_FLOAT`) now that far-data soft-float is ready (§3w) — watch the ~896 KB Victor image ceiling; (2) MicroPython image-size / deep-recursion tradeoff; (3) small .EXE ABI mismatch (`[[per-model-gate]]`); (4) 211-commit upstream-qbe rebase (deferred).

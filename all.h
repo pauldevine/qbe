@@ -81,6 +81,13 @@ struct Target {
 	char apple;
 	char windows;
 	enum MemModel memmodel; /* Memory model (for 8086) */
+	char splitstack; /* SS != DS (i8086 far-data only, qbe -s): the C
+	                  * stack lives in its own segment, so register-
+	                  * indirect NEAR derefs — which are always stack-
+	                  * derived under far-data (globals are far-accessed,
+	                  * all C pointers are far) — need an ss: override.
+	                  * [bp] addressing is SS-relative by hardware
+	                  * default and direct [_sym] stays DS (DGROUP). */
 	int wordsz; /* byte width of Kw on this target (4 for 32/64-bit
 	             * targets; 2 for i8086, where the backend emits
 	             * `storew`/`loadw` as 16-bit `mov word`) */
@@ -239,9 +246,9 @@ enum {
 };
 
 #define INRANGE(x, l, u) ((unsigned)(x) - l <= u - l) /* linear in x */
-#define isstore(o) (INRANGE(o, Ostoreb, Ostored) || INRANGE(o, Ostorefb, Ostorefl))
+#define isstore(o) (INRANGE(o, Ostoreb, Ostored) || INRANGE(o, Ostorefb, Ostorefs))
 #define isload(o) INRANGE(o, Oloadsb, Oload)
-#define isloadfar(o) INRANGE(o, Oloadfb, Oloadfl)
+#define isloadfar(o) INRANGE(o, Oloadfb, Oloadfs)
 #define isalloc(o) INRANGE(o, Oalloc4, Oalloc16)
 #define isext(o) INRANGE(o, Oextsb, Oextuw)
 #define ispar(o) INRANGE(o, Opar, Opare)

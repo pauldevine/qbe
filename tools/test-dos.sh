@@ -73,6 +73,63 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/mediumprobe.c:minic/dos/tests/mediumprobe.golden.txt:medium"
 	"minic/dos/examples/mediumprobe.c:minic/dos/tests/mediumprobe.golden.txt:large"
 	"minic/dos/examples/mediumprobe.c:minic/dos/tests/mediumprobe.golden.txt:huge"
+	"minic/dos/examples/kl_ternary_mul_probe.c:minic/dos/tests/kl_ternary_mul_probe.golden.txt:medium"
+	"minic/dos/examples/kl_ternary_mul_probe.c:minic/dos/tests/kl_ternary_mul_probe.golden.txt:compact"
+	"minic/dos/examples/kl_ternary_mul_probe.c:minic/dos/tests/kl_ternary_mul_probe.golden.txt:large"
+	# Single-precision software float (no 8087): native `float` lowers to
+	# _sf_* helper calls.  Arithmetic/compare/convert are model-independent
+	# (medium probes below); far-data float load/store goes through the
+	# loadfs/storefs ops (float_fardata_probe, compact/large/huge).
+	"minic/dos/examples/softfloat_probe.c:minic/dos/tests/softfloat_probe.golden.txt:medium"
+	"minic/dos/examples/float_literal_probe.c:minic/dos/tests/float_literal_probe.golden.txt:medium"
+	# `double` aliases to single-precision (Ks) on this FPU-less target
+	# (sizeof==4, single-precision arithmetic), static float initializers
+	# (file-scope global + struct member, incl. negative via the 0-x desugar),
+	# and float->long conversion (Ostosi with a Kl result).
+	"minic/dos/examples/double_float_probe.c:minic/dos/tests/double_float_probe.golden.txt:medium"
+	# Algebraic soft-float libm (fabs/copysign/floor/ceil/round/nearbyint/fmod
+	# + isnan/isinf/signbit) reached via <math.h> macro names.  Prerequisite
+	# for MICROPY_FLOAT_IMPL_FLOAT.
+	"minic/dos/examples/softlibm_probe.c:minic/dos/tests/softlibm_probe.golden.txt:medium"
+	# Transcendental soft-float libm (exp2/log2/exp/log + powf).  powf is the
+	# one of these the curated MicroPython core links (objfloat **, parsenum
+	# 1eN, round(x,n)); exact integer-exponent fast path + exp2/log2 core.
+	"minic/dos/examples/softtrig_probe.c:minic/dos/tests/softtrig_probe.golden.txt:medium"
+	# Call-argument int<->float conversion (C11 6.5.2.2p7, §4x): an integer
+	# argument to a prototyped float param must convert (swtof/sltof), not
+	# pass its raw word as a binary32 denormal; float arg to int/long param
+	# converts via stosi.  MicroPython surface: parsenum.c mp_decimal_exp's
+	# powf(5, -dec_exp) was powf(eps, eps) ~= 1.0 — every float literal
+	# mis-parsed (1.5 -> 7.5).
+	"minic/dos/examples/float_arg_coerce_probe.c:minic/dos/tests/float_arg_coerce_probe.golden.txt:medium"
+	"minic/dos/examples/float_arg_coerce_probe.c:minic/dos/tests/float_arg_coerce_probe.golden.txt:compact"
+	# Kw div/rem AX/DX liveness brackets (§4y): the inline idiv/div handlers
+	# clobbered AX (dividend staging, quotient) and DX (cwd/xor, remainder)
+	# with NO save — a live temp parked in either was destroyed (the §1h
+	# found-not-fixed two-div-one-call bug; 21 sites in the MP image via the
+	# emit-bracket audit, tools/run-emit-audit.sh).  rega-dependent trigger:
+	# green probe is necessary-not-sufficient, the audit is the real guard.
+	"minic/dos/examples/div_live_clobber_probe.c:minic/dos/tests/div_live_clobber_probe.golden.txt:medium"
+	"minic/dos/examples/div_live_clobber_probe.c:minic/dos/tests/div_live_clobber_probe.golden.txt:compact"
+	# Soft-float compare/convert result in CX (§4x): the Ocmps/Ostosi emit
+	# brackets pushed/popped CX unconditionally, so a result rega placed in
+	# CX was popped over with stale garbage (objfloat.c modulo sign-fix fired
+	# on 7.5 % 2.0 -> 3.5; bool(0.0) -> True on Victor).  rega-dependent
+	# trigger: green probe is necessary-not-sufficient, the real guard is the
+	# dst_in_cx skip in i8086/emit.c.  Verified bug-loud vs the unfixed emit.
+	"minic/dos/examples/float_cmp_cx_probe.c:minic/dos/tests/float_cmp_cx_probe.golden.txt:medium"
+	"minic/dos/examples/float_cmp_cx_probe.c:minic/dos/tests/float_cmp_cx_probe.golden.txt:compact"
+	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:compact"
+	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:large"
+	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:huge"
+	# Regression: copy.c must not fold a class-narrowing `=w copy` of an `l`
+	# temp on i8086 (T.wordsz==2) — `(int)(a>>31) && ...` would invert the
+	# sign decision.  Surfaced by the soft-libm floor/fmod/round helpers.
+	"minic/dos/examples/kl_narrow_copy_branch_probe.c:minic/dos/tests/kl_narrow_copy_branch_probe.golden.txt:medium"
+	"minic/dos/examples/struct_copy_probe.c:minic/dos/tests/struct_copy_probe.golden.txt:medium"
+	"minic/dos/examples/static_lptr_return_probe.c:minic/dos/tests/static_lptr_return_probe.golden.txt:medium"
+	"minic/dos/examples/lptr_range_probe.c:minic/dos/tests/lptr_range_probe.golden.txt:medium"
+	"minic/dos/examples/operator_pending_probe.c:minic/dos/tests/operator_pending_probe.golden.txt:medium"
 	"minic/dos/examples/divreg_probe.c:minic/dos/tests/divreg_probe.golden.txt:medium"
 	"minic/dos/examples/shlconst_probe.c:minic/dos/tests/shlconst_probe.golden.txt:medium"
 	"minic/dos/examples/shlconst_probe.c:minic/dos/tests/shlconst_probe.golden.txt:compact"
@@ -162,6 +219,9 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/dup_label_probe.c:minic/dos/tests/dup_label_probe.golden.txt:medium"
 	"minic/dos/examples/dup_label_probe.c:minic/dos/tests/dup_label_probe.golden.txt:large"
 	"minic/dos/examples/caddr_slot_probe.c:minic/dos/tests/caddr_slot_probe.golden.txt:medium"
+	"minic/dos/examples/uint_widen_cmp_probe.c:minic/dos/tests/uint_widen_cmp_probe.golden.txt:compact"
+	"minic/dos/examples/mp_str_int_probe.c:minic/dos/tests/mp_str_int_probe.golden.txt:compact"
+	"minic/dos/examples/local_array_memcpy_probe.c:minic/dos/tests/local_array_memcpy_probe.golden.txt:compact"
 	"minic/dos/examples/static_linkage_probe.c:minic/dos/tests/static_linkage_probe.golden.txt:medium"
 	"minic/dos/examples/static_linkage_probe.c:minic/dos/tests/static_linkage_probe.golden.txt:large"
 	"minic/dos/examples/setjmp_probe.c:minic/dos/tests/setjmp_probe.golden.txt:medium"
@@ -243,6 +303,87 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/objalign_probe.c:minic/dos/tests/objalign_probe.golden.txt:medium"
 	"minic/dos/examples/objalign_probe.c:minic/dos/tests/objalign_probe.golden.txt:compact"
 	"minic/dos/examples/objalign_probe.c:minic/dos/tests/objalign_probe.golden.txt:large"
+	"minic/dos/examples/struct_align_probe.c:minic/dos/tests/struct_align_probe.golden.txt:compact"
+	"minic/dos/examples/struct_align_probe.c:minic/dos/tests/struct_align_probe.golden.txt:large"
+	"minic/dos/examples/struct_align_probe.c:minic/dos/tests/struct_align_probe.golden.txt:huge"
+	# §4i far-pointer offset arithmetic: `far_ptr + idx` for an in-segment
+	# offset >= 0x8000 (addfo/subfo, segment-preserving 16-bit wraparound).
+	# compact/large only — under huge `far_ptr +/- idx` routes through
+	# huge_ptr_binop/_qbe_huge_add (a different, segment-normalising path that
+	# this fix does not touch), and that path has its own pre-existing >=0x8000
+	# gap; see the probe header.  See [[project-far-ptr-unsigned-index-bug]].
+	"minic/dos/examples/gc_bigheap_probe.c:minic/dos/tests/gc_bigheap_probe.golden.txt:compact"
+	"minic/dos/examples/gc_bigheap_probe.c:minic/dos/tests/gc_bigheap_probe.golden.txt:large"
+	# §4l self-contained faithful repro of MicroPython's conservative mark/sweep
+	# GC on a 49 KB far-data heap (forces ~18 collections under churn).  Guards the
+	# §4i far-ptr fix + GC-core far-data correctness (multi-level marking, far-array
+	# indexing, conservative dual-aligned scan).  PASSES — it proved the GC core is
+	# NOT the source of the MicroPython churn(120) corruption (that's in the
+	# MicroPython object/mp_state layer; see NEXT_SESSION §4l/§4m).  Layout-independent
+	# output (counts derive from HEAP_BYTES), identical compact/large.
+	"minic/dos/examples/gc_churn_probe.c:minic/dos/tests/gc_churn_probe.golden.txt:compact"
+	"minic/dos/examples/gc_churn_probe.c:minic/dos/tests/gc_churn_probe.golden.txt:large"
+	# §4m STATIC layout audit: every far-POINTER field in MicroPython's live heap
+	# object types (qstr_pool/map/dict/list/code_state) must sit at a 4-mod-0
+	# (sizeof(void*)) offset so the conservative GC's 4-stride scan finds it.
+	# Guards §4g's far-data struct-member alignment — a regression here would
+	# silently re-introduce the §4f "freed-while-live" GC bug class.  No GC at
+	# runtime (just offsetof prints); layout-independent, identical compact/large.
+	"minic/dos/examples/gc_offset_probe.c:minic/dos/tests/gc_offset_probe.golden.txt:compact"
+	"minic/dos/examples/gc_offset_probe.c:minic/dos/tests/gc_offset_probe.golden.txt:large"
+	# §4r variable-shift count pin (selshift CX pin, mirroring amd64).  The §4q
+	# root cause of the churn(120) saga: emit.c read a variable shift count from
+	# a register rega had spilled-and-reused (gc_mark_subtree's ATB_GET_KIND
+	# computed `atb >> atb`), so a live HEAD block was never marked and the
+	# "churn" qstr was freed-while-live.  Recreates the gc_mark_subtree shape
+	# (packed 2-bit table, imul count, extub value, register pressure) + Kw/Kl
+	# variable-shift edge cases with shift-free expectations.  NOTE: the original
+	# miscompile was layout-sensitive — a green probe alone is necessary, not
+	# sufficient (the real guard is the isel pin itself + the Victor scale2 run).
+	"minic/dos/examples/shift_count_spill_probe.c:minic/dos/tests/shift_count_spill_probe.golden.txt:medium"
+	"minic/dos/examples/shift_count_spill_probe.c:minic/dos/tests/shift_count_spill_probe.golden.txt:compact"
+	# §4w Kl/Ks stack-slot coloring (spill.c::colorklslots).  i8086 forces every
+	# Kl temp slot-resident; pre-§4w each owned a PRIVATE 2-word slot, making
+	# frame size proportional to the Kl temp COUNT (mp_execute_bytecode: 1261
+	# temps = 5464-byte frame = the ~5.6KB/level generator-resume cost measured
+	# in §4v).  §4w colors the interference graph so disjoint live ranges SHARE
+	# slots (same fn: 12 colors, 472B frame).  The probe is bug-loud on an
+	# interference miss (two overlapping temps sharing a slot = value bleed):
+	# 14 longs live across a call, short disjoint chains (these DO share), a
+	# loop-carried long swap cycle (pins the phi-web no-share rule — pmgen would
+	# otherwise need a slot<->slot Oswap emit doesn't implement), longs live
+	# across in-loop calls, and a pointer ping-pong walk (far Kl under compact).
+	"minic/dos/examples/kl_slot_color_probe.c:minic/dos/tests/kl_slot_color_probe.golden.txt:medium"
+	"minic/dos/examples/kl_slot_color_probe.c:minic/dos/tests/kl_slot_color_probe.golden.txt:compact"
+	# §4s pointer RELATIONAL compares are UNSIGNED (C11 6.5.8).  minic lowered
+	# ptr <,<=,>,>= to signed cslt/csle (pointers never carry the UNSIGNED type
+	# flag), inverting the result whenever the operands straddle the sign bit:
+	# near offset >= 0x8000 vs below, or far SEGMENT word >= 0x8000 vs below.
+	# Latent in the MicroPython images only because every segment there is
+	# >= 0x8000.  medium pins the near Kw path (cultw), compact the far-data Kl
+	# path (cultl); far-pointer cases discriminate under both.
+	"minic/dos/examples/ptr_relational_probe.c:minic/dos/tests/ptr_relational_probe.golden.txt:medium"
+	"minic/dos/examples/ptr_relational_probe.c:minic/dos/tests/ptr_relational_probe.golden.txt:compact"
+	# §4t Osub Kw two-address rescue: when rega gives a non-commutative op's
+	# result the same register as arg[1], emit.c saves arg[1] through a scratch
+	# — which was HARDCODED to BX.  With to==BX the save degenerated to
+	# `mov bx, bx`, the dst-mov clobbered it, and the trailing `pop bx`
+	# discarded the result: `right_pad -= p` compiled to a NO-OP and
+	# MicroPython's mp_print_strn right-pad loop ("%-5d" % 7) hung on Victor.
+	# The scratch is now chosen distinct from both the dest and arg[0].
+	# pad_out2 recreates the allocation (rega-dependent: green probe is
+	# necessary-not-sufficient; the real guard is the scratch chooser itself).
+	"minic/dos/examples/sub_arg1_alias_probe.c:minic/dos/tests/sub_arg1_alias_probe.golden.txt:medium"
+	"minic/dos/examples/sub_arg1_alias_probe.c:minic/dos/tests/sub_arg1_alias_probe.golden.txt:compact"
+	# §4v split stack (SS != DS): built with --split-stack (qbe -s ss:
+	# overrides on register-indirect near derefs + omf_link --separate-stack
+	# + libstub _dgroup_para DS reloads).  Exercises escaped &local writes,
+	# stack struct member chains, _far_sprintf into a stack buffer, fn-ptr
+	# callbacks with stack ptrs, setjmp/longjmp, and pins malloc seg ==
+	# DGROUP seg != stack seg (ok8 is the discriminator: a default link
+	# prints ok8 0).
+	"minic/dos/examples/split_stack_probe.c:minic/dos/tests/split_stack_probe.golden.txt:compact"
+	"minic/dos/examples/split_stack_probe.c:minic/dos/tests/split_stack_probe.golden.txt:large"
 )
 
 # --- Stevie size budget ----------------------------------------------------
@@ -316,11 +457,32 @@ run_runtime_probe() {
 	# (statics outside DGROUP).  Gated by basename so only these exercise it
 	# until far-global direct access is complete (see NEXT_SESSION.md).
 	farstatic=0
-	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe) farstatic=1 ;; esac
+	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe|gc_bigheap_probe|gc_churn_probe) farstatic=1 ;; esac
+	# Soft-float probes link the single-precision soft-float helper library.
+	sfflag=""
+	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe|float_arg_coerce_probe|float_cmp_cx_probe) sfflag="--softfloat" ;; esac
+	# Split-stack probe builds with SS in its own segment (qbe -s +
+	# omf_link --separate-stack); its ok8 asserts stack seg != DGROUP seg.
+	ssflag=""
+	case "$base" in split_stack_probe) ssflag="--split-stack" ;; esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
-		"$QBE_DIR/tools/build-example.sh" --model="$model" "$QBE_DIR/$src" >/dev/null
+		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag $ssflag "$QBE_DIR/$src" >/dev/null
 	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
 	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
+}
+
+# Runtime regression for OMF target-frame fixups into grouped near data.
+# This needs two translation units: the referenced _BSS globals live in one
+# object, while the data guard that old BSS-relative fixups corrupt lives in
+# another.  The single-source runtime table cannot express that shape.
+run_grouped_bss_probe() {
+	src="$QBE_DIR/minic/dos/examples/grouped_bss_probe.c"
+	def="$QBE_DIR/minic/dos/examples/grouped_bss_def.c"
+	golden="$QBE_DIR/minic/dos/tests/grouped_bss_probe.golden.txt"
+	exe="$QBE_DIR/build/examples/grouped_bss_probe/grouped_bss_probe.exe"
+	"$QBE_DIR/tools/build-example.sh" --model=medium "$src" "$def" >/dev/null
+	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
+	echo "$out" | diff -u "$golden" - >&2
 }
 
 # Compile-time probe for C `volatile` on named locals.  volatile is a codegen
@@ -569,6 +731,9 @@ for entry in "${RUNTIME_TESTS[@]}"; do
 	desc="$model runtime ($(basename "$src" .c))"
 	run "$desc" run_runtime_probe "$src" "$golden" "$model"
 done
+
+run "medium runtime (grouped_bss_probe)" \
+	run_grouped_bss_probe
 
 run "volatile asm (named local)" \
 	run_volatile_asm_probe

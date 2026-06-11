@@ -145,6 +145,7 @@ int memmodel = MSmall;
  * For far pointers (always `l`) the size stays 4 (seg:off). */
 #define SIZE(x)                                    \
 	(KIND(x) == NIL ? (die("void has no size"), 0) : \
+	 ISFLOAT(x) ? 4 :  /* float == double == single-precision, 4 bytes */ \
 	 KIND(x) == CHR ? 1 :  \
 	 ((x) & SHORT) ? 2 :  \
 	 KIND(x) == INT ? 2 : \
@@ -152,6 +153,9 @@ int memmodel = MSmall;
 	 (KIND(x) == STRUCT_T || KIND(x) == UNION_T) ? structh[DREF(x)].size : \
 	 (KIND(x) == PTR && KIND(DREF(x)) == FUN) ? CODEPTR_SZ() : \
 	 (KIND(x) == PTR && ISFAR(x)) ? 4 : DATAPTR_SZ())
+
+/* Round n up to a multiple of a (a must be a power of two). */
+#define ALIGNUP(n, a) (((n) + (a) - 1) & ~((a) - 1))
 
 typedef struct Node Node;
 typedef struct Symb Symb;
@@ -176,7 +180,9 @@ struct Node {
 	char op;
 	unsigned char nlong;  /* 'N' nodes: 1 if the integer literal is `long`
 	                       * (L/l suffix, or value too wide for i8086's
-	                       * 16-bit int) so expr() types it LNG not INT. */
+	                       * 16-bit int) so expr() types it LNG not INT.
+	                       * 'F' nodes: 1 if the float literal carries an
+	                       * f/F suffix (single-precision Ks), 0 = double. */
 	union {
 		int n;
 		char v[NString];
@@ -447,6 +453,8 @@ struct {
 	int nmembers;
 	struct Member members[NMember];  /* Max NMember members per struct */
 	int size;
+	int align;        /* §4g: struct alignment = max member alignment (1 under
+	                   * NEAR_DATA, so medium stays byte-identical/packed). */
 	int curbfoffset;  /* Current bit offset for bitfield packing */
 	int curbfbase;    /* Byte offset of current bitfield storage unit */
 	int forward;      /* 1 = forward/incomplete (tag known, body not yet defined) */
@@ -639,7 +647,7 @@ rename_pop_closed(void)
  * unchanged.  Mutates node->u.v in place so an initializer assignment
  * built from the same node targets the renamed slot. */
 char *
-block_scope_decl(Node *node, unsigned ctyp)
+block_scope_decl(Node *node, unsigned ctyp, int isarray)
 {
 	char *v = node->u.v;
 	unsigned h0, h;
@@ -651,7 +659,8 @@ block_scope_decl(Node *node, unsigned ctyp)
 			break;
 		if (strcmp(varh[h].v, v) == 0) {
 			if (varh[h].glo == 0 && !varh[h].isextern &&
-			    !varh[h].enumconst && varh[h].ctyp != ctyp) {
+			    !varh[h].enumconst &&
+			    (varh[h].ctyp != ctyp || varh[h].isarray != isarray)) {
 				if (renamestksp >= NRename)
 					die("too many block-scoped renames");
 				sprintf(renamestk[renamestksp].mangled,
@@ -765,6 +774,7 @@ structadd(char *name, int isunion)
 		structh[idx].isunion = isunion;
 		structh[idx].nmembers = 0;
 		structh[idx].size = 0;
+		structh[idx].align = 1;
 		structh[idx].curbfoffset = 0;
 		structh[idx].curbfbase = 0;
 		structh[idx].forward = 0;
@@ -779,6 +789,7 @@ structadd(char *name, int isunion)
 	structh[idx].isunion = isunion;
 	structh[idx].nmembers = 0;
 	structh[idx].size = 0;
+	structh[idx].align = 1;
 	structh[idx].curbfoffset = 0;  /* No bitfield in progress */
 	structh[idx].curbfbase = 0;
 	structh[idx].forward = 0;
@@ -806,16 +817,53 @@ structadd_forward(char *name, int isunion)
 	structh[idx].isunion = isunion;
 	structh[idx].nmembers = 0;
 	structh[idx].size = 0;
+	structh[idx].align = 1;
 	structh[idx].curbfoffset = 0;
 	structh[idx].curbfbase = 0;
 	structh[idx].forward = 1;
 	return idx;
 }
 
+/* §4g: natural alignment of a member type.  Under NEAR_DATA (tiny/small/
+ * medium) this is always 1, so those models keep the historical PACKED
+ * layout byte-for-byte.  Under far-data a 4-byte member (long / far data
+ * pointer / float / 4-byte fn-ptr) aligns to 4 so MicroPython's conservative
+ * GC, which scans memory in sizeof(void*)=4 strides, finds every pointer at
+ * a stride boundary instead of split across two scan words.  Sub-4-byte
+ * scalars (char, short, int, near ptr) stay align-1 (they can't hold a
+ * pointer, so their alignment is irrelevant to the collector) — this keeps
+ * the padding, and therefore the image growth, to a minimum: a struct with
+ * no 4-byte member has alignment 1 and is byte-identical even under far-data. */
+int
+alignof_ctyp(unsigned ctyp)
+{
+	if (NEAR_DATA())
+		return 1;
+	if (KIND(ctyp) == STRUCT_T || KIND(ctyp) == UNION_T)
+		return structh[DREF(ctyp)].align;
+	if (SIZE(ctyp) >= 4)
+		return 4;
+	return 1;
+}
+
+/* §4g: finalize a struct's layout by tail-padding its size up to its own
+ * alignment, so an array of it (or its embedding in a larger struct) keeps
+ * every element/member at its natural alignment.  Idempotent (rounding an
+ * already-rounded size is a no-op), so it is safe to call at every grammar
+ * close site.  A no-op under NEAR_DATA (align stays 1). */
+void
+structfinish(int idx)
+{
+	if (idx < 0)
+		return;
+	structh[idx].size = ALIGNUP(structh[idx].size, structh[idx].align);
+}
+
 void
 structaddmember(int sidx, char *name, unsigned ctyp)
 {
 	int i;
+	int malign;
 	struct Member *m;
 
 	if (structh[sidx].nmembers >= NMember)
@@ -846,6 +894,11 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 	m->isflex = 0;
 	m->fpid = -1;       /* Not a fn-ptr member (set by the fn-ptr member rule) */
 
+	/* §4g: track the struct's alignment and pad to the member's alignment
+	 * before placing it (no-op under NEAR_DATA — alignof_ctyp returns 1). */
+	malign = alignof_ctyp(ctyp);
+	if (malign > structh[sidx].align)
+		structh[sidx].align = malign;
 	if (structh[sidx].isunion) {
 		/* Union: all members at offset 0 */
 		m->offset = 0;
@@ -854,6 +907,7 @@ structaddmember(int sidx, char *name, unsigned ctyp)
 			structh[sidx].size = SIZE(ctyp);
 	} else {
 		/* Struct: members laid out sequentially */
+		structh[sidx].size = ALIGNUP(structh[sidx].size, malign);
 		m->offset = structh[sidx].size;
 		structh[sidx].size += SIZE(ctyp);
 	}
@@ -866,6 +920,7 @@ void
 structaddarrmember(int sidx, char *name, unsigned ctyp, int count)
 {
 	int i, total;
+	int malign;
 	struct Member *m;
 
 	if (structh[sidx].nmembers >= NMember)
@@ -886,11 +941,17 @@ structaddarrmember(int sidx, char *name, unsigned ctyp, int count)
 	m->count = count;
 	m->isflex = (count == 0);  /* `T x[];` flexible array: 0 bytes but decays */
 	total = SIZE(ctyp) * count;
+	/* §4g: array member aligns to its ELEMENT type (so a `void *arr[]`
+	 * after a 2-byte field starts at a 4-aligned offset). */
+	malign = alignof_ctyp(ctyp);
+	if (malign > structh[sidx].align)
+		structh[sidx].align = malign;
 	if (structh[sidx].isunion) {
 		m->offset = 0;
 		if (total > structh[sidx].size)
 			structh[sidx].size = total;
 	} else {
+		structh[sidx].size = ALIGNUP(structh[sidx].size, malign);
 		m->offset = structh[sidx].size;
 		structh[sidx].size += total;
 	}
@@ -924,10 +985,15 @@ structaddbitfield(int sidx, char *name, unsigned ctyp, int width)
 	if (width > unitsize)
 		die("bitfield width exceeds type size");
 
+	/* §4g: a bitfield's storage unit aligns to its declared type. */
+	if (alignof_ctyp(ctyp) > structh[sidx].align)
+		structh[sidx].align = alignof_ctyp(ctyp);
+
 	/* Check if this bitfield fits in current storage unit */
 	if (structh[sidx].curbfoffset == 0 ||
 	    structh[sidx].curbfoffset + width > unitsize) {
 		/* Start a new storage unit */
+		structh[sidx].size = ALIGNUP(structh[sidx].size, alignof_ctyp(ctyp));
 		structh[sidx].curbfbase = structh[sidx].size;
 		structh[sidx].curbfoffset = 0;
 		structh[sidx].size += unitbytes;
@@ -963,6 +1029,13 @@ hoistanonymous(int parent_sidx, int anon_sidx)
 	/* Base offset for anonymous members in parent struct */
 	base_offset = structh[parent_sidx].size;
 	anon_size = structh[anon_sidx].size;
+	/* §4g: the anonymous aggregate aligns to its own alignment, and that
+	 * alignment propagates to the parent (no-op under NEAR_DATA: align==1,
+	 * so base_offset is unchanged and the layout stays byte-identical). */
+	if (structh[anon_sidx].align > structh[parent_sidx].align)
+		structh[parent_sidx].align = structh[anon_sidx].align;
+	if (!structh[parent_sidx].isunion)
+		base_offset = ALIGNUP(base_offset, structh[anon_sidx].align);
 
 	/* Copy all members from anonymous struct to parent */
 	for (i = 0; i < structh[anon_sidx].nmembers; i++) {
@@ -1007,8 +1080,8 @@ hoistanonymous(int parent_sidx, int anon_sidx)
 		if (anon_size > structh[parent_sidx].size)
 			structh[parent_sidx].size = anon_size;
 	} else {
-		/* Struct: add anonymous member size */
-		structh[parent_sidx].size += anon_size;
+		/* Struct: place the anonymous body at the (aligned) base. */
+		structh[parent_sidx].size = base_offset + anon_size;
 	}
 }
 
@@ -1526,6 +1599,45 @@ typeof_expr(Node *n)
 	return s.ctyp;
 }
 
+int
+sizeof_member_array_expr(Node *n)
+{
+	FILE *save_of = of, *nullf;
+	int save_tmp = tmp, save_lbl = lbl, save_clit = clit;
+	Symb s;
+	struct Member *m = 0;
+	int sidx, i, bytes = 0;
+
+	if (!n || n->op != '.')
+		return 0;
+
+	nullf = fopen("/dev/null", "w");
+	if (nullf)
+		of = nullf;
+	s = lval(n->l);
+	of = save_of;
+	if (nullf)
+		fclose(nullf);
+	tmp = save_tmp;
+	lbl = save_lbl;
+	clit = save_clit;
+
+	if (KIND(s.ctyp) != STRUCT_T && KIND(s.ctyp) != UNION_T)
+		return 0;
+
+	sidx = DREF(s.ctyp);
+	for (i = 0; i < structh[sidx].nmembers; i++) {
+		if (strcmp(structh[sidx].members[i].name, n->r->u.v) == 0) {
+			m = &structh[sidx].members[i];
+			break;
+		}
+	}
+	if (!m || m->count <= 0)
+		return 0;
+	bytes = SIZE(m->ctyp) * m->count;
+	return bytes;
+}
+
 char
 irtyp(unsigned ctyp)
 {
@@ -1544,8 +1656,11 @@ irtyp(unsigned ctyp)
 		return DATAPTR_T();
 	}
 	if (ISFLOAT(ctyp)) {
-		if (k == LNG) return 'd';  /* double */
-		return 's';  /* float */
+		/* No soft-double on i8086: double is aliased to single (Ks), so
+		 * every float — including any leftover LNG|FLOAT — emits as 's'.
+		 * This keeps a stray Kd from ever reaching the backend (which has
+		 * no double support). */
+		return 's';
 	}
 	/* Characters are bytes */
 	if (k == CHR) return 'b';
@@ -1571,8 +1686,8 @@ irtyp_ret(unsigned ctyp)
 		return DATAPTR_T();
 	}
 	if (ISFLOAT(ctyp)) {
-		if (KIND(ctyp) == LNG) return 'd';  /* double */
-		return 's';  /* float */
+		/* double aliases to single (Ks) on i8086 — see irtyp(). */
+		return 's';
 	}
 	if (KIND(ctyp) == LNG) return 'l';  /* 32-bit long on i8086 (SIZE 4) */
 	if (SIZE(ctyp) == 8) return 'l';
@@ -1751,6 +1866,21 @@ sext(Symb *s)
 	s->u.n = tmp++;
 }
 
+void
+widen_int_to_long(Symb *s)
+{
+	if (s->t == Con) {
+		s->ctyp = ISUNSIGNED(s->ctyp) ? (LNG | UNSIGNED) : LNG;
+		return;
+	}
+	fprintf(of, "\t%%t%d =l %s ", tmp, ISUNSIGNED(s->ctyp) ? "extuw" : "extsw");
+	psymb(*s);
+	fprintf(of, "\n");
+	s->t = Tmp;
+	s->ctyp = ISUNSIGNED(s->ctyp) ? (LNG | UNSIGNED) : LNG;
+	s->u.n = tmp++;
+}
+
 unsigned
 prom(int op, Symb *l, Symb *r)
 {
@@ -1759,15 +1889,17 @@ prom(int op, Symb *l, Symb *r)
 
 	/* Floating-point promotion: if either operand is float/double, promote both */
 	if (ISFLOAT(l->ctyp) || ISFLOAT(r->ctyp)) {
-		unsigned target_type = (LNG | FLOAT);  /* default to double */
-
-		/* If both are float, result is float; otherwise double */
-		if (ISFLOAT(l->ctyp) && ISFLOAT(r->ctyp)) {
-			if (KIND(l->ctyp) == INT && KIND(r->ctyp) == INT)
-				target_type = INT | FLOAT;  /* both float */
-			else
-				target_type = LNG | FLOAT;  /* at least one double */
-		}
+		/* C usual arithmetic conversions: the common floating type is the
+		 * widest operand — double only if either operand is itself double;
+		 * a float combined with an integer (or another float) stays float
+		 * and the integer converts to float, NOT double.  This also keeps
+		 * unary minus on a float — which mkneg desugars to `0 - x` — single
+		 * precision (Ks), instead of promoting to Kd which the soft-float
+		 * backend cannot lower. */
+		int l_dbl = ISFLOAT(l->ctyp) && KIND(l->ctyp) == LNG;
+		int r_dbl = ISFLOAT(r->ctyp) && KIND(r->ctyp) == LNG;
+		unsigned target_type = (l_dbl || r_dbl) ? (LNG | FLOAT)
+		                                        : (INT | FLOAT);
 
 		/* Convert integer to floating-point if needed */
 		if (!ISFLOAT(l->ctyp)) {
@@ -1781,8 +1913,11 @@ prom(int op, Symb *l, Symb *r)
 			l->t = Tmp;
 			l->ctyp = target_type;
 			l->u.n = tmp++;
-		} else if (l->ctyp != target_type) {
-			/* Convert float to double or vice versa */
+		} else if ((KIND(l->ctyp) == LNG) != (KIND(target_type) == LNG)) {
+			/* Convert float to double or vice versa — only on a real
+			 * precision change (compare KIND, not the full ctyp, so the
+			 * far-data FAR bit on a float value doesn't force a bogus
+			 * float->float truncd). */
 			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(target_type));
 			if (KIND(target_type) == LNG)
 				fprintf(of, "exts ");  /* float to double */
@@ -1806,8 +1941,10 @@ prom(int op, Symb *l, Symb *r)
 			r->t = Tmp;
 			r->ctyp = target_type;
 			r->u.n = tmp++;
-		} else if (r->ctyp != target_type) {
-			/* Convert float to double or vice versa */
+		} else if ((KIND(r->ctyp) == LNG) != (KIND(target_type) == LNG)) {
+			/* Convert float to double or vice versa — only on a real
+			 * precision change (compare KIND, not the full ctyp; see the
+			 * matching note on the left operand above). */
 			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(target_type));
 			if (KIND(target_type) == LNG)
 				fprintf(of, "exts ");  /* float to double */
@@ -1866,12 +2003,12 @@ prom(int op, Symb *l, Symb *r)
 
 	/* Promote int to long (handles both signed and unsigned) */
 	if (KIND(l->ctyp) == LNG && KIND(r->ctyp) == INT) {
-		sext(r);
+		widen_int_to_long(r);
 		/* Return unsigned long if l is unsigned, else signed long */
 		return ISUNSIGNED(l->ctyp) ? (LNG | UNSIGNED) : LNG;
 	}
 	if (KIND(l->ctyp) == INT && KIND(r->ctyp) == LNG) {
-		sext(l);
+		widen_int_to_long(l);
 		/* Return unsigned long if r is unsigned, else signed long */
 		return ISUNSIGNED(r->ctyp) ? (LNG | UNSIGNED) : LNG;
 	}
@@ -2009,6 +2146,8 @@ loadfar(Symb d, Symb s)
 		fprintf(of, " =w loadfh ");
 	} else if (t == 'l') {
 		fprintf(of, " =l loadfl ");  /* 32-bit long through far ptr */
+	} else if (t == 's') {
+		fprintf(of, " =s loadfs ");  /* 32-bit single-float through far ptr */
 	} else {
 		fprintf(of, " =w loadfw ");  /* Word (16-bit) load through far ptr */
 	}
@@ -2042,6 +2181,8 @@ storefar(Symb d, Symb s)
 		fprintf(of, "storefh ");
 	} else if (t == 'l') {
 		fprintf(of, "storefl ");  /* 32-bit long through far ptr */
+	} else if (t == 's') {
+		fprintf(of, "storefs ");  /* 32-bit single-float through far ptr */
 	} else {
 		fprintf(of, "storefw ");  /* Word (16-bit) store through far ptr */
 	}
@@ -2337,7 +2478,7 @@ call_target_name(char *f)
 		"fread", "fwrite", "fflush",
 		"strlen", "strcpy", "strcmp", "strncmp", "strncpy",
 		"strchr", "strcat", "strcspn", "strstr", "strrchr",
-		"memcpy", "memcmp", "memset",
+		"memcpy", "memmove", "memcmp", "memset",
 		"intdos", "int86", "segread",
 		"setjmp", "longjmp",
 		0
@@ -2506,26 +2647,51 @@ fnproto_find(char *name)
 }
 
 /* Coerce a call argument value `s' to the declared parameter type `ptyp'
- * (C11 6.5.2.2p4).  Only integer-scalar width mismatches are handled — the
- * case that shifts the stack-argument layout; pointer/float/aggregate
- * arguments keep their own type. */
+ * (C11 6.5.2.2p7).  Integer-scalar width mismatches are fixed (the case that
+ * shifts the stack-argument layout), and int<->float mismatches get the REAL
+ * C argument conversion; pointer and by-value aggregate arguments keep their
+ * own type. */
 static Symb
 coerce_arg(Symb s, unsigned ptyp)
 {
-	int arg_int, par_int;
 	char ac, pc;
 
-	/* Width-coerce any scalar arg whose IR class differs from the declared
-	 * param's: pointers/functions are integers at the IR level (`w' near,
-	 * `l' far), so an integer literal NULL/0 (always `w') handed to a far
-	 * pointer param must widen to `l' or the 2-byte push shifts every later
-	 * stack arg (the mp_arg_parse_all(0, NULL, ...) hang).  Only floats and
-	 * by-value aggregates are excluded (aggregates cross by pointer via
-	 * eval_arg/emit_arg; mixing float<->int here would be a real conversion,
-	 * not a width fix). */
-	arg_int = !ISFLOAT(s.ctyp) && !is_aggr(s.ctyp);
-	par_int = !ISFLOAT(ptyp) && !is_aggr(ptyp);
-	if (!arg_int || !par_int)
+	/* By-value aggregates cross by pointer via eval_arg/emit_arg. */
+	if (is_aggr(s.ctyp) || is_aggr(ptyp))
+		return s;
+	/* Integer argument to a prototyped FLOAT parameter: a real conversion,
+	 * not a width fix.  Without it the raw integer word lands in the
+	 * callee's binary32 slot and reads back as a denormal (~1e-44) — e.g.
+	 * parsenum.c's powf(5, -dec_exp) became powf(eps, eps) ~= 1.0, so the
+	 * decimal-exponent scaling of every MicroPython float literal was a
+	 * silent no-op (§4x). */
+	if (ISFLOAT(ptyp) && !ISFLOAT(s.ctyp)) {
+		fprintf(of, "\t%%t%d =%c %s ", tmp, irtyp_ret(ptyp),
+		    KIND(s.ctyp) == LNG ? "sltof" : "swtof");
+		psymb(s);
+		fprintf(of, "\n");
+		s.t = Tmp;
+		s.ctyp = ptyp;
+		s.u.n = tmp++;
+		return s;
+	}
+	/* Float argument to a prototyped INTEGER parameter.  The source is
+	 * always single-precision (Ks) on this target, so the op is stosi for
+	 * any integer dest width — a Kl result takes the full _sf_to_int DX:AX
+	 * (the §3z Ostosi-with-Kl-result path); dtosi would fail QBE's
+	 * typecheck (it wants a Kd operand, which never exists here). */
+	if (!ISFLOAT(ptyp) && ISFLOAT(s.ctyp)) {
+		fprintf(of, "\t%%t%d =%c %s ", tmp, irtyp_ret(ptyp),
+		    "stosi");
+		psymb(s);
+		fprintf(of, "\n");
+		s.t = Tmp;
+		s.ctyp = ptyp;
+		s.u.n = tmp++;
+		return s;
+	}
+	/* float -> float: single precision only on this target, nothing to fix. */
+	if (ISFLOAT(ptyp))
 		return s;
 	ac = irtyp_ret(s.ctyp);   /* 'w' or 'l' */
 	pc = irtyp_ret(ptyp);
@@ -2848,6 +3014,78 @@ huge_ptr_binop(int op, Symb dst, Symb lhs, Symb rhs)
 	return 1;
 }
 
+/*
+ * Far-pointer index arithmetic for compact/large (and explicit __far in any
+ * non-huge model): emit the dedicated `addfo`/`subfo` ops instead of a flat
+ * `=l add`/`=l sub`.
+ *
+ * A far pointer's segment is fixed per object (objects <= 64 KB) and the
+ * 16-bit offset wraps within the segment, so `far_ptr ± idx` must add/sub the
+ * index to the OFFSET word only, preserving the segment.  A flat 32-bit add of
+ * a SIGN-extended index (what the Scale path produces) goes wrong when the
+ * in-segment byte offset is >= 0x8000: extsw makes it negative, so the sum
+ * lands BELOW the object (e.g. MicroPython gc_alloc's pool_start + start_block*16
+ * on a >32 KB heap).  A zero-extended index instead breaks a 16-bit-wrapped
+ * "negative" size_t delta (off + 0xFFFF should give off-1).  Only offset-only
+ * modular arithmetic on the 16-bit offset is correct for BOTH — that's what
+ * the addfo/subfo backend ops do (they read just arg1's low 16 bits, so the
+ * Scale path's `=l mul`/sext is left unchanged: its low word already equals
+ * (idx*sz) mod 0x10000).  See NEXT_SESSION §4i / [[project-far-ptr-unsigned-index-bug]].
+ *
+ * MHuge is excluded: there an object can exceed 64 KB, so a genuine segment
+ * carry is required — handled by huge_ptr_binop (_qbe_huge_add/sub), which the
+ * callers run first.  Function pointers (pointee FUN, living in CS) and near
+ * pointers (16-bit, irtyp 'w') keep the regular add/sub.
+ *
+ * Returns 1 if it emitted addfo/subfo (caller skips its add/sub), else 0.
+ */
+static int
+far_ptr_offset_binop(int op, Symb dst, Symb lhs, Symb rhs)
+{
+	Symb sptr, soff;
+
+	if (op != '+' && op != '-') return 0;
+	if (memmodel == MHuge) return 0;
+	if (KIND(dst.ctyp) != PTR) return 0;
+	if (KIND(DREF(dst.ctyp)) == FUN) return 0;   /* fn ptr lives in CS */
+	if (irtyp_ret(dst.ctyp) != 'l') return 0;     /* near (16-bit) ptr */
+	if (ISFLOAT(lhs.ctyp) || ISFLOAT(rhs.ctyp)) return 0;
+
+	/* The pointer side is the PTR operand; the other is the (already
+	 * element-size-scaled) byte offset.  '+' is commutative; for '-' the
+	 * pointer must be the LHS (prom() has already swapped a `idx + ptr`
+	 * so the pointer is `lhs`). */
+	if (KIND(lhs.ctyp) == PTR) {
+		sptr = lhs;
+		soff = rhs;
+	} else {
+		sptr = rhs;
+		soff = lhs;
+	}
+
+	/* VARIABLE index only.  A CONSTANT offset keeps the flat `=l add`: the
+	 * bug needs a runtime index whose 16-bit value is >= 0x8000 (gc_alloc's
+	 * start_block*16) or a runtime-wrapped negative delta — a compile-time
+	 * constant scaled offset is folded by QBE into a single relocated CAddr
+	 * (`$sym+off`, no runtime arith), and routing it through the opaque
+	 * addfo/subfo would defeat that fold and bloat every `arr[const]` /
+	 * `&arr[const]` site (measured +2304 B across MicroPython, near the load
+	 * ceiling).  A constant index >= 0x8000 could in theory carry into the
+	 * segment too, but it is rare and the linker resolves the CAddr addend;
+	 * handle it only if a real case appears (NEXT_SESSION §4h scope note). */
+	if (soff.t == Con)
+		return 0;
+
+	fprintf(of, "\t");
+	psymb(dst);
+	fprintf(of, " =l %s ", op == '+' ? "addfo" : "subfo");
+	psymb(sptr);
+	fprintf(of, ", ");
+	psymb(soff);
+	fprintf(of, "\n");
+	return 1;
+}
+
 /* Fill a struct/union aggregate's members from an initlist into the storage
  * whose address is the SSA operand `dst` (e.g. "%_clit3" for a compound
  * literal, or "%foo"/"%t9" for a named local / deref target — see the
@@ -2934,7 +3172,7 @@ expr(Node *n)
 		['^'] = "xor",
 		['L'] = "shl",
 		['R'] = "shr",
-		['<'] = "cslt",  /* meeeeh, wrong for pointers! */
+		['<'] = "cslt",  /* signed default; ptr/unsigned rewritten to cult/cule at the emit site */
 		['l'] = "csle",
 		['e'] = "ceq",
 		['n'] = "cne",
@@ -2994,25 +3232,65 @@ expr(Node *n)
 		fprintf(of, "@l%d\n", l);
 		s0 = expr(n->r->l);
 		fprintf(of, "\tjmp @l%d\n", l+2);
-		fprintf(of, "@l%d\n", l+2);
-		fprintf(of, "\tjmp @l%d\n", l+4);
 		/* False branch */
 		fprintf(of, "@l%d\n", l+1);
 		s1 = expr(n->r->r);
 		fprintf(of, "\tjmp @l%d\n", l+3);
-		fprintf(of, "@l%d\n", l+3);
-		fprintf(of, "\tjmp @l%d\n", l+4);
-		/* Merge */
-		fprintf(of, "@l%d\n", l+4);
-		if (s0.ctyp != s1.ctyp) {
-			if (s0.ctyp == LNG && s1.ctyp == INT)
+		/* Usual arithmetic conversions of the two arms.  The phi (and
+		 * therefore BOTH arms) must have the IL width of the WIDER arm,
+		 * else the wider value is truncated through the phi.  The old
+		 * code only recognised the exact signed INT/LNG pair, so
+		 * `cond ? 0 : (U32)x` (an `unsigned long` = LNG|UNSIGNED arm,
+		 * which is not == LNG) defaulted to the narrow INT arm and emitted
+		 * a `=w` phi that dropped the high word of the 32-bit arm.  Now
+		 * any 4-byte ('l') arm forces an 'l' phi and the 2-byte ('w') arm
+		 * is sign/zero-extended (per its own signedness) in its trailer
+		 * block, where referencing the arm value is still SSA-dominated. */
+		{
+			char w0 = irtyp_ret(s0.ctyp);
+			char w1 = irtyp_ret(s1.ctyp);
+			int widen0 = 0, widen1 = 0;
+			if (s0.ctyp == s1.ctyp)
+				sr.ctyp = s0.ctyp;
+			else if (w0 == 'l' && w1 == 'w') {
+				sr.ctyp = s0.ctyp; widen1 = 1;
+			} else if (w1 == 'l' && w0 == 'w') {
+				sr.ctyp = s1.ctyp; widen0 = 1;
+			} else if (s0.ctyp == LNG && s1.ctyp == INT)
 				sr.ctyp = LNG;
 			else if (s0.ctyp == INT && s1.ctyp == LNG)
 				sr.ctyp = LNG;
 			else
 				sr.ctyp = s0.ctyp;
-		} else
-			sr.ctyp = s0.ctyp;
+			/* Trailer-true: predecessor of the merge for the true arm. */
+			fprintf(of, "@l%d\n", l+2);
+			if (widen0) {
+				Symb e;
+				e.t = Tmp; e.u.n = tmp++; e.ctyp = sr.ctyp;
+				fprintf(of, "\t");
+				psymb(e);
+				fprintf(of, " =l %s ", ISUNSIGNED(s0.ctyp) ? "extuw" : "extsw");
+				psymb(s0);
+				fprintf(of, "\n");
+				s0 = e;
+			}
+			fprintf(of, "\tjmp @l%d\n", l+4);
+			/* Trailer-false. */
+			fprintf(of, "@l%d\n", l+3);
+			if (widen1) {
+				Symb e;
+				e.t = Tmp; e.u.n = tmp++; e.ctyp = sr.ctyp;
+				fprintf(of, "\t");
+				psymb(e);
+				fprintf(of, " =l %s ", ISUNSIGNED(s1.ctyp) ? "extuw" : "extsw");
+				psymb(s1);
+				fprintf(of, "\n");
+				s1 = e;
+			}
+			fprintf(of, "\tjmp @l%d\n", l+4);
+		}
+		/* Merge */
+		fprintf(of, "@l%d\n", l+4);
 		fprintf(of, "\t");
 		psymb(sr);
 		fprintf(of, " =%c phi @l%d ", irtyp_ret(sr.ctyp), l+2);
@@ -3078,14 +3356,17 @@ expr(Node *n)
 		break;
 
 	case 'F':
-		/* Floating-point literal */
-		/* For now, default to double; we can make this smarter later */
+		/* Floating-point literal.  On this FPU-less i8086 target `double`
+		 * is single-precision (see TDOUBLE below): there is no soft-double
+		 * and no 64-bit int to build one, so EVERY float literal — suffixed
+		 * or not — types as single (Ks) and lowers through the _sf_* helpers.
+		 * QBE truncates the `s_` constant to binary32. */
 		sr.t = Tmp;
 		sr.u.n = tmp++;
-		sr.ctyp = LNG | FLOAT;  /* double */
+		sr.ctyp = INT | FLOAT;  /* float (single); double aliases to this */
 		fprintf(of, "\t");
 		psymb(sr);
-		fprintf(of, " =d copy d_%s\n", n->u.v);
+		fprintf(of, " =s copy s_%s\n", n->u.v);
 		break;
 
 	case 'S':
@@ -3808,8 +4089,13 @@ expr(Node *n)
 			s0.t = Tmp;
 			s0.ctyp = s1.ctyp;
 			s0.u.n = tmp++;
-		} else if (ISFLOAT(s1.ctyp) && ISFLOAT(s0.ctyp) && s1.ctyp != s0.ctyp) {
-			/* Convert between float and double */
+		} else if (ISFLOAT(s1.ctyp) && ISFLOAT(s0.ctyp)
+		           && (KIND(s1.ctyp) == LNG) != (KIND(s0.ctyp) == LNG)) {
+			/* Convert between float and double.  Compare only the
+			 * floating PRECISION (double = KIND LNG, float = KIND INT),
+			 * not the full ctyp — under a far-data model the RHS value
+			 * carries an extra FAR bit, so `float = float` must NOT be
+			 * mistaken for a precision change and emit a bogus truncd. */
 			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(s1.ctyp));
 			if (KIND(s1.ctyp) == LNG)
 				fprintf(of, "exts ");  /* float to double */
@@ -3885,6 +4171,8 @@ expr(Node *n)
 				fprintf(of, "\tstorefh ");
 			else if (t == 'l')
 				fprintf(of, "\tstorefl ");
+			else if (t == 's')
+				fprintf(of, "\tstorefs ");
 			else
 				fprintf(of, "\tstorefw ");
 		} else {
@@ -3932,7 +4220,8 @@ expr(Node *n)
 		s1.ctyp = INT;
 		/* Compute new value */
 		sr.ctyp = prom(o, &s0, &s1);
-		if (!huge_ptr_binop(o, sr, s0, s1)) {
+		if (!huge_ptr_binop(o, sr, s0, s1)
+		 && !far_ptr_offset_binop(o, sr, s0, s1)) {
 			fprintf(of, "\t");
 			psymb(sr);
 			fprintf(of, " =%c %s ", irtyp_ret(sr.ctyp), o == '+' ? "add" : "sub");
@@ -3950,6 +4239,8 @@ expr(Node *n)
 				fprintf(of, "\tstorefh ");
 			else if (t == 'l')
 				fprintf(of, "\tstorefl ");
+			else if (t == 's')
+				fprintf(of, "\tstorefs ");
 			else
 				fprintf(of, "\tstorefw ");
 		} else {
@@ -4031,6 +4322,16 @@ expr(Node *n)
 			break;
 		}
 
+		/* Compact/large (or explicit __far): `far_ptr ± idx` must use the
+		 * offset-only addfo/subfo ops (segment preserved, 16-bit offset
+		 * wraparound) — a flat `=l add` of the Scale path's sign-extended
+		 * index corrupts any in-segment offset >= 0x8000.  Covers a[i],
+		 * p+i, p-i, and the postfix p++/p-- that reach Binop.  The post-switch
+		 * ptr-ptr `div` and the P/M store-back still run after this break.
+		 * See far_ptr_offset_binop / [[project-far-ptr-unsigned-index-bug]]. */
+		if (far_ptr_offset_binop(o, sr, s0, s1))
+			break;
+
 		/* Validate operations on floating-point types */
 		if (ISFLOAT(sr.ctyp)) {
 			/* Disallow modulo on floats */
@@ -4073,8 +4374,18 @@ expr(Node *n)
 				fprintf(of, " cne%s ", ty);
 			else
 				fprintf(of, " %s%s ", otoa[o], ty);
-		} else if (strchr("<l", o) && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp))) {
-			/* Unsigned integer comparison */
+		} else if (strchr("<l", o) && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp)
+		           || KIND(s0.ctyp) == PTR || KIND(s1.ctyp) == PTR)) {
+			/* Unsigned integer comparison.  POINTER relational compares
+			 * (C11 6.5.8) are address comparisons and must be UNSIGNED
+			 * too: pointer types never carry the UNSIGNED flag, so
+			 * without the KIND==PTR check they fell through to the
+			 * signed cslt/csle below — wrong whenever the operands
+			 * straddle the sign bit (near offset >= 0x8000, or a far
+			 * pointer's segment word >= 0x8000 vs one below).  Harmless
+			 * by luck in images where every segment is >= 0x8000 (all
+			 * "negative", so signed ordering matches), but real; found
+			 * in §4o's VERIFY_PTR SSA audit. */
 			fprintf(of, " %s%s ", o == '<' ? "cult" : "cule", ty);
 		} else if ((o == '/' || o == '%')
 		           && (ISUNSIGNED(s0.ctyp) || ISUNSIGNED(s1.ctyp))) {
@@ -4115,6 +4426,8 @@ expr(Node *n)
 				fprintf(of, "\tstorefh ");
 			else if (t == 'l')
 				fprintf(of, "\tstorefl ");
+			else if (t == 's')
+				fprintf(of, "\tstorefs ");
 			else
 				fprintf(of, "\tstorefw ");
 		} else {
@@ -4564,7 +4877,11 @@ stmt(Stmt *s, int b, int c)
 				psymb(x);
 				fprintf(of, "\n");
 				x.t = Tmp; x.ctyp = curfntyp; x.u.n = tmp++;
-			} else if (ISFLOAT(curfntyp) && ISFLOAT(x.ctyp) && curfntyp != x.ctyp) {
+			} else if (ISFLOAT(curfntyp) && ISFLOAT(x.ctyp)
+			           && (KIND(curfntyp) == LNG) != (KIND(x.ctyp) == LNG)) {
+				/* Convert between float and double only on a real
+				 * precision change (compare KIND, not the full ctyp —
+				 * the far-data FAR bit must not force a bogus truncd). */
 				fprintf(of, "\t%%t%d =%c ", tmp, irtyp(curfntyp));
 				fprintf(of, KIND(curfntyp) == LNG ? "exts " : "truncd ");
 				psymb(x);
@@ -4958,6 +5275,7 @@ emit_struct_global_array(char *name, int count)
 
 	if (idx < 0)
 		die("missing struct context");
+	structfinish(idx);    /* §4g: tail-pad before the array stride is read */
 	styp = (idx << 3) + STRUCT_T;
 	curstruct = -1;
 	total = SIZE(styp) * count;
@@ -5416,6 +5734,70 @@ agg_unwrap_scalar(Node *init)
 	return init;
 }
 
+/* Evaluate a compile-time-constant floating expression to a host double.
+ * Handles float/int literals, value-preserving casts, the four arithmetic
+ * ops, and unary minus — including the `0 - x` form mkneg desugars `-x` into
+ * (so a negative float initializer like `float n = -0.5f;` folds correctly).
+ * Integer-only subexpressions fall back to const_eval.  Used only for static
+ * float initializers (minic runs on the host, so host double is fine). */
+double
+const_eval_double(Node *n)
+{
+	double l, r;
+
+	if (!n) die("null expression in float constant");
+	switch (n->op) {
+	case 'F':                      /* float literal */
+		return strtod(n->u.v, 0);
+	case 'K':                      /* (type)expr cast: value-preserving */
+		return const_eval_double(n->l);
+	case '+':
+		return const_eval_double(n->l) + const_eval_double(n->r);
+	case '*':
+		return const_eval_double(n->l) * const_eval_double(n->r);
+	case '/':
+		l = const_eval_double(n->l);
+		r = const_eval_double(n->r);
+		if (r == 0.0) die("division by zero in float constant");
+		return l / r;
+	case '-':
+		if (!n->r)             /* unary minus */
+			return -const_eval_double(n->l);
+		return const_eval_double(n->l) - const_eval_double(n->r);
+	default:
+		/* Integer constant promoted to float, e.g. `float x = 5;`. */
+		return (double)const_eval(n);
+	}
+}
+
+/* Produce the QBE float-literal text (the part after the `s_` prefix) for a
+ * compile-time-constant single-precision initializer.  `%.17g` round-trips a
+ * host double exactly; QBE's `s_` lexer (fscanf "_%f") accepts the sign,
+ * decimal, and exponent forms this can produce, then rounds to binary32. */
+void
+cival_float_text(Node *n, char *out)
+{
+	sprintf(out, "%.17g", const_eval_double(n));
+}
+
+/* `T NAME = <const float expr>;` at file scope. */
+void
+emit_global_float_init(Node *n)
+{
+	char buf[96], ftext[64];
+
+	if (parsed_type == NIL)
+		die("invalid void declaration");
+	if (nglo == NGlo)
+		die("too many globals");
+	cival_float_text(n, ftext);
+	sprintf(buf, "{ s s_%s }", ftext);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], parsed_ident);
+	varadd(parsed_ident, nglo++, parsed_type, 0);
+}
+
 void
 agg_emit_scalar(unsigned ctyp, Node *init, char *buf, int *bl, int *first)
 {
@@ -5426,6 +5808,14 @@ agg_emit_scalar(unsigned ctyp, Node *init, char *buf, int *bl, int *first)
 	init = agg_unwrap_scalar(init);
 	if (!init) {
 		*bl += sprintf(buf + *bl, " %c 0", ir);
+		return;
+	}
+	if (ISFLOAT(ctyp)) {
+		/* Single-precision member: emit `s s_<value>` (QBE rounds to
+		 * binary32 and the i8086 data path lays it out as 4 bytes). */
+		char ftext[64];
+		cival_float_text(init, ftext);
+		*bl += sprintf(buf + *bl, " s s_%s", ftext);
 		return;
 	}
 	cival_eval(init, &v);
@@ -6537,6 +6927,7 @@ typedefstruct: typedefstructstart smembers '}' IDENT ';'
 {
 	/* Create typedef to the (tagged) struct */
 	int idx = curstruct;
+	structfinish(idx);
 	curstruct = -1;
 	typhadd($4->u.v, (idx << 3) + STRUCT_T);
 }
@@ -6546,6 +6937,7 @@ typedefunion: typedefunionstart smembers '}' IDENT ';'
 {
 	/* Create typedef to the (tagged) union */
 	int idx = curstruct;
+	structfinish(idx);
 	curstruct = -1;
 	typhadd($4->u.v, (idx << 3) + UNION_T);
 }
@@ -6580,6 +6972,7 @@ static_assert_dcl: STATIC_ASSERT '(' expr ',' STR ')' ';'
 
 sdcl: structstart smembers '}' ';'
 {
+	structfinish(curstruct);
 	curstruct = -1;  /* Done defining this struct */
 }
     | STRUCT IDENT ';'
@@ -6703,6 +7096,7 @@ nestedagg: nested_s_begin smembers '}' ';'
 {
 	/* Anonymous nested struct: hoist its members into the parent. */
 	int idx = curstruct;
+	structfinish(idx);
 	curstruct = structstk[--structstksp];
 	hoistanonymous(curstruct, idx);
 }
@@ -6710,6 +7104,7 @@ nestedagg: nested_s_begin smembers '}' ';'
 {
 	/* Anonymous nested union: hoist its members into the parent. */
 	int idx = curstruct;
+	structfinish(idx);
 	curstruct = structstk[--structstksp];
 	hoistanonymous(curstruct, idx);
 }
@@ -6845,7 +7240,10 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	 * reduces via the '=' STR rule below (its '.' shifts ';'); '=' gaggr
 	 * is distinguished by its leading brace.  Non-constant initializers
 	 * die in const_eval. */
-	emit_global_int_init(const_eval($2));
+	if (ISFLOAT(parsed_type))
+		emit_global_float_init($2);
+	else
+		emit_global_int_init(const_eval($2));
 }
                | '=' gaggr ';'                   { emit_global_aggregate(parsed_type, parsed_ident, $2); }
                | '[' expr ']' ';'
@@ -7779,7 +8177,7 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
     | TLNGLNG  { $$ = LNG; /* long long aliases to 32-bit long on i8086 */ }
     | TBOOL    { $$ = CHR | UNSIGNED; }
     | TFLOAT   { $$ = INT | FLOAT; }
-    | TDOUBLE  { $$ = LNG | FLOAT; }
+    | TDOUBLE  { $$ = INT | FLOAT; /* no 8087 / no soft-double on i8086: double aliases to single-precision (Ks) */ }
     | TVOID    { $$ = NIL; }
     | TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
     | TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }
@@ -7888,12 +8286,14 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
          * enclosing curstruct, or -1 at top level) so there is exactly one
          * reduce action for `STRUCT '{'` — no reduce/reduce conflict. */
         int idx = curstruct;
+        structfinish(idx);
         curstruct = structstk[--structstksp];
         $$ = (idx << 3) + STRUCT_T;
     }
     | nested_u_begin smembers '}' {
         /* Anonymous union used directly as a type. */
         int idx = curstruct;
+        structfinish(idx);
         curstruct = structstk[--structstksp];
         $$ = (idx << 3) + UNION_T;
     }
@@ -7922,7 +8322,7 @@ stmt: ';'                            { $$ = 0; }
         char *v;
         if ($1 == NIL)
             die("invalid void declaration");
-        v = block_scope_decl($2, $1);
+        v = block_scope_decl($2, $1, 0);
         s = SIZE($1);
         varadd(v, 0, $1, 0);
         emit_local_alloc(v, ALLOC_T(), iralign($1), s);
@@ -7940,7 +8340,7 @@ stmt: ';'                            { $$ = 0; }
         Node *init_node;
         if ($1 == NIL)
             die("invalid void declaration");
-        v = block_scope_decl($2, $1);
+        v = block_scope_decl($2, $1, 0);
         s = SIZE($1);
         varadd(v, 0, $1, 0);
         emit_local_alloc(v, ALLOC_T(), iralign($1), s);
@@ -7958,7 +8358,7 @@ stmt: ';'                            { $$ = 0; }
         Node *clit_node, *init_node;
         if ($1 == NIL)
             die("invalid void declaration");
-        v = $2->u.v;
+        v = block_scope_decl($2, $1, 0);
         s = SIZE($1);
         varadd(v, 0, $1, 0);
         fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), s);
@@ -7995,7 +8395,7 @@ stmt: ';'                            { $$ = 0; }
         char *v;
         if ($1 == NIL)
             die("invalid void array");
-        v = $2->u.v;
+        v = block_scope_decl($2, IDIR($1), 1);
         n = const_eval($4);
         s = SIZE($1);
         total = s * n;
@@ -8014,7 +8414,7 @@ stmt: ';'                            { $$ = 0; }
         Node *chain;
         if ($1 == NIL)
             die("invalid void array");
-        v = $2->u.v;
+        v = block_scope_decl($2, IDIR($1), 1);
         n = const_eval($4);
         total = SIZE($1) * n;
         varadd(v, 0, IDIR($1), 1);
@@ -8031,7 +8431,7 @@ stmt: ';'                            { $$ = 0; }
         Node *chain;
         if ($1 == NIL)
             die("invalid void array");
-        v = $2->u.v;
+        v = block_scope_decl($2, IDIR($1), 1);
         chain = mk_local_array_init(v, $7, 0, 0, &n);
         varadd(v, 0, IDIR($1), 1);
         var_set_arraybytes(v, SIZE($1) * n);
@@ -8222,7 +8622,7 @@ forinit_var: type IDENT '='
     if ($1 == NIL)
         die("invalid void declaration");
     forinit_basetyp = $1;
-    v = block_scope_decl($2, $1);
+    v = block_scope_decl($2, $1, 0);
     s = SIZE($1);
     varadd(v, 0, $1, 0);
     emit_local_alloc(v, ALLOC_T(), iralign($1), s);
@@ -8656,9 +9056,12 @@ post: NUM
         /* sizeof of an expression: unevaluated; report its type size.
          * A bare array variable reports its whole-array byte size;
          * everything else routes through typeof_expr. */
+        int member_array_bytes;
         $$ = mknode('N', 0, 0);
         if ($3->op == 'V' && var_arraybytes($3->u.v) > 0)
             $$->u.n = var_arraybytes($3->u.v);
+        else if ((member_array_bytes = sizeof_member_array_expr($3)) > 0)
+            $$->u.n = member_array_bytes;
         else
             $$->u.n = SIZE(typeof_expr($3));
     }
@@ -8846,6 +9249,7 @@ yylex_inner()
 	};
 	int i, c, c1;
 	int suffix_l;  /* set when an integer literal carries an L/l suffix */
+	int single_float;  /* set when a float literal carries an f/F suffix */
 	unsigned long n;
 	char v[NString], *p;
 
@@ -8889,6 +9293,7 @@ yylex_inner()
 	if (isdigit(c) || c == '.') {
 		int isfloat = 0;
 		suffix_l = 0;
+		single_float = 0;
 		p = v;
 
 		/* Handle leading dot for numbers like .5 */
@@ -9019,6 +9424,7 @@ yylex_inner()
 		 */
 		if (c == 'f' || c == 'F') {
 			isfloat = 1;
+			single_float = 1;  /* `1.5f` is single-precision (Ks), not double */
 			c = getchar();  /* Consume float suffix */
 		} else if (c == 'l' || c == 'L') {
 			if (isfloat) {
@@ -9050,6 +9456,7 @@ yylex_inner()
 			*p = 0;
 			yylval.n = mknode('F', 0, 0);
 			strcpy(yylval.n->u.v, v);
+			yylval.n->nlong = single_float;  /* 'F': 1 = single (Ks), 0 = double */
 			return FNUM;
 		} else {
 			yylval.n = mknode('N', 0, 0);

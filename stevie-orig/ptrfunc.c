@@ -99,9 +99,9 @@ register LPTR	*a, *b;
 {
 	LPTR	tmp;
 
-	tmp = *a;
-	*a  = *b;
-	*b  = tmp;
+	LPCOPY(tmp, *a);
+	LPCOPY(*a, *b);
+	LPCOPY(*b, tmp);
 }
 
 /*

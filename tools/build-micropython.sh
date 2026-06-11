@@ -60,6 +60,56 @@ QBE="$QBE_DIR/qbe"
 DOS_DIR="$QBE_DIR/minic/dos"
 OUT_DIR="$QBE_DIR/build/mp-link"
 mkdir -p "$OUT_DIR"
+# Default DOS stack = 61440.  The dos8086 port runs the STACKLESS-strict VM
+# (ports/dos8086/mpconfigport.h §4b): deep Python recursion chains code_state
+# frames on the GC heap instead of the C stack — but deep GENERATOR recursion
+# still C-recurses on resume (objgenerator.c → mp_execute_bytecode, which
+# STACKLESS does NOT cover) at a §4v-MEASURED ~5.6 KB of C stack per level
+# (probe: VM-entry &param far addresses; the earlier "~2 KB/level" §4u
+# estimate was derived from overflow-luck endpoints, see below).  With the
+# §4v split stack (own SS segment) the old DGROUP cap (64KB − ~37KB data+bss
+# ≈ 28.4KB) is GONE; the cap is the 16-bit SP itself, so 61440 ≈ the max
+# (SP ≤ 65534) with a round margin.  ~61440/5772 ≈ 10 real generator levels.
+# HISTORY WARNING: every pre-§4v "frontier" measurement (gc(8)@16384,
+# gc(11)@24576) was stack OVERFLOW past the stack bottom into libstub's
+# unused _heap_buf in DGROUP — silent UB that happened to work.  Under the
+# split there is no landing pad (overflow wraps SP into the far-data
+# segments), so MICROPY_STACK_CHECK=1 (mpconfigport.h §4v) now raises a
+# clean RuntimeError at the limit instead.
+MP_STACK_SIZE=${MP_STACK_SIZE:-61440}
+# §4v split stack (default ON): the stack gets its OWN segment (SS != DS)
+# via qbe -s + omf_link --separate-stack + the libstub _dgroup_para DS
+# reloads.  This removes the DGROUP cap described above: DGROUP keeps its
+# full 64KB for near data+bss, and the stack can grow to the full 64KB SP
+# range (65535) independent of near-data size.  Set MP_SPLIT_STACK=0 to
+# fall back to the classic SS==DS layout (then the DGROUP cap applies).
+MP_SPLIT_STACK=${MP_SPLIT_STACK:-1}
+QBE_SPLIT_FLAG=""
+LINK_SPLIT_FLAG=""
+if [ "$MP_SPLIT_STACK" != "0" ]; then
+	QBE_SPLIT_FLAG="-s"
+	LINK_SPLIT_FLAG="--separate-stack"
+fi
+# Stack-check limit (REAL since §4v: MICROPY_STACK_CHECK=1).  mp_cstack_check
+# raises RuntimeError when (stack_top - SP) >= limit.  Default leaves 8 KB of
+# headroom under MP_STACK_SIZE: checks run at VM/parser entry, so up to one
+# ~5.6 KB resume frame plus libstub/ISR transients can land beyond the check.
+MP_STACK_LIMIT=${MP_STACK_LIMIT:-$((MP_STACK_SIZE - 8192))}
+MP_HEAP_SIZE=${MP_HEAP_SIZE:-49152}
+MP_DOS_TINY_STACK_CHECK=${MP_DOS_TINY_STACK_CHECK:-0}
+MP_DOS_STACKLESS_RECURSION_RAISE=${MP_DOS_STACKLESS_RECURSION_RAISE:-0}
+MP_EXTRA_CPPFLAGS=${MP_EXTRA_CPPFLAGS:-}
+# Per-FUNCTION text segments (§4t): with budget=1, asm_to_omf splits .text at
+# every function boundary, so omf_link --gc-sections strips each unreachable
+# function individually (statics included) instead of whole-TU text blocks,
+# and --pack-code re-packs the survivors back-to-back (word-aligned, no
+# paragraph waste).  On the curated MicroPython link this cut code 703553 →
+# 452461 bytes (-251 KB, -36%): the whole-TU granularity had been retaining
+# every dead function in any partially-used TU (mpz, showbc, profile, ...).
+# Only set here — the asm_to_omf default stays 56000 for builds that don't
+# link with --gc-sections --pack-code (per-function segments without packing
+# would ADD paragraph padding per function).
+export QBE_TEXT_SEG_BUDGET=${QBE_TEXT_SEG_BUDGET:-1}
 
 NORMALIZE='s/\bunsigned short int\b/unsigned short/g;s/\bunsigned long int\b/unsigned long/g;s/\bsigned short int\b/short/g;s/\bsigned long int\b/long/g;s/\blong long int\b/long long/g;s/\blong int\b/long/g;s/\bshort int\b/short/g;s/\bsigned char\b/char/g;s/\bsigned long long\b/long long/g;s/\bsigned long\b/long/g;s/\bsigned int\b/int/g'
 
@@ -77,9 +127,16 @@ for f in "$MP"/py/*.c; do
 	CORE_SRCS+=("$f")
 done
 PORT_SRCS=("$DOSPORT/main.c" "$DOSPORT/mphalport.c")
-ALL_SRCS=("${CORE_SRCS[@]}" "${PORT_SRCS[@]}")
+# softfloat.c provides the single-precision soft-libm: the _sf_add/sub/mul/div
+# arithmetic helpers the i8086 backend calls for Ks ops, plus the algebraic +
+# transcendental libm surface (floorf/powf/...) MicroPython references under
+# MICROPY_FLOAT_IMPL_FLOAT.  Always linked; --gc-sections dead-strips it
+# entirely when MICROPY_FLOAT_IMPL is NONE (no _sf_*/sf_* references), so the
+# image is byte-identical to a build without it in that case.
+SOFTFLOAT_SRC=("$DOS_DIR/softfloat.c")
+ALL_SRCS=("${CORE_SRCS[@]}" "${PORT_SRCS[@]}" "${SOFTFLOAT_SRC[@]}")
 
-echo "=== Compiling ${#ALL_SRCS[@]} TUs (${#CORE_SRCS[@]} core + ${#PORT_SRCS[@]} port) [model=$MODEL${FARSTATIC_FLAG:+, far-static-data}] ==="
+echo "=== Compiling ${#ALL_SRCS[@]} TUs (${#CORE_SRCS[@]} core + ${#PORT_SRCS[@]} port + ${#SOFTFLOAT_SRC[@]} softfloat) [model=$MODEL${FARSTATIC_FLAG:+, far-static-data}] ==="
 
 pass_objs=()
 fail=()
@@ -94,11 +151,39 @@ for f in "${ALL_SRCS[@]}"; do
 	: > "$err"
 
 	if ! clang -E -P -nostdinc -DDOS -D__TURBOC__ $FARDATA_DEF \
+			$MP_EXTRA_CPPFLAGS \
 			"-I$DOSPORT" "-I$STUB" "-I$INC_DIR" "-I$MP" "-I$GENHDR" \
 			"$f" 2>"$err" > "$OUT_DIR/$base.raw.c"; then
 		fail+=("$base (cpp)"); [ $KEEP_GOING -eq 0 ] && { echo "FAIL cpp: $base"; cat "$err"; exit 1; }; continue
 	fi
 	tr -d '\r\032' < "$OUT_DIR/$base.raw.c" | sed "$NORMALIZE" > "$pp"
+	if [ "$base" = "main" ] && [ "$MP_STACK_LIMIT" != "8192" ]; then
+		sed "s/mp_stack_set_limit(8192);/mp_stack_set_limit($MP_STACK_LIMIT);/" "$pp" > "$pp.tmp"
+		mv "$pp.tmp" "$pp"
+	fi
+	if [ "$base" = "main" ] && [ "$MP_HEAP_SIZE" != "49152" ]; then
+		sed "s/static char heap\\[(49152)\\];/static char heap[($MP_HEAP_SIZE)];/" "$pp" > "$pp.tmp"
+		mv "$pp.tmp" "$pp"
+	fi
+	if [ "$base" = "cstack" ] && [ "$MP_DOS_TINY_STACK_CHECK" != "0" ]; then
+		sed '/^void mp_cstack_check(void) {/,/^}/c\
+void mp_cstack_check(void) {\
+    volatile int stack_dummy;\
+    unsigned int top = (unsigned int)(mp_state_ctx.thread.stack_top);\
+    unsigned int cur = (unsigned int)&stack_dummy;\
+    if ((unsigned int)(top - cur) >= (unsigned int)(mp_state_ctx.thread.stack_limit)) {\
+        mp_raise_recursion_depth();\
+    }\
+}' "$pp" > "$pp.tmp"
+		mv "$pp.tmp" "$pp"
+	fi
+	if [ "$base" = "runtime" ] && [ "$MP_DOS_STACKLESS_RECURSION_RAISE" != "0" ]; then
+		cat >> "$pp" <<'EOF'
+__attribute__((noreturn)) void mp_raise_recursion_depth(void) {
+    mp_raise_type_arg(&mp_type_RuntimeError, ((mp_obj_t)((((mp_uint_t)(MP_QSTR_maximum_space_recursion_space_depth_space_exceeded)) << 3) | 2)));
+}
+EOF
+	fi
 
 	if ! "$MINIC" -m "$MODEL" < "$pp" > "$ssa" 2>"$err"; then
 		fail+=("$base (minic)"); [ $KEEP_GOING -eq 0 ] && { echo "FAIL minic: $base"; cat "$err"; exit 1; }; continue
@@ -106,7 +191,7 @@ for f in "${ALL_SRCS[@]}"; do
 	# Empty SSA: minic accepted but emitted nothing (arch-gated-out TU).  Skip.
 	if [ ! -s "$ssa" ]; then continue; fi
 
-	if ! "$QBE" -t i8086 -m "$MODEL" "$ssa" > "$asm" 2>"$err"; then
+	if ! "$QBE" -t i8086 -m "$MODEL" $QBE_SPLIT_FLAG "$ssa" > "$asm" 2>"$err"; then
 		fail+=("$base (qbe)"); [ $KEEP_GOING -eq 0 ] && { echo "FAIL qbe: $base"; cat "$err"; exit 1; }; continue
 	fi
 	if ! "$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" $FARSTATIC_FLAG "$base" "$asm" "$omf" 2>"$err"; then
@@ -139,6 +224,7 @@ nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$OUT_DI
 
 echo "=== Linking ==="
 OBJS=("$OUT_DIR/crt0_exe.obj" "${pass_objs[@]}" "$OUT_DIR/libstub_exe.obj")
+printf '%s\n' "${OBJS[@]}" > /tmp/mp_objs.txt
 # --gc-sections dead-strips CODE/FAR_DATA segments unreachable from _start
 # (the standard linker --gc-sections model, sound here because every
 # cross-segment dependency is an OMF fixup).  This is the biggest size lever:
@@ -148,11 +234,15 @@ OBJS=("$OUT_DIR/crt0_exe.obj" "${pass_objs[@]}" "$OUT_DIR/libstub_exe.obj")
 # few <=64KB buckets, reclaiming the per-function paragraph padding (~5KB on the
 # core subset — see NEXT_SESSION.md §2p).  Safe because every code reference is
 # an offset-aware OMF fixup and near jumps stay intra-function.
+# The VM recurses through C frames for generator resumes; 8KB corrupted the
+# return path at recsum(8) on Victor.  The stack cap is DGROUP (see the
+# MP_STACK_SIZE comment above), not image size.
 if "$QBE_DIR/tools/omf_link.py" \
 		-o "$OUT_DIR/mpython.exe" \
 		--map "$OUT_DIR/mpython.map" \
 		--entry _start \
-		--stack-size 8192 \
+		--stack-size "$MP_STACK_SIZE" \
+		$LINK_SPLIT_FLAG \
 		--gc-sections \
 		--pack-code \
 		"${OBJS[@]}" 2>"$OUT_DIR/link.err"; then

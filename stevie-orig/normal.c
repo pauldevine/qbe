@@ -62,6 +62,7 @@ register int	c;
 	int	dir = FORWARD;	/* search direction */
 	int	nchar = NUL;
 	bool_t	finish_op;
+	LPTR	*pos;
 
 	/*
 	 * If there is an operator pending, then the command we take
@@ -158,7 +159,7 @@ register int	c;
 		switch (vgetc()) {
 		case NL:		/* put Curschar at top of screen */
 		case CR:
-			*Topchar = *Curschar;
+			LPCOPY(*Topchar, *Curschar);
 			Topchar->index = 0;
 			updatescreen();
 			break;
@@ -262,7 +263,7 @@ register int	c;
 			char	ch;
 			LPTR	save;
 
-			save = *Curschar;
+			LPCOPY(save, *Curschar);
 			/*
 			 * First back up to start of identifier. This
 			 * doesn't match the real vi but I like it a
@@ -290,7 +291,7 @@ register int	c;
 			}
 			stuffin("\n");
 
-			*Curschar = save;	/* restore, in case of error */
+			LPCOPY(*Curschar, save);	/* restore, in case of error */
 		}
 		break;
 
@@ -299,13 +300,14 @@ register int	c;
 	 */
 	case 'G':
 		mtype = MLINE;
-		*Curschar = *gotoline(Prenum);
+		pos = gotoline(Prenum);
+		LPCOPY(*Curschar, *pos);
 		beginline(TRUE);
 		break;
 
 	case 'H':
 		mtype = MLINE;
-		*Curschar = *Topchar;
+		LPCOPY(*Curschar, *Topchar);
 		for (n = Prenum; n && onedown(1) ;n--)
 			;
 		beginline(TRUE);
@@ -313,7 +315,7 @@ register int	c;
 
 	case 'M':
 		mtype = MLINE;
-		*Curschar = *Topchar;
+		LPCOPY(*Curschar, *Topchar);
 		for (n = 0; n < Rows/2 && onedown(1) ;n++)
 			;
 		beginline(TRUE);
@@ -321,7 +323,8 @@ register int	c;
 
 	case 'L':
 		mtype = MLINE;
-		*Curschar = *prevline(Botchar);
+		pos = prevline(Botchar);
+		LPCOPY(*Curschar, *pos);
 		for (n = Prenum; n && oneup(1) ;n--)
 			;
 		beginline(TRUE);
@@ -401,8 +404,10 @@ register int	c;
 		mtype = MCHAR;
 		mincl = TRUE;
 		beginline(FALSE);
-		if (Prenum > 0)
-			*Curschar = *coladvance(Curschar, Prenum-1);
+		if (Prenum > 0) {
+			pos = coladvance(Curschar, Prenum-1);
+			LPCOPY(*Curschar, *pos);
+		}
 		Curswant = Prenum - 1;
 		break;
 		
@@ -419,14 +424,11 @@ register int	c;
 		mincl = FALSE;
 		set_want_col = TRUE;
 		for (n = DEFAULT1(Prenum); n > 0 ;n--) {
-			LPTR	*pos;
-
-			if ((pos = bck_word(Curschar, type)) == NULL) {
+			if (!mbck_word(Curschar, type)) {
 				beep();
 				CLEAROP;
 				break;
-			} else
-				*Curschar = *pos;
+			}
 		}
 		break;
 
@@ -448,14 +450,11 @@ register int	c;
 		mincl = FALSE;
 		set_want_col = TRUE;
 		for (n = DEFAULT1(Prenum); n > 0 ;n--) {
-			LPTR	*pos;
-
-			if ((pos = fwd_word(Curschar, type)) == NULL) {
+			if (!mfwd_word(Curschar, type)) {
 				beep();
 				CLEAROP;
 				break;
-			} else
-				*Curschar = *pos;
+			}
 		}
 		break;
 
@@ -469,23 +468,22 @@ register int	c;
 		mincl = TRUE;
 		set_want_col = TRUE;
 		for (n = DEFAULT1(Prenum); n > 0 ;n--) {
-			LPTR	*pos;
+			bool_t	ok;
 
 			/*
 			 * The first motion gets special treatment if we're
 			 * do a 'CHANGE'.
 			 */
 			if (n == DEFAULT1(Prenum))
-				pos = end_word(Curschar,type,operator==CHANGE);
+				ok = mend_word(Curschar,type,operator==CHANGE);
 			else
-				pos = end_word(Curschar, type, FALSE);
+				ok = mend_word(Curschar, type, FALSE);
 
-			if (pos == NULL) {
+			if (!ok) {
 				beep();
 				CLEAROP;
 				break;
-			} else
-				*Curschar = *pos;
+			}
 		}
 		break;
 
@@ -661,7 +659,7 @@ register int	c;
 				CLEAROP;
 			} else {
 				setpcmark();
-				*Curschar = *pos;
+				LPCOPY(*Curschar, *pos);
 				set_want_col = TRUE;
 			}
 		}
@@ -704,11 +702,17 @@ register int	c;
 
 	case 'x':
 		CLEAROP;
-		if (lineempty())	/* can't do it on a blank line */
+		if (lineempty()) {	/* can't do it on a blank line */
 			beep();
-		if (Prenum)
-			stuffnum(Prenum);
-		stuffin("d.");
+			break;
+		}
+		strcpy(Redobuff, "x");
+		u_saveline();
+		n = DEFAULT1(Prenum);
+		while (n--)
+			if (!delchar(TRUE))
+				break;
+		updateline();
 		break;
 
 	case 'X':
@@ -784,7 +788,7 @@ register int	c;
 				goto lineop;
 			if (Prenum != 0)
 				opnum = Prenum;
-			startop = *Curschar;
+			LPCOPY(startop, *Curschar);
 			operator = TILDE;
 		}
 #endif
@@ -860,7 +864,7 @@ register int	c;
 			goto lineop;
 		if (Prenum != 0)
 			opnum = Prenum;
-		startop = *Curschar;
+		LPCOPY(startop, *Curschar);
 		operator = DELETE;
 		break;
 
@@ -869,7 +873,7 @@ register int	c;
 			goto lineop;
 		if (Prenum != 0)
 			opnum = Prenum;
-		startop = *Curschar;
+		LPCOPY(startop, *Curschar);
 		operator = CHANGE;
 		break;
 
@@ -878,7 +882,7 @@ register int	c;
 			goto lineop;
 		if (Prenum != 0)
 			opnum = Prenum;
-		startop = *Curschar;
+		LPCOPY(startop, *Curschar);
 		operator = YANK;
 		break;
 
@@ -887,7 +891,7 @@ register int	c;
 			goto lineop;
 		if (Prenum != 0)
 			opnum = Prenum;
-		startop = *Curschar;
+		LPCOPY(startop, *Curschar);
 		operator = RSHIFT;
 		break;
 
@@ -896,7 +900,7 @@ register int	c;
 			goto lineop;
 		if (Prenum != 0)
 			opnum = Prenum;
-		startop = *Curschar;	/* save current position */
+		LPCOPY(startop, *Curschar);	/* save current position */
 		operator = LSHIFT;
 		break;
 
@@ -905,7 +909,7 @@ register int	c;
 			goto lineop;
 		if (Prenum != 0)
 			opnum = Prenum;
-		startop = *Curschar;
+		LPCOPY(startop, *Curschar);
 		operator = FILTER;
 		break;
 
@@ -962,9 +966,9 @@ register int	c;
 				beep();
 				CLEAROP;
 			} else {
-				mtmp = *mark;
+				LPCOPY(mtmp, *mark);
 				setpcmark();
-				*Curschar = mtmp;
+				LPCOPY(*Curschar, mtmp);
 				if (flag)
 					beginline(TRUE);
 			}

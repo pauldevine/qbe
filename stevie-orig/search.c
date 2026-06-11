@@ -138,7 +138,7 @@ char	*str;
 		 */
 		setpcmark();
 /* v1.1	*Curschar = savep = *p; */
-		*Curschar = *p;			/* v1.1 */
+		LPCOPY(*Curschar, *p);		/* v1.1 */
 		set_want_col = TRUE;
 		cursupdate();
 
@@ -266,7 +266,7 @@ char	*str;
 		return NULL;
 	}
 
-	*p = *Curschar;
+	LPCOPY(*p, *Curschar);
 	if (dec(p) == -1) {	/* already at start of file? */
 		*p = *Fileend;
 		p->index = strlen(p->linep->s) - 1;
@@ -380,11 +380,12 @@ char	*cmd;
 	 * If no range was given, do the current line. If only one line
 	 * was given, just do that one.
 	 */
-	if (lp->linep == NULL)
-		*up = *lp = *Curschar;
-	else {
+	if (lp->linep == NULL) {
+		LPCOPY(*lp, *Curschar);
+		LPCOPY(*up, *lp);
+	} else {
 		if (up->linep == NULL)
-			*up = *lp;
+			LPCOPY(*up, *lp);
 	}
 
 	pat = ++cmd;		/* skip the initial '/' */
@@ -569,11 +570,11 @@ char	*cmd;
 				if (Curschar->linep != cp) {
 					LPTR	savep;
 
-					savep = *Curschar;
+					LPCOPY(savep, *Curschar);
 					Curschar->linep = cp;
 					Curschar->index = 0;
 					delline(1, FALSE);
-					*Curschar = savep;
+					LPCOPY(*Curschar, savep);
 				} else
 					delline(1, FALSE);
 				break;
@@ -638,7 +639,7 @@ int	type;
 {
 	LPTR	save;
 
-	save = *Curschar;	/* save position in case we fail */
+	LPCOPY(save, *Curschar);	/* save position in case we fail */
 	lastc = c;
 	lastcdir = dir;
 	lastctype = type;
@@ -657,7 +658,7 @@ int	type;
 			return TRUE;
 		}
 	}
-	*Curschar = save;
+	LPCOPY(*Curschar, save);
 	return FALSE;
 }
 
@@ -695,7 +696,7 @@ showmatch()
 	char	c;
 	int	count = 0;
 
-	pos = *Curschar;		/* set starting point */
+	LPCOPY(pos, *Curschar);		/* set starting point */
 
 	switch (initc) {
 
@@ -800,7 +801,7 @@ int	type;
 	static	LPTR	pos;
 	int	sclass = cls(gchar(p));		/* starting class */
 
-	pos = *p;
+	LPCOPY(pos, *p);
 
 	stype = type;
 
@@ -838,6 +839,21 @@ int	type;
 	return &pos;
 }
 
+bool_t
+mfwd_word(p, type)
+LPTR	*p;
+int	type;
+{
+	LPTR	*pos;
+
+	pos = fwd_word(p, type);
+	if (pos == NULL)
+		return FALSE;
+
+	LPCOPY(*p, *pos);
+	return TRUE;
+}
+
 /*
  * bck_word(pos, type) - move backward one word
  *
@@ -851,7 +867,7 @@ int	type;
 	static	LPTR	pos;
 	int	sclass = cls(gchar(p));		/* starting class */
 
-	pos = *p;
+	LPCOPY(pos, *p);
 
 	stype = type;
 
@@ -904,6 +920,21 @@ int	type;
 	return &pos;
 }
 
+bool_t
+mbck_word(p, type)
+LPTR	*p;
+int	type;
+{
+	LPTR	*pos;
+
+	pos = bck_word(p, type);
+	if (pos == NULL)
+		return FALSE;
+
+	LPCOPY(*p, *pos);
+	return TRUE;
+}
+
 /*
  * end_word(pos, type, in_change) - move to the end of the word
  *
@@ -930,7 +961,7 @@ bool_t	in_change;
 	static	LPTR	pos;
 	int	sclass = cls(gchar(p));		/* starting class */
 
-	pos = *p;
+	LPCOPY(pos, *p);
 
 	stype = type;
 
@@ -978,5 +1009,21 @@ bool_t	in_change;
 	dec(&pos);			/* overshot - forward one */
 
 	return &pos;
+}
+
+bool_t
+mend_word(p, type, in_change)
+LPTR	*p;
+int	type;
+bool_t	in_change;
+{
+	LPTR	*pos;
+
+	pos = end_word(p, type, in_change);
+	if (pos == NULL)
+		return FALSE;
+
+	LPCOPY(*p, *pos);
+	return TRUE;
 }
 

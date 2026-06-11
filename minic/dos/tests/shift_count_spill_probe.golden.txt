@@ -1,0 +1,10 @@
+scan nheads=8 wsum=48 chk=424
+scan_heads ok
+perblock ok
+one_shl_n ok
+shr0=1234 shr12=1
+x_shr_x=0
+two_shl_two=8
+kl_var_shift ok
+sar3=-4096
+DONE
