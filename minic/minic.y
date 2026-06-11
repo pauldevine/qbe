@@ -67,7 +67,22 @@ int memmodel = MSmall;
 #define SHORT     (1 << 16)  /* Short flag for types */
 #define UNSIGNED  (1 << 17)  /* Unsigned flag for types */
 #define FLOAT     (1 << 18)  /* Float flag for types (float=INT|FLOAT, double=LNG|FLOAT) */
-#define FAR       (1 << 24)  /* Far pointer flag (32-bit segment:offset) */
+/* FAR sits at bit 26 (§5c; was 24).  Position 24 is where the FLOAT flag
+ * (bit 18) lands after TWO encoding shifts (IDIR(IDIR(float)) = `float **`,
+ * IDIR(FUNC(float)) = float-returning fn ptr) — with FAR at 24 the collision
+ * made DREF strip the shifted FLOAT bit, silently decoding the inner type
+ * as int (the §5b miscompile class; §5b side-tabled only the fn-ptr RETURN
+ * case).  At 26 the residual collisions move one level deeper and were
+ * surveyed UNCONSUMED 2026-06-11 across MP + stevie + probes:
+ *   - UNSIGNED (17) + 9 = 26: `unsigned T ***` / unsigned-returning fn ptr
+ *     behind one more level decodes a phantom FAR;
+ *   - FLOAT (18) + 9 = 27: `float ***` pollutes QVOLATILE;
+ *   - the innermost FAR of a far-data T*** overflows bit 32 — nested far
+ *     pointers keep exactly ONE level (`T **` round-trips: inner FAR
+ *     26 -> 29 -> 26; a third level 26 -> 29 -> 32 is lost).  The old
+ *     layout had two levels (24 -> 27 -> 30) but traded them for the
+ *     REAL float ** miscompile above. */
+#define FAR       (1 << 26)  /* Far pointer flag (32-bit segment:offset) */
 /* QVOLATILE: a `volatile`-qualified type.  (Named QVOLATILE, not VOLATILE,
  * because VOLATILE is already a grammar TOKEN — yacc emits its own
  * `#define VOLATILE <tok>` that would shadow a same-named macro in the
@@ -81,7 +96,10 @@ int memmodel = MSmall;
  * (`volatile uint8_t *reg; *reg = x;`).  Set on a scalar type directly
  * (`volatile int v` -> INT|QVOLATILE) it is the OUTER qualifier, which varadd
  * strips into varh[].isvolatile.  See [[minic-volatile]]. */
-#define QVOLATILE (1 << 25)  /* volatile-qualified type */
+#define QVOLATILE (1 << 27)  /* volatile-qualified type (§5c; was 25 — moved
+                              * with FAR so SHORT (16) + 9 = 25 no longer
+                              * pollutes it on `short ***`; the pointee's own
+                              * volatile now rides one level up at bit 30) */
 /* IDIR builds a pointer-to-x type.  In far-data memory models
  * (compact/large/huge), default data pointers are 32-bit segment:offset
  * (FAR), so dereferences route through loadfX/storefX.  Code pointers,
@@ -97,18 +115,19 @@ int memmodel = MSmall;
  * downstream type unpacking.  Example: under compact, `struct line *l`
  * has ctyp = (struct_type << 3) | PTR | FAR.  After `*l`, downstream
  * sites compute sidx = DREF(struct_type | FAR_metadata).  Without the
- * mask, the FAR bit at position 24 shifts to bit 21, and the next DREF
+ * mask, the FAR bit at position 26 shifts to bit 23, and the next DREF
  * call (e.g. in `case '.'` looking up structh[sidx]) explodes into a
  * wild array index → SIGSEGV.  Inner FAR bits encoded inside a nested
- * pointer type sit at position 27 (one IDIR up) and shift correctly to
- * position 24 after DREF, so nested far ptrs (e.g. `int **` in compact)
- * still round-trip.  Reported via stevie alloc.c crashing minic under
- * --model=compact. */
-/* DREF also strips the OUTER QVOLATILE qualifier (bit 25) before the shift,
+ * pointer type sit at position 29 (one IDIR up) and shift correctly to
+ * position 26 after DREF, so ONE level of nested far ptr (e.g. `int **`
+ * in compact) round-trips; a second nested level would need bit 32 and
+ * is lost (see the FAR definition comment).  Reported via stevie
+ * alloc.c crashing minic under --model=compact. */
+/* DREF also strips the OUTER QVOLATILE qualifier (bit 27) before the shift,
  * mirroring the FAR mask: when unpacking a pointer type, any volatile on the
  * pointer OBJECT itself (normally absent — varadd consumes it) must not
  * pollute the recovered pointee, while the pointee's OWN volatile (encoded
- * one level up at bit 28) survives the shift down to bit 25.  It also makes
+ * one level up at bit 30) survives the shift down to bit 27.  It also makes
  * DREF-as-struct-index-extraction (structh[DREF(structtype)]) strip a
  * volatile-qualified struct type's bit so the index stays clean. */
 #define DREF(x) (((x) & ~FAR & ~QVOLATILE) >> 3)
@@ -377,6 +396,15 @@ struct {
 	char v[NString];
 	unsigned ptyp[NFnParam];
 	int nparam;  /* fixed params recorded (>=0); entry absent => -1 at lookup */
+	unsigned rett;     /* declared RETURN type, carried UNSHIFTED (§5c).
+	                    * The direct-call decode DREF(FUNC(ret)) strips
+	                    * any ret bit sitting on the FAR/QVOLATILE
+	                    * positions — e.g. a `float **` return's FLOAT
+	                    * flag (18 + 9 = 27 = QVOLATILE) — silently
+	                    * mistyping the result.  The fnproto mirror of
+	                    * fpproto.rett (§5b) keeps the decode exact and
+	                    * layout-independent. */
+	int has_rett;      /* rett recorded (NIL is a valid void rett) */
 } fnproto[NVar];
 
 /* Function-POINTER prototypes (§2q).  An indirect call through a function
@@ -396,13 +424,14 @@ struct {
 	unsigned ptyp[NFpParam];
 	unsigned rett;     /* declared RETURN type (§5b).  The type integer
 	                    * IDIR(FUNC(ret)) shifts `ret' up 6 bits, which
-	                    * lands a float return's FLOAT flag (bit 18) on
-	                    * bit 24 == FAR — and DREF strips FAR, so a
-	                    * float-returning fn ptr decoded as int-returning
-	                    * (the call result class came out w, not s).  The
-	                    * side table carries the return type unshifted;
-	                    * call sites with an fpid use it instead of the
-	                    * double-DREF decode. */
+	                    * (pre-§5c, FAR at bit 24) landed a float return's
+	                    * FLOAT flag (bit 18) on FAR — and DREF strips
+	                    * FAR, so a float-returning fn ptr decoded as
+	                    * int-returning (the call result class came out
+	                    * w, not s).  §5c moved FAR to 26, but the side
+	                    * table stays: it also covers `float *` returns
+	                    * (FLOAT three shifts up = 27 = QVOLATILE now)
+	                    * and keeps the decode layout-independent. */
 } fpproto[NFp];
 int nfpproto = 0;
 int g_callee_fpid = -1;  /* set by expr() case '.' to a fn-ptr member's fpid
@@ -2537,7 +2566,7 @@ is_aggr(unsigned ctyp)
  * to (true varargs keep their own promoted type).  Overwrites any prior entry
  * (a definition supersedes an earlier prototype). */
 static void
-fnproto_record(char *name, Node *params)
+fnproto_record(char *name, Node *params, unsigned rett)
 {
 	unsigned h0, h;
 	Node *n;
@@ -2555,6 +2584,8 @@ fnproto_record(char *name, Node *params)
 				fnproto[h].ptyp[i++] = s ? s->ctyp : INT;
 			}
 			fnproto[h].nparam = i;
+			fnproto[h].rett = rett;
+			fnproto[h].has_rett = 1;
 			return;
 		}
 		h = (h + 1) % NVar;
@@ -2839,10 +2870,12 @@ call(Node *n, Symb *sr)
 			int sret_slot = 0;
 			int fpid = varfpid(f);
 			sr->ctyp = DREF(fptr_type);     /* return_type */
-			/* The double-DREF decode LOSES a float return: the
-			 * FLOAT flag shifted to bit 24 == FAR, which DREF
-			 * strips.  Recover the declared type from the side
-			 * table when the declarator recorded one (§5b). */
+			/* The double-DREF decode can LOSE a float return:
+			 * pre-§5c the FLOAT flag shifted onto FAR (now a
+			 * `float *` return shifts onto QVOLATILE instead),
+			 * and DREF strips both.  Recover the declared type
+			 * from the side table when the declarator recorded
+			 * one (§5b). */
 			if (fpid >= 0)
 				sr->ctyp = fpproto[fpid].rett;
 			sret = (KIND(sr->ctyp) == STRUCT_T || KIND(sr->ctyp) == UNION_T);
@@ -2916,11 +2949,20 @@ call(Node *n, Symb *sr)
 	/* Struct/union return-by-value: alloc the result slot and pass its
 	 * address as the hidden first argument.  The slot alloc must precede
 	 * argument evaluation so its temp number stays stable. */
-	int sret = (KIND(sr->ctyp) == STRUCT_T || KIND(sr->ctyp) == UNION_T);
-	unsigned aggr = sr->ctyp;
+	int sret;
+	unsigned aggr;
 	int sret_slot = 0;
 	int proto = fnproto_find(f);
 	int argi = 0;
+	/* §5c: the DREF(FUNC(ret)) decode strips any ret bit that lands on
+	 * the FAR/QVOLATILE flag positions — e.g. a `float **` return's
+	 * FLOAT flag, three encoding shifts up.  Prefer the recorded
+	 * declared return type (carried unshifted), the direct-call mirror
+	 * of the §5b fpproto.rett fix. */
+	if (proto >= 0 && fnproto[proto].has_rett)
+		sr->ctyp = fnproto[proto].rett;
+	sret = (KIND(sr->ctyp) == STRUCT_T || KIND(sr->ctyp) == UNION_T);
+	aggr = sr->ctyp;
 	if (sret)
 		sret_slot = alloc_sret_slot(aggr);
 	for (a=n->r; a; a=a->r, argi++) {
@@ -6553,7 +6595,7 @@ emit_knr_func(char *fname, Node *params)
 	strncpy(cur_fn_name, fname, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(fname, 1, FUNC(INT), 0);
-	fnproto_record(fname, params);
+	fnproto_record(fname, params, INT);
 	fprintf(of, "%s w $%s(", fn_export_kw(), fname);
 	n = params;
 	if (n)
@@ -6593,7 +6635,7 @@ emit_knr_func_typed(char *fname, Node *params)
 	strncpy(cur_fn_name, fname, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(fname, 1, FUNC(curfntyp), 0);
-	fnproto_record(fname, params);
+	fnproto_record(fname, params, curfntyp);
 
 	/* Struct/union return-by-value: hidden first pointer parameter +
 	 * pointer return (see cur_fn_sret notes near the top of the file). */
@@ -6873,7 +6915,7 @@ externdcl: EXTERN type IDENT ';'
 		varadd($3->u.v, 1, FUNC(NIL), 0);
 	else
 		varadd($3->u.v, 1, FUNC($2), 0);
-	fnproto_record($3->u.v, $5);
+	fnproto_record($3->u.v, $5, $2);
 }
          | EXTERN type ext_decllist ';'
 {
@@ -7492,7 +7534,7 @@ ansi_proto_register: '(' init_ansi par0 ')'
 	/* Prototype-only registration: register function type, no IR emission. */
 	curfntyp = parsed_type;
 	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
-	fnproto_record(parsed_ident, $3);
+	fnproto_record(parsed_ident, $3, curfntyp);
 };
 
 knr_func_proto: '(' init_kr kr_idlist ')' kr_param_dcls
@@ -7514,7 +7556,7 @@ ansi_func_proto: '(' init_ansi par0 ')'
 	strncpy(cur_fn_name, parsed_ident, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
-	fnproto_record(parsed_ident, $3);
+	fnproto_record(parsed_ident, $3, curfntyp);
 
 	/* Struct/union return-by-value: lower to a hidden first pointer
 	 * parameter (caller-allocated result storage) plus a pointer
@@ -7885,7 +7927,7 @@ dcls:
 {
 	/* Local ANSI prototype with typed args. */
 	varadd($3->u.v, 1, FUNC($2), 0);
-	fnproto_record($3->u.v, $5);
+	fnproto_record($3->u.v, $5, $2);
 }
     | dcls ALIGNAS '(' NUM ')' type IDENT ';'
 {
