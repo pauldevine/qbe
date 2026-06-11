@@ -96,6 +96,11 @@ fi
 # ~5.6 KB resume frame plus libstub/ISR transients can land beyond the check.
 MP_STACK_LIMIT=${MP_STACK_LIMIT:-$((MP_STACK_SIZE - 8192))}
 MP_HEAP_SIZE=${MP_HEAP_SIZE:-49152}
+# §4z split heap: size of the SECOND GC area (gcheap2.c, its own far
+# segment; mpconfigport.h defines MICROPY_GC_SPLIT_HEAP=1 and a matching
+# default).  Total heap = MP_HEAP_SIZE + MP_HEAP2_SIZE.  Each area must
+# stay under the 64 KB compact-model segment cap.
+MP_HEAP2_SIZE=${MP_HEAP2_SIZE:-65024}
 MP_DOS_TINY_STACK_CHECK=${MP_DOS_TINY_STACK_CHECK:-0}
 MP_DOS_STACKLESS_RECURSION_RAISE=${MP_DOS_STACKLESS_RECURSION_RAISE:-0}
 MP_EXTRA_CPPFLAGS=${MP_EXTRA_CPPFLAGS:-}
@@ -126,7 +131,7 @@ for f in "$MP"/py/*.c; do
 	[[ "$base" =~ $DROP_RE ]] && continue
 	CORE_SRCS+=("$f")
 done
-PORT_SRCS=("$DOSPORT/main.c" "$DOSPORT/mphalport.c")
+PORT_SRCS=("$DOSPORT/main.c" "$DOSPORT/mphalport.c" "$DOSPORT/gcheap2.c")
 # softfloat.c provides the single-precision soft-libm: the _sf_add/sub/mul/div
 # arithmetic helpers the i8086 backend calls for Ks ops, plus the algebraic +
 # transcendental libm surface (floorf/powf/...) MicroPython references under
@@ -151,6 +156,7 @@ for f in "${ALL_SRCS[@]}"; do
 	: > "$err"
 
 	if ! clang -E -P -nostdinc -DDOS -D__TURBOC__ $FARDATA_DEF \
+			"-DMP_GC_HEAP2_SIZE=$MP_HEAP2_SIZE" \
 			$MP_EXTRA_CPPFLAGS \
 			"-I$DOSPORT" "-I$STUB" "-I$INC_DIR" "-I$MP" "-I$GENHDR" \
 			"$f" 2>"$err" > "$OUT_DIR/$base.raw.c"; then

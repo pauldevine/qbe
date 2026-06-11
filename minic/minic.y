@@ -9,7 +9,7 @@ enum {
 	NString = 128,  /* max identifier length; MicroPython has 49-char names
 	                 * (e.g. MP_MAP_LOOKUP_ADD_IF_NOT_FOUND_OR_REMOVE_IF_FOUND)
 	                 * and longer generated qstr symbols. Host-only memory. */
-	NGlo = 256,
+	NGlo = 512,
 	/* varh[] is an open-addressing table holding all globals + enum
 	 * constants (never cleared) plus the current function's locals.
 	 * MicroPython pulls ~214 MP_QSTR_* enum constants from genhdr alone,
@@ -67,7 +67,22 @@ int memmodel = MSmall;
 #define SHORT     (1 << 16)  /* Short flag for types */
 #define UNSIGNED  (1 << 17)  /* Unsigned flag for types */
 #define FLOAT     (1 << 18)  /* Float flag for types (float=INT|FLOAT, double=LNG|FLOAT) */
-#define FAR       (1 << 24)  /* Far pointer flag (32-bit segment:offset) */
+/* FAR sits at bit 26 (§5c; was 24).  Position 24 is where the FLOAT flag
+ * (bit 18) lands after TWO encoding shifts (IDIR(IDIR(float)) = `float **`,
+ * IDIR(FUNC(float)) = float-returning fn ptr) — with FAR at 24 the collision
+ * made DREF strip the shifted FLOAT bit, silently decoding the inner type
+ * as int (the §5b miscompile class; §5b side-tabled only the fn-ptr RETURN
+ * case).  At 26 the residual collisions move one level deeper and were
+ * surveyed UNCONSUMED 2026-06-11 across MP + stevie + probes:
+ *   - UNSIGNED (17) + 9 = 26: `unsigned T ***` / unsigned-returning fn ptr
+ *     behind one more level decodes a phantom FAR;
+ *   - FLOAT (18) + 9 = 27: `float ***` pollutes QVOLATILE;
+ *   - the innermost FAR of a far-data T*** overflows bit 32 — nested far
+ *     pointers keep exactly ONE level (`T **` round-trips: inner FAR
+ *     26 -> 29 -> 26; a third level 26 -> 29 -> 32 is lost).  The old
+ *     layout had two levels (24 -> 27 -> 30) but traded them for the
+ *     REAL float ** miscompile above. */
+#define FAR       (1 << 26)  /* Far pointer flag (32-bit segment:offset) */
 /* QVOLATILE: a `volatile`-qualified type.  (Named QVOLATILE, not VOLATILE,
  * because VOLATILE is already a grammar TOKEN — yacc emits its own
  * `#define VOLATILE <tok>` that would shadow a same-named macro in the
@@ -81,7 +96,10 @@ int memmodel = MSmall;
  * (`volatile uint8_t *reg; *reg = x;`).  Set on a scalar type directly
  * (`volatile int v` -> INT|QVOLATILE) it is the OUTER qualifier, which varadd
  * strips into varh[].isvolatile.  See [[minic-volatile]]. */
-#define QVOLATILE (1 << 25)  /* volatile-qualified type */
+#define QVOLATILE (1 << 27)  /* volatile-qualified type (§5c; was 25 — moved
+                              * with FAR so SHORT (16) + 9 = 25 no longer
+                              * pollutes it on `short ***`; the pointee's own
+                              * volatile now rides one level up at bit 30) */
 /* IDIR builds a pointer-to-x type.  In far-data memory models
  * (compact/large/huge), default data pointers are 32-bit segment:offset
  * (FAR), so dereferences route through loadfX/storefX.  Code pointers,
@@ -97,18 +115,19 @@ int memmodel = MSmall;
  * downstream type unpacking.  Example: under compact, `struct line *l`
  * has ctyp = (struct_type << 3) | PTR | FAR.  After `*l`, downstream
  * sites compute sidx = DREF(struct_type | FAR_metadata).  Without the
- * mask, the FAR bit at position 24 shifts to bit 21, and the next DREF
+ * mask, the FAR bit at position 26 shifts to bit 23, and the next DREF
  * call (e.g. in `case '.'` looking up structh[sidx]) explodes into a
  * wild array index → SIGSEGV.  Inner FAR bits encoded inside a nested
- * pointer type sit at position 27 (one IDIR up) and shift correctly to
- * position 24 after DREF, so nested far ptrs (e.g. `int **` in compact)
- * still round-trip.  Reported via stevie alloc.c crashing minic under
- * --model=compact. */
-/* DREF also strips the OUTER QVOLATILE qualifier (bit 25) before the shift,
+ * pointer type sit at position 29 (one IDIR up) and shift correctly to
+ * position 26 after DREF, so ONE level of nested far ptr (e.g. `int **`
+ * in compact) round-trips; a second nested level would need bit 32 and
+ * is lost (see the FAR definition comment).  Reported via stevie
+ * alloc.c crashing minic under --model=compact. */
+/* DREF also strips the OUTER QVOLATILE qualifier (bit 27) before the shift,
  * mirroring the FAR mask: when unpacking a pointer type, any volatile on the
  * pointer OBJECT itself (normally absent — varadd consumes it) must not
  * pollute the recovered pointee, while the pointee's OWN volatile (encoded
- * one level up at bit 28) survives the shift down to bit 25.  It also makes
+ * one level up at bit 30) survives the shift down to bit 27.  It also makes
  * DREF-as-struct-index-extraction (structh[DREF(structtype)]) strip a
  * volatile-qualified struct type's bit so the index stays clean. */
 #define DREF(x) (((x) & ~FAR & ~QVOLATILE) >> 3)
@@ -377,6 +396,15 @@ struct {
 	char v[NString];
 	unsigned ptyp[NFnParam];
 	int nparam;  /* fixed params recorded (>=0); entry absent => -1 at lookup */
+	unsigned rett;     /* declared RETURN type, carried UNSHIFTED (§5c).
+	                    * The direct-call decode DREF(FUNC(ret)) strips
+	                    * any ret bit sitting on the FAR/QVOLATILE
+	                    * positions — e.g. a `float **` return's FLOAT
+	                    * flag (18 + 9 = 27 = QVOLATILE) — silently
+	                    * mistyping the result.  The fnproto mirror of
+	                    * fpproto.rett (§5b) keeps the decode exact and
+	                    * layout-independent. */
+	int has_rett;      /* rett recorded (NIL is a valid void rett) */
 } fnproto[NVar];
 
 /* Function-POINTER prototypes (§2q).  An indirect call through a function
@@ -394,6 +422,16 @@ enum { NFp = 512, NFpParam = 16 };
 struct {
 	int nparam;
 	unsigned ptyp[NFpParam];
+	unsigned rett;     /* declared RETURN type (§5b).  The type integer
+	                    * IDIR(FUNC(ret)) shifts `ret' up 6 bits, which
+	                    * (pre-§5c, FAR at bit 24) landed a float return's
+	                    * FLOAT flag (bit 18) on FAR — and DREF strips
+	                    * FAR, so a float-returning fn ptr decoded as
+	                    * int-returning (the call result class came out
+	                    * w, not s).  §5c moved FAR to 26, but the side
+	                    * table stays: it also covers `float *` returns
+	                    * (FLOAT three shifts up = 27 = QVOLATILE now)
+	                    * and keeps the decode layout-independent. */
 } fpproto[NFp];
 int nfpproto = 0;
 int g_callee_fpid = -1;  /* set by expr() case '.' to a fn-ptr member's fpid
@@ -2528,7 +2566,7 @@ is_aggr(unsigned ctyp)
  * to (true varargs keep their own promoted type).  Overwrites any prior entry
  * (a definition supersedes an earlier prototype). */
 static void
-fnproto_record(char *name, Node *params)
+fnproto_record(char *name, Node *params, unsigned rett)
 {
 	unsigned h0, h;
 	Node *n;
@@ -2546,6 +2584,8 @@ fnproto_record(char *name, Node *params)
 				fnproto[h].ptyp[i++] = s ? s->ctyp : INT;
 			}
 			fnproto[h].nparam = i;
+			fnproto[h].rett = rett;
+			fnproto[h].has_rett = 1;
 			return;
 		}
 		h = (h + 1) % NVar;
@@ -2564,19 +2604,26 @@ mkptype(unsigned ty, Node *rest)
 	return n;
 }
 
-/* Record a function-pointer declarator's fixed parameter types (the `chain' of
- * mkptype nodes from fptpar0) into fpproto[] and return its index, or -1 if the
- * table is full or there are no fixed params to coerce.  A `...' contributes no
- * node (the chain ends), so nparam counts only the fixed parameters. */
+/* Record a function-pointer declarator's RETURN type and fixed parameter
+ * types (the `chain' of mkptype nodes from fptpar0) into fpproto[] and return
+ * its index, or -1 if the table is full or there is nothing worth recording.
+ * A `...' contributes no node (the chain ends), so nparam counts only the
+ * fixed parameters.  A float return is recorded even with an empty parameter
+ * list: the IDIR(FUNC(ret)) encoding destroys its FLOAT flag (see the fpproto
+ * struct comment), so the side table is the only place the call site can
+ * recover the result class from. */
 static int
-fpproto_alloc(Node *chain)
+fpproto_alloc(unsigned rett, Node *chain)
 {
 	Node *n;
 	int i = 0, id;
 
-	if (chain == 0 || nfpproto >= NFp)
-		return -1;
+	if ((chain == 0 && !(rett & (FLOAT | (FLOAT << 3)))) || nfpproto >= NFp)
+		return -1;     /* FLOAT<<3 also catches a float* return: its
+		                * FLOAT bit sits one IDIR up and still lands on
+		                * FAR after FUNC's shift */
 	id = nfpproto++;
+	fpproto[id].rett = rett;
 	for (n = chain; n && i < NFpParam; n = n->r)
 		fpproto[id].ptyp[i++] = (unsigned)n->u.n;
 	fpproto[id].nparam = i;
@@ -2821,7 +2868,16 @@ call(Node *n, Symb *sr)
 			int sret;
 			unsigned aggr;
 			int sret_slot = 0;
+			int fpid = varfpid(f);
 			sr->ctyp = DREF(fptr_type);     /* return_type */
+			/* The double-DREF decode can LOSE a float return:
+			 * pre-§5c the FLOAT flag shifted onto FAR (now a
+			 * `float *` return shifts onto QVOLATILE instead),
+			 * and DREF strips both.  Recover the declared type
+			 * from the side table when the declarator recorded
+			 * one (§5b). */
+			if (fpid >= 0)
+				sr->ctyp = fpproto[fpid].rett;
 			sret = (KIND(sr->ctyp) == STRUCT_T || KIND(sr->ctyp) == UNION_T);
 			aggr = sr->ctyp;
 
@@ -2842,7 +2898,6 @@ call(Node *n, Symb *sr)
 			 * direct call (fnproto path), but here the prototype comes
 			 * from the fn-ptr variable's recorded fpid, not its name. */
 			{
-				int fpid = varfpid(f);
 				int argi = 0;
 				for (a=n->r; a; a=a->r, argi++) {
 					a->u.s = eval_arg(a);
@@ -2894,11 +2949,20 @@ call(Node *n, Symb *sr)
 	/* Struct/union return-by-value: alloc the result slot and pass its
 	 * address as the hidden first argument.  The slot alloc must precede
 	 * argument evaluation so its temp number stays stable. */
-	int sret = (KIND(sr->ctyp) == STRUCT_T || KIND(sr->ctyp) == UNION_T);
-	unsigned aggr = sr->ctyp;
+	int sret;
+	unsigned aggr;
 	int sret_slot = 0;
 	int proto = fnproto_find(f);
 	int argi = 0;
+	/* §5c: the DREF(FUNC(ret)) decode strips any ret bit that lands on
+	 * the FAR/QVOLATILE flag positions — e.g. a `float **` return's
+	 * FLOAT flag, three encoding shifts up.  Prefer the recorded
+	 * declared return type (carried unshifted), the direct-call mirror
+	 * of the §5b fpproto.rett fix. */
+	if (proto >= 0 && fnproto[proto].has_rett)
+		sr->ctyp = fnproto[proto].rett;
+	sret = (KIND(sr->ctyp) == STRUCT_T || KIND(sr->ctyp) == UNION_T);
+	aggr = sr->ctyp;
 	if (sret)
 		sret_slot = alloc_sret_slot(aggr);
 	for (a=n->r; a; a=a->r, argi++) {
@@ -3524,6 +3588,11 @@ expr(Node *n)
 			/* Get return type */
 			fptr_type = DREF(fptr.ctyp);  /* FUN(return_type) */
 			sr.ctyp = DREF(fptr_type);     /* return_type */
+			/* A float return does not survive the double-DREF decode
+			 * (FLOAT flag shifted onto FAR, which DREF strips) —
+			 * recover it from the recorded prototype (§5b). */
+			if (fpid >= 0)
+				sr.ctyp = fpproto[fpid].rett;
 			sret = (KIND(sr.ctyp) == STRUCT_T || KIND(sr.ctyp) == UNION_T);
 			aggr = sr.ctyp;
 
@@ -6359,19 +6428,38 @@ kr_array_node(char *name, int size)
 	return n;
 }
 
+/* Append an `IDENT = init` assignment for declarator name `v` to a
+ * comma-chain (the mk_local_array_init shape).  The chain is returned
+ * to the caller instead of being expr()'d here so a stmt-context
+ * declaration's initializer runs in lexical/control-flow order — a
+ * direct expr() at parse time lands in the function entry block, so a
+ * decl inside a loop body would init ONCE instead of per iteration
+ * ([[minic-decl-init-hoisting]], multi-declarator form). */
+static Node *
+multi_decl_chain_init(Node *chain, char *v, Node *init)
+{
+	Node *id, *asgn;
+
+	id = mknode('V', 0, 0);
+	strcpy(id->u.v, v);
+	asgn = mknode('=', id, init);
+	return chain ? mknode(',', chain, asgn) : asgn;
+}
+
 /* Same as emit_local_multi_decl but every declarator (including the
  * first) is in `list`.  Used when the first declarator is decorated
- * (`[N]`, `*`, `()`, etc.). */
-void
+ * (`[N]`, `*`, `()`, etc.).  Returns the deferred initializer chain
+ * (or 0); the caller decides placement. */
+Node *
 emit_local_multi_decl_full(unsigned base, Node *list)
 {
-	Node *n, *next;
-	int i;
+	Node *n, *chain;
 	unsigned t;
 	char *v;
 
 	if (base == NIL)
 		die("invalid void declaration");
+	chain = 0;
 	for (n = list; n; n = n->r) {
 		v = n->u.v;
 		if (n->op == 'F') {
@@ -6398,24 +6486,31 @@ emit_local_multi_decl_full(unsigned base, Node *list)
 		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
 		if ((KIND(t) == STRUCT_T || KIND(t) == UNION_T) && struct_has_bitfield(DREF(t)))
 			emit_zero_local(v, SIZE(t));
-		(void)next;
+		if ((n->op == 0 || n->op == 'P') && n->l)
+			chain = multi_decl_chain_init(chain, v, n->l);
 	}
+	return chain;
 }
 
 /* Emit a multi-name local declaration: `type IDENT, ext_decllist;`.
  * Each declarator carries its own decoration in `op`.  Used for the
  * many K&R patterns such as `char *s1, *s2;` and the mixed
- * `char *initstr, *getenv();` (proto + var). */
-void
+ * `char *initstr, *getenv();` (proto + var).  Allocs are emitted at
+ * parse time (entry block, QBE convention); initializers are returned
+ * as a deferred comma-chain (or 0) — the dcls-context caller expr()s
+ * it immediately (entry == lexical order there), the stmt-context
+ * caller wraps it in mkstmt(Expr,…) so it runs in control-flow order. */
+Node *
 emit_local_multi_decl(unsigned base, char *first, Node *rest)
 {
-	int s, i;
-	Node *n;
+	int s;
+	Node *n, *chain;
 	unsigned t;
 	char *v;
 
 	if (base == NIL)
 		die("invalid void declaration");
+	chain = 0;
 	s = SIZE(base);
 	v = first;
 	varadd(v, 0, base, 0);
@@ -6451,11 +6546,8 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 			t = IDIR(ebase);
 			varadd(v, 0, t, 0);
 			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
-			if (n->l) {
-				Node *id = mknode('V', 0, 0);
-				strcpy(id->u.v, v);
-				expr(mknode('=', id, n->l));
-			}
+			if (n->l)
+				chain = multi_decl_chain_init(chain, v, n->l);
 			continue;
 		}
 		/* Plain or [N] declarator: peel one * off the absorbed base
@@ -6466,12 +6558,10 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
 		if ((KIND(t) == STRUCT_T || KIND(t) == UNION_T) && struct_has_bitfield(DREF(t)))
 			emit_zero_local(v, SIZE(t));
-		if (n->op == 0 && n->l) {
-			Node *id = mknode('V', 0, 0);
-			strcpy(id->u.v, v);
-			expr(mknode('=', id, n->l));
-		}
+		if (n->op == 0 && n->l)
+			chain = multi_decl_chain_init(chain, v, n->l);
 	}
+	return chain;
 }
 
 /* Emit a K&R-style function header.  Called from the prot_knr action
@@ -6505,7 +6595,7 @@ emit_knr_func(char *fname, Node *params)
 	strncpy(cur_fn_name, fname, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(fname, 1, FUNC(INT), 0);
-	fnproto_record(fname, params);
+	fnproto_record(fname, params, INT);
 	fprintf(of, "%s w $%s(", fn_export_kw(), fname);
 	n = params;
 	if (n)
@@ -6545,7 +6635,7 @@ emit_knr_func_typed(char *fname, Node *params)
 	strncpy(cur_fn_name, fname, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(fname, 1, FUNC(curfntyp), 0);
-	fnproto_record(fname, params);
+	fnproto_record(fname, params, curfntyp);
 
 	/* Struct/union return-by-value: hidden first pointer parameter +
 	 * pointer return (see cur_fn_sret notes near the top of the file). */
@@ -6762,12 +6852,15 @@ externdcl: EXTERN type IDENT ';'
          | EXTERN type IDENT '[' expr ']' ';'
 {
 	/* Extern array with size - register as pointer.  The dimension may be
-	   any constant expression (e.g. `extern char buf[(32) + 1];`); the
-	   size is not needed for an extern (no storage is allocated here), so
-	   the folded value is discarded. */
+	   any constant expression (e.g. `extern char buf[(32) + 1];`); no
+	   storage is allocated here, but the total byte size is recorded so
+	   sizeof on the extern array answers correctly.  NOTE a bare-NUM
+	   dimension does NOT reduce here - it goes through ext_decllist as a
+	   B node (see the multi-name rule below). */
 	if ($2 == NIL)
 		die("invalid void extern array");
 	varaddextern($3->u.v, IDIR($2), 1);
+	var_set_arraybytes($3->u.v, SIZE($2) * const_eval($5));
 }
          | EXTERN STRUCT IDENT IDENT ';'
 {
@@ -6822,7 +6915,7 @@ externdcl: EXTERN type IDENT ';'
 		varadd($3->u.v, 1, FUNC(NIL), 0);
 	else
 		varadd($3->u.v, 1, FUNC($2), 0);
-	fnproto_record($3->u.v, $5);
+	fnproto_record($3->u.v, $5, $2);
 }
          | EXTERN type ext_decllist ';'
 {
@@ -6839,7 +6932,13 @@ externdcl: EXTERN type IDENT ';'
 			t = FUNC($2);
 		} else if (n->op == 'G') {
 			t = FUNC(IDIR($2));
-		} else if (n->op == 'A') {
+		} else if (n->op == 'A' || n->op == 'B') {
+			/* B = sized array declarator (the bare-NUM dimension form
+			 * reduces through ext_decl, NOT the dedicated rule above).
+			 * Before this branch existed it fell into the scalar else:
+			 * the symbol registered as a plain base-type scalar, so a
+			 * reference LOADED its first bytes instead of decaying to
+			 * the array address (gc_add got seg 0 and wrote the IVT). */
 			if ($2 == NIL)
 				die("invalid void extern array");
 			t = IDIR($2);
@@ -6852,7 +6951,9 @@ externdcl: EXTERN type IDENT ';'
 				die("invalid void extern declaration");
 			t = $2;
 		}
-		varaddextern(n->u.v, t, n->op == 'A' ? 1 : 0);
+		varaddextern(n->u.v, t, (n->op == 'A' || n->op == 'B') ? 1 : 0);
+		if (n->op == 'B')
+			var_set_arraybytes(n->u.v, SIZE($2) * n->l->u.n);
 	}
 }
          ;
@@ -6901,7 +7002,7 @@ tdcl: TYPEDEF type IDENT ';'
 	/* Function pointer typedef: typedef int (*callback_t)(int, int); */
 	unsigned fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
 	typhadd($5->u.v, fptr_type);
-	typhset_fpid($5->u.v, fpproto_alloc($8));  /* coerce args at `fp(...)' (§2s) */
+	typhset_fpid($5->u.v, fpproto_alloc($2, $8));  /* args + float ret (§2s/§5b) */
 }
     ;
 
@@ -7058,7 +7159,7 @@ smembers:
 	structaddmember(curstruct, $5->u.v, IDIR(FUNC($2)));
 	/* Record the member's parameter types so an indirect call through it
 	 * (`obj->fn(...)') coerces arguments to the declared widths (§2q). */
-	structset_last_fpid(curstruct, fpproto_alloc($8));
+	structset_last_fpid(curstruct, fpproto_alloc($2, $8));
 }
         | smembers attrspec
         | smembers nestedagg
@@ -7322,6 +7423,21 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 			strcpy(ini[nglo], buf);
 			strcpy(gloname[nglo], n->u.v);
 			varadd(n->u.v, nglo++, t, 1);
+		} else if (n->op == 'B') {
+			/* Sized array declarator in a multi-name file-scope decl,
+			 * e.g. int a, b 10 elements.  Emit a real zero block of the
+			 * full array size (the scalar else-branch used to emit one
+			 * element and register a scalar - wrong size AND no decay). */
+			int total = SIZE(parsed_type) * n->l->u.n;
+			t = IDIR(parsed_type);
+			if (nglo == NGlo)
+				die("too many globals");
+			sprintf(buf, "align %d { z %d }", iralign(parsed_type), total);
+			ini[nglo] = alloc(strlen(buf) + 1);
+			strcpy(ini[nglo], buf);
+			strcpy(gloname[nglo], n->u.v);
+			varadd(n->u.v, nglo++, t, 1);
+			var_set_arraybytes(n->u.v, total);
 		} else {
 			if (nglo == NGlo)
 				die("too many globals");
@@ -7418,7 +7534,7 @@ ansi_proto_register: '(' init_ansi par0 ')'
 	/* Prototype-only registration: register function type, no IR emission. */
 	curfntyp = parsed_type;
 	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
-	fnproto_record(parsed_ident, $3);
+	fnproto_record(parsed_ident, $3, curfntyp);
 };
 
 knr_func_proto: '(' init_kr kr_idlist ')' kr_param_dcls
@@ -7440,7 +7556,7 @@ ansi_func_proto: '(' init_ansi par0 ')'
 	strncpy(cur_fn_name, parsed_ident, NString - 1);
 	cur_fn_name[NString - 1] = 0;
 	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
-	fnproto_record(parsed_ident, $3);
+	fnproto_record(parsed_ident, $3, curfntyp);
 
 	/* Struct/union return-by-value: lower to a hidden first pointer
 	 * parameter (caller-allocated result storage) plus a pointer
@@ -7648,14 +7764,19 @@ par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
     | type                { $$ = abstract_param($1, 0); }
     | ELLIPSIS            { $$ = 0; /* variadic marker: ... proto only, no IR */ }
     | type '(' '*' IDENT ')' '(' fptpar0 ')' ',' par1 {
-        /* Function pointer parameter: int (*callback)(int, int), ... */
+        /* Function pointer parameter: int (*callback)(int, int), ...
+         * Record the fpid (§5b) so a call through the PARAMETER coerces
+         * args and recovers a float return class (modmath.c's
+         * math_generic_1(x, mp_float_t (*f)(mp_float_t)) shape). */
         unsigned fptr_type = IDIR(FUNC($1));
         $$ = param($4->u.v, fptr_type, $10);
+        varsetfpid($4->u.v, fpproto_alloc($1, $7));
     }
     | type '(' '*' IDENT ')' '(' fptpar0 ')' {
         /* Function pointer parameter: int (*callback)(int, int) */
         unsigned fptr_type = IDIR(FUNC($1));
         $$ = param($4->u.v, fptr_type, 0);
+        varsetfpid($4->u.v, fpproto_alloc($1, $7));
     }
     ;
 
@@ -7759,20 +7880,33 @@ dcls:
 		expr(init_node);
 	}
 }
-    | dcls type IDENT ',' ext_decllist ';' { emit_local_multi_decl($2, $3->u.v, $5); }
+    | dcls type IDENT ',' ext_decllist ';'
+{
+	/* dcls context: parse-time emit IS the entry block, which is also
+	 * the lexical position of the declaration — emit the chain now. */
+	Node *ch = emit_local_multi_decl($2, $3->u.v, $5);
+	if (ch)
+		expr(ch);
+}
     | dcls type IDENT '[' expr ']' ',' ext_decllist ';'
 {
 	Node *first = kr_array_node($3->u.v, const_eval($5));
+	Node *ch;
 	first->r = $8;
-	emit_local_multi_decl_full($2, first);
+	ch = emit_local_multi_decl_full($2, first);
+	if (ch)
+		expr(ch);
 }
     | dcls type IDENT '(' ')' ',' ext_decllist ';'
 {
 	/* `T name1(), name2, ...;` — first declarator is K&R proto.
 	 * Build a 'F' node and chain. */
 	Node *first = kr_name_node($3->u.v, 'F');
+	Node *ch;
 	first->r = $7;
-	emit_local_multi_decl_full($2, first);
+	ch = emit_local_multi_decl_full($2, first);
+	if (ch)
+		expr(ch);
 }
     | dcls type IDENT '=' expr ',' init_decllist ';'
 {
@@ -7793,7 +7927,7 @@ dcls:
 {
 	/* Local ANSI prototype with typed args. */
 	varadd($3->u.v, 1, FUNC($2), 0);
-	fnproto_record($3->u.v, $5);
+	fnproto_record($3->u.v, $5, $2);
 }
     | dcls ALIGNAS '(' NUM ')' type IDENT ';'
 {
@@ -7916,11 +8050,13 @@ dcls:
 			t = FUNC($3);
 		else if (n->op == 'G')
 			t = FUNC(IDIR($3));
-		else if (n->op == 'A' || n->op == 'P')
+		else if (n->op == 'A' || n->op == 'B' || n->op == 'P')
 			t = IDIR($3);
 		else
 			t = $3;
-		varaddextern(n->u.v, t, n->op == 'A' ? 1 : 0);
+		varaddextern(n->u.v, t, (n->op == 'A' || n->op == 'B') ? 1 : 0);
+		if (n->op == 'B')
+			var_set_arraybytes(n->u.v, SIZE($3) * n->l->u.n);
 	}
 }
     | dcls type IDENT '[' expr ']' ';'
@@ -8077,7 +8213,7 @@ dcls:
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
 	varadd(v, 0, fptr_type, 0);  /* Not an array */
-	varsetfpid(v, fpproto_alloc($8));  /* coerce args at `fp(...)' (§2q) */
+	varsetfpid(v, fpproto_alloc($2, $8));  /* args + float ret (§2q/§5b) */
 	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
 }
     | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr ';'
@@ -8092,7 +8228,7 @@ dcls:
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));
 	varadd(v, 0, fptr_type, 0);
-	varsetfpid(v, fpproto_alloc($8));  /* coerce args at `fp(...)' (§2q) */
+	varsetfpid(v, fpproto_alloc($2, $8));  /* args + float ret (§2q/§5b) */
 	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
 	init_node = mknode('=', $5, $11);
 	expr(init_node);
@@ -8113,7 +8249,11 @@ dcls:
 	varadd(v, 0, fptr_type, 0);
 	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
 	(void)first;
-	emit_local_multi_decl_full($2, $11);
+	{
+		Node *ch = emit_local_multi_decl_full($2, $11);
+		if (ch)
+			expr(ch);
+	}
 }
     | dcls STATIC_ASSERT '(' expr ',' STR ')' ';'
 {
@@ -8128,7 +8268,7 @@ dcls:
 	 * table, which is fine as long as the name does not clash.  Mirrors
 	 * the file-scope fnptr-typedef rule.  Needed by py stream.c. */
 	typhadd($6->u.v, IDIR(FUNC($3)));
-	typhset_fpid($6->u.v, fpproto_alloc($9));  /* coerce args at `fp(...)' (§2s) */
+	typhset_fpid($6->u.v, fpproto_alloc($3, $9));  /* args + float ret (§2s/§5b) */
 }
     ;
 
@@ -8441,9 +8581,35 @@ stmt: ';'                            { $$ = 0; }
     | type IDENT ',' ext_decllist ';' {
         /* Block-scoped multi-variable decl with full per-declarator
          * decoration support (`*`, `[]`, `[N]`, `()`).  Reuses the
-         * same helper as the dcls-context multi-decl rule. */
-        emit_local_multi_decl($1, $2->u.v, $4);
-        $$ = 0;
+         * same helper as the dcls-context multi-decl rule, but DEFERS
+         * the initializer chain as an Expr stmt so it runs in
+         * control-flow order — `T k, nf = 0;` in a loop body must
+         * re-init nf each iteration, not once at function entry. */
+        Node *ch;
+        ch = emit_local_multi_decl($1, $2->u.v, $4);
+        $$ = ch ? mkstmt(Expr, ch, 0, 0) : 0;
+    }
+    | type IDENT '=' expr ',' init_decllist ';' {
+        /* Block-scoped multi-declarator where the FIRST declarator has
+         * an initializer: `int a = 1, b = 2;` inside a block (the dcls
+         * rule covers function top).  Allocs at parse time; ALL inits
+         * chained into one deferred Expr stmt, in source order. */
+        Node *chain, *n;
+        char *v;
+        if ($1 == NIL)
+            die("invalid void declaration");
+        v = block_scope_decl($2, $1, 0);
+        varadd(v, 0, $1, 0);
+        emit_local_alloc(v, ALLOC_T(), iralign($1), SIZE($1));
+        chain = mknode('=', $2, $4);
+        for (n = $6; n; n = n->r) {
+            varadd(n->u.v, 0, $1, 0);
+            emit_local_alloc(n->u.v, ALLOC_T(), iralign($1), SIZE($1));
+            if (n->l)
+                chain = mknode(',', chain,
+                    multi_decl_chain_init(0, n->u.v, n->l));
+        }
+        $$ = mkstmt(Expr, chain, 0, 0);
     }
     | type '(' '*' IDENT ')' '(' fptpar0 ')' ';' {
         /* Block-scoped function pointer: `int (*fp)(int, int);` */

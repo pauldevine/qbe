@@ -33,7 +33,7 @@ import sys
 PROLOGUE_TEMPLATE = """\
 ; Auto-generated from minic/dos/libstub.asm by tools/libstub_to_exe.py
 ; {model_label} libc/runtime stubs for stevie .EXE build.
-; All functions use far-call ABI: retf, args at [bp+6] and up.
+; {abi_label}
 bits 16
 cpu 8086
 
@@ -2364,9 +2364,61 @@ def far_data_model(model):
     return model in ('compact', 'large', 'huge')
 
 
+def near_code_model(model):
+    """Tiny/small keep libstub's native near-call ABI: 2-byte return
+    address, args from [bp+4], plain `ret`.  The body passes through
+    UNTRANSFORMED and the EXE epilogue blocks (authored in far-call ABI)
+    are reverse-transformed by unfar_epilogue()."""
+    return model in ('tiny', 'small')
+
+
+def unfar_epilogue(text):
+    """Reverse the far-call ABI the EXE epilogue blocks are authored in,
+    for near-code models: `retf` -> `ret`, `call far X` -> `call X`, and
+    every positive [bp+N] arg offset (N >= 6, the first far-ABI arg) drops
+    2 because a near call pushes a 2-byte return address.  The printf
+    engines also compute their vararg base arithmetically
+    (`add si, N ; first vararg at bp+M = ...`) — shift those the same way."""
+    out = []
+    for line in text.splitlines():
+        line = re.sub(r'\bretf\b', 'ret', line)
+        line = re.sub(r'\bcall\s+far\s+', 'call ', line)
+        # The blocks switch segments internally; route their code into the
+        # shared near-code _TEXT segment.
+        line = re.sub(r'\bLIBSTUB_TEXT\b', '_TEXT', line)
+
+        def repl(m):
+            n = int(m.group(1))
+            if n >= 6:
+                return '[bp+{}]'.format(n - 2)
+            return m.group(0)
+        line = re.sub(r'\[bp\+(\d+)\]', repl, line)
+        m = re.match(r'^(\s*add\s+si,\s*)(\d+)(\s*; first vararg at bp\+)'
+                     r'(\d+)(.*)$', line)
+        if m:
+            line = '{}{}{}{}{}'.format(m.group(1), int(m.group(2)) - 2,
+                                       m.group(3), int(m.group(4)) - 2,
+                                       m.group(5))
+        out.append(line)
+    return '\n'.join(out)
+
+
 def build_epilogue(model):
     """Assemble the EPILOGUE; the 4-byte stdio sentinels + _far_fX helpers
     are appended only under far-data models."""
+    if near_code_model(model):
+        # Small/tiny .EXE: keep the EXE-specific malloc/fileio replacements
+        # (libstub.asm's versions reference .COM-only labels) but in near
+        # ABI.  FAR_SPRINTF stays because FILEIO's _far_printf/_far_fprintf
+        # call it (unreachable under near-code — minic's far_stdlib
+        # mangling is off — but nasm needs the symbol defined).
+        # FAR_DOSIO/FAR_STDIO/FAR_SETJMP are likewise unreachable and
+        # standalone, so they are dropped.  SETJMP_EXE is dropped too:
+        # its jmp_buf layout is structurally far (saves the 4-byte CS:IP
+        # return, longjmp exits via retf) — a near setjmp needs its own
+        # implementation; no small-model consumer today.
+        return ''.join(unfar_epilogue(p) for p in
+                       [MALLOC_EXE, FILEIO_EXE, FAR_SPRINTF_EXE])
     parts = [MALLOC_EXE, FILEIO_EXE, FAR_SPRINTF_EXE, FAR_DOSIO_EXE, SETJMP_EXE]
     if far_data_model(model):
         parts.append(FAR_STDIO_EXE)
@@ -2417,10 +2469,23 @@ def main():
     # Compact is currently routed through the medium-model far-call ABI
     # (see i8086 `uses_far_code()`): the only model-specific difference
     # is far-pointer data on the libstub side via the _far_X variants.
-    code_seg = 'LIBSTUB_TEXT'
-    model_label = 'Medium/far-code model (model=%s)' % model
+    # Near-code models (small) keep the native near ABI and emit into the
+    # shared `_TEXT` segment so the linker coalesces ALL code into one
+    # 64KB CS frame (near calls + 2-byte code pointers need one frame).
+    near_code = near_code_model(model)
+    if near_code:
+        code_seg = '_TEXT'
+        model_label = 'Small/near-code model (model=%s)' % model
+        abi_label = ('All functions use the native near-call ABI: '
+                     'ret, args at [bp+4] and up.')
+    else:
+        code_seg = 'LIBSTUB_TEXT'
+        model_label = 'Medium/far-code model (model=%s)' % model
+        abi_label = ('All functions use far-call ABI: '
+                     'retf, args at [bp+6] and up.')
     prologue = PROLOGUE_TEMPLATE.format(code_seg=code_seg,
-                                        model_label=model_label)
+                                        model_label=model_label,
+                                        abi_label=abi_label)
     with open(in_path) as f:
         src = f.read()
 
@@ -2575,11 +2640,12 @@ def main():
             i += 1
             continue
 
-        # Otherwise it's code: apply transform (ret→retf, bp+ shift)
+        # Otherwise it's code: apply transform (ret→retf, bp+ shift).
+        # Near-code models keep the body's native near ABI untouched.
         if in_data_block:
             in_data_block = False
             open_code()
-        out_lines.append(transform(raw))
+        out_lines.append(raw if near_code else transform(raw))
         i += 1
 
     out_lines.append(build_epilogue(model))

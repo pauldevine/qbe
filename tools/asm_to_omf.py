@@ -307,8 +307,6 @@ def main():
         sys.exit(2)
     basename, in_path, out_path = args[0], args[1], args[2]
     prefix = basename + '_'
-    near_code = model in ('tiny', 'small', 'compact')
-
     with open(in_path) as f:
         raw_lines = f.readlines()
 
@@ -485,9 +483,20 @@ def main():
     # Medium model: give each module its own _TEXT segment so the linker
     # places them in separate physical 64KB code segments.  All _DATA /
     # _BSS go into shared DGROUP segments (so DS addresses everything).
-    code_seg = basename.upper() + '_TEXT'
-    _ = near_code  # reserved for future tiny/small/compact coalescing
-    emit_text_segments(out, code_seg, sections['text'], text_func_bounds)
+    # Near-CODE models (tiny/small — NOT compact, which uses the far-call
+    # ABI and may exceed 64KB total code): every module emits into the
+    # shared `_TEXT` segment so omf_link coalesces all code into ONE
+    # paragraph frame.  Near calls and 2-byte code pointers only work when
+    # caller, callee, and the runtime CS share that single frame.  No
+    # budget splitting either — total code must fit 64KB anyway.
+    if model in ('tiny', 'small'):
+        code_seg = '_TEXT'
+        out.append('segment %s class=CODE align=2 use16' % code_seg)
+        out.extend(sections['text'])
+        out.append('')
+    else:
+        code_seg = basename.upper() + '_TEXT'
+        emit_text_segments(out, code_seg, sections['text'], text_func_bounds)
 
     # align=16 (paragraph): the linker places each segment at a paragraph
     # base, so a within-segment NASM `align N` (N<=16) yields an N-aligned

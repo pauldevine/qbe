@@ -685,3 +685,367 @@ float sf_powf(float x, float y)
 	}
 	return sf_frombits(ieee_exp2(sf_mul(ay, ieee_log2(ax))));   /* x > 0 */
 }
+
+/* ======================================================================
+ * sqrt + trig/inverse-trig + frexp/ldexp/modf (for the MicroPython `math`
+ * module, §5b).
+ *
+ * sqrt is the fdlibm bitwise restoring algorithm — one result bit per
+ * iteration over 32-bit integers only, CORRECTLY ROUNDED (nearest-even).
+ *
+ * sin/cos use the Cephes single-precision scheme: octant reduction with a
+ * 3-part pi/4 split (DP1 has 8 significand bits, so y*DP1 is an EXACT
+ * binary32 product for y < 2^16 — accuracy degrades gradually for
+ * |x| > ~51471, which we accept and document) + minimax kernels on
+ * [-pi/4, pi/4].  tan = sin/cos (one extra rounding).  atan is the Cephes
+ * two-threshold reduction (tan pi/8 / tan 3pi/8) + 4-term minimax; asin and
+ * acos derive from atan + sqrt via identities that avoid the 1-x^2
+ * cancellation (asin uses (1-x)(1+x); acos uses 2*atan(sqrt((1-x)/(1+x))),
+ * exact at both endpoints).  Accuracy target, like the exp2/log2 family
+ * above, is a few ulps — NOT correctly rounded (except sqrt).
+ * ====================================================================== */
+
+#define FOPI_F     ((U32)0x3FA2F983)   /* 4/pi */
+/* pi/4 split into 8-bit chunks: y*DPn_F is an EXACT binary32 product for
+ * every y < 2^16 (8+16 = 24 significand bits), so the reduction chain only
+ * rounds at the final DP4 term.  (The classic Cephes 3-part split has 11
+ * bits in its second term — exact only to y < 2^13, which showed up as
+ * 8-ulp cos errors near |x| ~ 28000 in the host harness.) */
+#define DP1_F      ((U32)0x3F490000)   /* 0.78515625        (8 bits) */
+#define DP2_F      ((U32)0x397D0000)   /* 2.41279602e-4     (8 bits) */
+#define DP3_F      ((U32)0x352A0000)   /* 6.33299351e-7     (7 bits) */
+#define DP4_F      ((U32)0x30085A30)   /* 4.96046759e-10 (full, rounds) */
+#define PI_F       ((U32)0x40490FDB)
+#define PIO2_F     ((U32)0x3FC90FDB)
+#define PIO4_F     ((U32)0x3F490FDB)
+#define PI3O4_F    ((U32)0x4016CBE4)   /* 3*pi/4 */
+
+/* sin kernel coefficients (Cephes): x + x*z*((S2*z + S1)*z + S0), z = x^2 */
+#define SINC0      ((U32)0xBE2AAAA3)   /* -1.6666654611e-1 */
+#define SINC1      ((U32)0x3C08839E)   /*  8.3321608736e-3 */
+#define SINC2      ((U32)0xB94CA1F9)   /* -1.9515295891e-4 */
+
+/* cos kernel: 1 - z/2 + z^2*((C2*z + C1)*z + C0) */
+#define COSC0      ((U32)0x3D2AAAA5)   /*  4.166664568298827e-2 */
+#define COSC1      ((U32)0xBAB6061A)   /* -1.388731625493765e-3 */
+#define COSC2      ((U32)0x37CCF5CE)   /*  2.443315711809948e-5 */
+
+/* atan reduction thresholds + kernel coefficients (Cephes) */
+#define TAN3PI8_F  ((U32)0x401A827A)   /* 2.414213562373095 = tan(3pi/8) */
+#define TANPI8_F   ((U32)0x3ED413CD)   /* 0.4142135623730950 = tan(pi/8) */
+#define ATC0       ((U32)0x3DA4F0D1)   /*  8.05374449538e-2 */
+#define ATC1       ((U32)0xBE0E1B85)   /* -1.38776856032e-1 */
+#define ATC2       ((U32)0x3E4C925F)   /*  1.99777106478e-1 */
+#define ATC3       ((U32)0xBEAAAA2A)   /* -3.33329491539e-1 */
+
+int sf_isfinite(float x) { return EXP_OF(sf_bits(x)) != 0xFF; }
+
+/* Correctly-rounded sqrt (fdlibm e_sqrtf shape, U32-only). */
+float sf_sqrt(float xf)
+{
+	U32 a = sf_bits(xf);
+	U32 ix, q, s, r, t;
+	int m;
+
+	if (sf_is_nan(a))
+		return sf_frombits(QNAN);
+	if ((a & ABS_MASK) == 0)
+		return xf;                        /* +-0 -> itself */
+	if (SIGN_OF(a))
+		return sf_frombits(QNAN);         /* x < 0 */
+	if (EXP_OF(a) == 0xFF)
+		return xf;                        /* +inf */
+	if (EXP_OF(a) == 0)
+		return sf_frombits(0);            /* subnormal: house flush-to-zero */
+
+	m  = EXP_OF(a) - 127;
+	ix = FRAC_OF(a) | IMPLICIT;               /* 1.f at bits [23:0] */
+	if (m & 1)
+		ix += ix;                         /* odd exponent: double mantissa */
+	m >>= 1;                                  /* floor(m/2); m may be negative */
+
+	/* One result bit per iteration; remainder stays < 2^27 so no overflow. */
+	ix += ix;
+	q = 0; s = 0; r = (U32)0x01000000;
+	while (r != 0) {
+		t = s + r;
+		if (t <= ix) {
+			s = t + r;
+			ix -= t;
+			q += r;
+		}
+		ix += ix;
+		r >>= 1;
+	}
+	if (ix != 0)
+		q += (q & 1);                     /* round to nearest (even) */
+	ix = (q >> 1) + ((U32)0x3F000000);
+	ix += ((U32)(S32)m << 23);
+	return sf_frombits(ix);
+}
+
+/* Octant reduction: |x| -> r in [-pi/4, pi/4] and octant j in 0..7.
+ * ax = |x| bit pattern, finite. */
+static U32 sf_trig_reduce(U32 ax, int *octant)
+{
+	U32 y, r;
+	S32 j;
+
+	j = sf_to_int(sf_mul(ax, FOPI_F));        /* truncate; ax >= 0 */
+	y = sf_from_int(j);
+	if (j & 1) {                              /* round j up to even */
+		j++;
+		y = sf_add(y, ONE_F);
+	}
+	*octant = (int)(j & 7);
+	r = sf_sub(ax, sf_mul(y, DP1_F));         /* exact products for y < 2^16 */
+	r = sf_sub(r, sf_mul(y, DP2_F));
+	r = sf_sub(r, sf_mul(y, DP3_F));
+	r = sf_sub(r, sf_mul(y, DP4_F));
+	return r;
+}
+
+/* sin kernel on the reduced argument (bit pattern), z = r^2. */
+static U32 sf_sin_kern(U32 r, U32 z)
+{
+	U32 p = sf_add(SINC1, sf_mul(z, SINC2));
+	p = sf_add(SINC0, sf_mul(z, p));
+	return sf_add(r, sf_mul(sf_mul(r, z), p));
+}
+
+/* cos kernel, z = r^2. */
+static U32 sf_cos_kern(U32 z)
+{
+	U32 p = sf_add(COSC1, sf_mul(z, COSC2));
+	p = sf_add(COSC0, sf_mul(z, p));
+	p = sf_add(ONE_F, sf_mul(sf_mul(z, z), p));   /* 1 + z^2*poly */
+	return sf_sub(p, sf_mul(HALF_F, z));          /* - z/2 */
+}
+
+float sf_sin(float xf)
+{
+	U32 a = sf_bits(xf);
+	U32 ax = a & ABS_MASK, r, z, p;
+	int sign = SIGN_OF(a), j;
+
+	if (EXP_OF(ax) == 0xFF)
+		return sf_frombits(QNAN);         /* sin(inf/nan) = nan */
+	if (ax == 0)
+		return xf;                        /* sin(+-0) = +-0 */
+	r = sf_trig_reduce(ax, &j);
+	if (j > 3) {
+		sign ^= 1;
+		j -= 4;
+	}
+	z = sf_mul(r, r);
+	p = (j == 1 || j == 2) ? sf_cos_kern(z) : sf_sin_kern(r, z);
+	if (sign)
+		p ^= SIGN_BIT;
+	return sf_frombits(p);
+}
+
+float sf_cos(float xf)
+{
+	U32 a = sf_bits(xf);
+	U32 ax = a & ABS_MASK, r, z, p;
+	int sign = 0, j;
+
+	if (EXP_OF(ax) == 0xFF)
+		return sf_frombits(QNAN);
+	r = sf_trig_reduce(ax, &j);
+	if (j > 3) {
+		sign ^= 1;
+		j -= 4;
+	}
+	if (j > 1)
+		sign ^= 1;
+	z = sf_mul(r, r);
+	p = (j == 1 || j == 2) ? sf_sin_kern(r, z) : sf_cos_kern(z);
+	if (sign)
+		p ^= SIGN_BIT;
+	return sf_frombits(p);
+}
+
+float sf_tan(float xf)
+{
+	U32 a = sf_bits(xf);
+	if (EXP_OF(a) == 0xFF)
+		return sf_frombits(QNAN);         /* tan(inf/nan) = nan */
+	return sf_frombits(sf_div(sf_bits(sf_sin(xf)), sf_bits(sf_cos(xf))));
+}
+
+float sf_atan(float xf)
+{
+	U32 a = sf_bits(xf);
+	U32 x = a & ABS_MASK, y, z, p;
+	int sign = SIGN_OF(a);
+
+	if (sf_is_nan(a))
+		return sf_frombits(QNAN);
+	if (x == 0)
+		return xf;                        /* atan(+-0) = +-0 */
+	if (sf_cmp(x, TAN3PI8_F) > 0) {           /* incl. atan(inf) -> pi/2 */
+		y = PIO2_F;
+		x = sf_div(ONE_F, x) ^ SIGN_BIT;  /* -(1/x) */
+	} else if (sf_cmp(x, TANPI8_F) > 0) {
+		y = PIO4_F;
+		x = sf_div(sf_sub(x, ONE_F), sf_add(x, ONE_F));
+	} else {
+		y = 0;
+	}
+	z = sf_mul(x, x);
+	p = sf_add(ATC1, sf_mul(z, ATC0));
+	p = sf_add(ATC2, sf_mul(z, p));
+	p = sf_add(ATC3, sf_mul(z, p));
+	p = sf_add(sf_mul(sf_mul(z, x), p), x);   /* z*x*poly + x */
+	y = sf_add(y, p);
+	if (sign)
+		y ^= SIGN_BIT;
+	return sf_frombits(y);
+}
+
+/* IEEE-conformant atan2 (matches CPython on zero/inf combinations). */
+float sf_atan2(float yf, float xf)
+{
+	U32 ay = sf_bits(yf), ax = sf_bits(xf);
+	int sy = SIGN_OF(ay), sx = SIGN_OF(ax);
+	U32 r;
+
+	if (sf_is_nan(ay) || sf_is_nan(ax))
+		return sf_frombits(QNAN);
+	if (EXP_OF(ax) == 0xFF) {                 /* x = +-inf */
+		if (EXP_OF(ay) == 0xFF)
+			r = sx ? PI3O4_F : PIO4_F;
+		else
+			r = sx ? PI_F : 0;
+	} else if (EXP_OF(ay) == 0xFF) {          /* y = +-inf, x finite */
+		r = PIO2_F;
+	} else if ((ay & ABS_MASK) == 0) {        /* y = +-0 */
+		r = sx ? PI_F : 0;
+	} else if ((ax & ABS_MASK) == 0) {        /* x = +-0, y nonzero */
+		r = PIO2_F;
+	} else {
+		r = sf_bits(sf_atan(sf_frombits(sf_div(ay, ax))));
+		if (sx)                           /* x < 0: shift into (pi/2, pi] */
+			r = sy ? sf_sub(r, PI_F) : sf_add(r, PI_F);
+		return sf_frombits(r);            /* sign already correct */
+	}
+	if (sy)
+		r ^= SIGN_BIT;                    /* special cases take y's sign */
+	return sf_frombits(r);
+}
+
+float sf_asin(float xf)
+{
+	U32 a = sf_bits(xf);
+	U32 x = a & ABS_MASK, t, r;
+	int sign = SIGN_OF(a);
+
+	if (sf_is_nan(a))
+		return sf_frombits(QNAN);
+	if (sf_cmp(x, ONE_F) > 0)
+		return sf_frombits(QNAN);         /* |x| > 1: domain error */
+	if (x == 0)
+		return xf;                        /* asin(+-0) = +-0 */
+	if (x == ONE_F) {
+		r = PIO2_F;
+	} else {
+		/* asin(x) = atan(x / sqrt((1-x)(1+x))) — the factored form
+		 * avoids the 1 - x^2 cancellation near |x| = 1. */
+		t = sf_mul(sf_sub(ONE_F, x), sf_add(ONE_F, x));
+		t = sf_bits(sf_sqrt(sf_frombits(t)));
+		r = sf_bits(sf_atan(sf_frombits(sf_div(x, t))));
+	}
+	if (sign)
+		r ^= SIGN_BIT;
+	return sf_frombits(r);
+}
+
+float sf_acos(float xf)
+{
+	U32 a = sf_bits(xf);
+	U32 t;
+
+	if (sf_is_nan(a))
+		return sf_frombits(QNAN);
+	if (sf_cmp(a & ABS_MASK, ONE_F) > 0)
+		return sf_frombits(QNAN);
+	/* acos(x) = 2*atan(sqrt((1-x)/(1+x))): exact at x=1 (-> +0) and
+	 * x=-1 (1-x)/(1+x) = 2/+0 = +inf, atan(inf) = pi/2 -> pi. */
+	t = sf_div(sf_sub(ONE_F, a), sf_add(ONE_F, a));
+	t = sf_bits(sf_sqrt(sf_frombits(t)));
+	t = sf_bits(sf_atan(sf_frombits(t)));
+	return sf_frombits(sf_mul(TWO_F, t));
+}
+
+/* frexp: x = m * 2^e with m in [0.5, 1).  Zero/inf/nan: *e = 0, return x. */
+float sf_frexp(float xf, int *e)
+{
+	U32 a = sf_bits(xf);
+
+	*e = 0;
+	if (EXP_OF(a) == 0xFF || (a & ABS_MASK) == 0)
+		return xf;
+	if (EXP_OF(a) == 0)                       /* subnormal: house flush */
+		return sf_frombits(a & SIGN_BIT);
+	*e = EXP_OF(a) - 126;
+	return sf_frombits((a & ~(EXP_MASK << 23)) | ((U32)126 << 23));
+}
+
+/* ldexp: x * 2^n with overflow -> signed inf, underflow -> signed zero. */
+float sf_ldexp(float xf, int n)
+{
+	U32 a = sf_bits(xf);
+
+	if (EXP_OF(a) == 0xFF || (a & ABS_MASK) == 0)
+		return xf;
+	if (EXP_OF(a) == 0)
+		return sf_frombits(a & SIGN_BIT);
+	if (n > 280)                              /* clamp so EXP_OF + n fits int */
+		n = 280;
+	if (n < -280)
+		n = -280;
+	return sf_frombits(sf_scalbn(a, n));
+}
+
+/* modf: *iptr = integral part (trunc), returns the fractional part; both
+ * carry x's sign (modf(-2.0) = (-0.0, -2.0), as CPython prints). */
+float sf_modf(float xf, float *iptr)
+{
+	U32 a = sf_bits(xf);
+	U32 t, frac;
+
+	if (sf_is_nan(a)) {
+		*iptr = xf;
+		return xf;
+	}
+	if (EXP_OF(a) == 0xFF) {                  /* +-inf: frac = +-0 */
+		*iptr = xf;
+		return sf_frombits(a & SIGN_BIT);
+	}
+	t = sf_bits(sf_trunc(xf));
+	*iptr = sf_frombits(t);
+	frac = sf_sub(a, t);
+	if ((frac & ABS_MASK) == 0)               /* keep x's sign on a zero frac */
+		frac = a & SIGN_BIT;
+	return sf_frombits(frac);
+}
+
+#ifndef SF_HOST
+/* Real bare-libm-named functions.  MicroPython's modmath.c passes these BY
+ * FUNCTION POINTER (math_generic_1(x, sqrtf) — a function-like macro does
+ * not expand without a following '('), so the <math.h> macro mappings are
+ * not enough: the SYMBOLS must exist.  Host builds omit them (they would
+ * collide with libm, which the host ulp-harness compares against). */
+float sqrtf(float x)           { return sf_sqrt(x); }
+float sinf(float x)            { return sf_sin(x); }
+float cosf(float x)            { return sf_cos(x); }
+float tanf(float x)            { return sf_tan(x); }
+float asinf(float x)           { return sf_asin(x); }
+float acosf(float x)           { return sf_acos(x); }
+float atanf(float x)           { return sf_atan(x); }
+float atan2f(float y, float x) { return sf_atan2(y, x); }
+float expf(float x)            { return sf_expf(x); }
+float powf(float x, float y)   { return sf_powf(x, y); }
+float fmodf(float x, float y)  { return sf_fmod(x, y); }
+#endif

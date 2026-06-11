@@ -1,4 +1,381 @@
-# Next session (§4y is DONE 2026-06-10 — **the emit-bracket audit is now a STANDING TOOL and it found + fixed the §1h two-div-one-call bug** (user-designated track).  New machinery: `QBE_EMIT_CHK=1` makes `i8086/emit.c` precede every emitted IR instruction with `; CHK <op> to=<dest> live=<regs>` carrying the EXACT post-rega GPR live-after set (per-function CFG fixpoint over {ax,cx,dx,bx,si,di}; ret blocks read AX/DX; the only implicit pair-use is the Kl `copy R1` call-result — `argcls` can NOT discriminate because `Km == Kl` lies about address operands on a 16-bit target), plus `; CHKT` terminator markers and a `cons=` cross-check of the §2w conservative tracker; off-mode output byte-identical.  `tools/check_emit_brackets.py` symbolically executes each marked region (symbolic regs, push/pop stack, tracked [bp+N] cells, calls clobber AX/CX/DX per ABI) and flags (a) any live non-dest GPR whose final value is not the entry value, (b) a register DEST that ends holding its entry value (the §4x pop-over-the-result shape), (c) ES/DS not entry-valued (DGROUP invariants), (d) a dropped/malformed Oswap exchange.  VALIDATED by reverting the §4x fixes: catches all three emit-side shapes (Ocmps/cnes/stosi CX-dest incl. in real objfloat divmod, Ocast AX).  `tools/run-emit-audit.sh` sweeps 107 MP TUs (compact) + every gate probe under its gate model (~440 asm, ~110k regions).  **THE FIND: Kw `Odiv`/`Orem`/`Oudiv`/`Ourem` clobber BOTH AX (dividend staging + quotient) and DX (cwd / xor + remainder) with NO liveness bracket** — the §1h "two divisions feeding one call corrupt the first result" found-not-fixed bug, 21 live-clobber sites in the shipping MP image (mp_format_mantissa = every float print, mp_map_lookup = every dict access, mp_lexer_to_next, gc, objint, ringbuf...).  Fixed with liveness-gated dest-skipped push/pop brackets (+ slot-dest result stores the old code silently lacked).  Probe `div_live_clobber_probe` (medium+compact, verified bug-loud: y=4 printed 3 unfixed); audit corpus CLEAN after fix; gate 242→244/244; make check green; MP body 650272→650352 (+80 B); Victor float probe + feature-4t byte-exact, churn scale2 + gen sweep clean.  No designated successor — open tracks at the §4y notes' end.)
+# Next session (§5c is DONE 2026-06-11 — all three primary items landed in one session.  (1) **Upstream sync**: merged `c081897..e786f06` (3 commits; `fa19d3c` strict-aliasing fix in emit.c float-constant comments is output-identical) — make check green, gate 254/254, MP body byte-identical.  (2) **THE SMALL MODEL WORKS** (the only flat-out broken model, commit `4cfb321`): `libstub_to_exe.py` gained `near_code_model`/`unfar_epilogue` — small keeps libstub's native near ABI untouched and the EXE epilogue blocks (authored far-ABI) are reverse-transformed (retf→ret, `call far X`→`call X`, `[bp+N≥6]`−2, the printf engines' computed vararg bases `add si,N`−2, LIBSTUB_TEXT→_TEXT); FAR_DOSIO + SETJMP dropped under near-code (unreachable; SETJMP's jmp_buf is structurally far — a near setjmp is an OPEN track); `asm_to_omf.py` emits tiny/small code into shared `_TEXT` (no budget split); **`omf_link.py` now coalesces CODE segments BY NAME like DATA/BSS** (behavior-identical for far models — names unique; under small the three `_TEXT`s merge into ONE paragraph frame so near calls and 16-bit fn ptrs resolve against the runtime CS — fnptrprobe passes, proving it); crt0 `-DNEAR_CODE` → near `call _main`.  6 gate entries: cprobe/cstrprobe/fnptrprobe/mathprobe/dosapi_probe/fileio-roundtrip, all DOSBox-verified; cstrprobe has a small-specific golden (`%p` prints the C-correct 16-bit near ptr `5678`).  Gate 254→260.  (3) **the `float **` collision is FIXED** (commit `bf4a2e3`): FAR 24→26, QVOLATILE 25→27 — FLOAT (18) two shifts up no longer lands on FAR, so `float **` deref/store/param all decode right (pre-fix medium emitted loadl+loadfw+swtof garbage — probe-proven).  PLUS the probe's f3 case found the DIRECT-call sibling of §5b: `DREF(FUNC(ret))` strips ret bits on the flag positions (a direct fn returning `float **` puts FLOAT on new-QVOLATILE 27), so **fnproto gained `rett`/`has_rett`** (the fpproto.rett mirror; recorded at all 6 fnproto_record sites, used at the direct-call decode — layout-independent).  Residual collisions all moved one level deeper and surveyed UNCONSUMED (MP+stevie+probes): `unsigned T ***` (17+9=26), `float ***` (18+9=27), and far-data nested-far depth is now exactly ONE level (`T **` ok; T***'s innermost FAR needs bit 32 — the probe's short*** case under compact CONFIRMED the documented trade, reduced to short**).  Probe `float_dblptr_probe.c` (medium+compact, bug-loud).  Gate 260→**262/262** with every pre-existing golden unmoved; conflicts unchanged 115 s/r; MP compact rebuild BYTE-IDENTICAL (731,088) after EACH of the three changes → no Victor runs needed all session.  No designated successor — open tracks below.)
+
+## §5c session notes (2026-06-11)
+
+### Small model — what to know before extending it
+- The near-code link model: ALL code (crt0 `_TEXT` + every TU's `_TEXT` + libstub `_TEXT`)
+  coalesces by NAME in omf_link into one paragraph frame at para 0; entry CS=0.  Near calls
+  are self-relative byte-distance fixups (frame-independent); 16-bit code-symbol fixups
+  (fn ptrs, loc==1) resolve against the combined segment's frame == runtime CS.  This is
+  why fn pointers REQUIRED the coalescing, not just contiguous placement.
+- The i8086 backend needed ZERO changes: `sf_farcall()`/`farcall` in emit.c already gate
+  helper calls on memmodel (near `call _qbe_div32s` under small), minic's `far_stdlib`
+  mangling is NEAR_CODE-off, crt0 was the only far-call site.
+- OPEN small-model gaps (extend on demand): no setjmp/longjmp (SETJMP_EXE dropped — needs
+  a dedicated near impl with a 2-byte env return slot); softfloat probes not gated under
+  small (the `_sf_*` helpers ARE near-callable and softfloat.c compiles — just never
+  gated); no stevie-small (DGROUP pressure untested); `unfar_epilogue` is mechanical —
+  any NEW epilogue block with computed arg offsets needs the `add si,N ; first vararg`
+  idiom or plain `[bp+N]` so the reverse transform sees it.
+- tiny .COM is untouched (flat concat via build-com-test.sh, never goes through
+  libstub_to_exe/omf_link); `--model=tiny` through build-example.sh now produces the same
+  near-code .EXE shape as small (untested, no consumer).
+
+### float**/encoding — the residual map (post-move)
+- Encoding law: any flag bit f collides with anything at bit f+3k after k shifts.  Current
+  layout: SHORT 16, UNSIGNED 17, FLOAT 18, FAR 26, QVOLATILE 27.  Residuals: UNSIGNED@3
+  →FAR, FLOAT@3→QVOLATILE (the fn-ptr/direct-call RETURN paths are immune via
+  fpproto.rett / fnproto.rett), SHORT@4→28 (harmless today), far-data T*** loses its
+  innermost FAR (bit 32 overflow).  A future flag must not land on 19–25 without checking
+  depth collisions against all five.
+- fnproto.rett applies to EVERY recorded direct call (not just float) — it also upgrades
+  the stale-prototype shape where a function-local prototype's varh entry died at scope
+  exit but fnproto persists (previously decoded FUNC(INT)).  MP byte-identical proves no
+  shipping consumer changed.
+
+### Open tracks (carried; pick by appetite)
+- huge `_qbe_huge_add` ≥0x8000 variable-index gap (§4i) — gate has huge entries to extend.
+- `jmp_buf bufs[6]` (§4v, UNREDUCED) — reduce, classify, fix or document.
+- minic static-initializer FLOAT const-expr folding (`static float x = 2.0f*3.14f;`) —
+  also unlocks MICROPY_PY_MATH_CONSTANTS for free.
+- Multi-decl items after the first skip block_scope_decl (loud "double definition").
+- Small-model setjmp/longjmp (near env) if a consumer appears; softfloat gate entries
+  under small (cheap thickening).
+- **ROADMAP.md still stale since 2026-05-23** (predates the whole MP campaign + §4/§5
+  toolchain work) — one consolidation pass; also prune the CLAUDE.md Prior: chain.
+- Kw spill-slot sharing (no consumer pain); newlibc integration (STRATEGIC, needs user
+  go/no-go — would retire the libstub ret-rewrite machinery §5c just made model-aware).
+
+---
+
+# (DONE in §5c above) Next session (§5c — DESIGNATED by the user 2026-06-11: **PIVOT OFF MICROPYTHON onto the core QBE/minic/linker 8086 toolchain workstream.**  The MP port is "very capable" and is now a CONSUMER of the toolchain, not the driver: its remaining tracks (math SPECIAL_FUNCTIONS, isclose, MATH_CONSTANTS, third GC area, MP_STACK_LIMIT lever, `-DMP_DBG_*` cleanup) are PARKED unless a toolchain fix unlocks them for free.  MP's role from here: the 108-TU compact rebuild is a regression corpus — after toolchain changes, rebuild and byte-compare the body; Victor re-runs only when bytes move.  Ordered plan below: (1) warm-up = the 3-commit upstream sync; (2) main track = the SMALL-model .EXE fix (the only memory model that is flat-out broken); (3) then the `float **` type-encoding collision (the silent-miscompile class §5b exposed); follow-ons and strategic items after.)
+
+## §5c plan (recommended ordering, gathered 2026-06-11; survey notes inline)
+
+### 1. Warm-up: upstream QBE sync — 3 commits (`c081897..e786f06`)
+- `fa19d3c` "emit: fix aliasing-breaking pointer dereference via union" is
+  TARGET-GENERAL emit code — the one of the three that can touch us.  `e786f06`
+  (rv64 pc-rel globals) and `80d745c` (arm64 extern offset) are other-arch.
+- Procedure (the PR #23 rebase recipe, scaled down): merge `upstream/master`,
+  `make check`, full gate (254/254 expected), MP compact rebuild + body
+  byte-compare (expect byte-identical; if fa19d3c moves bytes, diff the asm and
+  re-run the Victor feature-4t probe), commit.  ~an hour including the gate.
+
+### 2. MAIN TRACK: small-model .EXE (the only broken model) — see [[per-model-gate]]
+- Symptom: DOSBox hangs.  Root cause (documented since the per-model gate work):
+  `tools/libstub_to_exe.py` UNCONDITIONALLY rewrites every libstub `ret` → `retf`
+  and shifts `[bp+N]` arg offsets +2 for the 4-byte far return address — correct
+  for medium/compact/large/huge (far-code ABI), WRONG for small (near calls,
+  2-byte return address, near `_main`).
+- Shape of the fix: make the rewrite MODEL-CONDITIONAL (`--model` is already
+  plumbed through libstub_to_exe.py since the compact bring-up) — small keeps
+  libstub.asm's native near `ret` + unshifted `[bp+N]`; audit the EPILOGUE
+  helpers for far-only assumptions (far_stdlib mangling is OFF under small in
+  minic.y, so `_far_*` entries are unreachable — verify, don't assume); check
+  crt0_exe.asm's `call far _main` vs near under small; omf_link near-code
+  grouping (one CS segment — TEXT_SEG_BUDGET irrelevant under small).
+- Acceptance: small entries in the gate for the standard probe ladder
+  (cprobe, cstrprobe, mathprobe, fileio, fnptrprobe, dosapi_probe), DOSBox
+  runtime-verified.  Expect latent near-ABI assumptions to surface — budget a
+  full session.
+- NOTE: if item 6 (newlibc) is ever greenlit, it subsumes this — do not
+  gold-plate; model-conditional rewrite is enough.
+
+### 3. `float **` type-encoding collision (silent-miscompile class, §5b sibling)
+- Mechanism (proven in §5b): qualifier flags ride INSIDE the shifted type word —
+  FLOAT (bit 18) + two IDIR/FUNC 3-bit shifts = bit 24 == FAR, and DREF strips
+  ~FAR.  §5b fixed the fn-ptr RETURN case via the fpproto `rett` side table;
+  `float **` (deref of pointer-to-pointer-to-float) still decodes the inner
+  type as `int *` → loads `w` instead of `s`.  SHORT (bit 16) has the same
+  collision at 3 levels (QVOLATILE, bit 25).
+- Candidate fix surveyed in §5b: relocate FAR 24→26 and QVOLATILE 25→27.
+  FLOAT then survives 2 levels (float ** and float-ret-fnptr both clean) and
+  collides only at 3 (`float ***`).  COST: nested-far headroom shrinks — inner
+  FAR bits sit one IDIR up (26→29 ok, 26→32 OVERFLOWS), so far-data models keep
+  exactly ONE level of nested far pointer (`T **` ok, the innermost FAR of
+  `T ***` is lost).  BEFORE committing: grep the MP corpus + stevie + probes
+  for triple-pointer types under far-data models; the DREF comment block in
+  minic.y documents the current 27/30 two-level headroom — update it.
+- Probe FIRST (bug-loud `float_dblptr_probe.c`: store/load through `float **`,
+  fn returning `float *` through a fn ptr, `short ***` if the SHORT fix rides
+  along), then the bit move, then: full gate byte-compare (goldens should be
+  IDENTICAL — the bits are internal), MP body byte-compare.
+
+### 4. Follow-on correctness tracks (independent, pick by appetite)
+- huge `_qbe_huge_add` ≥0x8000 variable-index gap (§4i) — the documented hole
+  in huge far-ptr arith; gate has huge entries to extend.
+- `jmp_buf bufs[6]` (§4v, UNREDUCED) — array-of-jmp_buf cross-frame longjmp
+  misbehaved; reduce first (suspect: §2m array_vartyp stride family), classify,
+  then fix or document.
+- minic static-initializer FLOAT const-expr folding (`static float x = 2.0f*3.14f;`
+  dies "unsupported operation in constant expression"; INFINITY/NAN macros are
+  runtime calls so they need a bits-level static-init story).  General C gap;
+  also unlocks MICROPY_PY_MATH_CONSTANTS for free.
+- Multi-decl items after the first skip block_scope_decl (loud "double
+  definition", not silent — lowest priority of the four).
+
+### 5. Maintenance (cheap, do opportunistically)
+- **ROADMAP.md is stale since 2026-05-23** — predates the entire MP campaign,
+  the emit-bracket audit, split stack, slot coloring, FLOAT, the math module.
+  One consolidation pass; also prune the CLAUDE.md header scroll (the Prior:
+  chain is most of a year of sessions deep).
+- Kw spill-slot sharing (Kl/Ks got §4w coloring; plain Kw never shares) — small
+  frame lever, no known consumer pain.
+- Standing tool reminder: `tools/run-emit-audit.sh` after ANY i8086/emit.c change.
+
+### 6. STRATEGIC (own campaign, needs user go/no-go): newlibc integration
+- `~/projects/newlibc` is the planned real libc replacing libstub's organically
+  grown helper set (printf engine as a python EPILOGUE string, near/far
+  duplication, `_mktemp` deferral, per-model ret-rewrite hacks).  Biggest open
+  workstream; would also resolve item 2 cleanly and retire a whole class of
+  libstub ABI bugs ([[libstub-null-ptr-dx]] family).  Do NOT start it as a side
+  effect of another track — it deserves its own bring-up plan (per-model ABI,
+  OMF object production, gate migration).
+
+---
+
+# (DONE in §5b — successor §5c above) Next session (§5b is DONE 2026-06-11 — **the MicroPython `math` module is ON and Victor-verified byte-exact** (the standing §4x/§4z open track).  softfloat.c grew the missing soft-libm: `sf_sqrt` (fdlibm bitwise restoring, **correctly rounded** — 0 ulp vs host libm over 2M random samples), `sf_sin`/`sf_cos`/`sf_tan` (Cephes octant reduction with a **4-part 8-bit-chunk π/4 split** so every `y*DPn` product is exact for y < 2^16, |x| ≲ 51471 — the classic 3-part Cephes split has 11 bits in DP2, exact only to y < 2^13, which showed up as 8-ulp cos errors near |x| ~ 28000), `sf_atan`/`sf_atan2` (Cephes two-threshold + IEEE zero/inf grid matching CPython), `sf_asin` (atan of x/sqrt((1−x)(1+x)) — factored to dodge the 1−x² cancellation), `sf_acos` (2·atan(sqrt((1−x)/(1+x))), exact at both endpoints), `sf_frexp`/`sf_ldexp`/`sf_modf` (modf keeps x's sign on a zero frac per CPython), `sf_isfinite`.  Host ulp harness `build/sf-math-host-test.c` (cc -DSF_HOST + libm): sqrt 0 ulp, sin/cos ≤4, atan/atan2 ≤3, asin/acos ≤4, frexp/ldexp/modf bit-exact; near the zeros of sin/cos the final DP4 product rounding bounds the ABSOLUTE error at ~1e-12 (the pure-single-precision reduction limit — glibc sinf uses doubles internally; we have none).  **THE MINIC BUG the bring-up found: a float-returning function POINTER decoded as int-returning.**  FLOAT is type-flag bit 18 and IDIR(FUNC(ret)) shifts ret up 6 bits — FLOAT lands exactly on bit 24 == FAR, which DREF strips, so `float (*f)(float)` called through the pointer emitted `=w call` + a bogus swtof (garbage results).  This is exactly MicroPython modmath.c's shape: `math_generic_1(x, sqrtf)` passes every math function BY POINTER into `mp_float_t (*f)(mp_float_t)`.  Fix: `fpproto[]` (the §2q indirect-call side table) gains `rett` — the declared return type carried UNSHIFTED; `fpproto_alloc(rett, chain)` at all 6 declarator sites; the two indirect-call sites override the double-DREF decode when an fpid exists; and the two `par1` fn-ptr PARAMETER rules now record an fpid at all (they previously recorded NONE — no arg coercion either).  Sibling latent hole documented-not-fixed: `float **` hits the same bit-24 collision (no consumer).  Because modmath also needs the bare libm names as REAL SYMBOLS (a function-like macro never expands without a following `(`), softfloat.c exports alias functions `sqrtf`/`sinf`/.../`fmodf` (#ifndef SF_HOST — they would collide with the host harness's libm reference) and math.h declares those prototypes BEFORE defining the same-named macros (a later declaration line would itself be macro-expanded).  Wiring: `MICROPY_PY_MATH=1`; **MICROPY_PY_MATH_CONSTANTS stays 0** (tau's initializer is a float CONST-EXPR (2.0*M_PI) and inf/nan are INFINITY/NAN = sf_inff()/sf_nan() RUNTIME CALLS in minic's math.h — minic cannot fold either in a static initializer; math.e/math.pi are plain literals and work); 27 QDEF0 qstr appends (djb2 via py/makeqstrdata.py compute_hash); `moduledefs.h` MODULE_DEF_MATH; minic `NGlo` 256→512 (qstr.c's pool overflowed with the new strings).  Probe `mathfns_probe.c` (medium + compact, --softfloat; 63 bit-pattern lines incl. the fn-POINTER path; golden DOSBox-captured and line-by-line verified against host doubles by `build/mathfns-verify.py`, untracked).  Gate **248→254/254** (also closed the §4x cheap-thickening track: softfloat/softlibm/softtrig/double_float each gained a compact entry); `make check` green; conflicts unchanged 115 s/r.  MP body 717,168 → **731,088** (+13,920), ~93 KB under the ~824 KB ceiling.  **Victor: mp-math-probe.py BYTE-EXACT vs host python3** (exact prints: sqrt/floor/ceil/trunc/fabs/copysign/fmod/pow + frexp/modf tuples; 17 tolerance checks over sin/cos/tan/asin/acos/atan/atan2/exp/log/log-base/degrees/radians/pi/e; ValueError domain raises for sqrt(-1) and asin(2)); feature-4t byte-exact; float probe byte-exact; DOSBox small-config smoke byte-exact first (the §4z fast loop).  Successor: §5c above (core-toolchain pivot).)
+
+## 2026-06-11 §5b notes (math module: soft-libm trig/sqrt + the fn-ptr float-return DREF/FAR collision)
+
+### softfloat.c additions (minic/dos/softfloat.c, +~330 lines; existing functions untouched)
+- `sf_sqrt`: fdlibm e_sqrtf bitwise restoring algorithm, U32-only, one result bit per
+  iteration, remainder stays < 2^27 (no overflow); negative-half-exponent case (`m >>= 1`
+  with m negative) verified through minic.  CORRECTLY ROUNDED (nearest-even).
+- `sf_trig_reduce`: j = trunc(|x|·4/π) rounded up to even, octant = j&7, then
+  r = (((|x| − y·DP1) − y·DP2) − y·DP3) − y·DP4 with DP1..DP3 of ≤8 significand bits
+  each (EXACT products for y < 2^16) and DP4 the full-precision tail (the only rounding).
+- sin/cos kernels: Cephes minimax (3 terms over z=r² + the r/1−z/2 leads); tan =
+  sin/cos (one extra rounding, ≤8 ulp budget in the gate verifier).
+- atan: Cephes two-threshold reduction (tan π/8, tan 3π/8) + 4-term poly; atan(inf)
+  exact π/2.  atan2: explicit IEEE zero/inf grid (CPython-matching: atan2(±inf,±inf) =
+  ±π/4 / ±3π/4, atan2(±0,−0) = ±π...), general case atan(y/x) + π-shift for x<0.
+- frexp/ldexp/modf: pure bit manipulation; ldexp clamps n to ±280 BEFORE the int
+  exponent add (16-bit int would overflow at n ~ 32767−254); modf returns ±0 frac with
+  x's sign (CPython prints modf(-2.0) = (-0.0, -2.0)).
+- Alias functions sqrtf/sinf/cosf/tanf/asinf/acosf/atanf/atan2f/expf/powf/fmodf — real
+  exported symbols for the fn-pointer path, #ifndef SF_HOST.
+
+### THE MINIC FIX — fpproto rett (minic/minic.y; conflicts unchanged 115 s/r)
+- Repro: `static unsigned long via1(float (*f)(float), float x) { return fbits(f(x)); }`
+  emitted `%t3 =w call %t4(s %t6)` + `swtof` — result class w, garbage float.
+  `long (*f)(float)` was FINE (=l): LNG lives in the KIND bits, which shift cleanly.
+- Root cause: FLOAT flag (bit 18) + two encoding shifts (FUNC, IDIR) = bit 24 = FAR;
+  DREF masks ~FAR.  The same collision hits `float **` (FLOAT one IDIR up + FUNC...
+  i.e. any type with FLOAT two levels deep) — LATENT, no consumer, documented here.
+- Fix: fpproto[] gains `unsigned rett`; fpproto_alloc(rett, chain) also allocates when
+  chain is empty but rett carries a FLOAT bit (FLOAT | FLOAT<<3 — float and float*
+  returns); the 6 declarator sites pass the parsed return type; call()'s fn-ptr branch
+  and expr case 'I' use fpproto[fpid].rett instead of the double-DREF decode when an
+  fpid is recorded; the par1 fn-ptr param rules now varsetfpid(fpproto_alloc(...)).
+  Existing behavior: for every non-float fn ptr rett == the old decode — gate goldens
+  unmoved (254/254).
+- NGlo 256 → 512 (qstr.c hit "too many globals" with the 27 new qstr pool strings).
+
+### Verification
+- Host: build/sf-math-host-test.c ALL OK (limits above).  Golden independently
+  re-derived: build/mathfns-verify.py checks every golden line vs host doubles —
+  sqrt/specials/frexp/ldexp/modf EXACT, trig within declared ulp budgets.
+- Gate 248 → 254/254 (mathfns_probe medium+compact + 4 compact-thickening entries);
+  make check green.
+- DOSBox small config (MP_HEAP_SIZE=8192 MP_HEAP2_SIZE=12288 MP_STACK_SIZE=16384,
+  612 KB image): mp-math-probe.py byte-exact vs host python3.
+- **Victor (full 751,664-byte image, body 731,088): math probe byte-exact, feature-4t
+  byte-exact, float probe byte-exact.**  Clean D4/C5 exits.
+
+### Open tracks (ordered into the §5c plan above; carried + new)
+- `math` SPECIAL_FUNCTIONS (log2/log10/hyperbolics/erf/gamma) — needs more soft-libm;
+  log2f exists already, log10/cosh/sinh/tanh/acosh/asinh/atanh/erf/lgamma do not.
+- MICROPY_PY_MATH_CONSTANTS — needs minic float const-expr folding in static
+  initializers (tau = 2.0*M_PI) + a static-init story for INFINITY/NAN (runtime calls
+  in minic's math.h).  math.isclose (MICROPY_PY_MATH_ISCLOSE) is another cheap add.
+- **`float **` latent collision** (same bit-24/FAR mechanism as the §5b fn-ptr fix) —
+  fix would need the FLOAT flag out of the shifted chain entirely; no consumer today.
+- Third GC area (gcheap3.c clone, +~64 KB; §4z note) — ~93 KB headroom now, so a
+  third FULL area no longer fits; heap1 could still grow ~11 KB inside main_BSS.
+- Upstream sync: 3 commits (`c081897..e786f06`).
+- Carried: `jmp_buf bufs[6]` latent minic note (§4v, unreduced); huge `_qbe_huge_add`
+  ≥0x8000 gap (§4i); `-DMP_DBG_*` cleanup in the external tree; Kw spill-slot sharing;
+  MP_STACK_LIMIT 8192→~2048 lever; multi-decl items after the first skip
+  block_scope_decl (loud, not silent).
+
+---
+
+# (DONE in §5b above) Next session (§5a is DONE 2026-06-11 — **the minic multi-declarator init-hoisting hole is CLOSED** (the top §4z open track).  `T k, nf = 0;` inside a block/loop body used to run the init ONCE at function entry — `emit_local_multi_decl`'s per-declarator `expr()` calls fired at parse time, which is the entry block; the deferred-Stmt discipline the single-declarator rule got long ago ([[minic-decl-init-hoisting]]) never reached the list form.  Worse, a hoisted init EXPRESSION read its operands before they were live (`int k, *p = &g[i];` computed `&g[i]` at entry with `i` uninitialized).  Fix: `emit_local_multi_decl` and `emit_local_multi_decl_full` now RETURN a comma-chain of `=` nodes (the mk_local_array_init shape) instead of emitting; the stmt-context rule wraps it in `mkstmt(Expr,…)` so inits run in control-flow order, the four dcls-context call sites `expr()` it immediately (entry == lexical position at function top, so dcls semantics unchanged).  TWO SIBLING BUGS found during the reduce, both fixed: (1) the dcls `_full` path (decorated first declarator: `int a[5], b = 3;` at function top) silently DROPPED later declarators' inits — `b` read uninitialized stack; `_full` now chains op-0/'P' inits like the plain helper.  (2) `int a = 1, b = 2;` inside a BLOCK (first declarator carries the init) was a PARSE ERROR — no stmt-level `type IDENT '=' expr ',' init_decllist ';'` rule existed; added (deferred chain, block_scope_decl on the first declarator), grammar conflicts UNCHANGED at 115 s/r 0 r/r.  Probe `multi_decl_init_probe.c` (medium+compact; bug-loud: unfixed minic = hard compile error on the new form, and the nf-accumulation shape prints 0 1 3 vs 0 1 2).  Gate **246→248/248**; `make check` green; MP compact rebuild 108/108 TUs, body 717,168 **byte-identical** to §4z (shipping MP never hit these shapes — only §4z's debug counter did), so no Victor re-run needed.  FOR-loop init rules were audited and were ALREADY correct (they defer via mkfor comma-chains).  No designated successor — open tracks at the §5a notes' end.)
+
+## 2026-06-11 §5a notes (multi-declarator init hoisting: defer the chain, not the emit)
+
+### The fix (minic/minic.y, action-only + one new C helper; conflicts unchanged 115 s/r)
+- New `multi_decl_chain_init(chain, v, init)` — appends `V(name) = init` to a comma-chain
+  (the mk_local_array_init shape, one Node wrappable in mkstmt(Expr,…)).
+- `emit_local_multi_decl` (plain first declarator) and `emit_local_multi_decl_full`
+  (decorated first declarator) now return that chain; allocs still emit at parse time
+  (entry block, QBE convention).  `_full` previously had NO init handling at all — later
+  op-0/'P' declarators with `= expr` were silently dropped (e.g. `int a[5], b = 3;`).
+- Call sites: stmt-context `type IDENT ',' ext_decllist ';'` wraps the chain in
+  mkstmt(Expr,…) — control-flow order, re-inits per loop iteration; the four dcls-context
+  sites (plain, `[N]` first, `()` first, fnptr first) `expr()` the chain immediately.
+  SSA ordering note: dcls-context inits now emit AFTER the whole decl line's allocs
+  instead of interleaved per declarator — allocs are side-effect-free, init order among
+  declarators is preserved, gate goldens unmoved.
+- NEW stmt rule `type IDENT '=' expr ',' init_decllist ';'` — `int a = 1, b = 2;` inside a
+  block was a parse error before (dcls had the rule at minic.y:7803, stmt did not).  First
+  declarator goes through block_scope_decl (rename stamps later uses); all inits in one
+  deferred chain, source order.  Zero new conflicts.
+- AUDITED-OK: the three C99 for-init rules already defer (mkfor comma-chain); the
+  multi-scalar for-init (§1k) was never broken.  K&R/file-scope walkers untouched.
+
+### Probe + verification
+- `multi_decl_init_probe.c` (medium + compact): loop-body re-init (nf accumulation),
+  hoisted-init-reads-dead-operand (`int k, *p = &g[i];`), first-declarator-init block form,
+  dcls `_full` dropped init, side-effecting init in a never-taken branch (must not run) and
+  in a taken branch (runs exactly once at the decl point), pointer-decorated later
+  declarator in a loop.  Bug-loud vs unfixed minic: hard compile error.
+- Gate **246 → 248/248**; `make check` green; minic rebuilt via the staleness-proof recipe.
+- MP compact rebuild: 108/108 TUs, body 717,168 byte-identical → no Victor re-run.
+  (Process note: `build-micropython.sh` without `--model=compact` fails fast now that
+  MP_SPLIT_STACK=1 is the default — split stack requires a far-data model.)
+
+### Open tracks (no §5b designated; carried from §4z)
+- **Third GC area** if a consumer wants it: gcheap3.c clone (+~64 KB → body ~782 KB,
+  ~42 KB ceiling margin) — mechanical; heap1 could also grow ~11 KB inside main_BSS.
+- MicroPython `math` module (sqrtf + trig in softfloat.c, §4x recipe).
+- The four older soft-float suites still medium-only in the gate; they pass under compact
+  (§4x) — cheap thickening.
+- Upstream sync: 3 commits (`c081897..e786f06`).
+- Carried: `jmp_buf bufs[6]` latent minic note (§4v, unreduced); huge `_qbe_huge_add`
+  ≥0x8000 gap (§4i); `-DMP_DBG_*` cleanup in the external tree; Kw spill-slot sharing;
+  MP_STACK_LIMIT 8192→~2048 lever.  NOTE: multi-decl items after the first still skip
+  block_scope_decl (a different-type shadow across blocks dies "double definition" —
+  loud, not silent; same pre-existing behavior as the for-init list forms).
+
+---
+
+# (DONE in §5a above) Next session (§4z is DONE 2026-06-11 — **the GC heap is SPLIT and 2.3× bigger: MICROPY_GC_SPLIT_HEAP=1 + a second 65,024-byte area in its own far segment; total heap 49,152 + 65,024 = 114,176 bytes, Victor-verified byte-exact vs host python3** (user-designated track: "increase the heap size").  The flip itself was config + ~30 lines (mpconfigport `MICROPY_GC_SPLIT_HEAP (1)` + `MP_GC_HEAP2_SIZE (65024)`; new `ports/dos8086/gcheap2.c` holding `char mp_gc_heap2[...]` — its OWN TU because minic puts a TU's far BSS in one shared `<tu>_BSS` segment capped at 64 KB and main_BSS already holds heap[]+REPL buffers; main.c `gc_add()` after `gc_init()`; build-micropython.sh `MP_HEAP2_SIZE` knob + `-DMP_GC_HEAP2_SIZE` + PORT_SRCS).  py/gc.c's split-heap machinery is 8086-clean AS-IS (no qbe/emit change): uintptr_t is 32-bit under FAR_DATA, each area's pool lives inside ONE <64 KB segment so `gc_get_ptr_area`'s unsigned 32-bit far-pointer range compares are correct even against cross-segment garbage words, and BLOCK_FROM_PTR/PTR_FROM_BLOCK stay same-segment.  **THE BUG the bring-up found is a minic frontend hole: `extern char a[65024];` with a BARE-NUMBER dimension registered as a SCALAR** — the LR machine routes `IDENT [ NUM ]` through `ext_decllist`'s op-'B' node (kr_array_node), which the EXTERN list walkers didn't handle, so references LOADED the first byte instead of decaying to the address; `gc_add` received 0:0 and `gc_setup_area` zeroed the interrupt vector table (wedge between the C2/C3 boot markers).  A parenthesized dimension `[(65024)]` dodges it (reduces via the dedicated `'[' expr ']'` rule) — which is why this never bit before.  FIXED at 4 sites in minic.y: the file-scope `EXTERN type ext_decllist` walker, the function-local `dcls EXTERN type ext_decllist` walker, the file-scope non-extern multi-decl (`int a, b[10];` used to emit a WRONG-SIZE scalar global for b), and the dedicated sized-extern rule now records arraybytes so `sizeof` answers correctly.  Probe `extern_array_decay_probe.c` (medium + compact; bug-loud: unfixed minic dies "dereference of a non-pointer").  Gate **244→246/246**; `make check` green; grammar conflicts unchanged (action-only edits; baseline is 115 s/r — the "111" in older notes is stale).  Body 650,352 → **717,168** (+65,024 heap2 + ~1.8 KB split-heap gc code), ~107 KB under the ~824 KB ceiling.  **Victor: heap-split stress probe BYTE-EXACT vs host python3** (220×400 B = 88 KB live strings spilling deep into area 2, integrity-verified; 8 churn rounds across repeated MULTI-AREA collects; 120-string post-churn reallocation; graceful MemoryError-with-traceback verified at genuine exhaustion); feature-4t byte-exact; churn scale2 all correct + DONE; float probe byte-exact.  No designated successor — open tracks at the §4z notes' end.)
+
+## 2026-06-11 §4z notes (split GC heap: 114 KB total; the extern-array-decay minic hole; DOSBox fast loop rediscovered)
+
+**§4z executed the user-designated "increase the heap size" track via `MICROPY_GC_SPLIT_HEAP`,
+and the bring-up surfaced one real minic frontend bug plus two process lessons worth keeping.**
+
+### The change (external tree + build harness)
+- `ports/dos8086/mpconfigport.h`: `MICROPY_GC_SPLIT_HEAP (1)`; `MP_GC_HEAP2_SIZE` default
+  65024 (`#ifndef`-guarded so the build's `-D` wins).
+- **`ports/dos8086/gcheap2.c` (new TU)** — `char mp_gc_heap2[MP_GC_HEAP2_SIZE];`.  One TU per
+  extra area is the load-bearing trick: minic/asm_to_omf put a TU's far BSS in ONE shared
+  `<tu>_BSS` segment (≤64 KB), and main_BSS already carries heap[] 49152 + repl_hist 4096 +
+  repl_edit_saved 512.  The gc_add() reference from main.c keeps the segment alive under
+  --gc-sections.
+- `main.c`: `gc_add(mp_gc_heap2, mp_gc_heap2 + MP_GC_HEAP2_SIZE)` right after gc_init.
+- `tools/build-micropython.sh`: `MP_HEAP2_SIZE` env knob → `-DMP_GC_HEAP2_SIZE` (all TUs),
+  gcheap2.c in PORT_SRCS (108 TUs now).
+- **Why the split-heap gc.c needs NO backend work** (checked before flipping): uintptr_t =
+  unsigned long under FAR_DATA (stdint.h), so the `(uintptr_t)ptr & ~(BYTES_PER_BLOCK-1)`
+  masks keep the segment word; each area is one array inside one far segment, so per-area
+  pointer subtraction cancels segments exactly; `gc_get_ptr_area` bounds checks are §4s
+  `cult/cule` unsigned 32-bit compares, and a pointer with ANY other segment word falls
+  outside [S:lo, S:hi) because every pool spans <64 KB; the area struct that gc_add carves
+  from the start of the new region is reached through ordinary far loads/stores.
+- Sizes: body 650,352 → 717,168; total GC heap 114,176 (was 49,152).  DOS reports ~107 KB
+  of load-ceiling headroom remaining.
+
+### THE BUG — minic extern-array decay (minic/minic.y, 4 sites)
+- First Victor boot wedged between C2 and C3.  Bring-up markers (temporary gz_s/gz_h prints
+  in gc.c) showed `gc_add` receiving `start=0x00000018-0x18 = 0`, `end=0xFFFFFE00` (0 +
+  65024 sign-extended): **`mp_gc_heap2` evaluated to a LOADED BYTE, not an address** — the
+  area struct landed at 0:0 and gc_setup_area memset the IVT.
+- Root cause chain: `extern char a[65024];` (bare NUM dim) does NOT reduce through the
+  dedicated `EXTERN type IDENT '[' expr ']' ';'` rule — `IDENT '[' NUM ']'` is captured by
+  `ext_decl`/`ext_decllist` (the K&R multi-name machinery) as an op-'B' node from
+  kr_array_node, and BOTH extern list walkers handled only 'F'/'G'/'A'/'P': 'B' fell into
+  the scalar else-branch (`t = base`, isarray=0).  `[(65024)]` parses via the expr rule and
+  works — pure historical luck that every prior extern array in the tree had parens or no
+  size.
+- Fixes: (1) file-scope `EXTERN type ext_decllist ';'` — 'B' → IDIR + isarray=1 +
+  var_set_arraybytes; (2) same in the function-local `dcls EXTERN type ext_decllist ';'`;
+  (3) file-scope NON-extern multi-decl (`int a, b[10];`) — 'B' used to emit a one-element
+  zero block AND register a scalar (wrong size + no decay), now emits `z total` + arraybytes;
+  (4) the dedicated sized-extern rule now const_evals the dim into arraybytes so
+  `sizeof(extern_arr)` stops answering pointer-size.  Action-only edits — conflict count
+  unchanged (115 s/r baseline; the "111 s/r" in old notes is stale).
+- **Probe `extern_array_decay_probe.c`** (medium + compact): bare-NUM extern, parenthesized
+  extern, multi-name extern with sized array, function-local extern, `int ga, gb[10];`,
+  pointer-identity (`name == &name[0]`), sizeof×4.  Single-TU linkable: uses emit at main's
+  closing brace while symbols are still extern-state; real definitions follow at EOF
+  (varadd upgrades extern→definition).  Bug-loud vs unfixed minic: hard compile error.
+- Gate **244 → 246/246**; `make check` green.
+
+### Verification (all green, shipping image body 717,168)
+- **Victor `build/mp-heap-split-probe.py` BYTE-EXACT vs host python3**: 220 strings ×
+  400 B = 88 KB live (≫ area-1's 47.6 KB pool — deep area-2 occupancy), per-element
+  integrity, 8 churn rounds (each triggering multi-area collects observed via the
+  bring-up markers in earlier runs), 120-string reallocation after the drop, DONE.
+- Victor regressions: `mp-feature-4t.py` byte-exact; `mp-churn-scale2.py` 20..120 all
+  correct + DONE; `mp-float-probe.py` byte-exact.
+- Graceful exhaustion verified TWICE (DOSBox small config + Victor with an over-sized
+  200-string build): scan-fail → collect → rescan → `MemoryError: memory allocation
+  failed` with intact traceback and clean C5 exit — the gc returns NULL properly when
+  both areas are genuinely full/fragmented.
+
+### Process lessons (cost real wall-clock; keep)
+- **The "hang" after the first collect was 5 MHz 8088 SLOWNESS.**  The original probe
+  printed nothing between `tot` and `churn DONE`; 30 rounds × 50 string-builds exceeded
+  even a 700 s window, reading as a hang.  Phase markers showed every collect healthy.
+  Rule: Victor-bound probes MUST print progress per phase/round — silence is unreadable.
+- **DOSBox fast loop for SPLIT-HEAP work**: `MP_HEAP_SIZE=8192 MP_HEAP2_SIZE=12288
+  MP_STACK_SIZE=16384 tools/build-micropython.sh --model=compact` → ~600 KB image that
+  LOADS IN DOSBOX (PROG.PY goes next to the exe; run-dos-exe.sh mounts the exe dir).
+  Small areas exercise every split path (multi-area alloc, cross-area mark/sweep,
+  area-list walks, exhaustion) in 30-second cycles.  This proved the GC end-to-end while
+  the Victor runs were still ambiguous.
+- **My own debug counter hit a LIVE minic bug**: `size_t k, nf = 0;` declared inside the
+  per-area loop hoisted `nf = 0` to FUNCTION ENTRY (SSA: one `storew 0, %nf`), so nf
+  accumulated across areas and printed an impossible 1539-of-999.  This is the
+  [[minic-decl-init-hoisting]] class surviving in the MULTI-DECLARATOR form (`T a, b = X;`
+  inside a block) — the earlier fix covered the single-declarator stmt rule.  NOT fixed
+  this session (debug-only victim); reduced + documented as an open track.
+
+### Open tracks (no §5a designated)
+- **minic multi-declarator init hoisting** (NEW, from this session's debug code): `T a,
+  b = 0;` inside a block/loop body runs the init once at function entry, not per
+  iteration/at the decl point.  Single-declarator form was fixed long ago
+  ([[minic-decl-init-hoisting]]); the list form (`emit_local_multi_decl*`?) was not.
+  Reduce: `for(...){ size_t k, nf = 0; ... }` — nf keeps its prior value.
+- **Third GC area** if a consumer wants it: gcheap3.c clone (+~64 KB → body ~782 KB,
+  ~42 KB ceiling margin) — mechanical now; also heap1 could grow ~11 KB inside main_BSS.
+  GC pause cost grows with area count (gc_get_ptr_area walks the list per scanned word).
+- MicroPython `math` module (sqrtf + trig in softfloat.c, §4x recipe).
+- The four older soft-float suites still medium-only in the gate; they pass under compact
+  (§4x) — cheap thickening.
+- Upstream sync: 3 commits (`c081897..e786f06`).
+- Carried: `jmp_buf bufs[6]` latent minic note (§4v, unreduced); huge `_qbe_huge_add`
+  ≥0x8000 gap (§4i); `-DMP_DBG_*` cleanup in the external tree; Kw spill-slot sharing;
+  MP_STACK_LIMIT 8192→~2048 lever.
+
+---
+
+# (DONE in §4z above) Next session (§4y is DONE 2026-06-10 — **the emit-bracket audit is now a STANDING TOOL and it found + fixed the §1h two-div-one-call bug** (user-designated track).  New machinery: `QBE_EMIT_CHK=1` makes `i8086/emit.c` precede every emitted IR instruction with `; CHK <op> to=<dest> live=<regs>` carrying the EXACT post-rega GPR live-after set (per-function CFG fixpoint over {ax,cx,dx,bx,si,di}; ret blocks read AX/DX; the only implicit pair-use is the Kl `copy R1` call-result — `argcls` can NOT discriminate because `Km == Kl` lies about address operands on a 16-bit target), plus `; CHKT` terminator markers and a `cons=` cross-check of the §2w conservative tracker; off-mode output byte-identical.  `tools/check_emit_brackets.py` symbolically executes each marked region (symbolic regs, push/pop stack, tracked [bp+N] cells, calls clobber AX/CX/DX per ABI) and flags (a) any live non-dest GPR whose final value is not the entry value, (b) a register DEST that ends holding its entry value (the §4x pop-over-the-result shape), (c) ES/DS not entry-valued (DGROUP invariants), (d) a dropped/malformed Oswap exchange.  VALIDATED by reverting the §4x fixes: catches all three emit-side shapes (Ocmps/cnes/stosi CX-dest incl. in real objfloat divmod, Ocast AX).  `tools/run-emit-audit.sh` sweeps 107 MP TUs (compact) + every gate probe under its gate model (~440 asm, ~110k regions).  **THE FIND: Kw `Odiv`/`Orem`/`Oudiv`/`Ourem` clobber BOTH AX (dividend staging + quotient) and DX (cwd / xor + remainder) with NO liveness bracket** — the §1h "two divisions feeding one call corrupt the first result" found-not-fixed bug, 21 live-clobber sites in the shipping MP image (mp_format_mantissa = every float print, mp_map_lookup = every dict access, mp_lexer_to_next, gc, objint, ringbuf...).  Fixed with liveness-gated dest-skipped push/pop brackets (+ slot-dest result stores the old code silently lacked).  Probe `div_live_clobber_probe` (medium+compact, verified bug-loud: y=4 printed 3 unfixed); audit corpus CLEAN after fix; gate 242→244/244; make check green; MP body 650272→650352 (+80 B); Victor float probe + feature-4t byte-exact, churn scale2 + gen sweep clean.  No designated successor — open tracks at the §4y notes' end.)
+
+## 2026-06-10 repo-state update (post-§4y housekeeping — PR #24 merged; two stale open-track notes corrected)
+
+- **PR #24 merged** (`97376dc`): the 41 commits §3p→§4y (soft-float campaign, churn-GC
+  root-cause, per-fn gc-sections, split stack, Kl slot coloring, FLOAT-on-Victor, emit-bracket
+  audit) are now on GitHub master.  Local master fast-forwarded — local and GitHub are in sync.
+- **The 211-commit upstream-qbe rebase is DONE and has been since 2026-06-06** — PR #23
+  ("[codex] Test upstream QBE rebase", merge `a6ef88d`) landed it; `amd64/winabi.c` etc. are
+  in-tree.  The "upstream rebase" open-track bullet repeated below §4y (and in CLAUDE.md) was
+  stale.  As of 2026-06-10 only **3 newer upstream commits** (`c081897..e786f06` on
+  `upstream/master`) are unmerged — the remaining track is a small periodic sync, not a
+  campaign.
+- **The "stevie build broken at hexchars.c" §4y bullet was WRONG** — verified 2026-06-10:
+  `tools/build-stevie.sh --exe` compiles 24/24 TUs and links (146,672 bytes), hexchars.c
+  rebuilt fresh (not cached, empty .err), and the user interactively verified stevie on the
+  real Victor.  The "gate uses a STALE exe" half was also wrong: `test-dos.sh::run_stevie_size`
+  rebuilds via build-stevie.sh before measuring.  hexchars.c's `chars[]` initializer is fully
+  braced — the claimed brace-elision construct doesn't even exist there.  Likely a transient
+  mid-§4y observation (stale-minic class, see [[minic-make-staleness]]) jotted down and never
+  re-verified.
+- The §4y open-tracks list below is edited accordingly.
 
 ## 2026-06-10 §4y notes (emit-bracket audit: exact-liveness CHK markers + symbolic checker; the Kw div/rem AX/DX hole closed)
 
@@ -70,16 +447,19 @@ documented open codegen bug.**
 - Final audit run: **339 files / 112,443 regions / 0 violations / 0 build failures**
   (107 MP TUs compact + every gate probe under its gate model with the gate's flags).
 
-### Open tracks (no §4z designated)
+### Open tracks (no §4z designated; list corrected 2026-06-10 — see repo-state update above)
 - The four older soft-float suites (softfloat/softlibm/softtrig/double_float) still gated
   medium-only; they PASS under compact (§4x bisect) — cheap gate-thickening.
 - MicroPython: `math` module (needs sqrtf + trig in softfloat.c — recipe per §4x
   discussion); heap expansion via MICROPY_GC_SPLIT_HEAP (multiple ≤64 KB areas).
-- stevie build broken at hexchars.c (minic brace-elision in array-of-struct init) — the
-  gate's stevie size check uses a STALE exe.
+- ~~stevie build broken at hexchars.c~~ — **STALE, removed**: build verified 24/24 + linked
+  + user-verified interactively on Victor 2026-06-10; the gate's stevie check rebuilds
+  (it never used a stale exe).  See the repo-state update above.
+- Upstream sync: the 211-commit rebase landed via PR #23 (2026-06-06); only 3 newer
+  upstream commits (`c081897..e786f06`) pending — small periodic sync.
 - Latent minic note (§4v, NOT reduced): `jmp_buf bufs[6]` array-of-jmp_buf cross-frame
-  longjmp; huge `_qbe_huge_add` ≥0x8000 gap (§4i); `-DMP_DBG_*` cleanup; 211-commit
-  upstream-qbe rebase; Kw spill slots never share; MP_STACK_LIMIT 8192→~2048 lever.
+  longjmp; huge `_qbe_huge_add` ≥0x8000 gap (§4i); `-DMP_DBG_*` cleanup; Kw spill slots
+  never share; MP_STACK_LIMIT 8192→~2048 lever.
 
 ---
 
