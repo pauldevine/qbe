@@ -119,6 +119,16 @@ RUNTIME_TESTS=(
 	# op-B gap (wrong-size scalar global) and sizeof on sized extern arrays.
 	"minic/dos/examples/extern_array_decay_probe.c:minic/dos/tests/extern_array_decay_probe.golden.txt:medium"
 	"minic/dos/examples/extern_array_decay_probe.c:minic/dos/tests/extern_array_decay_probe.golden.txt:compact"
+	# Multi-declarator initializers (§5a): the stmt-context multi-decl rule
+	# (type IDENT, ext_decllist;) emitted each declarator's init via a direct
+	# expr() at parse time = function ENTRY, so `T k, nf = 0;` in a loop body
+	# initialized once and accumulated across iterations (bit §4z's debug
+	# counter), and `int k, *p = &g[i];` read i before its init.  Also pins
+	# the previously-missing stmt rule `int a = 1, b = 2;` (was a parse
+	# error) and the dcls _full path `int a[5], b = 3;` (init silently
+	# DROPPED), plus side-effecting inits in never-taken branches.
+	"minic/dos/examples/multi_decl_init_probe.c:minic/dos/tests/multi_decl_init_probe.golden.txt:medium"
+	"minic/dos/examples/multi_decl_init_probe.c:minic/dos/tests/multi_decl_init_probe.golden.txt:compact"
 	# Soft-float compare/convert result in CX (§4x): the Ocmps/Ostosi emit
 	# brackets pushed/popped CX unconditionally, so a result rega placed in
 	# CX was popped over with stale garbage (objfloat.c modulo sign-fix fired

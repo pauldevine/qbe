@@ -1,0 +1,15 @@
+b 3
+nf 0
+nf 1
+nf 2
+a2 2
+p3 31
+g0 1 g3 31
+y 5
+y 6
+y 7
+side 0
+q 7 side 1
+pk 111
+pk 121
+DONE

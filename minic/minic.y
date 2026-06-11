@@ -6359,19 +6359,38 @@ kr_array_node(char *name, int size)
 	return n;
 }
 
+/* Append an `IDENT = init` assignment for declarator name `v` to a
+ * comma-chain (the mk_local_array_init shape).  The chain is returned
+ * to the caller instead of being expr()'d here so a stmt-context
+ * declaration's initializer runs in lexical/control-flow order — a
+ * direct expr() at parse time lands in the function entry block, so a
+ * decl inside a loop body would init ONCE instead of per iteration
+ * ([[minic-decl-init-hoisting]], multi-declarator form). */
+static Node *
+multi_decl_chain_init(Node *chain, char *v, Node *init)
+{
+	Node *id, *asgn;
+
+	id = mknode('V', 0, 0);
+	strcpy(id->u.v, v);
+	asgn = mknode('=', id, init);
+	return chain ? mknode(',', chain, asgn) : asgn;
+}
+
 /* Same as emit_local_multi_decl but every declarator (including the
  * first) is in `list`.  Used when the first declarator is decorated
- * (`[N]`, `*`, `()`, etc.). */
-void
+ * (`[N]`, `*`, `()`, etc.).  Returns the deferred initializer chain
+ * (or 0); the caller decides placement. */
+Node *
 emit_local_multi_decl_full(unsigned base, Node *list)
 {
-	Node *n, *next;
-	int i;
+	Node *n, *chain;
 	unsigned t;
 	char *v;
 
 	if (base == NIL)
 		die("invalid void declaration");
+	chain = 0;
 	for (n = list; n; n = n->r) {
 		v = n->u.v;
 		if (n->op == 'F') {
@@ -6398,24 +6417,31 @@ emit_local_multi_decl_full(unsigned base, Node *list)
 		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
 		if ((KIND(t) == STRUCT_T || KIND(t) == UNION_T) && struct_has_bitfield(DREF(t)))
 			emit_zero_local(v, SIZE(t));
-		(void)next;
+		if ((n->op == 0 || n->op == 'P') && n->l)
+			chain = multi_decl_chain_init(chain, v, n->l);
 	}
+	return chain;
 }
 
 /* Emit a multi-name local declaration: `type IDENT, ext_decllist;`.
  * Each declarator carries its own decoration in `op`.  Used for the
  * many K&R patterns such as `char *s1, *s2;` and the mixed
- * `char *initstr, *getenv();` (proto + var). */
-void
+ * `char *initstr, *getenv();` (proto + var).  Allocs are emitted at
+ * parse time (entry block, QBE convention); initializers are returned
+ * as a deferred comma-chain (or 0) — the dcls-context caller expr()s
+ * it immediately (entry == lexical order there), the stmt-context
+ * caller wraps it in mkstmt(Expr,…) so it runs in control-flow order. */
+Node *
 emit_local_multi_decl(unsigned base, char *first, Node *rest)
 {
-	int s, i;
-	Node *n;
+	int s;
+	Node *n, *chain;
 	unsigned t;
 	char *v;
 
 	if (base == NIL)
 		die("invalid void declaration");
+	chain = 0;
 	s = SIZE(base);
 	v = first;
 	varadd(v, 0, base, 0);
@@ -6451,11 +6477,8 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 			t = IDIR(ebase);
 			varadd(v, 0, t, 0);
 			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
-			if (n->l) {
-				Node *id = mknode('V', 0, 0);
-				strcpy(id->u.v, v);
-				expr(mknode('=', id, n->l));
-			}
+			if (n->l)
+				chain = multi_decl_chain_init(chain, v, n->l);
 			continue;
 		}
 		/* Plain or [N] declarator: peel one * off the absorbed base
@@ -6466,12 +6489,10 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
 		if ((KIND(t) == STRUCT_T || KIND(t) == UNION_T) && struct_has_bitfield(DREF(t)))
 			emit_zero_local(v, SIZE(t));
-		if (n->op == 0 && n->l) {
-			Node *id = mknode('V', 0, 0);
-			strcpy(id->u.v, v);
-			expr(mknode('=', id, n->l));
-		}
+		if (n->op == 0 && n->l)
+			chain = multi_decl_chain_init(chain, v, n->l);
 	}
+	return chain;
 }
 
 /* Emit a K&R-style function header.  Called from the prot_knr action
@@ -7785,20 +7806,33 @@ dcls:
 		expr(init_node);
 	}
 }
-    | dcls type IDENT ',' ext_decllist ';' { emit_local_multi_decl($2, $3->u.v, $5); }
+    | dcls type IDENT ',' ext_decllist ';'
+{
+	/* dcls context: parse-time emit IS the entry block, which is also
+	 * the lexical position of the declaration — emit the chain now. */
+	Node *ch = emit_local_multi_decl($2, $3->u.v, $5);
+	if (ch)
+		expr(ch);
+}
     | dcls type IDENT '[' expr ']' ',' ext_decllist ';'
 {
 	Node *first = kr_array_node($3->u.v, const_eval($5));
+	Node *ch;
 	first->r = $8;
-	emit_local_multi_decl_full($2, first);
+	ch = emit_local_multi_decl_full($2, first);
+	if (ch)
+		expr(ch);
 }
     | dcls type IDENT '(' ')' ',' ext_decllist ';'
 {
 	/* `T name1(), name2, ...;` — first declarator is K&R proto.
 	 * Build a 'F' node and chain. */
 	Node *first = kr_name_node($3->u.v, 'F');
+	Node *ch;
 	first->r = $7;
-	emit_local_multi_decl_full($2, first);
+	ch = emit_local_multi_decl_full($2, first);
+	if (ch)
+		expr(ch);
 }
     | dcls type IDENT '=' expr ',' init_decllist ';'
 {
@@ -8141,7 +8175,11 @@ dcls:
 	varadd(v, 0, fptr_type, 0);
 	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
 	(void)first;
-	emit_local_multi_decl_full($2, $11);
+	{
+		Node *ch = emit_local_multi_decl_full($2, $11);
+		if (ch)
+			expr(ch);
+	}
 }
     | dcls STATIC_ASSERT '(' expr ',' STR ')' ';'
 {
@@ -8469,9 +8507,35 @@ stmt: ';'                            { $$ = 0; }
     | type IDENT ',' ext_decllist ';' {
         /* Block-scoped multi-variable decl with full per-declarator
          * decoration support (`*`, `[]`, `[N]`, `()`).  Reuses the
-         * same helper as the dcls-context multi-decl rule. */
-        emit_local_multi_decl($1, $2->u.v, $4);
-        $$ = 0;
+         * same helper as the dcls-context multi-decl rule, but DEFERS
+         * the initializer chain as an Expr stmt so it runs in
+         * control-flow order — `T k, nf = 0;` in a loop body must
+         * re-init nf each iteration, not once at function entry. */
+        Node *ch;
+        ch = emit_local_multi_decl($1, $2->u.v, $4);
+        $$ = ch ? mkstmt(Expr, ch, 0, 0) : 0;
+    }
+    | type IDENT '=' expr ',' init_decllist ';' {
+        /* Block-scoped multi-declarator where the FIRST declarator has
+         * an initializer: `int a = 1, b = 2;` inside a block (the dcls
+         * rule covers function top).  Allocs at parse time; ALL inits
+         * chained into one deferred Expr stmt, in source order. */
+        Node *chain, *n;
+        char *v;
+        if ($1 == NIL)
+            die("invalid void declaration");
+        v = block_scope_decl($2, $1, 0);
+        varadd(v, 0, $1, 0);
+        emit_local_alloc(v, ALLOC_T(), iralign($1), SIZE($1));
+        chain = mknode('=', $2, $4);
+        for (n = $6; n; n = n->r) {
+            varadd(n->u.v, 0, $1, 0);
+            emit_local_alloc(n->u.v, ALLOC_T(), iralign($1), SIZE($1));
+            if (n->l)
+                chain = mknode(',', chain,
+                    multi_decl_chain_init(0, n->u.v, n->l));
+        }
+        $$ = mkstmt(Expr, chain, 0, 0);
     }
     | type '(' '*' IDENT ')' '(' fptpar0 ')' ';' {
         /* Block-scoped function pointer: `int (*fp)(int, int);` */
