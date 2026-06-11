@@ -81,20 +81,33 @@ RUNTIME_TESTS=(
 	# (medium probes below); far-data float load/store goes through the
 	# loadfs/storefs ops (float_fardata_probe, compact/large/huge).
 	"minic/dos/examples/softfloat_probe.c:minic/dos/tests/softfloat_probe.golden.txt:medium"
+	"minic/dos/examples/softfloat_probe.c:minic/dos/tests/softfloat_probe.golden.txt:compact"
 	"minic/dos/examples/float_literal_probe.c:minic/dos/tests/float_literal_probe.golden.txt:medium"
 	# `double` aliases to single-precision (Ks) on this FPU-less target
 	# (sizeof==4, single-precision arithmetic), static float initializers
 	# (file-scope global + struct member, incl. negative via the 0-x desugar),
 	# and float->long conversion (Ostosi with a Kl result).
 	"minic/dos/examples/double_float_probe.c:minic/dos/tests/double_float_probe.golden.txt:medium"
+	"minic/dos/examples/double_float_probe.c:minic/dos/tests/double_float_probe.golden.txt:compact"
 	# Algebraic soft-float libm (fabs/copysign/floor/ceil/round/nearbyint/fmod
 	# + isnan/isinf/signbit) reached via <math.h> macro names.  Prerequisite
 	# for MICROPY_FLOAT_IMPL_FLOAT.
 	"minic/dos/examples/softlibm_probe.c:minic/dos/tests/softlibm_probe.golden.txt:medium"
+	"minic/dos/examples/softlibm_probe.c:minic/dos/tests/softlibm_probe.golden.txt:compact"
 	# Transcendental soft-float libm (exp2/log2/exp/log + powf).  powf is the
 	# one of these the curated MicroPython core links (objfloat **, parsenum
 	# 1eN, round(x,n)); exact integer-exponent fast path + exp2/log2 core.
 	"minic/dos/examples/softtrig_probe.c:minic/dos/tests/softtrig_probe.golden.txt:medium"
+	"minic/dos/examples/softtrig_probe.c:minic/dos/tests/softtrig_probe.golden.txt:compact"
+	# §5b math-module soft-libm: sqrt (correctly rounded, fdlibm bitwise) +
+	# sin/cos/tan (4-part 8-bit-chunk pi/4 reduction, exact to y < 2^16) +
+	# asin/acos/atan/atan2 + frexp/ldexp/modf/isfinite, AND the bare-symbol
+	# fn-POINTER path modmath.c uses (math_generic_1(x, sqrtf)) — which
+	# found+fixed the minic fn-ptr float-return DREF/FAR collision: a
+	# float-returning fn ptr decoded as int-returning (=w call + swtof).
+	# Golden verified line-by-line vs host doubles by build/mathfns-verify.py.
+	"minic/dos/examples/mathfns_probe.c:minic/dos/tests/mathfns_probe.golden.txt:medium"
+	"minic/dos/examples/mathfns_probe.c:minic/dos/tests/mathfns_probe.golden.txt:compact"
 	# Call-argument int<->float conversion (C11 6.5.2.2p7, §4x): an integer
 	# argument to a prototyped float param must convert (swtof/sltof), not
 	# pass its raw word as a binary32 denormal; float arg to int/long param
@@ -478,7 +491,7 @@ run_runtime_probe() {
 	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe|gc_bigheap_probe|gc_churn_probe) farstatic=1 ;; esac
 	# Soft-float probes link the single-precision soft-float helper library.
 	sfflag=""
-	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe|float_arg_coerce_probe|float_cmp_cx_probe) sfflag="--softfloat" ;; esac
+	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe|float_arg_coerce_probe|float_cmp_cx_probe|mathfns_probe) sfflag="--softfloat" ;; esac
 	# Split-stack probe builds with SS in its own segment (qbe -s +
 	# omf_link --separate-stack); its ok8 asserts stack seg != DGROUP seg.
 	ssflag=""

@@ -1,4 +1,71 @@
-# Next session (§5a is DONE 2026-06-11 — **the minic multi-declarator init-hoisting hole is CLOSED** (the top §4z open track).  `T k, nf = 0;` inside a block/loop body used to run the init ONCE at function entry — `emit_local_multi_decl`'s per-declarator `expr()` calls fired at parse time, which is the entry block; the deferred-Stmt discipline the single-declarator rule got long ago ([[minic-decl-init-hoisting]]) never reached the list form.  Worse, a hoisted init EXPRESSION read its operands before they were live (`int k, *p = &g[i];` computed `&g[i]` at entry with `i` uninitialized).  Fix: `emit_local_multi_decl` and `emit_local_multi_decl_full` now RETURN a comma-chain of `=` nodes (the mk_local_array_init shape) instead of emitting; the stmt-context rule wraps it in `mkstmt(Expr,…)` so inits run in control-flow order, the four dcls-context call sites `expr()` it immediately (entry == lexical position at function top, so dcls semantics unchanged).  TWO SIBLING BUGS found during the reduce, both fixed: (1) the dcls `_full` path (decorated first declarator: `int a[5], b = 3;` at function top) silently DROPPED later declarators' inits — `b` read uninitialized stack; `_full` now chains op-0/'P' inits like the plain helper.  (2) `int a = 1, b = 2;` inside a BLOCK (first declarator carries the init) was a PARSE ERROR — no stmt-level `type IDENT '=' expr ',' init_decllist ';'` rule existed; added (deferred chain, block_scope_decl on the first declarator), grammar conflicts UNCHANGED at 115 s/r 0 r/r.  Probe `multi_decl_init_probe.c` (medium+compact; bug-loud: unfixed minic = hard compile error on the new form, and the nf-accumulation shape prints 0 1 3 vs 0 1 2).  Gate **246→248/248**; `make check` green; MP compact rebuild 108/108 TUs, body 717,168 **byte-identical** to §4z (shipping MP never hit these shapes — only §4z's debug counter did), so no Victor re-run needed.  FOR-loop init rules were audited and were ALREADY correct (they defer via mkfor comma-chains).  No designated successor — open tracks at the §5a notes' end.)
+# Next session (§5b is DONE 2026-06-11 — **the MicroPython `math` module is ON and Victor-verified byte-exact** (the standing §4x/§4z open track).  softfloat.c grew the missing soft-libm: `sf_sqrt` (fdlibm bitwise restoring, **correctly rounded** — 0 ulp vs host libm over 2M random samples), `sf_sin`/`sf_cos`/`sf_tan` (Cephes octant reduction with a **4-part 8-bit-chunk π/4 split** so every `y*DPn` product is exact for y < 2^16, |x| ≲ 51471 — the classic 3-part Cephes split has 11 bits in DP2, exact only to y < 2^13, which showed up as 8-ulp cos errors near |x| ~ 28000), `sf_atan`/`sf_atan2` (Cephes two-threshold + IEEE zero/inf grid matching CPython), `sf_asin` (atan of x/sqrt((1−x)(1+x)) — factored to dodge the 1−x² cancellation), `sf_acos` (2·atan(sqrt((1−x)/(1+x))), exact at both endpoints), `sf_frexp`/`sf_ldexp`/`sf_modf` (modf keeps x's sign on a zero frac per CPython), `sf_isfinite`.  Host ulp harness `build/sf-math-host-test.c` (cc -DSF_HOST + libm): sqrt 0 ulp, sin/cos ≤4, atan/atan2 ≤3, asin/acos ≤4, frexp/ldexp/modf bit-exact; near the zeros of sin/cos the final DP4 product rounding bounds the ABSOLUTE error at ~1e-12 (the pure-single-precision reduction limit — glibc sinf uses doubles internally; we have none).  **THE MINIC BUG the bring-up found: a float-returning function POINTER decoded as int-returning.**  FLOAT is type-flag bit 18 and IDIR(FUNC(ret)) shifts ret up 6 bits — FLOAT lands exactly on bit 24 == FAR, which DREF strips, so `float (*f)(float)` called through the pointer emitted `=w call` + a bogus swtof (garbage results).  This is exactly MicroPython modmath.c's shape: `math_generic_1(x, sqrtf)` passes every math function BY POINTER into `mp_float_t (*f)(mp_float_t)`.  Fix: `fpproto[]` (the §2q indirect-call side table) gains `rett` — the declared return type carried UNSHIFTED; `fpproto_alloc(rett, chain)` at all 6 declarator sites; the two indirect-call sites override the double-DREF decode when an fpid exists; and the two `par1` fn-ptr PARAMETER rules now record an fpid at all (they previously recorded NONE — no arg coercion either).  Sibling latent hole documented-not-fixed: `float **` hits the same bit-24 collision (no consumer).  Because modmath also needs the bare libm names as REAL SYMBOLS (a function-like macro never expands without a following `(`), softfloat.c exports alias functions `sqrtf`/`sinf`/.../`fmodf` (#ifndef SF_HOST — they would collide with the host harness's libm reference) and math.h declares those prototypes BEFORE defining the same-named macros (a later declaration line would itself be macro-expanded).  Wiring: `MICROPY_PY_MATH=1`; **MICROPY_PY_MATH_CONSTANTS stays 0** (tau's initializer is a float CONST-EXPR (2.0*M_PI) and inf/nan are INFINITY/NAN = sf_inff()/sf_nan() RUNTIME CALLS in minic's math.h — minic cannot fold either in a static initializer; math.e/math.pi are plain literals and work); 27 QDEF0 qstr appends (djb2 via py/makeqstrdata.py compute_hash); `moduledefs.h` MODULE_DEF_MATH; minic `NGlo` 256→512 (qstr.c's pool overflowed with the new strings).  Probe `mathfns_probe.c` (medium + compact, --softfloat; 63 bit-pattern lines incl. the fn-POINTER path; golden DOSBox-captured and line-by-line verified against host doubles by `build/mathfns-verify.py`, untracked).  Gate **248→254/254** (also closed the §4x cheap-thickening track: softfloat/softlibm/softtrig/double_float each gained a compact entry); `make check` green; conflicts unchanged 115 s/r.  MP body 717,168 → **731,088** (+13,920), ~93 KB under the ~824 KB ceiling.  **Victor: mp-math-probe.py BYTE-EXACT vs host python3** (exact prints: sqrt/floor/ceil/trunc/fabs/copysign/fmod/pow + frexp/modf tuples; 17 tolerance checks over sin/cos/tan/asin/acos/atan/atan2/exp/log/log-base/degrees/radians/pi/e; ValueError domain raises for sqrt(-1) and asin(2)); feature-4t byte-exact; float probe byte-exact; DOSBox small-config smoke byte-exact first (the §4z fast loop).  No designated successor — open tracks at the §5b notes' end.)
+
+## 2026-06-11 §5b notes (math module: soft-libm trig/sqrt + the fn-ptr float-return DREF/FAR collision)
+
+### softfloat.c additions (minic/dos/softfloat.c, +~330 lines; existing functions untouched)
+- `sf_sqrt`: fdlibm e_sqrtf bitwise restoring algorithm, U32-only, one result bit per
+  iteration, remainder stays < 2^27 (no overflow); negative-half-exponent case (`m >>= 1`
+  with m negative) verified through minic.  CORRECTLY ROUNDED (nearest-even).
+- `sf_trig_reduce`: j = trunc(|x|·4/π) rounded up to even, octant = j&7, then
+  r = (((|x| − y·DP1) − y·DP2) − y·DP3) − y·DP4 with DP1..DP3 of ≤8 significand bits
+  each (EXACT products for y < 2^16) and DP4 the full-precision tail (the only rounding).
+- sin/cos kernels: Cephes minimax (3 terms over z=r² + the r/1−z/2 leads); tan =
+  sin/cos (one extra rounding, ≤8 ulp budget in the gate verifier).
+- atan: Cephes two-threshold reduction (tan π/8, tan 3π/8) + 4-term poly; atan(inf)
+  exact π/2.  atan2: explicit IEEE zero/inf grid (CPython-matching: atan2(±inf,±inf) =
+  ±π/4 / ±3π/4, atan2(±0,−0) = ±π...), general case atan(y/x) + π-shift for x<0.
+- frexp/ldexp/modf: pure bit manipulation; ldexp clamps n to ±280 BEFORE the int
+  exponent add (16-bit int would overflow at n ~ 32767−254); modf returns ±0 frac with
+  x's sign (CPython prints modf(-2.0) = (-0.0, -2.0)).
+- Alias functions sqrtf/sinf/cosf/tanf/asinf/acosf/atanf/atan2f/expf/powf/fmodf — real
+  exported symbols for the fn-pointer path, #ifndef SF_HOST.
+
+### THE MINIC FIX — fpproto rett (minic/minic.y; conflicts unchanged 115 s/r)
+- Repro: `static unsigned long via1(float (*f)(float), float x) { return fbits(f(x)); }`
+  emitted `%t3 =w call %t4(s %t6)` + `swtof` — result class w, garbage float.
+  `long (*f)(float)` was FINE (=l): LNG lives in the KIND bits, which shift cleanly.
+- Root cause: FLOAT flag (bit 18) + two encoding shifts (FUNC, IDIR) = bit 24 = FAR;
+  DREF masks ~FAR.  The same collision hits `float **` (FLOAT one IDIR up + FUNC...
+  i.e. any type with FLOAT two levels deep) — LATENT, no consumer, documented here.
+- Fix: fpproto[] gains `unsigned rett`; fpproto_alloc(rett, chain) also allocates when
+  chain is empty but rett carries a FLOAT bit (FLOAT | FLOAT<<3 — float and float*
+  returns); the 6 declarator sites pass the parsed return type; call()'s fn-ptr branch
+  and expr case 'I' use fpproto[fpid].rett instead of the double-DREF decode when an
+  fpid is recorded; the par1 fn-ptr param rules now varsetfpid(fpproto_alloc(...)).
+  Existing behavior: for every non-float fn ptr rett == the old decode — gate goldens
+  unmoved (254/254).
+- NGlo 256 → 512 (qstr.c hit "too many globals" with the 27 new qstr pool strings).
+
+### Verification
+- Host: build/sf-math-host-test.c ALL OK (limits above).  Golden independently
+  re-derived: build/mathfns-verify.py checks every golden line vs host doubles —
+  sqrt/specials/frexp/ldexp/modf EXACT, trig within declared ulp budgets.
+- Gate 248 → 254/254 (mathfns_probe medium+compact + 4 compact-thickening entries);
+  make check green.
+- DOSBox small config (MP_HEAP_SIZE=8192 MP_HEAP2_SIZE=12288 MP_STACK_SIZE=16384,
+  612 KB image): mp-math-probe.py byte-exact vs host python3.
+- **Victor (full 751,664-byte image, body 731,088): math probe byte-exact, feature-4t
+  byte-exact, float probe byte-exact.**  Clean D4/C5 exits.
+
+### Open tracks (no §5c designated; carried + new)
+- `math` SPECIAL_FUNCTIONS (log2/log10/hyperbolics/erf/gamma) — needs more soft-libm;
+  log2f exists already, log10/cosh/sinh/tanh/acosh/asinh/atanh/erf/lgamma do not.
+- MICROPY_PY_MATH_CONSTANTS — needs minic float const-expr folding in static
+  initializers (tau = 2.0*M_PI) + a static-init story for INFINITY/NAN (runtime calls
+  in minic's math.h).  math.isclose (MICROPY_PY_MATH_ISCLOSE) is another cheap add.
+- **`float **` latent collision** (same bit-24/FAR mechanism as the §5b fn-ptr fix) —
+  fix would need the FLOAT flag out of the shifted chain entirely; no consumer today.
+- Third GC area (gcheap3.c clone, +~64 KB; §4z note) — ~93 KB headroom now, so a
+  third FULL area no longer fits; heap1 could still grow ~11 KB inside main_BSS.
+- Upstream sync: 3 commits (`c081897..e786f06`).
+- Carried: `jmp_buf bufs[6]` latent minic note (§4v, unreduced); huge `_qbe_huge_add`
+  ≥0x8000 gap (§4i); `-DMP_DBG_*` cleanup in the external tree; Kw spill-slot sharing;
+  MP_STACK_LIMIT 8192→~2048 lever; multi-decl items after the first skip
+  block_scope_decl (loud, not silent).
+
+---
+
+# (DONE in §5b above) Next session (§5a is DONE 2026-06-11 — **the minic multi-declarator init-hoisting hole is CLOSED** (the top §4z open track).  `T k, nf = 0;` inside a block/loop body used to run the init ONCE at function entry — `emit_local_multi_decl`'s per-declarator `expr()` calls fired at parse time, which is the entry block; the deferred-Stmt discipline the single-declarator rule got long ago ([[minic-decl-init-hoisting]]) never reached the list form.  Worse, a hoisted init EXPRESSION read its operands before they were live (`int k, *p = &g[i];` computed `&g[i]` at entry with `i` uninitialized).  Fix: `emit_local_multi_decl` and `emit_local_multi_decl_full` now RETURN a comma-chain of `=` nodes (the mk_local_array_init shape) instead of emitting; the stmt-context rule wraps it in `mkstmt(Expr,…)` so inits run in control-flow order, the four dcls-context call sites `expr()` it immediately (entry == lexical position at function top, so dcls semantics unchanged).  TWO SIBLING BUGS found during the reduce, both fixed: (1) the dcls `_full` path (decorated first declarator: `int a[5], b = 3;` at function top) silently DROPPED later declarators' inits — `b` read uninitialized stack; `_full` now chains op-0/'P' inits like the plain helper.  (2) `int a = 1, b = 2;` inside a BLOCK (first declarator carries the init) was a PARSE ERROR — no stmt-level `type IDENT '=' expr ',' init_decllist ';'` rule existed; added (deferred chain, block_scope_decl on the first declarator), grammar conflicts UNCHANGED at 115 s/r 0 r/r.  Probe `multi_decl_init_probe.c` (medium+compact; bug-loud: unfixed minic = hard compile error on the new form, and the nf-accumulation shape prints 0 1 3 vs 0 1 2).  Gate **246→248/248**; `make check` green; MP compact rebuild 108/108 TUs, body 717,168 **byte-identical** to §4z (shipping MP never hit these shapes — only §4z's debug counter did), so no Victor re-run needed.  FOR-loop init rules were audited and were ALREADY correct (they defer via mkfor comma-chains).  No designated successor — open tracks at the §5a notes' end.)
 
 ## 2026-06-11 §5a notes (multi-declarator init hoisting: defer the chain, not the emit)
 

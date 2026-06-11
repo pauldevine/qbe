@@ -9,7 +9,7 @@ enum {
 	NString = 128,  /* max identifier length; MicroPython has 49-char names
 	                 * (e.g. MP_MAP_LOOKUP_ADD_IF_NOT_FOUND_OR_REMOVE_IF_FOUND)
 	                 * and longer generated qstr symbols. Host-only memory. */
-	NGlo = 256,
+	NGlo = 512,
 	/* varh[] is an open-addressing table holding all globals + enum
 	 * constants (never cleared) plus the current function's locals.
 	 * MicroPython pulls ~214 MP_QSTR_* enum constants from genhdr alone,
@@ -394,6 +394,15 @@ enum { NFp = 512, NFpParam = 16 };
 struct {
 	int nparam;
 	unsigned ptyp[NFpParam];
+	unsigned rett;     /* declared RETURN type (§5b).  The type integer
+	                    * IDIR(FUNC(ret)) shifts `ret' up 6 bits, which
+	                    * lands a float return's FLOAT flag (bit 18) on
+	                    * bit 24 == FAR — and DREF strips FAR, so a
+	                    * float-returning fn ptr decoded as int-returning
+	                    * (the call result class came out w, not s).  The
+	                    * side table carries the return type unshifted;
+	                    * call sites with an fpid use it instead of the
+	                    * double-DREF decode. */
 } fpproto[NFp];
 int nfpproto = 0;
 int g_callee_fpid = -1;  /* set by expr() case '.' to a fn-ptr member's fpid
@@ -2564,19 +2573,26 @@ mkptype(unsigned ty, Node *rest)
 	return n;
 }
 
-/* Record a function-pointer declarator's fixed parameter types (the `chain' of
- * mkptype nodes from fptpar0) into fpproto[] and return its index, or -1 if the
- * table is full or there are no fixed params to coerce.  A `...' contributes no
- * node (the chain ends), so nparam counts only the fixed parameters. */
+/* Record a function-pointer declarator's RETURN type and fixed parameter
+ * types (the `chain' of mkptype nodes from fptpar0) into fpproto[] and return
+ * its index, or -1 if the table is full or there is nothing worth recording.
+ * A `...' contributes no node (the chain ends), so nparam counts only the
+ * fixed parameters.  A float return is recorded even with an empty parameter
+ * list: the IDIR(FUNC(ret)) encoding destroys its FLOAT flag (see the fpproto
+ * struct comment), so the side table is the only place the call site can
+ * recover the result class from. */
 static int
-fpproto_alloc(Node *chain)
+fpproto_alloc(unsigned rett, Node *chain)
 {
 	Node *n;
 	int i = 0, id;
 
-	if (chain == 0 || nfpproto >= NFp)
-		return -1;
+	if ((chain == 0 && !(rett & (FLOAT | (FLOAT << 3)))) || nfpproto >= NFp)
+		return -1;     /* FLOAT<<3 also catches a float* return: its
+		                * FLOAT bit sits one IDIR up and still lands on
+		                * FAR after FUNC's shift */
 	id = nfpproto++;
+	fpproto[id].rett = rett;
 	for (n = chain; n && i < NFpParam; n = n->r)
 		fpproto[id].ptyp[i++] = (unsigned)n->u.n;
 	fpproto[id].nparam = i;
@@ -2821,7 +2837,14 @@ call(Node *n, Symb *sr)
 			int sret;
 			unsigned aggr;
 			int sret_slot = 0;
+			int fpid = varfpid(f);
 			sr->ctyp = DREF(fptr_type);     /* return_type */
+			/* The double-DREF decode LOSES a float return: the
+			 * FLOAT flag shifted to bit 24 == FAR, which DREF
+			 * strips.  Recover the declared type from the side
+			 * table when the declarator recorded one (§5b). */
+			if (fpid >= 0)
+				sr->ctyp = fpproto[fpid].rett;
 			sret = (KIND(sr->ctyp) == STRUCT_T || KIND(sr->ctyp) == UNION_T);
 			aggr = sr->ctyp;
 
@@ -2842,7 +2865,6 @@ call(Node *n, Symb *sr)
 			 * direct call (fnproto path), but here the prototype comes
 			 * from the fn-ptr variable's recorded fpid, not its name. */
 			{
-				int fpid = varfpid(f);
 				int argi = 0;
 				for (a=n->r; a; a=a->r, argi++) {
 					a->u.s = eval_arg(a);
@@ -3524,6 +3546,11 @@ expr(Node *n)
 			/* Get return type */
 			fptr_type = DREF(fptr.ctyp);  /* FUN(return_type) */
 			sr.ctyp = DREF(fptr_type);     /* return_type */
+			/* A float return does not survive the double-DREF decode
+			 * (FLOAT flag shifted onto FAR, which DREF strips) —
+			 * recover it from the recorded prototype (§5b). */
+			if (fpid >= 0)
+				sr.ctyp = fpproto[fpid].rett;
 			sret = (KIND(sr.ctyp) == STRUCT_T || KIND(sr.ctyp) == UNION_T);
 			aggr = sr.ctyp;
 
@@ -6933,7 +6960,7 @@ tdcl: TYPEDEF type IDENT ';'
 	/* Function pointer typedef: typedef int (*callback_t)(int, int); */
 	unsigned fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
 	typhadd($5->u.v, fptr_type);
-	typhset_fpid($5->u.v, fpproto_alloc($8));  /* coerce args at `fp(...)' (§2s) */
+	typhset_fpid($5->u.v, fpproto_alloc($2, $8));  /* args + float ret (§2s/§5b) */
 }
     ;
 
@@ -7090,7 +7117,7 @@ smembers:
 	structaddmember(curstruct, $5->u.v, IDIR(FUNC($2)));
 	/* Record the member's parameter types so an indirect call through it
 	 * (`obj->fn(...)') coerces arguments to the declared widths (§2q). */
-	structset_last_fpid(curstruct, fpproto_alloc($8));
+	structset_last_fpid(curstruct, fpproto_alloc($2, $8));
 }
         | smembers attrspec
         | smembers nestedagg
@@ -7695,14 +7722,19 @@ par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
     | type                { $$ = abstract_param($1, 0); }
     | ELLIPSIS            { $$ = 0; /* variadic marker: ... proto only, no IR */ }
     | type '(' '*' IDENT ')' '(' fptpar0 ')' ',' par1 {
-        /* Function pointer parameter: int (*callback)(int, int), ... */
+        /* Function pointer parameter: int (*callback)(int, int), ...
+         * Record the fpid (§5b) so a call through the PARAMETER coerces
+         * args and recovers a float return class (modmath.c's
+         * math_generic_1(x, mp_float_t (*f)(mp_float_t)) shape). */
         unsigned fptr_type = IDIR(FUNC($1));
         $$ = param($4->u.v, fptr_type, $10);
+        varsetfpid($4->u.v, fpproto_alloc($1, $7));
     }
     | type '(' '*' IDENT ')' '(' fptpar0 ')' {
         /* Function pointer parameter: int (*callback)(int, int) */
         unsigned fptr_type = IDIR(FUNC($1));
         $$ = param($4->u.v, fptr_type, 0);
+        varsetfpid($4->u.v, fpproto_alloc($1, $7));
     }
     ;
 
@@ -8139,7 +8171,7 @@ dcls:
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));  /* Pointer to function returning type */
 	varadd(v, 0, fptr_type, 0);  /* Not an array */
-	varsetfpid(v, fpproto_alloc($8));  /* coerce args at `fp(...)' (§2q) */
+	varsetfpid(v, fpproto_alloc($2, $8));  /* args + float ret (§2q/§5b) */
 	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
 }
     | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr ';'
@@ -8154,7 +8186,7 @@ dcls:
 	v = $5->u.v;
 	fptr_type = IDIR(FUNC($2));
 	varadd(v, 0, fptr_type, 0);
-	varsetfpid(v, fpproto_alloc($8));  /* coerce args at `fp(...)' (§2q) */
+	varsetfpid(v, fpproto_alloc($2, $8));  /* args + float ret (§2q/§5b) */
 	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
 	init_node = mknode('=', $5, $11);
 	expr(init_node);
@@ -8194,7 +8226,7 @@ dcls:
 	 * table, which is fine as long as the name does not clash.  Mirrors
 	 * the file-scope fnptr-typedef rule.  Needed by py stream.c. */
 	typhadd($6->u.v, IDIR(FUNC($3)));
-	typhset_fpid($6->u.v, fpproto_alloc($9));  /* coerce args at `fp(...)' (§2s) */
+	typhset_fpid($6->u.v, fpproto_alloc($3, $9));  /* args + float ret (§2s/§5b) */
 }
     ;
 

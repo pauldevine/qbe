@@ -19,6 +19,7 @@
 
 int   sf_isnan(float);
 int   sf_isinf(float);
+int   sf_isfinite(float);
 int   sf_signbit(float);
 float sf_fabs(float);
 float sf_copysign(float, float);
@@ -35,6 +36,39 @@ float sf_expf(float);
 float sf_logf(float);
 float sf_powf(float, float);
 float sf_inff(void);
+float sf_sqrt(float);
+float sf_sin(float);
+float sf_cos(float);
+float sf_tan(float);
+float sf_asin(float);
+float sf_acos(float);
+float sf_atan(float);
+float sf_atan2(float, float);
+float sf_frexp(float, int *);
+float sf_ldexp(float, int);
+float sf_modf(float, float *);
+
+/* The bare libm names below also exist as REAL exported functions in
+ * softfloat.c so they can be taken by ADDRESS (MicroPython's modmath.c
+ * passes them as function pointers, where a function-like macro does not
+ * expand).  These prototypes MUST come before the same-named function-like
+ * macros below: a later `float sqrtf(float);` line would itself be
+ * macro-expanded. */
+float sqrtf(float);
+float sinf(float);
+float cosf(float);
+float tanf(float);
+float asinf(float);
+float acosf(float);
+float atanf(float);
+float atan2f(float, float);
+float expf(float);
+float powf(float, float);
+float fmodf(float, float);
+
+#define M_E               2.71828182845904523536
+#define M_PI              3.14159265358979323846
+#define M_SQRT2           1.41421356237309504880
 
 #define INFINITY          (sf_inff())
 #define HUGE_VALF         (sf_inff())
@@ -43,6 +77,7 @@ float sf_inff(void);
 
 #define isnan(x)          sf_isnan(x)
 #define isinf(x)          sf_isinf(x)
+#define isfinite(x)       sf_isfinite(x)
 #define signbit(x)        sf_signbit(x)
 
 #define fabsf(x)          sf_fabs(x)
@@ -73,5 +108,27 @@ float sf_inff(void);
 #define log(x)            sf_logf(x)
 #define powf(x, y)        sf_powf((x), (y))
 #define pow(x, y)         sf_powf((x), (y))
+#define sqrtf(x)          sf_sqrt(x)
+#define sqrt(x)           sf_sqrt(x)
+#define sinf(x)           sf_sin(x)
+#define sin(x)            sf_sin(x)
+#define cosf(x)           sf_cos(x)
+#define cos(x)            sf_cos(x)
+#define tanf(x)           sf_tan(x)
+#define tan(x)            sf_tan(x)
+#define asinf(x)          sf_asin(x)
+#define asin(x)           sf_asin(x)
+#define acosf(x)          sf_acos(x)
+#define acos(x)           sf_acos(x)
+#define atanf(x)          sf_atan(x)
+#define atan(x)           sf_atan(x)
+#define atan2f(y, x)      sf_atan2((y), (x))
+#define atan2(y, x)       sf_atan2((y), (x))
+#define frexpf(x, e)      sf_frexp((x), (e))
+#define frexp(x, e)       sf_frexp((x), (e))
+#define ldexpf(x, n)      sf_ldexp((x), (n))
+#define ldexp(x, n)       sf_ldexp((x), (n))
+#define modff(x, ip)      sf_modf((x), (ip))
+#define modf(x, ip)       sf_modf((x), (ip))
 
 #endif /* _MATH_H */

@@ -1,0 +1,63 @@
+sqrt4=40000000
+sqrt2=3fb504f3
+sqrt625=40200000
+sqrthalf=3f3504f3
+sqrttiny=2f1b7e93
+sqrtbig=58c4e950
+sqrtneg=7fc00000
+sqrtinf=7f800000
+sqrtzero=00000000
+sin1=3f576aa5
+sinneg=bef57744
+sin3=3e1081c3
+sin100=bf01a12e
+sin1000=3f53ae60
+cos1=3f0a5140
+cos4=bf275530
+cosneg=bed51133
+cos100=3f5cc0ee
+tan1=3fc75924
+tanneg=be9e6152
+saninf=7fc00000
+asinh5=3f060a92
+asin1=3fc90fdb
+asinn1=bfc90fdb
+asindom=7fc00000
+acosh5=3f860a92
+acos1=00000000
+acosn1=40490fdb
+acosn99=404000e0
+atan1=3f490fdb
+atansm=3dcc1f15
+atanbig=3fc68095
+ataninf=3fc90fdb
+atanneg=bf8db70d
+at2q1=3f490fdb
+at2q2=4016cbe4
+at2q3=c016cbe4
+at2q4=bf490fdb
+at2y0=40490fdb
+at2x0=3fc90fdb
+at2inf=3f490fdb
+frx8=3f000000 e=4
+frx3=bf400000 e=2
+frx0=00000000 e=0
+ldx3=41c00000
+ldxn=bf400000
+ldxovf=7f800000
+ldxunf=00000000
+modf=3f400000 ip=40000000
+modfn=80000000 ip=c0000000
+isfin=1 0 0
+fpsqrt=40400000
+fpsin=3f68c7b8
+fpcos=bed51133
+fptan=3f0bda7b
+fpasin=3e815f4e
+fpacos=3fa8b808
+fpatan=3f9fe0bc
+fpexp=402df854
+fpat2=3f168758
+fppow=44800000
+fpfmod=3fc00000
+DONE
