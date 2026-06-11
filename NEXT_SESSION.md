@@ -1,4 +1,90 @@
-# Next session (§5b is DONE 2026-06-11 — **the MicroPython `math` module is ON and Victor-verified byte-exact** (the standing §4x/§4z open track).  softfloat.c grew the missing soft-libm: `sf_sqrt` (fdlibm bitwise restoring, **correctly rounded** — 0 ulp vs host libm over 2M random samples), `sf_sin`/`sf_cos`/`sf_tan` (Cephes octant reduction with a **4-part 8-bit-chunk π/4 split** so every `y*DPn` product is exact for y < 2^16, |x| ≲ 51471 — the classic 3-part Cephes split has 11 bits in DP2, exact only to y < 2^13, which showed up as 8-ulp cos errors near |x| ~ 28000), `sf_atan`/`sf_atan2` (Cephes two-threshold + IEEE zero/inf grid matching CPython), `sf_asin` (atan of x/sqrt((1−x)(1+x)) — factored to dodge the 1−x² cancellation), `sf_acos` (2·atan(sqrt((1−x)/(1+x))), exact at both endpoints), `sf_frexp`/`sf_ldexp`/`sf_modf` (modf keeps x's sign on a zero frac per CPython), `sf_isfinite`.  Host ulp harness `build/sf-math-host-test.c` (cc -DSF_HOST + libm): sqrt 0 ulp, sin/cos ≤4, atan/atan2 ≤3, asin/acos ≤4, frexp/ldexp/modf bit-exact; near the zeros of sin/cos the final DP4 product rounding bounds the ABSOLUTE error at ~1e-12 (the pure-single-precision reduction limit — glibc sinf uses doubles internally; we have none).  **THE MINIC BUG the bring-up found: a float-returning function POINTER decoded as int-returning.**  FLOAT is type-flag bit 18 and IDIR(FUNC(ret)) shifts ret up 6 bits — FLOAT lands exactly on bit 24 == FAR, which DREF strips, so `float (*f)(float)` called through the pointer emitted `=w call` + a bogus swtof (garbage results).  This is exactly MicroPython modmath.c's shape: `math_generic_1(x, sqrtf)` passes every math function BY POINTER into `mp_float_t (*f)(mp_float_t)`.  Fix: `fpproto[]` (the §2q indirect-call side table) gains `rett` — the declared return type carried UNSHIFTED; `fpproto_alloc(rett, chain)` at all 6 declarator sites; the two indirect-call sites override the double-DREF decode when an fpid exists; and the two `par1` fn-ptr PARAMETER rules now record an fpid at all (they previously recorded NONE — no arg coercion either).  Sibling latent hole documented-not-fixed: `float **` hits the same bit-24 collision (no consumer).  Because modmath also needs the bare libm names as REAL SYMBOLS (a function-like macro never expands without a following `(`), softfloat.c exports alias functions `sqrtf`/`sinf`/.../`fmodf` (#ifndef SF_HOST — they would collide with the host harness's libm reference) and math.h declares those prototypes BEFORE defining the same-named macros (a later declaration line would itself be macro-expanded).  Wiring: `MICROPY_PY_MATH=1`; **MICROPY_PY_MATH_CONSTANTS stays 0** (tau's initializer is a float CONST-EXPR (2.0*M_PI) and inf/nan are INFINITY/NAN = sf_inff()/sf_nan() RUNTIME CALLS in minic's math.h — minic cannot fold either in a static initializer; math.e/math.pi are plain literals and work); 27 QDEF0 qstr appends (djb2 via py/makeqstrdata.py compute_hash); `moduledefs.h` MODULE_DEF_MATH; minic `NGlo` 256→512 (qstr.c's pool overflowed with the new strings).  Probe `mathfns_probe.c` (medium + compact, --softfloat; 63 bit-pattern lines incl. the fn-POINTER path; golden DOSBox-captured and line-by-line verified against host doubles by `build/mathfns-verify.py`, untracked).  Gate **248→254/254** (also closed the §4x cheap-thickening track: softfloat/softlibm/softtrig/double_float each gained a compact entry); `make check` green; conflicts unchanged 115 s/r.  MP body 717,168 → **731,088** (+13,920), ~93 KB under the ~824 KB ceiling.  **Victor: mp-math-probe.py BYTE-EXACT vs host python3** (exact prints: sqrt/floor/ceil/trunc/fabs/copysign/fmod/pow + frexp/modf tuples; 17 tolerance checks over sin/cos/tan/asin/acos/atan/atan2/exp/log/log-base/degrees/radians/pi/e; ValueError domain raises for sqrt(-1) and asin(2)); feature-4t byte-exact; float probe byte-exact; DOSBox small-config smoke byte-exact first (the §4z fast loop).  No designated successor — open tracks at the §5b notes' end.)
+# Next session (§5c — DESIGNATED by the user 2026-06-11: **PIVOT OFF MICROPYTHON onto the core QBE/minic/linker 8086 toolchain workstream.**  The MP port is "very capable" and is now a CONSUMER of the toolchain, not the driver: its remaining tracks (math SPECIAL_FUNCTIONS, isclose, MATH_CONSTANTS, third GC area, MP_STACK_LIMIT lever, `-DMP_DBG_*` cleanup) are PARKED unless a toolchain fix unlocks them for free.  MP's role from here: the 108-TU compact rebuild is a regression corpus — after toolchain changes, rebuild and byte-compare the body; Victor re-runs only when bytes move.  Ordered plan below: (1) warm-up = the 3-commit upstream sync; (2) main track = the SMALL-model .EXE fix (the only memory model that is flat-out broken); (3) then the `float **` type-encoding collision (the silent-miscompile class §5b exposed); follow-ons and strategic items after.)
+
+## §5c plan (recommended ordering, gathered 2026-06-11; survey notes inline)
+
+### 1. Warm-up: upstream QBE sync — 3 commits (`c081897..e786f06`)
+- `fa19d3c` "emit: fix aliasing-breaking pointer dereference via union" is
+  TARGET-GENERAL emit code — the one of the three that can touch us.  `e786f06`
+  (rv64 pc-rel globals) and `80d745c` (arm64 extern offset) are other-arch.
+- Procedure (the PR #23 rebase recipe, scaled down): merge `upstream/master`,
+  `make check`, full gate (254/254 expected), MP compact rebuild + body
+  byte-compare (expect byte-identical; if fa19d3c moves bytes, diff the asm and
+  re-run the Victor feature-4t probe), commit.  ~an hour including the gate.
+
+### 2. MAIN TRACK: small-model .EXE (the only broken model) — see [[per-model-gate]]
+- Symptom: DOSBox hangs.  Root cause (documented since the per-model gate work):
+  `tools/libstub_to_exe.py` UNCONDITIONALLY rewrites every libstub `ret` → `retf`
+  and shifts `[bp+N]` arg offsets +2 for the 4-byte far return address — correct
+  for medium/compact/large/huge (far-code ABI), WRONG for small (near calls,
+  2-byte return address, near `_main`).
+- Shape of the fix: make the rewrite MODEL-CONDITIONAL (`--model` is already
+  plumbed through libstub_to_exe.py since the compact bring-up) — small keeps
+  libstub.asm's native near `ret` + unshifted `[bp+N]`; audit the EPILOGUE
+  helpers for far-only assumptions (far_stdlib mangling is OFF under small in
+  minic.y, so `_far_*` entries are unreachable — verify, don't assume); check
+  crt0_exe.asm's `call far _main` vs near under small; omf_link near-code
+  grouping (one CS segment — TEXT_SEG_BUDGET irrelevant under small).
+- Acceptance: small entries in the gate for the standard probe ladder
+  (cprobe, cstrprobe, mathprobe, fileio, fnptrprobe, dosapi_probe), DOSBox
+  runtime-verified.  Expect latent near-ABI assumptions to surface — budget a
+  full session.
+- NOTE: if item 6 (newlibc) is ever greenlit, it subsumes this — do not
+  gold-plate; model-conditional rewrite is enough.
+
+### 3. `float **` type-encoding collision (silent-miscompile class, §5b sibling)
+- Mechanism (proven in §5b): qualifier flags ride INSIDE the shifted type word —
+  FLOAT (bit 18) + two IDIR/FUNC 3-bit shifts = bit 24 == FAR, and DREF strips
+  ~FAR.  §5b fixed the fn-ptr RETURN case via the fpproto `rett` side table;
+  `float **` (deref of pointer-to-pointer-to-float) still decodes the inner
+  type as `int *` → loads `w` instead of `s`.  SHORT (bit 16) has the same
+  collision at 3 levels (QVOLATILE, bit 25).
+- Candidate fix surveyed in §5b: relocate FAR 24→26 and QVOLATILE 25→27.
+  FLOAT then survives 2 levels (float ** and float-ret-fnptr both clean) and
+  collides only at 3 (`float ***`).  COST: nested-far headroom shrinks — inner
+  FAR bits sit one IDIR up (26→29 ok, 26→32 OVERFLOWS), so far-data models keep
+  exactly ONE level of nested far pointer (`T **` ok, the innermost FAR of
+  `T ***` is lost).  BEFORE committing: grep the MP corpus + stevie + probes
+  for triple-pointer types under far-data models; the DREF comment block in
+  minic.y documents the current 27/30 two-level headroom — update it.
+- Probe FIRST (bug-loud `float_dblptr_probe.c`: store/load through `float **`,
+  fn returning `float *` through a fn ptr, `short ***` if the SHORT fix rides
+  along), then the bit move, then: full gate byte-compare (goldens should be
+  IDENTICAL — the bits are internal), MP body byte-compare.
+
+### 4. Follow-on correctness tracks (independent, pick by appetite)
+- huge `_qbe_huge_add` ≥0x8000 variable-index gap (§4i) — the documented hole
+  in huge far-ptr arith; gate has huge entries to extend.
+- `jmp_buf bufs[6]` (§4v, UNREDUCED) — array-of-jmp_buf cross-frame longjmp
+  misbehaved; reduce first (suspect: §2m array_vartyp stride family), classify,
+  then fix or document.
+- minic static-initializer FLOAT const-expr folding (`static float x = 2.0f*3.14f;`
+  dies "unsupported operation in constant expression"; INFINITY/NAN macros are
+  runtime calls so they need a bits-level static-init story).  General C gap;
+  also unlocks MICROPY_PY_MATH_CONSTANTS for free.
+- Multi-decl items after the first skip block_scope_decl (loud "double
+  definition", not silent — lowest priority of the four).
+
+### 5. Maintenance (cheap, do opportunistically)
+- **ROADMAP.md is stale since 2026-05-23** — predates the entire MP campaign,
+  the emit-bracket audit, split stack, slot coloring, FLOAT, the math module.
+  One consolidation pass; also prune the CLAUDE.md header scroll (the Prior:
+  chain is most of a year of sessions deep).
+- Kw spill-slot sharing (Kl/Ks got §4w coloring; plain Kw never shares) — small
+  frame lever, no known consumer pain.
+- Standing tool reminder: `tools/run-emit-audit.sh` after ANY i8086/emit.c change.
+
+### 6. STRATEGIC (own campaign, needs user go/no-go): newlibc integration
+- `~/projects/newlibc` is the planned real libc replacing libstub's organically
+  grown helper set (printf engine as a python EPILOGUE string, near/far
+  duplication, `_mktemp` deferral, per-model ret-rewrite hacks).  Biggest open
+  workstream; would also resolve item 2 cleanly and retire a whole class of
+  libstub ABI bugs ([[libstub-null-ptr-dx]] family).  Do NOT start it as a side
+  effect of another track — it deserves its own bring-up plan (per-model ABI,
+  OMF object production, gate migration).
+
+---
+
+# (DONE in §5b — successor §5c above) Next session (§5b is DONE 2026-06-11 — **the MicroPython `math` module is ON and Victor-verified byte-exact** (the standing §4x/§4z open track).  softfloat.c grew the missing soft-libm: `sf_sqrt` (fdlibm bitwise restoring, **correctly rounded** — 0 ulp vs host libm over 2M random samples), `sf_sin`/`sf_cos`/`sf_tan` (Cephes octant reduction with a **4-part 8-bit-chunk π/4 split** so every `y*DPn` product is exact for y < 2^16, |x| ≲ 51471 — the classic 3-part Cephes split has 11 bits in DP2, exact only to y < 2^13, which showed up as 8-ulp cos errors near |x| ~ 28000), `sf_atan`/`sf_atan2` (Cephes two-threshold + IEEE zero/inf grid matching CPython), `sf_asin` (atan of x/sqrt((1−x)(1+x)) — factored to dodge the 1−x² cancellation), `sf_acos` (2·atan(sqrt((1−x)/(1+x))), exact at both endpoints), `sf_frexp`/`sf_ldexp`/`sf_modf` (modf keeps x's sign on a zero frac per CPython), `sf_isfinite`.  Host ulp harness `build/sf-math-host-test.c` (cc -DSF_HOST + libm): sqrt 0 ulp, sin/cos ≤4, atan/atan2 ≤3, asin/acos ≤4, frexp/ldexp/modf bit-exact; near the zeros of sin/cos the final DP4 product rounding bounds the ABSOLUTE error at ~1e-12 (the pure-single-precision reduction limit — glibc sinf uses doubles internally; we have none).  **THE MINIC BUG the bring-up found: a float-returning function POINTER decoded as int-returning.**  FLOAT is type-flag bit 18 and IDIR(FUNC(ret)) shifts ret up 6 bits — FLOAT lands exactly on bit 24 == FAR, which DREF strips, so `float (*f)(float)` called through the pointer emitted `=w call` + a bogus swtof (garbage results).  This is exactly MicroPython modmath.c's shape: `math_generic_1(x, sqrtf)` passes every math function BY POINTER into `mp_float_t (*f)(mp_float_t)`.  Fix: `fpproto[]` (the §2q indirect-call side table) gains `rett` — the declared return type carried UNSHIFTED; `fpproto_alloc(rett, chain)` at all 6 declarator sites; the two indirect-call sites override the double-DREF decode when an fpid exists; and the two `par1` fn-ptr PARAMETER rules now record an fpid at all (they previously recorded NONE — no arg coercion either).  Sibling latent hole documented-not-fixed: `float **` hits the same bit-24 collision (no consumer).  Because modmath also needs the bare libm names as REAL SYMBOLS (a function-like macro never expands without a following `(`), softfloat.c exports alias functions `sqrtf`/`sinf`/.../`fmodf` (#ifndef SF_HOST — they would collide with the host harness's libm reference) and math.h declares those prototypes BEFORE defining the same-named macros (a later declaration line would itself be macro-expanded).  Wiring: `MICROPY_PY_MATH=1`; **MICROPY_PY_MATH_CONSTANTS stays 0** (tau's initializer is a float CONST-EXPR (2.0*M_PI) and inf/nan are INFINITY/NAN = sf_inff()/sf_nan() RUNTIME CALLS in minic's math.h — minic cannot fold either in a static initializer; math.e/math.pi are plain literals and work); 27 QDEF0 qstr appends (djb2 via py/makeqstrdata.py compute_hash); `moduledefs.h` MODULE_DEF_MATH; minic `NGlo` 256→512 (qstr.c's pool overflowed with the new strings).  Probe `mathfns_probe.c` (medium + compact, --softfloat; 63 bit-pattern lines incl. the fn-POINTER path; golden DOSBox-captured and line-by-line verified against host doubles by `build/mathfns-verify.py`, untracked).  Gate **248→254/254** (also closed the §4x cheap-thickening track: softfloat/softlibm/softtrig/double_float each gained a compact entry); `make check` green; conflicts unchanged 115 s/r.  MP body 717,168 → **731,088** (+13,920), ~93 KB under the ~824 KB ceiling.  **Victor: mp-math-probe.py BYTE-EXACT vs host python3** (exact prints: sqrt/floor/ceil/trunc/fabs/copysign/fmod/pow + frexp/modf tuples; 17 tolerance checks over sin/cos/tan/asin/acos/atan/atan2/exp/log/log-base/degrees/radians/pi/e; ValueError domain raises for sqrt(-1) and asin(2)); feature-4t byte-exact; float probe byte-exact; DOSBox small-config smoke byte-exact first (the §4z fast loop).  Successor: §5c above (core-toolchain pivot).)
 
 ## 2026-06-11 §5b notes (math module: soft-libm trig/sqrt + the fn-ptr float-return DREF/FAR collision)
 
@@ -47,7 +133,7 @@
 - **Victor (full 751,664-byte image, body 731,088): math probe byte-exact, feature-4t
   byte-exact, float probe byte-exact.**  Clean D4/C5 exits.
 
-### Open tracks (no §5c designated; carried + new)
+### Open tracks (ordered into the §5c plan above; carried + new)
 - `math` SPECIAL_FUNCTIONS (log2/log10/hyperbolics/erf/gamma) — needs more soft-libm;
   log2f exists already, log10/cosh/sinh/tanh/acosh/asinh/atanh/erf/lgamma do not.
 - MICROPY_PY_MATH_CONSTANTS — needs minic float const-expr folding in static
