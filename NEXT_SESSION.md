@@ -1,5 +1,26 @@
 # Next session (§4y is DONE 2026-06-10 — **the emit-bracket audit is now a STANDING TOOL and it found + fixed the §1h two-div-one-call bug** (user-designated track).  New machinery: `QBE_EMIT_CHK=1` makes `i8086/emit.c` precede every emitted IR instruction with `; CHK <op> to=<dest> live=<regs>` carrying the EXACT post-rega GPR live-after set (per-function CFG fixpoint over {ax,cx,dx,bx,si,di}; ret blocks read AX/DX; the only implicit pair-use is the Kl `copy R1` call-result — `argcls` can NOT discriminate because `Km == Kl` lies about address operands on a 16-bit target), plus `; CHKT` terminator markers and a `cons=` cross-check of the §2w conservative tracker; off-mode output byte-identical.  `tools/check_emit_brackets.py` symbolically executes each marked region (symbolic regs, push/pop stack, tracked [bp+N] cells, calls clobber AX/CX/DX per ABI) and flags (a) any live non-dest GPR whose final value is not the entry value, (b) a register DEST that ends holding its entry value (the §4x pop-over-the-result shape), (c) ES/DS not entry-valued (DGROUP invariants), (d) a dropped/malformed Oswap exchange.  VALIDATED by reverting the §4x fixes: catches all three emit-side shapes (Ocmps/cnes/stosi CX-dest incl. in real objfloat divmod, Ocast AX).  `tools/run-emit-audit.sh` sweeps 107 MP TUs (compact) + every gate probe under its gate model (~440 asm, ~110k regions).  **THE FIND: Kw `Odiv`/`Orem`/`Oudiv`/`Ourem` clobber BOTH AX (dividend staging + quotient) and DX (cwd / xor + remainder) with NO liveness bracket** — the §1h "two divisions feeding one call corrupt the first result" found-not-fixed bug, 21 live-clobber sites in the shipping MP image (mp_format_mantissa = every float print, mp_map_lookup = every dict access, mp_lexer_to_next, gc, objint, ringbuf...).  Fixed with liveness-gated dest-skipped push/pop brackets (+ slot-dest result stores the old code silently lacked).  Probe `div_live_clobber_probe` (medium+compact, verified bug-loud: y=4 printed 3 unfixed); audit corpus CLEAN after fix; gate 242→244/244; make check green; MP body 650272→650352 (+80 B); Victor float probe + feature-4t byte-exact, churn scale2 + gen sweep clean.  No designated successor — open tracks at the §4y notes' end.)
 
+## 2026-06-10 repo-state update (post-§4y housekeeping — PR #24 merged; two stale open-track notes corrected)
+
+- **PR #24 merged** (`97376dc`): the 41 commits §3p→§4y (soft-float campaign, churn-GC
+  root-cause, per-fn gc-sections, split stack, Kl slot coloring, FLOAT-on-Victor, emit-bracket
+  audit) are now on GitHub master.  Local master fast-forwarded — local and GitHub are in sync.
+- **The 211-commit upstream-qbe rebase is DONE and has been since 2026-06-06** — PR #23
+  ("[codex] Test upstream QBE rebase", merge `a6ef88d`) landed it; `amd64/winabi.c` etc. are
+  in-tree.  The "upstream rebase" open-track bullet repeated below §4y (and in CLAUDE.md) was
+  stale.  As of 2026-06-10 only **3 newer upstream commits** (`c081897..e786f06` on
+  `upstream/master`) are unmerged — the remaining track is a small periodic sync, not a
+  campaign.
+- **The "stevie build broken at hexchars.c" §4y bullet was WRONG** — verified 2026-06-10:
+  `tools/build-stevie.sh --exe` compiles 24/24 TUs and links (146,672 bytes), hexchars.c
+  rebuilt fresh (not cached, empty .err), and the user interactively verified stevie on the
+  real Victor.  The "gate uses a STALE exe" half was also wrong: `test-dos.sh::run_stevie_size`
+  rebuilds via build-stevie.sh before measuring.  hexchars.c's `chars[]` initializer is fully
+  braced — the claimed brace-elision construct doesn't even exist there.  Likely a transient
+  mid-§4y observation (stale-minic class, see [[minic-make-staleness]]) jotted down and never
+  re-verified.
+- The §4y open-tracks list below is edited accordingly.
+
 ## 2026-06-10 §4y notes (emit-bracket audit: exact-liveness CHK markers + symbolic checker; the Kw div/rem AX/DX hole closed)
 
 **§4y turned the recurring "emit handler clobbers a register rega owns" bug class (§2l, §4r,
@@ -70,16 +91,19 @@ documented open codegen bug.**
 - Final audit run: **339 files / 112,443 regions / 0 violations / 0 build failures**
   (107 MP TUs compact + every gate probe under its gate model with the gate's flags).
 
-### Open tracks (no §4z designated)
+### Open tracks (no §4z designated; list corrected 2026-06-10 — see repo-state update above)
 - The four older soft-float suites (softfloat/softlibm/softtrig/double_float) still gated
   medium-only; they PASS under compact (§4x bisect) — cheap gate-thickening.
 - MicroPython: `math` module (needs sqrtf + trig in softfloat.c — recipe per §4x
   discussion); heap expansion via MICROPY_GC_SPLIT_HEAP (multiple ≤64 KB areas).
-- stevie build broken at hexchars.c (minic brace-elision in array-of-struct init) — the
-  gate's stevie size check uses a STALE exe.
+- ~~stevie build broken at hexchars.c~~ — **STALE, removed**: build verified 24/24 + linked
+  + user-verified interactively on Victor 2026-06-10; the gate's stevie check rebuilds
+  (it never used a stale exe).  See the repo-state update above.
+- Upstream sync: the 211-commit rebase landed via PR #23 (2026-06-06); only 3 newer
+  upstream commits (`c081897..e786f06`) pending — small periodic sync.
 - Latent minic note (§4v, NOT reduced): `jmp_buf bufs[6]` array-of-jmp_buf cross-frame
-  longjmp; huge `_qbe_huge_add` ≥0x8000 gap (§4i); `-DMP_DBG_*` cleanup; 211-commit
-  upstream-qbe rebase; Kw spill slots never share; MP_STACK_LIMIT 8192→~2048 lever.
+  longjmp; huge `_qbe_huge_add` ≥0x8000 gap (§4i); `-DMP_DBG_*` cleanup; Kw spill slots
+  never share; MP_STACK_LIMIT 8192→~2048 lever.
 
 ---
 
