@@ -206,6 +206,7 @@ fi
 CRT0_FLAGS=""
 case "$MODEL" in
 	compact|large|huge) CRT0_FLAGS="-DFAR_DATA=1" ;;
+	small|tiny) CRT0_FLAGS="-DNEAR_CODE=1" ;;
 esac
 nasm $CRT0_FLAGS -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" 2>>"$ERR"
 "$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" \

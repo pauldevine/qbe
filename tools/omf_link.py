@@ -823,8 +823,18 @@ class Linker:
         if self.pack_code:
             self._place_packed_code(live_code)
         else:
+            # Coalesce by NAME, like DATA/BSS.  For far-code models every
+            # module's code segment name is unique (<BASE>_TEXT /
+            # LIBSTUB_TEXT / per-function gc-sections names), so this is
+            # behavior-identical to the old per-segment _place_distinct.
+            # Near-code models (small) emit ALL code as `_TEXT`; merging
+            # the same-named segments gives them one paragraph frame so
+            # near calls and 2-byte code pointers resolve against the
+            # single runtime CS.
+            coalesced_code: Dict[str, int] = {}
             for mi, si in live_code:
-                self._place_distinct(mi, si, self.modules[mi].segments[si])
+                self._place_coalesced(mi, si, self.modules[mi].segments[si],
+                                      coalesced_code)
 
         # DATA: coalesced by segment NAME across modules.
         coalesced_data: Dict[str, int] = {}

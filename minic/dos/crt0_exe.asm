@@ -23,6 +23,10 @@
 ; 4-byte far pointer, so argv[i] slots must be 4 bytes (offset+segment)
 ; and the argv array address passed to main() is itself a 4-byte far
 ; pointer.  Without FAR_DATA, argv is the medium-model 2-byte near form.
+;
+; Define NEAR_CODE (-DNEAR_CODE) for the small model: _main is reached
+; with a near call (it returns with a near ret), and all code coalesces
+; into this single _TEXT segment at link time.
 
 bits 16
 cpu 8086
@@ -162,7 +166,11 @@ _start:
     push ax
 %endif
     push word [_argc]
+%ifdef NEAR_CODE
+    call _main                     ; small model: near _main, near ret
+%else
     call far _main
+%endif
 %ifdef FAR_DATA
     add sp, 6
 %else

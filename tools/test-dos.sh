@@ -51,6 +51,18 @@ COM_RUNTIME_TESTS=(
 # golden.  Skipped (not failed) when DOSBox is missing.
 #
 RUNTIME_TESTS=(
+	# Small model (.EXE, near code + near data).  All code coalesces into
+	# one _TEXT frame (omf_link name-coalescing); libstub keeps its native
+	# near ABI and the EXE epilogue is reverse-transformed (see
+	# libstub_to_exe.py near_code_model/unfar_epilogue).  cstrprobe has a
+	# small-specific golden: %p prints a 16-bit near pointer (5678, the
+	# C-correct truncation of (char*)0x12345678L).
+	"minic/dos/examples/cprobe.c:minic/dos/tests/cprobe.golden.txt:small"
+	"minic/dos/examples/cstrprobe.c:minic/dos/tests/cstrprobe.golden.small.txt:small"
+	"minic/dos/examples/fnptrprobe.c:minic/dos/tests/fnptrprobe.golden.txt:small"
+	"minic/dos/examples/mathprobe.c:minic/dos/tests/mathprobe.golden.txt:small"
+	"minic/dos/examples/dosapi_probe.c:minic/dos/tests/dosapi_probe.golden.txt:small"
+	"minic/dos/tests/fileio.c:minic/dos/tests/fileio_exe.golden.txt:small"
 	"minic/dos/examples/cstrprobe.c:minic/dos/tests/cstrprobe.golden.txt:compact"
 	"minic/dos/examples/compactprobe_extra.c:minic/dos/tests/compactprobe_extra.golden.txt:compact"
 	"minic/dos/examples/fnptrprobe.c:minic/dos/tests/fnptrprobe.golden.txt:compact"
