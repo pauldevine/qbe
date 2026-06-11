@@ -1,4 +1,89 @@
-# Next session (§4x is DONE 2026-06-10 — **MicroPython FLOAT is ON and Victor-verified** (user-designated track): `MICROPY_FLOAT_IMPL_FLOAT` flipped per the §4a recipe; body 650272 — the float delta is only **+38 KB** over §4w's 612048 at per-function gc-sections granularity (not §4a's 59 KB at 56 KB granularity), ~174 KB under the ~824 KB ceiling.  First-ever float EXECUTION (§4a only ever linked) flushed out FOUR real toolchain bugs, all fixed + gate-pinned: (1) **minic `coerce_arg` had no int↔float argument conversion** (C11 6.5.2.2p7) — parsenum.c's `powf(5, -dec_exp)` passed raw int words as binary32 denormals, sf_powf saw `powf(eps,eps)≈1.0`, so EVERY float literal mis-parsed (1.5→7.5) and mp_parse hung on Victor; fix = swtof/sltof int→float-param, stosi float→int-param (probe `float_arg_coerce_probe`).  (2) **i8086 Ocmps/Ostosi emit brackets pushed/popped CX unconditionally** — a compare/convert result rega placed in CX was popped over with stale garbage: objfloat's modulo sign-fix misfired (`7.5 % 2.0`→3.5) and `bool(0.0)`→True; fix = dst_in_cx skip, mirror of the AX/DX skips (probe `float_cmp_cx_probe`, verified bug-loud).  (3) **load.c forwarded a stored float through a `Kw` cast** — lossless when w=4B, a TRUNCATION on i8086 (w=2B): medium-model `mp_decimal_exp` read its float as 16 bits (+ `loadsz` claimed a Ks `Oload` is wordsz=2 bytes); fix = direct `cast Ks→Kl` when `T.wordsz==2` + `loadsz` Ks=4 (target-general, stock targets byte-identical).  (4) **i8086 soft-float `Ocast` slot→slot used AX as scratch with no liveness bracket** — clobbered a live `dec_exp` in AX → `powf(5, -16624)` → inf; fix = `g_live_ax_after` bracket, same discipline as the Kl Ocopy path.  Bugs 3+4 were caught by the GATE (the new probe's medium entry failed while compact passed — far-data routes around load-forwarding).  **Full 29-line float probe byte-exact vs host python3 on real Victor**; feature-4t byte-exact; churn scale2 + gen sweep clean; gate 238→242/242; make check green.  No designated successor — open tracks at the §4x notes' end.)
+# Next session (§4y is DONE 2026-06-10 — **the emit-bracket audit is now a STANDING TOOL and it found + fixed the §1h two-div-one-call bug** (user-designated track).  New machinery: `QBE_EMIT_CHK=1` makes `i8086/emit.c` precede every emitted IR instruction with `; CHK <op> to=<dest> live=<regs>` carrying the EXACT post-rega GPR live-after set (per-function CFG fixpoint over {ax,cx,dx,bx,si,di}; ret blocks read AX/DX; the only implicit pair-use is the Kl `copy R1` call-result — `argcls` can NOT discriminate because `Km == Kl` lies about address operands on a 16-bit target), plus `; CHKT` terminator markers and a `cons=` cross-check of the §2w conservative tracker; off-mode output byte-identical.  `tools/check_emit_brackets.py` symbolically executes each marked region (symbolic regs, push/pop stack, tracked [bp+N] cells, calls clobber AX/CX/DX per ABI) and flags (a) any live non-dest GPR whose final value is not the entry value, (b) a register DEST that ends holding its entry value (the §4x pop-over-the-result shape), (c) ES/DS not entry-valued (DGROUP invariants), (d) a dropped/malformed Oswap exchange.  VALIDATED by reverting the §4x fixes: catches all three emit-side shapes (Ocmps/cnes/stosi CX-dest incl. in real objfloat divmod, Ocast AX).  `tools/run-emit-audit.sh` sweeps 107 MP TUs (compact) + every gate probe under its gate model (~440 asm, ~110k regions).  **THE FIND: Kw `Odiv`/`Orem`/`Oudiv`/`Ourem` clobber BOTH AX (dividend staging + quotient) and DX (cwd / xor + remainder) with NO liveness bracket** — the §1h "two divisions feeding one call corrupt the first result" found-not-fixed bug, 21 live-clobber sites in the shipping MP image (mp_format_mantissa = every float print, mp_map_lookup = every dict access, mp_lexer_to_next, gc, objint, ringbuf...).  Fixed with liveness-gated dest-skipped push/pop brackets (+ slot-dest result stores the old code silently lacked).  Probe `div_live_clobber_probe` (medium+compact, verified bug-loud: y=4 printed 3 unfixed); audit corpus CLEAN after fix; gate 242→244/244; make check green; MP body 650272→650352 (+80 B); Victor float probe + feature-4t byte-exact, churn scale2 + gen sweep clean.  No designated successor — open tracks at the §4y notes' end.)
+
+## 2026-06-10 §4y notes (emit-bracket audit: exact-liveness CHK markers + symbolic checker; the Kw div/rem AX/DX hole closed)
+
+**§4y turned the recurring "emit handler clobbers a register rega owns" bug class (§2l, §4r,
+§4t, §4x×2) into a MECHANICAL check, and the very first full sweep found the oldest
+documented open codegen bug.**
+
+### The instrumentation (i8086/emit.c, QBE_EMIT_CHK=1, off-mode byte-identical)
+- Exact GPR liveness post-rega: per-function CFG fixpoint (`chk_fixpoint`) + per-block
+  backward walk; kills = register dest / call (AX,CX,DX); uses = any RTmp/RMem operand;
+  ret blocks read {AX,DX}; Jjnz reads its register cond.
+- **Modeling lessons (each cost a false-positive class):** (1) the §2w blanket "Kl touches
+  AX/DX" rule manufactures phantom DX liveness — it deliberately over-approximates so save
+  brackets stay put; the audit needs exact, so the only implicit pair-use kept is
+  `Ocopy Kl from RAX` (call result in DX:AX).  (2) `argcls()` CANNOT be used to find pair
+  args: `Km == Kl`, so a store/load ADDRESS in AX reads as a "Kl arg" — on i8086 near-data
+  an address is 16-bit, no DX half.  (3) `cons=` in the marker prints the conservative
+  tracker for cross-checking: conservative ⊂ exact at any point = a checker bug (it found
+  two of mine).
+- `; CHKT <jmptype>` markers audit terminator emission too (the historical Jjnz-spilled-cond
+  AX clobber shape).
+
+### The checker (tools/check_emit_brackets.py) + driver (tools/run-emit-audit.sh)
+- Symbolic execution per region: register symbols, push/pop stack, `add/sub sp,N`
+  adjustment, tracked direct `[bp+N]` cells (slot-roundtrip saves), 8-bit subreg writes
+  clobber the parent, `call` clobbers AX/CX/DX and preserves BX/SI/DI/ES/DS (inductive
+  cdecl invariant), linear scan over local labels (brackets are straight-line).
+- Four rules: live non-dest GPR must survive; a REGISTER dest must NOT end entry-valued
+  (the §4x `pop cx` over the result — caught only by this rule; dest-destroyed, no
+  bystander); ES/DS entry-valued always; Oswap must be a clean 2-reg exchange (an EMPTY
+  swap region = the silently-dropped slot-swap, flagged as DROPPED).
+- `asm` regions skipped (user inline asm declares its own clobbers).
+- Validation: with the §4x emit fixes reverted, the checker flags clts/cnes/stosi CX-dest
+  (incl. `_mp_obj_float_divmod` in real objfloat) and the Ocast AX clobber.  With them
+  applied: clean.
+- Driver sweeps build/mp-link/*.ssa (compact) + every `tools/test-dos.sh` RUNTIME_TESTS
+  entry rebuilt under its own model with the gate's exact flags (QBE_FAR_STATIC_DATA /
+  --softfloat / --split-stack — model PAIRING matters: a compact .ssa run through
+  `qbe -m medium` is garbage).
+
+### THE FIND — Kw div/rem clobber live AX and DX (i8086/emit.c)
+- 21 sites in the MP image where a live temp sat in AX or DX across an inline 16-bit
+  division: `mp_format_mantissa` (every float print), `mp_map_lookup` (every dict access),
+  `mp_lexer_to_next`, `gc_*`, `mp_int_format_size`, ringbuf, `repl_hist_add`,
+  `mp_print_strn`...  This is `[[i8086-two-div-one-call-clobber]]`, documented
+  found-not-fixed since §1h.  The handlers had the §1-era divisor-staging fix (a divisor
+  IN AX/DX) but never protected a BYSTANDER temp in AX/DX: `mov ax, dividend` +
+  `cwd`/`xor dx,dx` + quotient/remainder writes.
+- **Fix**: liveness-gated dest-skipped AX/DX push/pop brackets (the §2z/§4x house
+  discipline), one shared result-move tail per handler (which also adds the RSlot dest
+  stores the old code silently LACKED — a spilled Kw div result previously went nowhere),
+  signed + unsigned paths.
+- **Probe `div_live_clobber_probe.c`** (medium+compact): two-divs-feeding-one-call,
+  3-result printf, digit-extraction loop (the format_mantissa shape), quotient live across
+  a second division, and a register-pressure case (5 locals live across div+rem — the CHK
+  markers confirmed `live=ax,cx,dx,bx,si,di` on that div).  Verified bug-loud with the
+  brackets neutered (y=4 prints 3).  Gate 242→244/244.
+- MP body 650272 → 650352 (+80 B — the brackets are liveness-gated so almost free).
+
+### Notes / leftovers
+- The audit found NOTHING else across ~110k regions — the §2-era bracket campaign
+  (§2l/§2w/§2x/§2z/§3a/§4r/§4t/§4x) plus this close out the known surface.  The marker
+  machinery + checker stay in-tree; run `tools/run-emit-audit.sh` after any emit.c change.
+- The `cons=` field stays in the markers (cheap, audit-only) for future triage.
+- Checker scope limits (documented in the file): flags-register liveness between a compare
+  and its consuming Jjfi* terminator is NOT audited; `asm` regions skipped; liveness of a
+  reg whose value is "stored to a slot and reloaded by a LATER IR instruction" is per-IR
+  honest (rega-visible) so no gap there.
+- Final audit run: **339 files / 112,443 regions / 0 violations / 0 build failures**
+  (107 MP TUs compact + every gate probe under its gate model with the gate's flags).
+
+### Open tracks (no §4z designated)
+- The four older soft-float suites (softfloat/softlibm/softtrig/double_float) still gated
+  medium-only; they PASS under compact (§4x bisect) — cheap gate-thickening.
+- MicroPython: `math` module (needs sqrtf + trig in softfloat.c — recipe per §4x
+  discussion); heap expansion via MICROPY_GC_SPLIT_HEAP (multiple ≤64 KB areas).
+- stevie build broken at hexchars.c (minic brace-elision in array-of-struct init) — the
+  gate's stevie size check uses a STALE exe.
+- Latent minic note (§4v, NOT reduced): `jmp_buf bufs[6]` array-of-jmp_buf cross-frame
+  longjmp; huge `_qbe_huge_add` ≥0x8000 gap (§4i); `-DMP_DBG_*` cleanup; 211-commit
+  upstream-qbe rebase; Kw spill slots never share; MP_STACK_LIMIT 8192→~2048 lever.
+
+---
+
+# (DONE in §4y above) Next session (§4x is DONE 2026-06-10 — **MicroPython FLOAT is ON and Victor-verified** (user-designated track): `MICROPY_FLOAT_IMPL_FLOAT` flipped per the §4a recipe; body 650272 — the float delta is only **+38 KB** over §4w's 612048 at per-function gc-sections granularity (not §4a's 59 KB at 56 KB granularity), ~174 KB under the ~824 KB ceiling.  First-ever float EXECUTION (§4a only ever linked) flushed out FOUR real toolchain bugs, all fixed + gate-pinned: (1) **minic `coerce_arg` had no int↔float argument conversion** (C11 6.5.2.2p7) — parsenum.c's `powf(5, -dec_exp)` passed raw int words as binary32 denormals, sf_powf saw `powf(eps,eps)≈1.0`, so EVERY float literal mis-parsed (1.5→7.5) and mp_parse hung on Victor; fix = swtof/sltof int→float-param, stosi float→int-param (probe `float_arg_coerce_probe`).  (2) **i8086 Ocmps/Ostosi emit brackets pushed/popped CX unconditionally** — a compare/convert result rega placed in CX was popped over with stale garbage: objfloat's modulo sign-fix misfired (`7.5 % 2.0`→3.5) and `bool(0.0)`→True; fix = dst_in_cx skip, mirror of the AX/DX skips (probe `float_cmp_cx_probe`, verified bug-loud).  (3) **load.c forwarded a stored float through a `Kw` cast** — lossless when w=4B, a TRUNCATION on i8086 (w=2B): medium-model `mp_decimal_exp` read its float as 16 bits (+ `loadsz` claimed a Ks `Oload` is wordsz=2 bytes); fix = direct `cast Ks→Kl` when `T.wordsz==2` + `loadsz` Ks=4 (target-general, stock targets byte-identical).  (4) **i8086 soft-float `Ocast` slot→slot used AX as scratch with no liveness bracket** — clobbered a live `dec_exp` in AX → `powf(5, -16624)` → inf; fix = `g_live_ax_after` bracket, same discipline as the Kl Ocopy path.  Bugs 3+4 were caught by the GATE (the new probe's medium entry failed while compact passed — far-data routes around load-forwarding).  **Full 29-line float probe byte-exact vs host python3 on real Victor**; feature-4t byte-exact; churn scale2 + gen sweep clean; gate 238→242/242; make check green.  No designated successor — open tracks at the §4x notes' end.)
 
 ## 2026-06-10 §4x notes (FLOAT flip: +38 KB, four real bugs — minic arg conversion, emit CX clobber, load.c Ks truncation, Ocast AX clobber)
 

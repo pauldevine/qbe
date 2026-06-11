@@ -103,6 +103,14 @@ RUNTIME_TESTS=(
 	# mis-parsed (1.5 -> 7.5).
 	"minic/dos/examples/float_arg_coerce_probe.c:minic/dos/tests/float_arg_coerce_probe.golden.txt:medium"
 	"minic/dos/examples/float_arg_coerce_probe.c:minic/dos/tests/float_arg_coerce_probe.golden.txt:compact"
+	# Kw div/rem AX/DX liveness brackets (§4y): the inline idiv/div handlers
+	# clobbered AX (dividend staging, quotient) and DX (cwd/xor, remainder)
+	# with NO save — a live temp parked in either was destroyed (the §1h
+	# found-not-fixed two-div-one-call bug; 21 sites in the MP image via the
+	# emit-bracket audit, tools/run-emit-audit.sh).  rega-dependent trigger:
+	# green probe is necessary-not-sufficient, the audit is the real guard.
+	"minic/dos/examples/div_live_clobber_probe.c:minic/dos/tests/div_live_clobber_probe.golden.txt:medium"
+	"minic/dos/examples/div_live_clobber_probe.c:minic/dos/tests/div_live_clobber_probe.golden.txt:compact"
 	# Soft-float compare/convert result in CX (§4x): the Ocmps/Ostosi emit
 	# brackets pushed/popped CX unconditionally, so a result rega placed in
 	# CX was popped over with stale garbage (objfloat.c modulo sign-fix fired

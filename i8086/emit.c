@@ -449,6 +449,169 @@ kl_restore_axdx(AxDxSave s, FILE *f)
 	if (s.save_ax) fprintf(f, "\tpop ax\n");
 }
 
+/* --- QBE_EMIT_CHK: emit-bracket audit markers (§4y) ---------------------
+ *
+ * The i8086 emit handlers synthesize multi-instruction sequences that use
+ * scratch registers rega knows nothing about; every one of them must either
+ * bracket the scratch with push/pop or prove it dead.  Getting that wrong is
+ * a recurring bug class (§2l Kl logops, §4r shift count, §4t Osub rescue,
+ * §4x Ocmps CX-dest + Ocast AX).  With QBE_EMIT_CHK=1 in the environment,
+ * every emitted IR instruction is preceded by a comment
+ *     ; CHK <op> to=<dest> live=<regs>
+ * carrying the EXACT set of GPRs live after the instruction (block-level
+ * CFG fixpoint + per-instruction backward walk over the post-rega IR), and
+ * every block terminator by `; CHKT <type> live=<regs>`.
+ * tools/check_emit_brackets.py symbolically executes each marked region and
+ * flags any live non-dest register whose value does not survive.  Output is
+ * byte-identical when the variable is unset. */
+
+#define CHK_ISGPR(v)  ((v) >= RAX && (v) <= RDI)
+#define CHK_BIT(v)    (1u << ((v) - RAX))
+
+static int chk_on = -1;            /* getenv("QBE_EMIT_CHK"), resolved once */
+static uint *chk_livein;           /* per-block live-in masks, by b->id */
+static uint chk_nblk;              /* capacity of chk_livein */
+
+/* Exact gen/kill transfer for one instruction (backward). */
+static uint
+chk_ins_live(Ins *i, Fn *fn, uint live)
+{
+	int a;
+	Ref r, bse, idx;
+
+	if (rtype(i->to) == RTmp && CHK_ISGPR(i->to.val))
+		live &= ~CHK_BIT(i->to.val);
+	if (iscall(i->op))
+		live &= ~(CHK_BIT(RAX) | CHK_BIT(RCX) | CHK_BIT(RDX));
+	for (a = 0; a < 2; a++) {
+		r = i->arg[a];
+		if (rtype(r) == RTmp && CHK_ISGPR(r.val))
+			live |= CHK_BIT(r.val);
+		else if (rtype(r) == RMem) {
+			bse = fn->mem[r.val].base;
+			idx = fn->mem[r.val].index;
+			if (rtype(bse) == RTmp && CHK_ISGPR(bse.val))
+				live |= CHK_BIT(bse.val);
+			if (rtype(idx) == RTmp && CHK_ISGPR(idx.val))
+				live |= CHK_BIT(idx.val);
+		}
+	}
+	/* Exact pair rule (NARROWER than compute_axdx_liveafter's blanket
+	 * "Kl touches AX/DX", which deliberately over-approximates uses to
+	 * keep save brackets in place — fine for gating, but it would
+	 * manufacture false live registers for the audit): the only implicit
+	 * register-pair READ is the Kl call-result copy `%t =l copy R1`,
+	 * whose high word travels in DX.  argcls() can NOT discriminate here
+	 * because Km == Kl, so a store/load ADDRESS operand in AX would also
+	 * read as "Kl arg" — on i8086 near-data an address is 16-bit and has
+	 * no DX half.  Handler-internal DX scratch writes are exactly what
+	 * the checker audits, so they must not be modeled as uses either. */
+	if (i->op == Ocopy && i->cls == Kl
+	 && rtype(i->arg[0]) == RTmp && i->arg[0].val == RAX)
+		live |= CHK_BIT(RDX);
+	return live;
+}
+
+/* Live-out of a block = union of successor live-ins; ret blocks read the
+ * return value registers (AX, and DX for wide/float returns). */
+static uint
+chk_blk_liveout(Blk *b)
+{
+	uint out = 0;
+
+	if (!b->s1 && !b->s2)
+		return CHK_BIT(RAX) | CHK_BIT(RDX);
+	if (b->s1)
+		out |= chk_livein[b->s1->id];
+	if (b->s2)
+		out |= chk_livein[b->s2->id];
+	return out;
+}
+
+/* Backward transfer over a whole block (terminator + instructions). */
+static uint
+chk_blk_livein(Blk *b, Fn *fn)
+{
+	uint live;
+	int n;
+
+	live = chk_blk_liveout(b);
+	if (b->jmp.type == Jjnz && rtype(b->jmp.arg) == RTmp
+	 && CHK_ISGPR(b->jmp.arg.val))
+		live |= CHK_BIT(b->jmp.arg.val);
+	for (n = b->nins - 1; n >= 0; n--)
+		live = chk_ins_live(&b->ins[n], fn, live);
+	return live;
+}
+
+static void
+chk_fixpoint(Fn *fn)
+{
+	Blk *b;
+	uint in;
+	int changed;
+
+	if (fn->nblk > chk_nblk) {
+		chk_nblk = fn->nblk;
+		chk_livein = realloc(chk_livein, chk_nblk * sizeof *chk_livein);
+		if (!chk_livein)
+			die("emit: out of memory for CHK liveness");
+	}
+	if (getenv("QBE_EMIT_CHK_DBG"))
+		for (b = fn->start; b; b = b->link)
+			fprintf(stderr, "CHKDBG blk %s id=%d nblk=%d s1=%s s2=%s\n",
+			    b->name, b->id, fn->nblk,
+			    b->s1 ? b->s1->name : "-",
+			    b->s2 ? b->s2->name : "-");
+	for (b = fn->start; b; b = b->link)
+		chk_livein[b->id] = 0;
+	do {
+		changed = 0;
+		for (b = fn->start; b; b = b->link) {
+			in = chk_blk_livein(b, fn);
+			if (in != chk_livein[b->id]) {
+				chk_livein[b->id] = in;
+				changed = 1;
+			}
+		}
+	} while (changed);
+}
+
+static void
+chk_print_live(uint live, FILE *f)
+{
+	static const char *nm[] = { "ax", "cx", "dx", "bx", "si", "di" };
+	int r, first = 1;
+
+	for (r = 0; r < 6; r++)
+		if (live & (1u << r)) {
+			fprintf(f, "%s%s", first ? "" : ",", nm[r]);
+			first = 0;
+		}
+	if (first)
+		fputc('-', f);
+}
+
+static void
+chk_mark_ins(Ins *i, Fn *fn, uint liveafter, FILE *f)
+{
+	fprintf(f, "\t; CHK %s cls=%d to=", optab[i->op].name, i->cls);
+	if (rtype(i->to) == RTmp && CHK_ISGPR(i->to.val))
+		fputs(rname[i->to.val], f);
+	else if (rtype(i->to) == RTmp)
+		fputs("R?", f);
+	else if (rtype(i->to) == RSlot)
+		fputs("slot", f);
+	else
+		fputc('-', f);
+	fputs(" live=", f);
+	chk_print_live(liveafter, f);
+	fprintf(f, " cons=%d%d%d", g_live_ax_after, g_live_dx_after,
+	    g_live_bx_after);
+	fputc('\n', f);
+	(void)fn;
+}
+
 /* When a Kl op uses AX/DX as scratch (Oadd/Osub/Omul), an arg that
  * rega placed in AX or DX is silently lost: `mov ax, r0` overwrites
  * a r1-in-AX; `xor dx, dx` zeros a r1-in-DX.  Subsequent references
@@ -3568,9 +3731,23 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * cwd              ; sign-extend AX into DX:AX
 		 * idiv divisor
 		 * ; quotient in AX, remainder in DX
-		 */
+		 *
+		 * AX and DX are BOTH implicitly clobbered (dividend staging /
+		 * cwd / quotient+remainder) and rega doesn't model that — a
+		 * live temp parked in either was silently destroyed (the §1h
+		 * found-not-fixed two-div-one-call bug; §4y checker found 21
+		 * sites in the MP image, e.g. mp_format_mantissa and
+		 * mp_map_lookup).  Bracket them, liveness-gated, dest-skipped
+		 * — same discipline as the Kl div helper-call path above. */
+		int dst_in_ax_dv = (rtype(i->to) == RTmp && i->to.val == RAX);
+		int dst_in_dx_dv = (rtype(i->to) == RTmp && i->to.val == RDX);
+		int save_ax_dv = !dst_in_ax_dv && g_live_ax_after;
+		int save_dx_dv = !dst_in_dx_dv && g_live_dx_after;
 		r0 = i->arg[0]; /* dividend */
 		r1 = i->arg[1]; /* divisor */
+
+		if (save_ax_dv) fprintf(f, "\tpush ax\n");
+		if (save_dx_dv) fprintf(f, "\tpush dx\n");
 
 		/* HAZARD: idiv/div implicitly use DX:AX as the dividend, so a divisor
 		 * that rega placed in AX or DX is destroyed by the `mov ax, dividend`
@@ -3599,52 +3776,52 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\tcwd\n");
 			fprintf(f, "\tidiv bx\n");
 			fprintf(f, "\tpop bx\n");
-			if (i->op == Odiv) {
-				if (rtype(i->to) == RTmp && i->to.val != RAX)
-					{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
-			} else {
-				if (rtype(i->to) == RTmp)
-					fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
+		} else {
+			/* Move dividend to AX if not already there */
+			if (rtype(r0) != RTmp || r0.val != RAX) {
+				fprintf(f, "\tmov ax, ");
+				if (rtype(r0) == RTmp)
+					fprintf(f, "%s\n", rname[r0.val]);
+				else if (rtype(r0) == RCon)
+					fprintf(f, "%"PRIi64"\n", fn->con[r0.val].bits.i);
+				else
+					fprintf(f, "?\n");
 			}
-			return;
+
+			/* Sign-extend AX into DX:AX */
+			fprintf(f, "\tcwd\n");
+
+			/* Perform signed division.  8086 idiv requires a reg/mem operand;
+			 * an immediate is illegal.  Hoist constant divisors through BX. */
+			if (rtype(r1) == RTmp)
+				fprintf(f, "\tidiv %s\n", rname[r1.val]);
+			else if (rtype(r1) == RCon) {
+				fprintf(f, "\tpush bx\n");
+				fprintf(f, "\tmov bx, %"PRIi64"\n", fn->con[r1.val].bits.i);
+				fprintf(f, "\tidiv bx\n");
+				fprintf(f, "\tpop bx\n");
+			} else
+				fprintf(f, "\tidiv ?\n");
 		}
 
-		/* Move dividend to AX if not already there */
-		if (rtype(r0) != RTmp || r0.val != RAX) {
-			fprintf(f, "\tmov ax, ");
-			if (rtype(r0) == RTmp)
-				fprintf(f, "%s\n", rname[r0.val]);
-			else if (rtype(r0) == RCon)
-				fprintf(f, "%"PRIi64"\n", fn->con[r0.val].bits.i);
-			else
-				fprintf(f, "?\n");
-		}
-
-		/* Sign-extend AX into DX:AX */
-		fprintf(f, "\tcwd\n");
-
-		/* Perform signed division.  8086 idiv requires a reg/mem operand;
-		 * an immediate is illegal.  Hoist constant divisors through BX. */
-		if (rtype(r1) == RTmp)
-			fprintf(f, "\tidiv %s\n", rname[r1.val]);
-		else if (rtype(r1) == RCon) {
-			fprintf(f, "\tpush bx\n");
-			fprintf(f, "\tmov bx, %"PRIi64"\n", fn->con[r1.val].bits.i);
-			fprintf(f, "\tidiv bx\n");
-			fprintf(f, "\tpop bx\n");
-		} else
-			fprintf(f, "\tidiv ?\n");
-
-		/* Move result to destination */
+		/* Move result to destination BEFORE the bracket pops (a dest
+		 * that overlaps a saved reg has its save skipped above). */
 		if (i->op == Odiv) {
 			/* Quotient is in AX */
-			if (rtype(i->to) == RTmp && i->to.val != RAX)
+			if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			else if (rtype(i->to) == RTmp && i->to.val != RAX)
 				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		} else {
 			/* Remainder is in DX */
-			if (rtype(i->to) == RTmp)
+			if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn));
+			else if (rtype(i->to) == RTmp)
 				fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
 		}
+
+		if (save_dx_dv) fprintf(f, "\tpop dx\n");
+		if (save_ax_dv) fprintf(f, "\tpop ax\n");
 		return;
 	}
 
@@ -3654,9 +3831,18 @@ emitins(Ins *i, Fn *fn, FILE *f)
 		 * xor dx, dx       ; zero-extend into DX:AX
 		 * div divisor
 		 * ; quotient in AX, remainder in DX
-		 */
+		 *
+		 * Same implicit AX/DX clobber as the signed path above —
+		 * bracket them, liveness-gated, dest-skipped (§4y). */
+		int dst_in_ax_du = (rtype(i->to) == RTmp && i->to.val == RAX);
+		int dst_in_dx_du = (rtype(i->to) == RTmp && i->to.val == RDX);
+		int save_ax_du = !dst_in_ax_du && g_live_ax_after;
+		int save_dx_du = !dst_in_dx_du && g_live_dx_after;
 		r0 = i->arg[0]; /* dividend */
 		r1 = i->arg[1]; /* divisor */
+
+		if (save_ax_du) fprintf(f, "\tpush ax\n");
+		if (save_dx_du) fprintf(f, "\tpush dx\n");
 
 		/* HAZARD (see signed path above): a divisor in AX/DX is destroyed by
 		 * the `mov ax, dividend` / `xor dx, dx` DX:AX setup.  Stage it to BX. */
@@ -3681,52 +3867,51 @@ emitins(Ins *i, Fn *fn, FILE *f)
 			fprintf(f, "\txor dx, dx\n");
 			fprintf(f, "\tdiv bx\n");
 			fprintf(f, "\tpop bx\n");
-			if (i->op == Oudiv) {
-				if (rtype(i->to) == RTmp && i->to.val != RAX)
-					{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
-			} else {
-				if (rtype(i->to) == RTmp)
-					fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
-			}
-			return;
-		}
-
-		/* Move dividend to AX if not already there */
-		if (rtype(r0) != RTmp || r0.val != RAX) {
-			fprintf(f, "\tmov ax, ");
-			if (rtype(r0) == RTmp)
-				fprintf(f, "%s\n", rname[r0.val]);
-			else if (rtype(r0) == RCon)
-				fprintf(f, "%"PRIi64"\n", fn->con[r0.val].bits.i);
-			else
-				fprintf(f, "?\n");
-		}
-
-		/* Zero-extend into DX:AX */
-		fprintf(f, "\txor dx, dx\n");
-
-		/* Perform unsigned division.  Same constant-hoist as idiv above. */
-		if (rtype(r1) == RTmp) {
-			fprintf(f, "\tdiv %s\n", rname[r1.val]);
-		} else if (rtype(r1) == RCon) {
-			fprintf(f, "\tpush bx\n");
-			fprintf(f, "\tmov bx, %"PRIi64"\n", fn->con[r1.val].bits.i);
-			fprintf(f, "\tdiv bx\n");
-			fprintf(f, "\tpop bx\n");
 		} else {
-			fprintf(f, "\tdiv ?\n");
+			/* Move dividend to AX if not already there */
+			if (rtype(r0) != RTmp || r0.val != RAX) {
+				fprintf(f, "\tmov ax, ");
+				if (rtype(r0) == RTmp)
+					fprintf(f, "%s\n", rname[r0.val]);
+				else if (rtype(r0) == RCon)
+					fprintf(f, "%"PRIi64"\n", fn->con[r0.val].bits.i);
+				else
+					fprintf(f, "?\n");
+			}
+
+			/* Zero-extend into DX:AX */
+			fprintf(f, "\txor dx, dx\n");
+
+			/* Perform unsigned division.  Same constant-hoist as idiv above. */
+			if (rtype(r1) == RTmp) {
+				fprintf(f, "\tdiv %s\n", rname[r1.val]);
+			} else if (rtype(r1) == RCon) {
+				fprintf(f, "\tpush bx\n");
+				fprintf(f, "\tmov bx, %"PRIi64"\n", fn->con[r1.val].bits.i);
+				fprintf(f, "\tdiv bx\n");
+				fprintf(f, "\tpop bx\n");
+			} else {
+				fprintf(f, "\tdiv ?\n");
+			}
 		}
 
-		/* Move result to destination */
+		/* Move result to destination BEFORE the bracket pops. */
 		if (i->op == Oudiv) {
 			/* Quotient is in AX */
-			if (rtype(i->to) == RTmp && i->to.val != RAX)
+			if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word [bp%+ld], ax\n", (long)slot(i->to, fn));
+			else if (rtype(i->to) == RTmp && i->to.val != RAX)
 				{ if (strcmp(rname[i->to.val], "ax") != 0) fprintf(f, "\tmov %s, ax\n", rname[i->to.val]); }
 		} else {
 			/* Remainder is in DX */
-			if (rtype(i->to) == RTmp)
+			if (rtype(i->to) == RSlot)
+				fprintf(f, "\tmov word [bp%+ld], dx\n", (long)slot(i->to, fn));
+			else if (rtype(i->to) == RTmp)
 				fprintf(f, "\tmov %s, dx\n", rname[i->to.val]);
 		}
+
+		if (save_dx_du) fprintf(f, "\tpop dx\n");
+		if (save_ax_du) fprintf(f, "\tpop ax\n");
 		return;
 	}
 
@@ -4433,11 +4618,19 @@ end_load_block:
 	}
 }
 
+static uint *chk_la_buf;   /* per-instruction live-after masks */
+static uint chk_la_cap;
+
 void
 i8086_emitfn(Fn *fn, FILE *f)
 {
 	Blk *b;
 	Ins *i;
+
+	if (chk_on == -1)
+		chk_on = (getenv("QBE_EMIT_CHK") != 0);
+	if (chk_on)
+		chk_fixpoint(fn);
 
 	/* Emit memory model header (once per output file) */
 	emit_model_header(f);
@@ -4489,16 +4682,46 @@ i8086_emitfn(Fn *fn, FILE *f)
 		}
 		compute_axdx_liveafter(b, fn, la_ax_buf, la_dx_buf, la_bx_buf);
 
+		if (chk_on) {
+			/* Exact per-instruction live-after for the audit markers:
+			 * backward walk seeded from the CFG-fixpoint live-out. */
+			uint cl;
+			int n;
+			if (b->nins > chk_la_cap) {
+				chk_la_cap = b->nins;
+				chk_la_buf = realloc(chk_la_buf,
+					chk_la_cap * sizeof *chk_la_buf);
+				if (!chk_la_buf)
+					die("emit: out of memory for CHK buffer");
+			}
+			cl = chk_blk_liveout(b);
+			if (b->jmp.type == Jjnz && rtype(b->jmp.arg) == RTmp
+			 && CHK_ISGPR(b->jmp.arg.val))
+				cl |= CHK_BIT(b->jmp.arg.val);
+			for (n = b->nins - 1; n >= 0; n--) {
+				chk_la_buf[n] = cl;
+				cl = chk_ins_live(&b->ins[n], fn, cl);
+			}
+		}
+
 		for (i = b->ins; i < &b->ins[b->nins]; i++) {
 			int idx = (int)(i - b->ins);
 			g_live_ax_after = la_ax_buf[idx];
 			g_live_dx_after = la_dx_buf[idx];
 			g_live_bx_after = la_bx_buf[idx];
+			if (chk_on)
+				chk_mark_ins(i, fn, chk_la_buf[idx], f);
 			emitins(i, fn, f);
 		}
 		g_live_ax_after = 1;
 		g_live_dx_after = 1;
 		g_live_bx_after = 1;
+
+		if (chk_on) {
+			fprintf(f, "\t; CHKT %d live=", b->jmp.type);
+			chk_print_live(chk_blk_liveout(b), f);
+			fputc('\n', f);
+		}
 
 		/* Emit jump */
 		switch (b->jmp.type) {
