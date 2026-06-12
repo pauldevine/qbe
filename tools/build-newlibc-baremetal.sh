@@ -70,6 +70,28 @@ fi
 if grep -q 'bm_interrupts\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
 fi
+if grep -q 'bm_display\.h' "$SRC"; then
+	SUPPORT_TUS+=("$NLC_DIR/bm_display.c" "$NLC_DIR/bm_font_data.c")
+fi
+if grep -q 'bm_keyboard\.h' "$SRC"; then
+	SUPPORT_TUS+=("$NLC_DIR/bm_keyboard.c"
+	              "$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
+fi
+if grep -q 'bm_serial\.h' "$SRC"; then
+	SUPPORT_TUS+=("$NLC_DIR/bm_serial.c"
+	              "$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
+fi
+# A program may pull the same support TU via more than one header probe
+# (keyboard + serial both need interrupts/pic); dedup, preserving order.
+DEDUP_TUS=()
+for tu in "${SUPPORT_TUS[@]}"; do
+	seen=0
+	for d in "${DEDUP_TUS[@]:-}"; do
+		[ "$d" = "$tu" ] && seen=1 && break
+	done
+	[ "$seen" = 0 ] && DEDUP_TUS+=("$tu")
+done
+SUPPORT_TUS=("${DEDUP_TUS[@]}")
 
 mkdir -p "$OUT_DIR"
 ERR="$OUT_DIR/build.err"

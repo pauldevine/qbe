@@ -5,10 +5,15 @@
 /* Install handlers into the IVT.  Call with interrupts still disabled
  * (the bare-metal flow: bm_interrupts_init() then bm_timer_init() then
  * bm_interrupts_enable()). */
+typedef void (*bm_isr_fn_t)(void);
+
 void bm_interrupts_init(void);
 void bm_interrupts_enable(void);
 void bm_interrupts_disable(void);
 void bm_set_vector(unsigned char int_num,
                    unsigned short seg, unsigned short off);
+/* Model-agnostic IVT install for a compiler-emitted ISR (resolves the
+ * code segment for near-code models via qbe_get_cs). */
+void bm_install_isr(unsigned char int_num, bm_isr_fn_t fn);
 
 #endif

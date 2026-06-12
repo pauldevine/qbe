@@ -46,10 +46,9 @@ void __far __attribute__((interrupt)) timer_isr(void) {
 
 /* Handler address, model-agnostic: far-code models carry seg:off in
  * the function pointer; near-code models a bare offset whose segment
- * is the (single) code frame — qbe_get_cs(). */
-typedef void (*bm_isr_fn_t)(void);
-
-static void install(unsigned char int_num, bm_isr_fn_t fn) {
+ * is the (single) code frame — qbe_get_cs().  Exported so driver TUs
+ * (bm_keyboard.c, bm_serial.c) can install their own ISRs. */
+void bm_install_isr(unsigned char int_num, bm_isr_fn_t fn) {
     uint32_t lin;
     uint16_t seg, off;
 
@@ -68,7 +67,7 @@ void bm_interrupts_init(void) {
      * image may have overwritten — a bare sti without this wild-jumps
      * within milliseconds. */
     bm_pic_init();
-    install(INT_TIMER, timer_isr);
+    bm_install_isr(INT_TIMER, timer_isr);
 }
 
 void bm_interrupts_enable(void) {

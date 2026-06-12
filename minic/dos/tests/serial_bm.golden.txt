@@ -1,0 +1,12 @@
+Victor 9000 bare-metal serial RX/ISR test (qbe/minic)
+phase 1: PIC re-init + timer ISR (INT 0x42)
+phase 2: 8253 ch2 100 Hz + IR2 unmask
+phase 3: 7201 ch B 9600 + RX ISR (INT 0x41) + IR1 unmask
+phase 4: sti
+phase 5: no RX byte pending at start: yes
+phase 6: waiting for 6 streamed bytes: got "victor"
+phase 7: bytes match "victor": yes
+phase 8: serial ISR entered: yes
+phase 9: no ring-buffer overruns: yes
+phase 10: timer still ticking alongside IR1: yes
+PASS: bare-metal serial RX ISR checks completed.

@@ -26,6 +26,20 @@ set -eu
 BIN="${1:-}"
 RUN_SECS="${2:-${VICTOR_RUN_SECS:-20}}"
 LOAD_ADDR="${VICTOR_LOAD_ADDR:-0x3000}"
+# Input injection (both optional, both delayed so the program is up first):
+#   $V9K_KEYPOST        text typed via MAME's natural keyboard (the
+#                       newlibc-validated natkeyboard:post pattern).
+#                       Keep it to plain ASCII; ' and \ are escaped.
+#   $V9K_KEYPOST_DELAY  seconds before typing (default 3)
+#   $V9K_SERIAL_IN      file whose BYTES are streamed into serial port B
+#                       (7201 channel B RX) via a second null_modem,
+#                       attached mid-run from Lua so nothing is lost
+#                       while the program is still initializing
+#   $V9K_SERIAL_IN_DELAY seconds before attaching (default 3)
+KEYPOST="${V9K_KEYPOST:-}"
+KEYPOST_DELAY="${V9K_KEYPOST_DELAY:-3}"
+SERIAL_IN="${V9K_SERIAL_IN:-}"
+SERIAL_IN_DELAY="${V9K_SERIAL_IN_DELAY:-3}"
 
 if [ -z "$BIN" ] || [ ! -f "$BIN" ]; then
 	echo "usage: $0 <path-to-prog.bin> [seconds_to_run]" >&2
@@ -77,11 +91,21 @@ for d in cfg nvram inp sta snap diff comments; do mkdir -p "$WORK/home/$d"; done
 
 # --- Lua autoboot loader (the newlibc phase-3 pattern) -------------------
 BIN_ABS="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
+KEYPOST_LUA="$(printf '%s' "$KEYPOST" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")"
+SERIAL_IN_ABS=""
+if [ -n "$SERIAL_IN" ]; then
+	[ -f "$SERIAL_IN" ] || { echo "$0: V9K_SERIAL_IN not found: $SERIAL_IN" >&2; exit 2; }
+	SERIAL_IN_ABS="$(cd "$(dirname "$SERIAL_IN")" && pwd)/$(basename "$SERIAL_IN")"
+fi
 LUA="$WORK/load.lua"
 cat > "$LUA" <<EOF
 local binary_path = '$BIN_ABS'
 local load_addr = $LOAD_ADDR
 local run_seconds = $RUN_SECS
+local keypost_text = '$KEYPOST_LUA'
+local keypost_delay = $KEYPOST_DELAY
+local serial_in_path = '$SERIAL_IN_ABS'
+local serial_in_delay = $SERIAL_IN_DELAY
 
 local function read_file(path)
     local file, err = io.open(path, 'rb')
@@ -122,11 +146,57 @@ set_reg(cpu, 'SS', 0)
 set_reg(cpu, 'SP', 0xF0EC)
 set_reg(cpu, 'IP', load_addr)
 
-emu.wait(run_seconds)
+-- Delayed input injection: keystrokes via the natural keyboard, and/or
+-- serial bytes by attaching a file to port B's null_modem mid-run (so
+-- the stream starts only after the program has initialized the 7201).
+local events = {}
+if keypost_text ~= '' then
+    events[#events + 1] = { at = keypost_delay, fn = function()
+        local natkbd = manager.machine.natkeyboard
+        if not natkbd.can_post then
+            error('natural keyboard posting unsupported')
+        end
+        natkbd.in_use = true
+        natkbd:post(keypost_text)
+    end }
+end
+if serial_in_path ~= '' then
+    events[#events + 1] = { at = serial_in_delay, fn = function()
+        for tag, img in pairs(manager.machine.images) do
+            local dtag = img.device and img.device.tag or tostring(tag)
+            if string.find(dtag, 'rs232b', 1, true) then
+                local ok = img:load(serial_in_path)
+                return
+            end
+        end
+        error('no rs232b image device to attach serial input to')
+    end }
+end
+table.sort(events, function(a, b) return a.at < b.at end)
+
+local now = 0
+for i = 1, #events do
+    if events[i].at > now then
+        emu.wait(events[i].at - now)
+        now = events[i].at
+    end
+    events[i].fn()
+end
+if run_seconds > now then
+    emu.wait(run_seconds - now)
+end
 manager.machine:exit()
 EOF
 
 # --- Run MAME headless (no disk, no floppy — pure RAM load) --------------
+# With a second null_modem on rs232b the two bitbanger media options get
+# numeric suffixes (creation order: rs232a first), so the capture file
+# binds to -bitbanger1; port B starts detached and Lua attaches the input
+# file at +serial_in_delay.
+RS232_ARGS=(-rs232a null_modem -bitbanger "$CAP")
+if [ -n "$SERIAL_IN_ABS" ]; then
+	RS232_ARGS=(-rs232a null_modem -rs232b null_modem -bitbanger1 "$CAP")
+fi
 SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}" "$MAME_BIN" victor9k \
 	-rompath "$MAME_ROMS" \
 	-homepath "$WORK/home" \
@@ -142,7 +212,7 @@ SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}" "$MAME_BIN" victor9k \
 	-autoboot_delay 0 \
 	-video none -sound none -nothrottle -skip_gameinfo \
 	-seconds_to_run "$(( RUN_SECS + 30 ))" \
-	-rs232a null_modem -bitbanger "$CAP" \
+	"${RS232_ARGS[@]}" \
 	>/dev/null 2>&1 &
 MAME_PID=$!
 
