@@ -455,6 +455,10 @@ struct Lnk {
 	char export;
 	char thread;
 	char common;
+	char isr;     /* i8086: function is an interrupt handler — the
+	               * backend emits a full ISR prologue/epilogue
+	               * (all-register save, DS/ES=DGROUP, iret).  Set by
+	               * the `interrupt` linkage keyword. */
 	char align;
 	char *sec;
 	char *secf;

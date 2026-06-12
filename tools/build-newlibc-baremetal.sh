@@ -61,6 +61,16 @@ SUPPORT_TUS=(
 	"$NLC_DIR/bm_console.c"
 )
 
+# Optional driver TUs (§6d), linked only when the program includes their
+# headers — keeps driver-free images (hello_bm) byte-stable for
+# test_omf_link.sh's raw-structure asserts.
+if grep -q 'bm_timer\.h' "$SRC"; then
+	SUPPORT_TUS+=("$NLC_DIR/bm_timer.c")
+fi
+if grep -q 'bm_interrupts\.h' "$SRC"; then
+	SUPPORT_TUS+=("$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
+fi
+
 mkdir -p "$OUT_DIR"
 ERR="$OUT_DIR/build.err"
 : > "$ERR"

@@ -11,6 +11,78 @@ status claims may be stale, verify against current code).
 
 ---
 
+# Next session (§6c — continue Phase 6.  §6b [2026-06-11, this session] completed **step 2: the newlibc portable subset runs DOS-hosted and is gated.**  ELEVEN phase3 tests (snprintf, fat_bpb/chain/root/dir/file, fat_vfs, ramfs, stdio_route, bss, terminal_meta) now build small-model via `tools/build-newlibc-test.sh` — test TU (`-Dmain=newlibc_test_main`) + libgloss/VFS/FAT/block + `minic/dos/newlibc/dos_shim.c` against crt0 + `libstub_to_exe.py --no-stdio` — and byte-diff against goldens in `tools/test-dos.sh`.  The full newlibc stack (printf wrappers → syscalls → VFS → devices/FAT-over-RAM-block) executes through THIS toolchain in DOSBox.  Two toolchain bugs fixed en route (static file-scope DATA linkage; decimal `UL` literal typing), both probe-gated.  Gate 274→**287/287**.  MP compact byte-identical (rigorous: pre-change toolchain rebuilt from git and whole-image `cmp`'d).  Next: **step 3** — omf_link raw-binary output + minic-built crt0 + MAME bare-metal hello at load addr 0x3000; then step 4 (drivers/ISRs/extended-asm).)
+
+## §6b session notes (2026-06-11)
+
+### The two toolchain fixes (probe-gated, loud-verified pre-fix)
+1. **Static file-scope DATA had no internal linkage** — minic NEVER emitted `export`
+   on data (`export data` is valid QBE it just didn't use), and asm_to_omf.py
+   compensated by auto-promoting EVERY data `_xxx:` label to an OMF public; two TUs
+   reusing a static name died "duplicate public symbol" (newlibc: libgloss/dirent.c
+   and vfs/vfs.c both define `static … dir_table[]`).  Fix mirrors §1q's function
+   story end-to-end: minic marks non-static file-scope data `export data` (new
+   `glostatic[]` flag; an `nglo` watermark `glo_decl_start` captured in
+   type_and_ident and retro-marked by the STATIC typed_decl variants — the variants
+   reduce AFTER typed_decl_rest registers the slots, and the lexer's pending_static
+   is already reset by then; `emit_static_local` marks mangled function-locals;
+   `STATIC structstart` marks its sai slot) and asm_to_omf.py's data auto-promotion
+   is REMOVED — `.globl` is now authoritative for code AND data.
+   `static_data_probe` (TWO TUs, small+medium gate entries: same-name file statics,
+   same-name block statics behind same-name static fns, plus a cross-TU extern
+   global proving export still works).
+2. **Decimal `12345UL` was typed int** — the decimal lexer's `u`-suffix branch
+   consumed a trailing `L` without setting suffix_l (hex/octal were correct), so a
+   `UL` literal ≤0xFFFF was pushed as ONE stack word; newlibc's snprintf_test `%lu`
+   read a garbage high word (`12345UL` printed 1093808185 = 0x4132<<16 | 12345).
+   longconst_probe gained ulvararg/ulassign cases (golden regenerated, medium+large).
+
+### Step-2 infrastructure (committed, not probe-grade)
+- `tools/build-newlibc-test.sh`: small model only (far models would need newlibc's
+  printf to answer minic's far_stdlib mangling — later phase).  `NEWLIBC_DIR`
+  overrides `~/projects/newlibc/phase3_newlib`.
+- `minic/dos/newlibc/shiminc/`: the §6a triage shim headers PROMOTED to the
+  committed tree (gate reproducibility); `build/newlibc-triage/sweep.sh` still has
+  its own copy (probe-grade, can be repointed later).
+- `minic/dos/newlibc/dos_shim.c`: console/tty device ops (INT 21h AH=3F/40 via
+  libstub int86), 100Hz wall-clock timer (AH=2Ch), display_puts→console,
+  POSIX unprefixed aliases (open/read/write/…→`_`-syscalls), minimal
+  FILE-table fopen/fclose/fread/fgetc over VFS fds (libstub's one-word
+  `_stdin/_stdout/_stderr` sentinels are layout-compatible with newlib's
+  `FILE{int _file;…}` first member — kept), `_impure_ptr`/`__heap_start/_end`
+  link satisfaction, and `main()` = `vfs_init()` (board_init()'s job on metal)
+  then `newlibc_test_main()`.
+- `libstub_to_exe.py --no-stdio` (near-code only): drops FILEIO_EXE+FAR_SPRINTF_EXE
+  and skips libstub.asm `_sprintf/_fgets/_putchar/_abort/_stat` so the newlibc
+  printf family + dos_shim own those names; keeps malloc/free, str/mem fns,
+  int86/intdos, `_qbe_*` helpers, and the stdio sentinels.
+- Gate: `run_newlibc_test` in tools/test-dos.sh, skip (77) when the newlibc tree
+  is absent; goldens `minic/dos/tests/newlibc_<test>.golden.txt`.
+
+### Excluded / deferred tests (with reasons)
+- memory_test: scans the Victor physical memory map — hardware-flavored, fails
+  DOS-hosted by design; belongs to step-3+ MAME bare-metal.
+- stdin_test / scanf_test / read_test: need stdin feeding — run-dos-exe.sh has no
+  input-redirect support yet (DOS `< file` works per the §3n REPL work; small
+  harness lever if wanted).
+- hello: BUILDS and is shimmed (timer/display/malloc) but prints wall-clock tick
+  values — not golden-able as-is.
+
+### Open tracks (new + carried)
+- newlibc step 3: omf_link raw-binary output mode + minic-built crt0 + MAME
+  bare-metal hello (load addr 0x3000, serial output); then tools/test-newlibc.sh.
+- run-dos-exe.sh stdin redirect (unlocks 3 more newlibc tests).
+- newlibc-under-far-models stdio story (minic far_stdlib mangling vs newlibc's
+  own printf) — decide when a far consumer appears.
+- Carried: far static-DATA-ptr reloc (§1g, static_sym_init_probe reproduces);
+  extended-asm output constraints + Intel template translation (step 4); ISR
+  definition strategy (step 4); param/static-local shadowing a global; huge
+  `_qbe_huge_add` ≥0x8000 (§4i); `jmp_buf bufs[6]` (§4v, unreduced); minic
+  static-init FLOAT const-expr folding; small setjmp/longjmp; multi-decl items
+  after the first skip block_scope_decl; Kw spill-slot sharing.
+
+---
+
 # Next session (§6b — continue Phase 6.  §6a [2026-06-11, this session] ran the newlibc TRIAGE SWEEP (Phase-6 step 1) and fixed SEVEN minic dialect gaps it exposed: the per-TU sweep (`build/newlibc-triage/sweep.sh` + `shiminc/` newlib-shaped shim headers) took phase3_newlib from **21/66 → 46/66 TUs compiling** under BOTH small and medium, and the **entire portable subset (libgloss ×7, vfs ×2, every non-asm test) now compiles** — exactly the step-2 target population.  Every remaining failure is inline-asm-flavored (drivers + dos_tests) or the ISR-definition gap — i.e. step-4 work, none of it portable-subset.  Six new probes, gate 262→274.  Next: **step 2 proper** — link the portable subset against libstub, run VFS/FAT/printf tests DOS-hosted in DOSBox, gate them; then step 3 (omf_link raw-binary output + minic crt0).)
 
 ## §6a session notes (2026-06-11)

@@ -4637,7 +4637,34 @@ i8086_emitfn(Fn *fn, FILE *f)
 
 	/* Function header */
 	fprintf(f, "\n");
-	emitfnlnk(fn->name, &fn->lnk, f);
+	if (fn->lnk.isr) {
+		/* Interrupt handler: emit two CS-addressable data words ahead
+		 * of the entry label, inside the same `.text` region so
+		 * asm_to_omf.py keeps them glued to the function when it
+		 * splits oversized TUs at function boundaries.
+		 *
+		 *   _qbe_isr_es_<fn>:  static ES save slot.  The Victor 9000
+		 *       BIOS ROM handlers clobber ES without saving it, so the
+		 *       interrupted ES must live in static memory, never on
+		 *       the stack (newlibc INTERRUPT_HANDLER_PATTERN.md,
+		 *       hardware-validated).
+		 *   _qbe_isr_dg_<fn>:  `dw DGROUP` — link-time group selector
+		 *       (MZ reloc / raw-binary absolute patch, the proven
+		 *       libstub `_dgroup_para` pattern).  Read with a cs:
+		 *       override so the prologue can load DS=DGROUP without
+		 *       trusting the interrupted DS.
+		 *
+		 * Both live in the code segment: real-mode RAM is writable and
+		 * cs: reaches them from the handler regardless of model. */
+		fprintf(f, ".text\n");
+		fprintf(f, "_qbe_isr_es_%s:\n\tdw 0\n", fn->name);
+		fprintf(f, "_qbe_isr_dg_%s:\n\tdw DGROUP\n", fn->name);
+		if (fn->lnk.export)
+			fprintf(f, ".globl %s%s\n", T.assym, fn->name);
+		fprintf(f, "%s%s:\n", T.assym, fn->name);
+	} else {
+		emitfnlnk(fn->name, &fn->lnk, f);
+	}
 
 	/* MASM `proc far/near` directive removed.  emitfnlnk above already
 	 * emitted the prefixed entry label; far calls are signaled by the
@@ -4654,6 +4681,26 @@ i8086_emitfn(Fn *fn, FILE *f)
 	 *
 	 * We always emit the saves rather than tracking actual usage; the
 	 * extra 3 push/pop pairs are tiny relative to the call overhead. */
+	if (fn->lnk.isr) {
+		/* Interrupt-handler prologue, wrapped OUTSIDE the standard
+		 * frame so the [bp-2/-4/-6] callee-save layout is unchanged:
+		 *   1. ES -> static memory FIRST (never stacked — Victor BIOS
+		 *      ROM handlers corrupt ES; see the header words above).
+		 *   2. Save every caller-visible register the body or its
+		 *      callees may touch (bx/si/di are saved by the standard
+		 *      frame below).
+		 *   3. DS = ES = DGROUP from the CS-local selector word; the
+		 *      interrupted DS/ES are arbitrary (BIOS, DOS, far ops),
+		 *      and generated code assumes both point at DGROUP. */
+		fprintf(f, "\tmov [cs:_qbe_isr_es_%s], es\n", fn->name);
+		fprintf(f, "\tpush ax\n");
+		fprintf(f, "\tpush cx\n");
+		fprintf(f, "\tpush dx\n");
+		fprintf(f, "\tpush ds\n");
+		fprintf(f, "\tmov ds, [cs:_qbe_isr_dg_%s]\n", fn->name);
+		fprintf(f, "\tmov ax, ds\n");
+		fprintf(f, "\tmov es, ax\n");
+	}
 	fprintf(f, "\tpush bp\n");
 	fprintf(f, "\tmov bp, sp\n");
 	fprintf(f, "\tpush bx\n");
@@ -4718,9 +4765,22 @@ i8086_emitfn(Fn *fn, FILE *f)
 		g_live_bx_after = 1;
 
 		if (chk_on) {
-			fprintf(f, "\t; CHKT %d live=", b->jmp.type);
-			chk_print_live(chk_blk_liveout(b), f);
-			fputc('\n', f);
+			if (fn->lnk.isr
+			    && (b->jmp.type == Jret0 || b->jmp.type == Jretw
+			        || b->jmp.type == Jretl || b->jmp.type == Jretf0
+			        || b->jmp.type == Jretfw || b->jmp.type == Jretfl)) {
+				/* ISR ret region: the epilogue restores the
+				 * INTERRUPTED context — every register (and ES/DS)
+				 * legitimately ends different from region entry.
+				 * The `isr` tag tells the checker to skip; the
+				 * epilogue is one fixed template, not bracket
+				 * logic. */
+				fprintf(f, "\t; CHKT %d live=isr\n", b->jmp.type);
+			} else {
+				fprintf(f, "\t; CHKT %d live=", b->jmp.type);
+				chk_print_live(chk_blk_liveout(b), f);
+				fputc('\n', f);
+			}
 		}
 
 		/* Emit jump */
@@ -4728,26 +4788,41 @@ i8086_emitfn(Fn *fn, FILE *f)
 		case Jret0:
 		case Jretw:
 		case Jretl:
-			/* Near return - for tiny/small memory models */
-			fprintf(f, "\tlea sp, [bp-6]\n");
-			fprintf(f, "\tpop di\n");
-			fprintf(f, "\tpop si\n");
-			fprintf(f, "\tpop bx\n");
-			fprintf(f, "\tpop bp\n");
-			fprintf(f, "\tret\n");
-			break;
 		case Jretf0:
 		case Jretfw:
 		case Jretfl:
-			/* Far return - for medium/large/huge memory models
-			 * RETF pops both IP and CS from stack (4 bytes total)
-			 */
+			if (fn->lnk.isr) {
+				/* Interrupt-handler epilogue: unwind the standard
+				 * frame, then the outer ISR save set, then restore
+				 * ES from static memory LAST (cs: override — DS is
+				 * already the interrupted value) and iret.  Both
+				 * near- and far-ret IR forms end in iret. */
+				fprintf(f, "\tlea sp, [bp-6]\n");
+				fprintf(f, "\tpop di\n");
+				fprintf(f, "\tpop si\n");
+				fprintf(f, "\tpop bx\n");
+				fprintf(f, "\tpop bp\n");
+				fprintf(f, "\tpop ds\n");
+				fprintf(f, "\tpop dx\n");
+				fprintf(f, "\tpop cx\n");
+				fprintf(f, "\tpop ax\n");
+				fprintf(f, "\tmov es, [cs:_qbe_isr_es_%s]\n",
+					fn->name);
+				fprintf(f, "\tiret\n");
+				break;
+			}
 			fprintf(f, "\tlea sp, [bp-6]\n");
 			fprintf(f, "\tpop di\n");
 			fprintf(f, "\tpop si\n");
 			fprintf(f, "\tpop bx\n");
 			fprintf(f, "\tpop bp\n");
-			fprintf(f, "\tretf\n");
+			if (b->jmp.type == Jretf0 || b->jmp.type == Jretfw
+			    || b->jmp.type == Jretfl)
+				/* RETF pops both IP and CS (4 bytes total) —
+				 * medium/large/huge memory models. */
+				fprintf(f, "\tretf\n");
+			else
+				fprintf(f, "\tret\n");
 			break;
 		case Jjmp:
 			if (b->s1 != b->link && b->s1->name[0])

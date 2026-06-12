@@ -2495,6 +2495,16 @@ _qbe_huge_cmp:
     pop bp
     ret
 
+; unsigned _qbe_get_cs(void) — the caller's code segment (the call is
+; near, so our CS is the caller's CS).  Used to build far IVT entries
+; for __attribute__((interrupt)) handlers: segment = CS, offset =
+; (uint16_t)fn.  Near-code models only; far-code callers would need a
+; per-segment answer.
+global _qbe_get_cs
+_qbe_get_cs:
+    mov ax, cs
+    ret
+
 ; ============================================================================
 ; int86x / intdosx / segread — the segment-aware members of the DOS API trio.
 ;

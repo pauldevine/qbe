@@ -458,6 +458,17 @@ RUNTIME_TESTS=(
 	# prints ok8 0).
 	"minic/dos/examples/split_stack_probe.c:minic/dos/tests/split_stack_probe.golden.txt:compact"
 	"minic/dos/examples/split_stack_probe.c:minic/dos/tests/split_stack_probe.golden.txt:large"
+	# §6d __attribute__((interrupt)) — QBE `interrupt` linkage → i8086 ISR
+	# prologue/epilogue (static-memory ES save, DS/ES=DGROUP from a CS-local
+	# `dw DGROUP` word, all-register save, iret).  Handler on software INT
+	# 0xF1: near-data + far MMIO + callee + 32-bit divide inside the ISR;
+	# fired 1006 times (stack-balance hammer).  The pre-fix toolchain dies
+	# at build ("last block misses jump" — asm-"iret" left the block
+	# unterminated); a wrong epilogue dies at first trigger.  small pins the
+	# bare-metal model (near ret → iret), medium the far-code path
+	# (retf → iret + far fn-ptr IVT install).
+	"minic/dos/examples/isr_probe.c:minic/dos/tests/isr_probe.golden.txt:small"
+	"minic/dos/examples/isr_probe.c:minic/dos/tests/isr_probe.golden.txt:medium"
 )
 
 # --- Stevie size budget ----------------------------------------------------
