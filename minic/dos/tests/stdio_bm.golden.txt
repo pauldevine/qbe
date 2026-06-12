@@ -1,0 +1,21 @@
+Victor 9000 bare-metal newlibc-stdio test (qbe/minic)
+phase 1: PIC re-init + timer ISR (INT 0x42)
+phase 2: 8253 ch2 100 Hz + IR2 unmask
+phase 3: tty init (display + keyboard, IR6)
+phase 4: sti
+phase 5: vfs init (fds 0/1/2 -> /dev/console)
+phase 6: printf formats: -123 456 0xbeef v9k !
+phase 6: printf returned 47
+phase 7: write(1) direct
+phase 7: write returned 25
+phase 8: fputc/fputs to stdout+stderr: .. ok
+phase 9: fprintf to /dev/null: yes
+phase 10: read /ram/readme.txt via fopen+fread: yes
+phase 11: isatty(0)=1 isatty(1)=1
+phase 12: prompt + fgets(stdin)
+v9k> vx 9k
+phase 13: got "v9k\n" -- yes
+phase 14: getchar: z
+got 'z'
+phase 15: clock via times(): advancing
+PASS: bare-metal newlibc-stdio checks completed.

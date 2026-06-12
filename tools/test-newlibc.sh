@@ -63,6 +63,7 @@ NEWLIBC_BM_TESTS=(
 	"pic_bm:35::"
 	"interrupt_bm:120::"
 	"tty_bm:30:vx\b9k\nz:"
+	"stdio_bm:45:vx\b9k\nz:"
 )
 
 pass=0

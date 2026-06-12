@@ -90,6 +90,27 @@ if grep -q 'bm_tty\.h' "$SRC"; then
 	              "$NLC_DIR/bm_keyboard.c"
 	              "$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
 fi
+# bm_stdio.h pulls the whole newlibc stdio stack (§6h): printf/scanf
+# wrappers -> libgloss syscalls -> VFS /dev/console -> bm_shim -> bm_tty.
+# Same portable-subset TU set as build-newlibc-test.sh, with bm_shim.c
+# in dos_shim.c's seat.
+if grep -q 'bm_stdio\.h' "$SRC"; then
+	SUPPORT_TUS+=("$NLC_DIR/bm_shim.c"
+	              "$NLC_DIR/bm_tty.c"
+	              "$NLC_DIR/bm_display.c" "$NLC_DIR/bm_font_data.c"
+	              "$NLC_DIR/bm_keyboard.c"
+	              "$NLC_DIR/bm_timer.c"
+	              "$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c"
+	              "$NL/libgloss/printf_wrappers.c"
+	              "$NL/libgloss/scanf_wrappers.c"
+	              "$NL/libgloss/syscalls.c"
+	              "$NL/libgloss/reent_stubs.c"
+	              "$NL/libgloss/dirent.c"
+	              "$NL/libgloss/unlink.c"
+	              "$NL/vfs/vfs.c"
+	              "$NL/vfs/fat.c"
+	              "$NL/drivers/block.c")
+fi
 # A program may pull the same support TU via more than one header probe
 # (keyboard + serial both need interrupts/pic); dedup, preserving order.
 DEDUP_TUS=()
