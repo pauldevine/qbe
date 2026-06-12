@@ -21,8 +21,9 @@ PASS: fstat(/ram/readme.txt) reports regular file.
 PASS: zero-length read accepts null buffer.
 PASS: read() prefix matches.
 PASS: read() full file matches.
-PASS: lseek(SEEK_END) returns file size.
+PASS: lseek(SEEK_END) seeks past EOF.
 PASS: read() reports EOF at file end.
+PASS: O_CREAT-existing open, errno clean.
 PASS: write-open of RAMFS file fails with EACCES.
 PASS: stat(/ram/readme.txt/) fails with errno 20.
 PASS: stat(/ram/readme.txt/child) fails with errno 20.

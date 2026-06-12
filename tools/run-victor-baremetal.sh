@@ -35,7 +35,10 @@ LOAD_ADDR="${VICTOR_LOAD_ADDR:-0x3000}"
 # Input injection (both optional, both delayed so the program is up first):
 #   $V9K_KEYPOST        text typed via MAME's natural keyboard (the
 #                       newlibc-validated natkeyboard:post pattern).
-#                       Keep it to plain ASCII; ' and \ are escaped.
+#                       Any byte is safe -- including control characters
+#                       like backspace/newline (every byte is passed to
+#                       Lua as a \ddd decimal escape); natkeyboard maps
+#                       \b to the Victor Backspace key and \n to Return.
 #   $V9K_KEYPOST_DELAY  seconds before typing (default 3)
 #   $V9K_SERIAL_IN      file whose BYTES are streamed into serial port B
 #                       (7201 channel B RX) via a second null_modem,
@@ -98,7 +101,11 @@ for d in cfg nvram inp sta snap diff comments; do mkdir -p "$WORK/home/$d"; done
 
 # --- Lua autoboot loader (the newlibc phase-3 pattern) -------------------
 BIN_ABS="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
-KEYPOST_LUA="$(printf '%s' "$KEYPOST" | sed -e 's/\\/\\\\/g' -e "s/'/\\\\'/g")"
+# Encode the keypost text as Lua \ddd decimal escapes, byte by byte, so
+# control characters (backspace editing, Return) survive the trip into
+# the single-quoted Lua string literal.
+KEYPOST_LUA="$(printf '%s' "$KEYPOST" | od -An -v -tu1 \
+	| tr ' ' '\n' | awk 'NF { printf "\\%03d", $1 }')"
 SERIAL_IN_ABS=""
 if [ -n "$SERIAL_IN" ]; then
 	[ -f "$SERIAL_IN" ] || { echo "$0: V9K_SERIAL_IN not found: $SERIAL_IN" >&2; exit 2; }

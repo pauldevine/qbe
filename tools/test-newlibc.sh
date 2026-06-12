@@ -49,6 +49,9 @@ done
 export V9K_SHOW="$SHOW"
 
 # Each entry: `<name>:<run-seconds>:<keypost>:<serial-in-bytes>`.
+# The keypost field goes through `printf %b`, so \b/\n escapes type the
+# Victor Backspace/Return keys (run-victor-baremetal.sh passes any byte
+# to MAME's natural keyboard).
 NEWLIBC_BM_TESTS=(
 	"hello_bm:15::"
 	"timer_bm:30::"
@@ -59,6 +62,7 @@ NEWLIBC_BM_TESTS=(
 	"crtc_bm:20::"
 	"pic_bm:35::"
 	"interrupt_bm:120::"
+	"tty_bm:30:vx\b9k\nz:"
 )
 
 pass=0
@@ -88,7 +92,7 @@ run() {
 run_bm_test() {
 	name="$1"
 	secs="$2"
-	keypost="$3"
+	keypost="$(printf '%b' "$3")"
 	serial_bytes="$4"
 
 	if [ ! -d "$NL" ]; then

@@ -6,6 +6,6 @@
 PASS: fat_find_root() locates HELLO.TXT.
 PASS: fat_find_root() locates root subdirectory.
 PASS: missing root file returns ENOENT.
-PASS: invalid 8.3 name returns EINVAL.
+PASS: invalid 8.3 name returns ENOENT.
 
 FAT root lookup test complete.
