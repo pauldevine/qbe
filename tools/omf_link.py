@@ -616,17 +616,30 @@ class GlobalSymbol:
 
 
 class Linker:
+    # Raw-binary mode reserves this much space at the image head for the
+    # synthesized register-setup stub (must stay a paragraph multiple so
+    # the segments that follow keep paragraph alignment).
+    RAW_STUB_SIZE = 32
+
     def __init__(self, modules: List[Module],
                  stack_size: int, entry_symbol: str,
                  gc_sections: bool = False,
                  pack_code: bool = False,
-                 separate_stack: bool = False):
+                 separate_stack: bool = False,
+                 raw_binary: bool = False,
+                 load_addr: int = 0):
         self.modules = modules
         self.stack_size = stack_size
         self.entry_symbol = entry_symbol
         self.gc_sections = gc_sections
         self.pack_code = pack_code
         self.separate_stack = separate_stack
+        self.raw_binary = raw_binary
+        self.load_addr = load_addr
+        # Paragraph the image is loaded at.  0 for MZ output (the DOS
+        # loader patches selectors via the reloc table); the fixed load
+        # paragraph for raw-binary output (selectors patched at link time).
+        self.base_para = load_addr // 16 if raw_binary else 0
         # Set of (module_idx, mod_seg_idx) reachable from the entry symbol.
         # None means "no dead-strip" (every segment is live).
         self.live_segs: Optional[set] = None
@@ -657,7 +670,10 @@ class Linker:
         self._coalesce_groups()
         self._resolve_entry()
         self._apply_fixups()
-        image, hdr = self._build_image()
+        if self.raw_binary:
+            image, hdr = self._build_raw_image(), b''
+        else:
+            image, hdr = self._build_image()
         Path(out_path).write_bytes(hdr + image)
         if map_path:
             self._write_map(map_path, out_path, len(image), len(hdr))
@@ -905,7 +921,7 @@ class Linker:
         # same array land at consecutive paragraph bases — provided
         # _0's length is a paragraph multiple (HUGE_CHUNK_BYTES in
         # asm_to_omf.py is 65520, == 4095 paragraphs).
-        cur_byte = 0
+        cur_byte = self.RAW_STUB_SIZE if self.raw_binary else 0
         for os_ in self.out_segs:
             # Round up to alignment (paragraph at minimum)
             align = max(os_.align, 16)
@@ -1149,12 +1165,15 @@ class Linker:
             return
 
         if loc == 2:  # 16-bit segment selector
-            # Selector = frame's paragraph base. Needs a runtime relocation
-            # because the actual segment depends on the program's load
-            # paragraph.
+            # Selector = frame's paragraph base.  MZ output needs a runtime
+            # relocation because the actual segment depends on the program's
+            # load paragraph; raw-binary output knows the load paragraph at
+            # link time, so the absolute selector is patched in directly.
             struct.pack_into('<H', site_out.data,
-                             mod_base_in_out + fix.where, frame_para & 0xFFFF)
-            self._add_reloc(site_out, mod_base_in_out + fix.where)
+                             mod_base_in_out + fix.where,
+                             (frame_para + self.base_para) & 0xFFFF)
+            if not self.raw_binary:
+                self._add_reloc(site_out, mod_base_in_out + fix.where)
             return
 
         if loc == 3:  # 32-bit far ptr: low word = offset within target segment, high word = selector
@@ -1165,8 +1184,9 @@ class Linker:
                              mod_base_in_out + fix.where, off)
             struct.pack_into('<H', site_out.data,
                              mod_base_in_out + fix.where + 2,
-                             frame_para & 0xFFFF)
-            self._add_reloc(site_out, mod_base_in_out + fix.where + 2)
+                             (frame_para + self.base_para) & 0xFFFF)
+            if not self.raw_binary:
+                self._add_reloc(site_out, mod_base_in_out + fix.where + 2)
             return
 
         if loc == 5:  # loader-resolved 16-bit offset (treat same as 1)
@@ -1220,9 +1240,11 @@ class Linker:
 
     # -------------------- emit --------------------
 
-    def _build_image(self) -> Tuple[bytes, bytes]:
-        # Concatenate output segments into a single image, padded.
-        cur = 0
+    def _concat_segments(self, start: int) -> bytearray:
+        """Concatenate output segments into a single image buffer beginning
+        at byte offset `start` (0 for MZ; RAW_STUB_SIZE for raw-binary,
+        where _layout_segments already shifted every byte_base)."""
+        cur = start
         image = bytearray()
         for seg in self.out_segs:
             # Pad to byte_base
@@ -1235,17 +1257,12 @@ class Linker:
                 # BSS-only contributors might have logical length > data
                 image.extend(b'\x00' * (seg.length - len(seg.data)))
                 cur = seg.byte_base + seg.length
+        return image
 
-        # MZ header (28 bytes) + reloc table; pad to paragraph multiple.
-        n_relocs = len(self.relocs)
-        hdr_min = 28 + 4 * n_relocs
-        hdr_size_bytes = (hdr_min + 15) & ~15
-        hdr_paragraphs = hdr_size_bytes // 16
-        total_image = hdr_size_bytes + len(image)
-
-        bytes_in_last = total_image % 512
-        total_pages = (total_image + 511) // 512
-
+    def _compute_ss_sp(self) -> Tuple[int, int]:
+        """SS (paragraphs relative to image base) and SP, enforcing the
+        DGROUP 64KB invariants.  Shared by the MZ header and the raw-binary
+        bootstrap stub."""
         # Default: SS == DS == DGROUP so that "near char *" works
         # consistently for both stack-local buffers and DGROUP globals.
         # The C runtime (strcpy's stosb, etc.) treats near pointers as
@@ -1289,6 +1306,21 @@ class Linker:
                         % dgroup_bytes)
             ss_para = stack_seg.para_base
             sp = self.stack_size & 0xFFFF
+        return ss_para, sp
+
+    def _build_image(self) -> Tuple[bytes, bytes]:
+        image = self._concat_segments(0)
+        ss_para, sp = self._compute_ss_sp()
+
+        # MZ header (28 bytes) + reloc table; pad to paragraph multiple.
+        n_relocs = len(self.relocs)
+        hdr_min = 28 + 4 * n_relocs
+        hdr_size_bytes = (hdr_min + 15) & ~15
+        hdr_paragraphs = hdr_size_bytes // 16
+        total_image = hdr_size_bytes + len(image)
+
+        bytes_in_last = total_image % 512
+        total_pages = (total_image + 511) // 512
 
         hdr = bytearray(hdr_size_bytes)
         struct.pack_into('<2sHHHHHHHHHHHHH', hdr, 0,
@@ -1312,6 +1344,52 @@ class Linker:
             struct.pack_into('<HH', hdr, off, ofs, seg)
             off += 4
         return bytes(image), bytes(hdr)
+
+    def _build_raw_image(self) -> bytes:
+        """Flat binary for a fixed load address (bare metal — the MAME Lua
+        loader writes the file at load_addr and starts execution there with
+        CS=DS=SS=0, so the image head must be a real-mode register-setup
+        stub).  All selectors were patched absolute during fixup
+        application; the stub establishes SS:SP and DS=ES=DGROUP, then
+        far-jumps to the entry symbol."""
+        if self.load_addr % 16 != 0:
+            die('--load-addr must be paragraph-aligned (got 0x%X)'
+                % self.load_addr)
+        image = self._concat_segments(self.RAW_STUB_SIZE)
+        ss_para, sp = self._compute_ss_sp()
+
+        dgroup = self.out_groups.get('DGROUP')
+        if dgroup and dgroup.member_out_segs:
+            ds_para = min(self.out_segs[i].para_base
+                          for i in dgroup.member_out_segs) + self.base_para
+        else:
+            ds_para = self.base_para
+        ss_abs = (ss_para + self.base_para) & 0xFFFF
+        cs_abs = (self.entry_cs + self.base_para) & 0xFFFF
+
+        stub = bytearray()
+        stub.append(0xFA)                                   # cli
+        stub.extend(b'\xB8' + struct.pack('<H', ss_abs))    # mov ax, SS
+        stub.extend(b'\x8E\xD0')                            # mov ss, ax
+        stub.extend(b'\xBC' + struct.pack('<H', sp))        # mov sp, SP
+        stub.extend(b'\xB8' + struct.pack('<H', ds_para))   # mov ax, DGROUP
+        stub.extend(b'\x8E\xD8')                            # mov ds, ax
+        stub.extend(b'\x8E\xC0')                            # mov es, ax
+        stub.append(0xEA)                                   # jmp far CS:IP
+        stub.extend(struct.pack('<HH', self.entry_ip, cs_abs))
+        if len(stub) > self.RAW_STUB_SIZE:
+            die('raw-binary bootstrap stub exceeds %d bytes'
+                % self.RAW_STUB_SIZE)
+        stub.extend(b'\xF4' * (self.RAW_STUB_SIZE - len(stub)))  # hlt pad
+
+        # The Victor 9000 program RAM window is 0x3000..0x9F000 (video RAM
+        # at 0xA0000); refuse an image that runs off the end.
+        end = self.load_addr + self.RAW_STUB_SIZE + len(image)
+        if end > 0x9F000:
+            die('raw image ends at 0x%X — past the 0x9F000 program-RAM '
+                'ceiling' % end)
+
+        return bytes(stub) + bytes(image)
 
     # -------------------- map / summary --------------------
 
@@ -1366,6 +1444,11 @@ class Linker:
             print('  far data: %d bytes' % fardata_bytes)
         print('  data+bss: %d bytes' % data_bytes)
         print('  relocations: %d' % n_relocs)
+        if self.raw_binary:
+            print('  raw binary @ 0x%05X (entry %04X:%04X)'
+                  % (self.load_addr,
+                     (self.entry_cs + self.base_para) & 0xFFFF,
+                     self.entry_ip))
         print('  image: %d bytes (header %d + body %d)'
               % (hdr_size + image_size, hdr_size, image_size))
         print('  output: %s' % out_path)
@@ -1394,6 +1477,15 @@ def main() -> None:
                     action='store_true',
                     help='give the stack its own segment (SS != DS); '
                          'far-data builds compiled with `qbe -s` only')
+    ap.add_argument('--raw-binary', dest='raw_binary', action='store_true',
+                    help='emit a flat binary for a fixed load address '
+                         '(bare metal) instead of a DOS MZ .EXE; selectors '
+                         'are resolved at link time and a register-setup '
+                         'stub is synthesized at the image head')
+    ap.add_argument('--load-addr', dest='load_addr',
+                    type=lambda s: int(s, 0), default=0x3000,
+                    help='absolute load address for --raw-binary '
+                         '(paragraph-aligned; default 0x3000)')
     ap.add_argument('objs', nargs='+', help='input .obj files')
     args = ap.parse_args()
 
@@ -1417,7 +1509,9 @@ def main() -> None:
     linker = Linker(modules, args.stack_size, args.entry,
                     gc_sections=args.gc_sections,
                     pack_code=args.pack_code,
-                    separate_stack=args.separate_stack)
+                    separate_stack=args.separate_stack,
+                    raw_binary=args.raw_binary,
+                    load_addr=args.load_addr)
     linker.link(args.output, args.map_path)
 
 

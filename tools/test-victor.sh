@@ -66,8 +66,25 @@ run_victor_probe() {
 	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
 }
 
+# Bare-metal raw-binary run (§6c): build hello_bm via the raw-binary link
+# path, load it at 0x3000 with the MAME Lua loader (no DOS, no disk), diff
+# serial output against the golden.  Skips (77) when the newlibc tree is
+# absent (v9k_hw.h) or MAME is missing.
+run_baremetal_hello() {
+	if [ ! -d "${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}" ]; then
+		echo "newlibc tree not found (set \$NEWLIBC_DIR)"; return 77
+	fi
+	"$QBE_DIR/tools/build-newlibc-baremetal.sh" hello_bm >/dev/null
+	out="$("$QBE_DIR/tools/run-victor-baremetal.sh" \
+		"$QBE_DIR/build/newlibc-baremetal/hello_bm/hello_bm.bin" 15)" \
+		|| return $?
+	echo "$out" | diff -u "$QBE_DIR/minic/dos/tests/hello_bm.golden.txt" - >&2
+}
+
 run "build qbe + minic" \
 	make -C "$QBE_DIR" -s qbe minic/minic
+
+run "victor bare-metal (hello_bm, raw @ 0x3000)" run_baremetal_hello
 
 for entry in "${VICTOR_TESTS[@]}"; do
 	src="${entry%%:*}"

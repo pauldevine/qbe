@@ -1,3 +1,73 @@
+# Next session (§6d — continue Phase 6.  §6c [2026-06-11, this session] completed **step 3: the toolchain's first BARE-METAL program runs on the Victor 9000.**  `omf_link.py --raw-binary --load-addr 0x3000` emits a flat binary (selectors resolved at link time against the load paragraph, no MZ header, a 32-byte synthesized register-setup stub at the image head — the MAME Lua loader enters at 0:0x3000 with CS=DS=SS=0 — and BSS rides as zeros, no clear loop).  A **minic-built crt0** (`bm_crt0.c` `start()` → board init → `main()` → hlt loop) plus a minic-dialect **polled NEC 7201 serial console** (`bm_console.c`, newlibc's validated VIA2/8253-counter-0/WR-register sequence, pure volatile-far MMIO — the original's inline asm was all ia16-gcc workarounds) carry `hello_bm.c` to a PASS over serial under MAME: `tools/build-newlibc-baremetal.sh` + `tools/run-victor-baremetal.sh` (Lua autoboot loader, null_modem bitbanger capture).  Gated: `test_omf_link.sh` test 3 (deterministic raw-image structure asserts) + a `tools/test-victor.sh` golden-diff entry (victor pipeline 3/3).  DOSBox gate stays **287/287**; MP compact **byte-identical** (MZ-path refactor also proven by relink `cmp`).  Next: **step 4** — drivers/ISRs: ISR definition strategy, extended-asm output constraints + Intel template translation; port timer/display; more newlibc tests bare-metal; `tools/test-newlibc.sh` once a battery exists.)
+
+## §6c session notes (2026-06-11)
+
+### omf_link.py raw-binary mode (the step-3 enabler)
+- `--raw-binary --load-addr 0x3000` (default 0x3000, paragraph-aligned): all
+  loc==2/loc==3 selector fixups get `frame_para + base_para` patched in at
+  link time (base_para = load_addr>>4) instead of an MZ reloc record; layout
+  starts at byte 32 (`RAW_STUB_SIZE`) so segment paragraph alignment holds.
+- The synthesized head stub: `cli; mov ss/sp; mov ds/es=DGROUP; jmp far
+  entry` — all constants known at link time (same `_compute_ss_sp()` as the
+  MZ header, SS=DGROUP + SP=stack-top-in-DGROUP for the small model).  The
+  hlt-padded 32-byte head means entry lands at image para 2.
+- Program-RAM ceiling check: image end past 0x9F000 (video RAM at 0xA0000)
+  is a link error.
+- MZ path refactor (shared `_concat_segments`/`_compute_ss_sp`) verified
+  byte-identical: snprintf_test relink `cmp` + MP compact whole-image `cmp`.
+- `test_omf_link.sh` test 3 asserts the raw structure (no MZ sig, stub
+  opcodes at fixed offsets, entry 0302:0000, far-call selector 0303
+  absolute); also fixed test 2's stale-crt0 collision (stevie-orig now
+  carries crt0_exe.obj — excluded from the smoke link).
+
+### Bare-metal runtime story (minic/dos/newlibc/)
+- `bm_crt0.c`: C `start()` (OMF `_start`) → `bm_board_init()` → `main(0,0)`
+  → `while(1) hlt`.  No DOS crt0, no PSP, no HALT2DOS rewrite — bare metal
+  WANTS the hlt idle loop.  BSS zero-fill not needed (in-image zeros).
+- `bm_console.c` + `.h`: polled 7201 channel-A TX at 9600.  Mirrors
+  newlibc drivers/console.c exactly (VIA2 port A bit0 internal clock; 8253
+  counter 0 — NOT counter 1 — mode 2 LSB+MSB divisor 8; channel reset +
+  WR0/WR4=0x44/WR3=0xC1/WR5=0xEA/WR1=0); all access via v9k_hw.h
+  HW_READ/WRITE_BYTE volatile-far MMIO.  The original's inline asm
+  (SAVE_ES/RESTORE_ES, forced byte stores) is ia16-gcc damage control this
+  backend doesn't need.  Plus bm_puts/bm_putu (32-bit udiv)/bm_puthex.
+- `hello_bm.c`: 48 KB raw image; checks volatile 16-bit mul, 32-bit
+  unsigned divide, strlen, hex print; __V9BEGIN__/__V9END__ sentinels +
+  PASS:/FAIL: verdict (newlibc run_test.sh regex convention).
+- libstub on bare metal: `--no-stdio` libstub links fine (its INT 21h
+  sites — exit/putc/dos_*/int86 — are functions, nothing runs at startup;
+  `_dgroup_para: dw DGROUP` resolves via the raw selector patch).  They are
+  LANDMINES if called; the real fix is newlibc replacing libstub (the
+  Phase-6 end state).
+
+### Harness
+- `tools/build-newlibc-baremetal.sh [--load-addr=] <name|path.c>`: test TU +
+  bm_crt0 + bm_console, small model, `--no-stdio` libstub, raw link.  Bare
+  name resolves minic/dos/newlibc/ first, then newlibc tests/.
+- `tools/run-victor-baremetal.sh <bin> [secs]`: MAME victor9k + Lua
+  autoboot loader (newlibc phase-3 pattern: write_u8 loop at 0x3000, zero
+  segment regs, IP=0x3000), serial via `-rs232a null_modem -bitbanger`,
+  sentinel-trimmed stdout, exit 77 skips, same orphan-killer watchdog as
+  run-victor-sasi.sh.
+- `tools/test-victor.sh` new entry "victor bare-metal (hello_bm)" diffs
+  against `minic/dos/tests/hello_bm.golden.txt`; skips when newlibc tree or
+  MAME absent.  Victor pipeline 3/3.
+
+### Open tracks (new + carried)
+- newlibc step 4: ISR definition strategy; extended-asm output-constraint
+  store marking + Intel-syntax template translation; port timer/display
+  drivers to minic dialect (the bm_console port shows most driver asm is
+  removable); grow the bare-metal test battery → tools/test-newlibc.sh.
+- run-dos-exe.sh stdin redirect (unlocks 3 more DOS-hosted newlibc tests).
+- newlibc-under-far-models stdio story — when a far consumer appears.
+- Carried: far static-DATA-ptr reloc (§1g); param/static-local shadowing a
+  global; huge `_qbe_huge_add` ≥0x8000 (§4i); `jmp_buf bufs[6]` (§4v,
+  unreduced); minic static-init FLOAT const-expr folding; small
+  setjmp/longjmp; multi-decl items after the first skip block_scope_decl;
+  Kw spill-slot sharing.
+
+---
+
 # Next session (§6c — continue Phase 6.  §6b [2026-06-11, this session] completed **step 2: the newlibc portable subset runs DOS-hosted and is gated.**  ELEVEN phase3 tests (snprintf, fat_bpb/chain/root/dir/file, fat_vfs, ramfs, stdio_route, bss, terminal_meta) now build small-model via `tools/build-newlibc-test.sh` — test TU (`-Dmain=newlibc_test_main`) + libgloss/VFS/FAT/block + `minic/dos/newlibc/dos_shim.c` against crt0 + `libstub_to_exe.py --no-stdio` — and byte-diff against goldens in `tools/test-dos.sh`.  The full newlibc stack (printf wrappers → syscalls → VFS → devices/FAT-over-RAM-block) executes through THIS toolchain in DOSBox.  Two toolchain bugs fixed en route (static file-scope DATA linkage; decimal `UL` literal typing), both probe-gated.  Gate 274→**287/287**.  MP compact byte-identical (rigorous: pre-change toolchain rebuilt from git and whole-image `cmp`'d).  Next: **step 3** — omf_link raw-binary output + minic-built crt0 + MAME bare-metal hello at load addr 0x3000; then step 4 (drivers/ISRs/extended-asm).)
 
 ## §6b session notes (2026-06-11)
@@ -70,84 +140,4 @@
 
 ---
 
-# Next session (§6b — continue Phase 6.  §6a [2026-06-11, this session] ran the newlibc TRIAGE SWEEP (Phase-6 step 1) and fixed SEVEN minic dialect gaps it exposed: the per-TU sweep (`build/newlibc-triage/sweep.sh` + `shiminc/` newlib-shaped shim headers) took phase3_newlib from **21/66 → 46/66 TUs compiling** under BOTH small and medium, and the **entire portable subset (libgloss ×7, vfs ×2, every non-asm test) now compiles** — exactly the step-2 target population.  Every remaining failure is inline-asm-flavored (drivers + dos_tests) or the ISR-definition gap — i.e. step-4 work, none of it portable-subset.  Six new probes, gate 262→274.  Next: **step 2 proper** — link the portable subset against libstub, run VFS/FAT/printf tests DOS-hosted in DOSBox, gate them; then step 3 (omf_link raw-binary output + minic crt0).)
-
-## §6a session notes (2026-06-11)
-
-### The seven minic fixes (each probe-gated, all loud-verified pre-fix)
-1. **`extern T *f(args);`** — extern + pointer-return + ANSI params had NO production
-   (only K&R `*f()`); errno.h's `extern int *__errno(void);` killed ~29 TUs at line 1.
-   New ext_decl kind `'H'` (par1 stashed on `->l`, fnproto_record'd in the extern walks).
-   `extern_ptrret_probe`.
-2. **File-scope prototype param leak** — par1's param() varadds names at file scope and
-   nothing removed them after a PROTOTYPE; a later decl reusing the name with a different
-   type died "double definition" (`int first(char *buf,…); extern long second(…,const
-   void *buf,…)`).  Fixed: `varclr()` at the end of every file-scope prototype-only
-   reduction (ansi_proto_register, EXTERN par1, both ext_decllist walks).  Definitions
-   were always safe (init_ansi/init_kr varclr first).  `proto_param_leak_probe`.
-3. **Array parameter declarators** — par1 had no `'['…']'` forms at all: `uint8_t out[11]`,
-   `char buf[]`, `char *const argv[]` all parse-errored (the *const was a red herring —
-   `type '*' CONST` existed).  Four new par1 productions, decay to (far-aware) pointer,
-   dimension folded and discarded.  `array_param_probe`.
-4. **`void __far __attribute__((interrupt)) f(void);`** — the ia16-gcc far-ISR spelling
-   (interrupts.h) had no production for the interposed `__far`; new
-   `type TFAR attropt IDENT` in type_and_ident accepts-and-drops the __far.  PROTOTYPE
-   only: ISR *definitions* remain a designed gap (the vestigial interrupt emission
-   produces `asm "iret"` with no block terminator — QBE rejects — and would skip the
-   epilogue anyway; Phase-6 step 4 decides the real ISR strategy).  `isr_far_attr_probe`.
-5. **`const volatile T`** — qualifier pair missing everywhere; new `vol_qual` nonterminal
-   (VOLATILE | CONST VOLATILE | VOLATILE CONST) replaced the bare-VOLATILE heads in all
-   type productions (incl. STRUCT/UNION/TNAME).  Covered by the font_test-shaped probe
-   cases inside array_param/others; no dedicated probe (parse-only, exercised by sweep).
-6. **Scalar global symbol-address init** — `char **environ = __env;` / `int *p = &x;` /
-   `int *mid = &arr[2];` died (the `'=' expr ';'` rule folded with const_eval only; the
-   aggregate path §1b/§1g could already emit `$sym+off`).  Now routed through cival_eval
-   → new emit_global_sym_init.  `static_sym_init_probe` (small+medium).  **The probe
-   under compact CONFIRMED the §1g far static-DATA-ptr reloc gap at runtime** (prints raw
-   offsets 4194/4192 — segment missing) — now a reproducible open track, NOT gated far.
-7. **Locals shadow file-scope bindings** — minic had NO local-shadows-global support
-   (`int g; int f(){int g;}` died), only §1k local-vs-local inner-block renames.  newlibc
-   vfs_open declares `const fat_mount_t *fat_mount;` next to the file-scope function
-   fat_mount() (found by automated delta-reduction of the 785-line failing prefix).
-   Fixed: block_scope_decl's rename trigger extended to any global/extern/function/enum
-   binding + block_scope_decl wired into the dcls-chain local rules (fn-body depth) —
-   the stmt-context rules already had it.  `local_shadow_probe` (global var + function +
-   enum constant all shadowed, post-shadow global intact).
-   Plus: postfix prototype attribute `void _init(void) __attribute__((weak));` (new
-   `ansi_proto_register ATTRIBUTE…';'` production), and `die("undefined variable")` now
-   prints the NAME (4 shim-gap diagnoses fell out instantly).
-
-### Sweep infrastructure (build/newlibc-triage/, intentionally untracked probe-grade)
-- `sweep.sh [model]`: per-TU clang -E (-nostdinc **-D__ia16__** — keeps `__far` real and
-  selects the GCC MK_FP branch in v9k_hw.h, which matches minic semantics) → minic →
-  qbe → asm_to_omf → nasm, keep-going, stage-bucketed report.
-- `shiminc/`: newlib-shaped shim headers (errno/unistd/fcntl/reent/dirent/stdio with
-  struct FILE._file/sys/stat with S_IF*+S_BLKSIZE/sys/types with dev_t/time/limits/io/
-  conio→dos.h/i86→dos.h).  These prefigure the real newlibc-port headers.
-- minic line numbers in errors are 0-based-ish (error:0 = line 1); statements are emitted
-  at the function-close reduce, so stmt-level errors report the `}` line — bisect inside.
-
-### Remaining failures (all step-4 flavored, NONE portable-subset)
-- 6 dos_tests: Watcom `_asm { … }` blocks (phase-1-style TUs; park or rewrite later).
-- 5 qbe-stage: extended-asm `"=r"` OUTPUT constraints — minic substitutes the slot into
-  the template but QBE sees a slot that is read-never-stored and rejects; ALSO
-  interrupts.c ISR definition (designed gap, see fix 4).
-- 8 nasm-stage: AT&T/ia16 mnemonics leak through the template (`pushfw/popw %0`,
-  `movw %es`) — nasm wants Intel.  Driver asm will need per-target porting in step 4
-  anyway (it was written for ia16-gcc).
-- 46/66 small AND medium, identical fail sets.
-
-### Open tracks (new + carried)
-- far static-DATA-ptr reloc (§1g, now runtime-reproduced by static_sym_init_probe under
-  compact) — needed before newlibc-style tables-of-pointers work in far-data models.
-- minic extended-asm output-constraint store marking + Intel-syntax template translation
-  (the qbe/nasm buckets above) — step 4.
-- ISR definition strategy (minic save-all+iret codegen vs asm shims) — step 4.
-- Param/static-local shadowing a global still dies (only plain locals fixed).
-- Carried: huge `_qbe_huge_add` ≥0x8000 (§4i); `jmp_buf bufs[6]` (§4v, unreduced); minic
-  static-init FLOAT const-expr folding; small setjmp/longjmp; multi-decl items after the
-  first skip block_scope_decl; Kw spill-slot sharing.
-
----
-
-Older session headers (§5c and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).
+Older session headers (§6a and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).
