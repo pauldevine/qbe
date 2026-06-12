@@ -71,6 +71,14 @@ ERR="$OUT_DIR/build.err"
 # Same int-type normalization the triage sweep / MP build use.
 NORMALIZE='s/\bunsigned short int\b/unsigned short/g;s/\bunsigned long int\b/unsigned long/g;s/\bsigned short int\b/short/g;s/\bsigned long int\b/long/g;s/\blong long int\b/long long/g;s/\blong int\b/long/g;s/\bshort int\b/short/g;s/\bsigned char\b/char/g;s/\bsigned long long\b/long long/g;s/\bsigned long\b/long/g;s/\bsigned int\b/int/g'
 
+# DOS-hosted termination: the bare-metal end-of-program idiom is
+# `while (1) __asm__ volatile("hlt");` (test tails like bss_test, plus
+# _exit/abort in libgloss/syscalls.c) — on hardware MAME kills the machine
+# from outside, but under DOSBox the program never returns to COMMAND.COM,
+# so the autoexec `exit` never runs and the harness hangs.  Rewrite the
+# idle halt into a DOS process terminate (INT 21h AH=4Ch).
+HALT2DOS='s/__asm__[[:space:]]*volatile[[:space:]]*([[:space:]]*"hlt"[[:space:]]*)/{ __asm__ volatile ("mov ax, 0x4c00"); __asm__ volatile ("int 0x21"); }/g'
+
 # compile_unit <source.c> <obj-base> <extra-cpp-flags...>
 compile_unit() {
 	local unit_src="$1" unit_base="$2"
@@ -81,7 +89,8 @@ compile_unit() {
 		"-I$SHIM" "-I$INC" \
 		"-I$NL/include" "-I$NL/drivers" "-I$NL/libgloss" "-I$NL/vfs" \
 		"$unit_src" 2>>"$ERR" \
-		| tr -d '\r\032' | sed "$NORMALIZE" > "$OUT_DIR/$unit_base.pp.c" \
+		| tr -d '\r\032' | sed "$NORMALIZE" | sed "$HALT2DOS" \
+		> "$OUT_DIR/$unit_base.pp.c" \
 		|| return 1
 	"$MINIC" -m "$MODEL" < "$OUT_DIR/$unit_base.pp.c" \
 		> "$OUT_DIR/$unit_base.ssa" 2>>"$ERR" || return 1
