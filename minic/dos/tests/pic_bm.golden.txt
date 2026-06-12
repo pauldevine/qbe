@@ -1,0 +1,12 @@
+Victor 9000 bare-metal PIC test (qbe/minic)
+phase 1: PIC re-init + timer ISR + 8253 + sti
+phase 2: IMR after init is 0xfb (only IR2 open): yes
+phase 3: timer ticks advance: yes
+phase 4: mask IR5 (unused expansion) sets bit: yes
+phase 5: timer undisturbed by IR5 masking: yes
+phase 6: unmask IR5 clears bit: yes
+phase 7: whole-mask restore reads back: yes
+phase 8: masking IR2 freezes ticks: yes
+phase 9: unmasking IR2 resumes ticks: yes
+phase 10: EOI verified by continuous ticks: yes
+PASS: bare-metal PIC checks completed.

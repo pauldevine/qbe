@@ -9,5 +9,8 @@
 void bm_pic_init(void);
 void bm_pic_unmask(unsigned char irq);
 void bm_pic_mask(unsigned char irq);
+/* IMR readback / whole-mask write (OCW1 data register, E000:0001). */
+unsigned char bm_pic_get_mask(void);
+void bm_pic_set_mask(unsigned char mask);
 
 #endif

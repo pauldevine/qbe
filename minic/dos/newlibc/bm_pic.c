@@ -82,3 +82,11 @@ void bm_pic_mask(unsigned char irq) {
     mask = mask | (uint8_t)(1 << irq);
     pic_data(mask);
 }
+
+unsigned char bm_pic_get_mask(void) {
+    return pic_read_mask();
+}
+
+void bm_pic_set_mask(unsigned char mask) {
+    pic_data(mask);
+}

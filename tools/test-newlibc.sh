@@ -27,6 +27,10 @@ NEWLIBC_BM_TESTS=(
 	"display_bm:20::"
 	"keyboard_bm:25:v9k:"
 	"serial_bm:25::victor"
+	"memory_bm:15::"
+	"crtc_bm:20::"
+	"pic_bm:35::"
+	"interrupt_bm:120::"
 )
 
 pass=0

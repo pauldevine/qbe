@@ -1,0 +1,7 @@
+Victor 9000 bare-metal CRTC test (qbe/minic)
+phase 1: display init (CRTC bring-up + font + clear)
+phase 2: write A..Z + 0..9 screen words via far pointer
+phase 3: read back pattern through driver hook: yes
+phase 4: cursor (12,34) reads back R14=0x03 R15=0xe2: yes
+phase 5: cursor home reads back R14=R15=0: yes
+PASS: bare-metal CRTC checks completed.

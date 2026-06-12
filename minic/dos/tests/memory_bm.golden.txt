@@ -1,0 +1,6 @@
+Victor 9000 bare-metal memory test (qbe/minic)
+phase 1: write 256-byte pattern to font RAM 0000:0C00
+phase 2: write inverted pattern to screen RAM F000:0000
+phase 3: font RAM readback: yes
+phase 4: screen RAM readback: yes
+PASS: font and screen RAM byte writes verified.

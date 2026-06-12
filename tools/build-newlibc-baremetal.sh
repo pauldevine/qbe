@@ -70,6 +70,9 @@ fi
 if grep -q 'bm_interrupts\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
 fi
+if grep -q 'bm_pic\.h' "$SRC"; then
+	SUPPORT_TUS+=("$NLC_DIR/bm_pic.c")
+fi
 if grep -q 'bm_display\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_display.c" "$NLC_DIR/bm_font_data.c")
 fi
