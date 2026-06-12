@@ -66,7 +66,7 @@ tools/run-emit-audit.sh         # emit-bracket liveness audit (after emit.c chan
 
 ## Repository Information
 
-**Repository:** https://github.com/pauldevine/qbe  (branch: master; PRs #23 upstream rebase, #24 §3p–§4y, #25 §5c)
+**Repository:** https://github.com/pauldevine/qbe  (branch: master; PRs #23 upstream rebase, #24 §3p–§4y, #25 §5c, #26 §6a–§6b, #27 §6c–§6h)
 **Upstream:** `upstream` remote → c9x.me/qbe.git — check upstream first for generic spill/SSA/regalloc bugs.  In sync through `e786f06` (2026-06-11).
 **Related trees:** `~/projects/newlibc` (Phase 6 target), `~/projects/micropython` (dos8086 port), `/Applications/dosbox.app`, MAME victor9k.
 
