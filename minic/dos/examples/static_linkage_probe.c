@@ -9,7 +9,8 @@
  *
  * The fix: minic emits a module-local `function` (no `.globl`) for a `static`
  * function, and asm_to_omf.py no longer auto-promotes code labels (it trusts
- * minic's `.globl` for functions; data still auto-promotes).
+ * minic's `.globl` for functions; §6b extended the same story to DATA —
+ * see static_data_probe.c).
  *
  * This probe is the REGRESSION GUARD for the codegen half: a now-local static
  * function must still be reachable through the medium-model far-call path

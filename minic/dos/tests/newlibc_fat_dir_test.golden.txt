@@ -1,0 +1,10 @@
+
+===============================================
+  Victor 9000 Phase 3 FAT Directory Test
+===============================================
+
+PASS: fat_dir_read() iterates root entries.
+PASS: fat_dir_read() iterates subdirectory entries.
+PASS: full DIR table preserves opendir path errno.
+
+PASS: FAT directory test complete.

@@ -1,0 +1,14 @@
+
+===============================================
+  Victor 9000 Phase 3 FAT Chain Test
+===============================================
+
+PASS: fat_next_cluster() follows cluster 2 to 3.
+PASS: fat_next_cluster() reports end-of-chain.
+PASS: fat_read_cluster() reads cluster data.
+PASS: fat_read_file_data() reads full cluster chain.
+PASS: fat_read_file_data() handles cross-cluster partial read.
+PASS: fat_read_file_data() reports EOF at file end.
+PASS: truncated cluster chain reports EIO.
+
+FAT chain test complete.

@@ -1,3 +1,75 @@
+# Next session (§6c — continue Phase 6.  §6b [2026-06-11, this session] completed **step 2: the newlibc portable subset runs DOS-hosted and is gated.**  ELEVEN phase3 tests (snprintf, fat_bpb/chain/root/dir/file, fat_vfs, ramfs, stdio_route, bss, terminal_meta) now build small-model via `tools/build-newlibc-test.sh` — test TU (`-Dmain=newlibc_test_main`) + libgloss/VFS/FAT/block + `minic/dos/newlibc/dos_shim.c` against crt0 + `libstub_to_exe.py --no-stdio` — and byte-diff against goldens in `tools/test-dos.sh`.  The full newlibc stack (printf wrappers → syscalls → VFS → devices/FAT-over-RAM-block) executes through THIS toolchain in DOSBox.  Two toolchain bugs fixed en route (static file-scope DATA linkage; decimal `UL` literal typing), both probe-gated.  Gate 274→**287/287**.  MP compact byte-identical (rigorous: pre-change toolchain rebuilt from git and whole-image `cmp`'d).  Next: **step 3** — omf_link raw-binary output + minic-built crt0 + MAME bare-metal hello at load addr 0x3000; then step 4 (drivers/ISRs/extended-asm).)
+
+## §6b session notes (2026-06-11)
+
+### The two toolchain fixes (probe-gated, loud-verified pre-fix)
+1. **Static file-scope DATA had no internal linkage** — minic NEVER emitted `export`
+   on data (`export data` is valid QBE it just didn't use), and asm_to_omf.py
+   compensated by auto-promoting EVERY data `_xxx:` label to an OMF public; two TUs
+   reusing a static name died "duplicate public symbol" (newlibc: libgloss/dirent.c
+   and vfs/vfs.c both define `static … dir_table[]`).  Fix mirrors §1q's function
+   story end-to-end: minic marks non-static file-scope data `export data` (new
+   `glostatic[]` flag; an `nglo` watermark `glo_decl_start` captured in
+   type_and_ident and retro-marked by the STATIC typed_decl variants — the variants
+   reduce AFTER typed_decl_rest registers the slots, and the lexer's pending_static
+   is already reset by then; `emit_static_local` marks mangled function-locals;
+   `STATIC structstart` marks its sai slot) and asm_to_omf.py's data auto-promotion
+   is REMOVED — `.globl` is now authoritative for code AND data.
+   `static_data_probe` (TWO TUs, small+medium gate entries: same-name file statics,
+   same-name block statics behind same-name static fns, plus a cross-TU extern
+   global proving export still works).
+2. **Decimal `12345UL` was typed int** — the decimal lexer's `u`-suffix branch
+   consumed a trailing `L` without setting suffix_l (hex/octal were correct), so a
+   `UL` literal ≤0xFFFF was pushed as ONE stack word; newlibc's snprintf_test `%lu`
+   read a garbage high word (`12345UL` printed 1093808185 = 0x4132<<16 | 12345).
+   longconst_probe gained ulvararg/ulassign cases (golden regenerated, medium+large).
+
+### Step-2 infrastructure (committed, not probe-grade)
+- `tools/build-newlibc-test.sh`: small model only (far models would need newlibc's
+  printf to answer minic's far_stdlib mangling — later phase).  `NEWLIBC_DIR`
+  overrides `~/projects/newlibc/phase3_newlib`.
+- `minic/dos/newlibc/shiminc/`: the §6a triage shim headers PROMOTED to the
+  committed tree (gate reproducibility); `build/newlibc-triage/sweep.sh` still has
+  its own copy (probe-grade, can be repointed later).
+- `minic/dos/newlibc/dos_shim.c`: console/tty device ops (INT 21h AH=3F/40 via
+  libstub int86), 100Hz wall-clock timer (AH=2Ch), display_puts→console,
+  POSIX unprefixed aliases (open/read/write/…→`_`-syscalls), minimal
+  FILE-table fopen/fclose/fread/fgetc over VFS fds (libstub's one-word
+  `_stdin/_stdout/_stderr` sentinels are layout-compatible with newlib's
+  `FILE{int _file;…}` first member — kept), `_impure_ptr`/`__heap_start/_end`
+  link satisfaction, and `main()` = `vfs_init()` (board_init()'s job on metal)
+  then `newlibc_test_main()`.
+- `libstub_to_exe.py --no-stdio` (near-code only): drops FILEIO_EXE+FAR_SPRINTF_EXE
+  and skips libstub.asm `_sprintf/_fgets/_putchar/_abort/_stat` so the newlibc
+  printf family + dos_shim own those names; keeps malloc/free, str/mem fns,
+  int86/intdos, `_qbe_*` helpers, and the stdio sentinels.
+- Gate: `run_newlibc_test` in tools/test-dos.sh, skip (77) when the newlibc tree
+  is absent; goldens `minic/dos/tests/newlibc_<test>.golden.txt`.
+
+### Excluded / deferred tests (with reasons)
+- memory_test: scans the Victor physical memory map — hardware-flavored, fails
+  DOS-hosted by design; belongs to step-3+ MAME bare-metal.
+- stdin_test / scanf_test / read_test: need stdin feeding — run-dos-exe.sh has no
+  input-redirect support yet (DOS `< file` works per the §3n REPL work; small
+  harness lever if wanted).
+- hello: BUILDS and is shimmed (timer/display/malloc) but prints wall-clock tick
+  values — not golden-able as-is.
+
+### Open tracks (new + carried)
+- newlibc step 3: omf_link raw-binary output mode + minic-built crt0 + MAME
+  bare-metal hello (load addr 0x3000, serial output); then tools/test-newlibc.sh.
+- run-dos-exe.sh stdin redirect (unlocks 3 more newlibc tests).
+- newlibc-under-far-models stdio story (minic far_stdlib mangling vs newlibc's
+  own printf) — decide when a far consumer appears.
+- Carried: far static-DATA-ptr reloc (§1g, static_sym_init_probe reproduces);
+  extended-asm output constraints + Intel template translation (step 4); ISR
+  definition strategy (step 4); param/static-local shadowing a global; huge
+  `_qbe_huge_add` ≥0x8000 (§4i); `jmp_buf bufs[6]` (§4v, unreduced); minic
+  static-init FLOAT const-expr folding; small setjmp/longjmp; multi-decl items
+  after the first skip block_scope_decl; Kw spill-slot sharing.
+
+---
+
 # Next session (§6b — continue Phase 6.  §6a [2026-06-11, this session] ran the newlibc TRIAGE SWEEP (Phase-6 step 1) and fixed SEVEN minic dialect gaps it exposed: the per-TU sweep (`build/newlibc-triage/sweep.sh` + `shiminc/` newlib-shaped shim headers) took phase3_newlib from **21/66 → 46/66 TUs compiling** under BOTH small and medium, and the **entire portable subset (libgloss ×7, vfs ×2, every non-asm test) now compiles** — exactly the step-2 target population.  Every remaining failure is inline-asm-flavored (drivers + dos_tests) or the ISR-definition gap — i.e. step-4 work, none of it portable-subset.  Six new probes, gate 262→274.  Next: **step 2 proper** — link the portable subset against libstub, run VFS/FAT/printf tests DOS-hosted in DOSBox, gate them; then step 3 (omf_link raw-binary output + minic crt0).)
 
 ## §6a session notes (2026-06-11)
@@ -78,69 +150,4 @@
 
 ---
 
-# (§6a designation, kept verbatim) Next session (§6a — DESIGNATED by the user 2026-06-11: **the newlibc frontier (Phase 6).**  Get `~/projects/newlibc` — a much-progressed Victor 9000 C library + driver suite — working when built by THIS toolchain, and adopt its test suite as a standing robustness harness; end state retires libstub.  Full plan + survey in ROADMAP.md → Phase 6.  Docs were consolidated this session (ROADMAP.md/CLAUDE.md rewritten, Phases 0–5 marked complete, the CLAUDE.md Prior: chain pruned, session history §3u–§5c-PLAN archived to SESSION_LOG.md).)
-
-## §6 entry notes (gathered 2026-06-11)
-- **newlibc survey**: `phase1_dos_drivers/` (DOS-hosted driver validation, OpenWatcom-built), `phase2_baremetal/`, `phase3_newlib/` (PRODUCTION — bare-metal newlib port built with **ia16-elf-gcc**, small model at load addr 0x3000, ~55–62 KB bins; medium secondary).  Phase 3 complete per its docs: crt0 + v9000.ld, libgloss syscalls, integer-only printf/scanf wrappers, sbrk malloc, VFS + read-only FAT12/16 over a SASI driver, CRTC display + loaded fonts (Victor has no char ROM), VIA 6522 keyboard, 8253-ch2-on-IR2 timer (NOT IBM IRQ0), PIC, serial.  **~40 test programs run under MAME victor9k** — that suite is the harness we want.  ~22 K lines / 82 files in phase 3.
-- **Known toolchain gaps** (validate by probe, don't assume): minic has no `__attribute__((interrupt))` (ISRs need a minic feature or asm shims); omf_link has no raw-binary output mode (newlibc is bare-metal at a load address, not MZ .EXE); newlib proper (the ia16-built libc.a/libm.a it links) is OUT of near-term scope — target newlibc's own code (libgloss/drivers/VFS/tests) first; the small model (§5c, brand-new) gets its first real consumer and still lacks setjmp/longjmp.
-- **Gated bring-up sequence** (detail in ROADMAP.md Phase 6): (1) triage sweep — compile newlibc sources with minic and bucket the failures (the MP-spike per-TU methodology); (2) portable subset (string/printf wrappers, VFS, FAT) DOS-hosted in DOSBox + gate entries; (3) raw-binary omf_link output + minic-built crt0 + MAME bare-metal hello; (4) drivers + ISR strategy; (5) `tools/test-newlibc.sh` standing gate; (6) libstub retirement.
-- Rules of engagement unchanged: probe-first; `tools/run-emit-audit.sh` after any emit.c change; MP compact rebuild + body byte-compare after any toolchain change (731,088 is the current baseline).
-
-## Carried open tracks (from §5c; pick by appetite)
-- huge `_qbe_huge_add` ≥0x8000 variable-index gap (§4i); `jmp_buf bufs[6]` (§4v, unreduced); minic static-init float const-expr folding (also unlocks MICROPY_PY_MATH_CONSTANTS); small-model setjmp/longjmp (newlibc may force this); multi-decl items after the first skip block_scope_decl (loud); Kw spill-slot sharing.
-- ~~ROADMAP.md refresh / CLAUDE.md prune~~ — DONE 2026-06-11.
-
----
-
-# Next session (§5c is DONE 2026-06-11 — all three primary items landed in one session.  (1) **Upstream sync**: merged `c081897..e786f06` (3 commits; `fa19d3c` strict-aliasing fix in emit.c float-constant comments is output-identical) — make check green, gate 254/254, MP body byte-identical.  (2) **THE SMALL MODEL WORKS** (the only flat-out broken model, commit `4cfb321`): `libstub_to_exe.py` gained `near_code_model`/`unfar_epilogue` — small keeps libstub's native near ABI untouched and the EXE epilogue blocks (authored far-ABI) are reverse-transformed (retf→ret, `call far X`→`call X`, `[bp+N≥6]`−2, the printf engines' computed vararg bases `add si,N`−2, LIBSTUB_TEXT→_TEXT); FAR_DOSIO + SETJMP dropped under near-code (unreachable; SETJMP's jmp_buf is structurally far — a near setjmp is an OPEN track); `asm_to_omf.py` emits tiny/small code into shared `_TEXT` (no budget split); **`omf_link.py` now coalesces CODE segments BY NAME like DATA/BSS** (behavior-identical for far models — names unique; under small the three `_TEXT`s merge into ONE paragraph frame so near calls and 16-bit fn ptrs resolve against the runtime CS — fnptrprobe passes, proving it); crt0 `-DNEAR_CODE` → near `call _main`.  6 gate entries: cprobe/cstrprobe/fnptrprobe/mathprobe/dosapi_probe/fileio-roundtrip, all DOSBox-verified; cstrprobe has a small-specific golden (`%p` prints the C-correct 16-bit near ptr `5678`).  Gate 254→260.  (3) **the `float **` collision is FIXED** (commit `bf4a2e3`): FAR 24→26, QVOLATILE 25→27 — FLOAT (18) two shifts up no longer lands on FAR, so `float **` deref/store/param all decode right (pre-fix medium emitted loadl+loadfw+swtof garbage — probe-proven).  PLUS the probe's f3 case found the DIRECT-call sibling of §5b: `DREF(FUNC(ret))` strips ret bits on the flag positions (a direct fn returning `float **` puts FLOAT on new-QVOLATILE 27), so **fnproto gained `rett`/`has_rett`** (the fpproto.rett mirror; recorded at all 6 fnproto_record sites, used at the direct-call decode — layout-independent).  Residual collisions all moved one level deeper and surveyed UNCONSUMED (MP+stevie+probes): `unsigned T ***` (17+9=26), `float ***` (18+9=27), and far-data nested-far depth is now exactly ONE level (`T **` ok; T***'s innermost FAR needs bit 32 — the probe's short*** case under compact CONFIRMED the documented trade, reduced to short**).  Probe `float_dblptr_probe.c` (medium+compact, bug-loud).  Gate 260→**262/262** with every pre-existing golden unmoved; conflicts unchanged 115 s/r; MP compact rebuild BYTE-IDENTICAL (731,088) after EACH of the three changes → no Victor runs needed all session.  No designated successor — open tracks below.)
-
-## §5c session notes (2026-06-11)
-
-### Small model — what to know before extending it
-- The near-code link model: ALL code (crt0 `_TEXT` + every TU's `_TEXT` + libstub `_TEXT`)
-  coalesces by NAME in omf_link into one paragraph frame at para 0; entry CS=0.  Near calls
-  are self-relative byte-distance fixups (frame-independent); 16-bit code-symbol fixups
-  (fn ptrs, loc==1) resolve against the combined segment's frame == runtime CS.  This is
-  why fn pointers REQUIRED the coalescing, not just contiguous placement.
-- The i8086 backend needed ZERO changes: `sf_farcall()`/`farcall` in emit.c already gate
-  helper calls on memmodel (near `call _qbe_div32s` under small), minic's `far_stdlib`
-  mangling is NEAR_CODE-off, crt0 was the only far-call site.
-- OPEN small-model gaps (extend on demand): no setjmp/longjmp (SETJMP_EXE dropped — needs
-  a dedicated near impl with a 2-byte env return slot); softfloat probes not gated under
-  small (the `_sf_*` helpers ARE near-callable and softfloat.c compiles — just never
-  gated); no stevie-small (DGROUP pressure untested); `unfar_epilogue` is mechanical —
-  any NEW epilogue block with computed arg offsets needs the `add si,N ; first vararg`
-  idiom or plain `[bp+N]` so the reverse transform sees it.
-- tiny .COM is untouched (flat concat via build-com-test.sh, never goes through
-  libstub_to_exe/omf_link); `--model=tiny` through build-example.sh now produces the same
-  near-code .EXE shape as small (untested, no consumer).
-
-### float**/encoding — the residual map (post-move)
-- Encoding law: any flag bit f collides with anything at bit f+3k after k shifts.  Current
-  layout: SHORT 16, UNSIGNED 17, FLOAT 18, FAR 26, QVOLATILE 27.  Residuals: UNSIGNED@3
-  →FAR, FLOAT@3→QVOLATILE (the fn-ptr/direct-call RETURN paths are immune via
-  fpproto.rett / fnproto.rett), SHORT@4→28 (harmless today), far-data T*** loses its
-  innermost FAR (bit 32 overflow).  A future flag must not land on 19–25 without checking
-  depth collisions against all five.
-- fnproto.rett applies to EVERY recorded direct call (not just float) — it also upgrades
-  the stale-prototype shape where a function-local prototype's varh entry died at scope
-  exit but fnproto persists (previously decoded FUNC(INT)).  MP byte-identical proves no
-  shipping consumer changed.
-
-### Open tracks (carried; pick by appetite)
-- huge `_qbe_huge_add` ≥0x8000 variable-index gap (§4i) — gate has huge entries to extend.
-- `jmp_buf bufs[6]` (§4v, UNREDUCED) — reduce, classify, fix or document.
-- minic static-initializer FLOAT const-expr folding (`static float x = 2.0f*3.14f;`) —
-  also unlocks MICROPY_PY_MATH_CONSTANTS for free.
-- Multi-decl items after the first skip block_scope_decl (loud "double definition").
-- Small-model setjmp/longjmp (near env) if a consumer appears; softfloat gate entries
-  under small (cheap thickening).
-- **ROADMAP.md still stale since 2026-05-23** (predates the whole MP campaign + §4/§5
-  toolchain work) — one consolidation pass; also prune the CLAUDE.md Prior: chain.
-- Kw spill-slot sharing (no consumer pain); newlibc integration (STRATEGIC, needs user
-  go/no-go — would retire the libstub ret-rewrite machinery §5c just made model-aware).
-
-
----
-
-Older session headers (§3u–§5c-PLAN and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).
+Older session headers (§5c and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).

@@ -1,0 +1,12 @@
+
+===============================================
+  Victor 9000 Phase 3 FAT BPB Test
+===============================================
+
+PASS: fat_mount() classifies FAT12 media.
+PASS: fat_mount() parses BPB fields.
+PASS: fat_mount() computes FAT layout.
+PASS: bad boot signature is rejected.
+PASS: mismatched BPB sector size is rejected.
+
+FAT BPB test complete.

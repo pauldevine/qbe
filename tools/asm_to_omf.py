@@ -415,27 +415,16 @@ def main():
             else:
                 sections[current].append(line)
 
-    # Auto-export every `_xxx`-prefixed *data* label defined in this file.
-    # minic doesn't currently emit qbe `export` markers for file-scope
-    # data, so qbe doesn't emit `.globl` for them — but C's default
-    # linkage for file-scope identifiers IS external, so we promote
-    # every data `_xxx:` label to a public.  The `<base>_xxx` per-module
-    # local labels (jump targets, string literals) stay private.
-    #
-    # CODE labels (functions, defined in a .text section) are NOT
-    # auto-promoted: minic correctly emits `.globl` for an exported
-    # function (`export function`) and omits it for a `static` one
-    # (internal linkage).  Auto-promoting them would re-export `static`
-    # helpers and collide as duplicate publics across every TU that
-    # includes the same `static inline` header function (e.g.
-    # MicroPython's utf8_get_char in py/misc.h).
+    # Publics come exclusively from `.globl` (§6b).  minic emits
+    # `export data` for external-linkage file-scope data and a plain
+    # `data` for C `static` data (including mangled function-local
+    # statics), exactly mirroring the function story (§1q: `export
+    # function` vs `function`), so qbe's `.globl` is authoritative for
+    # BOTH code and data labels.  The old behavior — auto-promoting
+    # every `_xxx:` data label to a public — exported `static` data and
+    # collided as duplicate publics when two TUs reused a static name
+    # (newlibc: dirent.c and vfs.c both define `static ... dir_table[]`).
     public_set = set(publics)
-    for sym in defined:
-        if sym in defined_text:
-            continue
-        if sym.startswith('_') and sym not in public_set:
-            publics.append(sym)
-            public_set.add(sym)
 
     # Compute externs: anything referenced but not defined locally.
     # Filter out segment-name-like tokens and false positives.

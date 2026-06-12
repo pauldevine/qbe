@@ -1,0 +1,11 @@
+
+===============================================
+  Victor 9000 Phase 3 FAT Root Lookup Test
+===============================================
+
+PASS: fat_find_root() locates HELLO.TXT.
+PASS: fat_find_root() locates root subdirectory.
+PASS: missing root file returns ENOENT.
+PASS: invalid 8.3 name returns EINVAL.
+
+FAT root lookup test complete.

@@ -355,6 +355,28 @@ char glosec[NGlo][NString];   /* Optional section override for each global.
                                * (`_HUGE_<sym>`) that the linker keeps out
                                * of DGROUP; asm_to_omf.py picks these up
                                * via `.section "_HUGE_<sym>"` markers. */
+char glostatic[NGlo];         /* 1 = internal linkage (C `static` file-scope
+                               * data, or a mangled function-local static):
+                               * emitted as plain `data` (no .globl).  0 =
+                               * external linkage: emitted as `export data`
+                               * (§6b — asm_to_omf.py no longer auto-promotes
+                               * data labels, so this flag is authoritative). */
+int glo_decl_start = 1;       /* nglo watermark captured at type_and_ident
+                               * (the start of a file-scope declaration); the
+                               * STATIC typed_decl variants retro-mark every
+                               * slot registered since (the named global plus
+                               * nothing else that matters: anonymous string
+                               * slots have no gloname and are never public,
+                               * and a static FUNCTION body's statics must be
+                               * internal anyway). */
+
+void
+glo_mark_static_range(int start)
+{
+	int i;
+	for (i = start; i < nglo && i < NGlo; i++)
+		glostatic[i] = 1;
+}
 struct {
 	char v[NString];
 	unsigned ctyp;
@@ -1817,6 +1839,7 @@ emit_static_local(char *name, unsigned sym_ctyp, int isarray, char *init_buf)
 	ini[nglo] = alloc(strlen(init_buf) + 1);
 	strcpy(ini[nglo], init_buf);
 	strcpy(gloname[nglo], mangled);
+	glostatic[nglo] = 1;  /* function-local static: internal linkage (§6b) */
 	varadd(name, nglo, sym_ctyp, isarray);
 	h0 = hash(name);
 	h = h0;
@@ -6811,6 +6834,7 @@ attr_typed_decl: attrspec type_and_ident_noattr typed_decl_rest
 	 * flags; type_and_ident_noattr does NOT reset them.  The lexer's
 	 * pending_static flag (set on STATIC at brace_depth 0 regardless of a
 	 * preceding ATTRIBUTE) already gives the function internal linkage. */
+	glo_mark_static_range(glo_decl_start);
 };
 
 attrspec: ATTRIBUTE '(' '(' attrreset attrlist ')' ')';
@@ -6819,6 +6843,7 @@ type_and_ident_noattr: type IDENT
 {
 	parsed_type = $1;
 	strcpy(parsed_ident, $2->u.v);
+	glo_decl_start = nglo;
 };
 
 edcl: enumstart enums '}' ';'
@@ -7138,6 +7163,8 @@ sdcl: structstart smembers '}' ';'
     | STATIC structstart smembers '}' IDENT '[' NUM ']' ';'
 {
 	emit_struct_global_array($5->u.v, $7->u.n);
+	glostatic[nglo - 1] = 1;  /* the slot emit_struct_global_array
+	                           * just registered (§6b) */
 }
     ;
 
@@ -7284,8 +7311,11 @@ typed_decl: type_and_ident typed_decl_rest
 }
           | STATIC type_and_ident typed_decl_rest
 {
-	/* `static` storage class: parse-only no-op for now (single-TU compilation).
-	 * Affects linkage in real C; MiniC emits all symbols equivalently. */
+	/* `static` storage class: internal linkage.  Function linkage is
+	 * handled by fn_export_kw/pending_static at the header; DATA slots
+	 * registered by typed_decl_rest are retro-marked here so they emit
+	 * as plain `data` (no .globl) — §6b. */
+	glo_mark_static_range(glo_decl_start);
 }
           | INLINE type_and_ident typed_decl_rest
 {
@@ -7294,16 +7324,19 @@ typed_decl: type_and_ident typed_decl_rest
           | STATIC INLINE type_and_ident typed_decl_rest
 {
 	/* `static inline` — same treatment. */
+	glo_mark_static_range(glo_decl_start);
 }
           | INLINE STATIC type_and_ident typed_decl_rest
 {
 	/* `inline static` — same treatment. */
+	glo_mark_static_range(glo_decl_start);
 }
           | STATIC attrspec type_and_ident_noattr typed_decl_rest
 {
 	/* `static __attribute__((xxx)) type ident ...` — MicroPython spells
 	 * `static __attribute__((noreturn)) void f(...)`.  attrspec set the
 	 * attribute flags; type_and_ident_noattr does NOT reset them. */
+	glo_mark_static_range(glo_decl_start);
 };
 
 type_and_ident: type IDENT
@@ -7312,12 +7345,14 @@ type_and_ident: type IDENT
 	cur_fn_weak = 0;
 	parsed_type = $1;
 	strcpy(parsed_ident, $2->u.v);
+	glo_decl_start = nglo;
 }
               | type attropt IDENT
 {
 	/* type __attribute__((xxx)) ident - attributes already set by attropt */
 	parsed_type = $1;
 	strcpy(parsed_ident, $3->u.v);
+	glo_decl_start = nglo;
 }
               | type TFAR attropt IDENT
 {
@@ -7328,6 +7363,7 @@ type_and_ident: type IDENT
 	 * accepted and dropped from the parsed type. */
 	parsed_type = $1;
 	strcpy(parsed_ident, $4->u.v);
+	glo_decl_start = nglo;
 };
 
 typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
@@ -9721,8 +9757,13 @@ yylex_inner()
 			}
 		} else if (c == 'u' || c == 'U') {
 			c = getchar();
-			/* Optional trailing L/l for `UL` etc. */
+			/* Optional trailing L/l for `UL` etc. — the L still
+			 * means LONG (12345UL pushed as 2 words, not 1); this
+			 * branch used to consume it without setting suffix_l,
+			 * so `%lu` of a UL literal read a garbage high word
+			 * (newlibc snprintf_test, §6b). */
 			if (c == 'l' || c == 'L') {
+				suffix_l = 1;
 				c = getchar();
 				if (c == 'l' || c == 'L')
 					c = getchar();
@@ -10095,7 +10136,14 @@ main(int argc, char **argv)
 		if (glosec[i][0] != 0)
 			fprintf(of, "section \"%s\" ", glosec[i]);
 		if (gloname[i][0] != 0)
-			fprintf(of, "data $%s = %s\n", gloname[i], ini[i]);
+			/* C file-scope data has external linkage unless declared
+			 * `static`; `export` makes qbe emit `.globl _name`, which
+			 * asm_to_omf.py now treats as authoritative for data
+			 * publics (it used to auto-promote every data label) —
+			 * §6b.  Anonymous $glo<N> slots (string literals) stay
+			 * module-local. */
+			fprintf(of, "%sdata $%s = %s\n",
+				glostatic[i] ? "" : "export ", gloname[i], ini[i]);
 		else
 			fprintf(of, "data $glo%d = %s\n", i, ini[i]);
 	}

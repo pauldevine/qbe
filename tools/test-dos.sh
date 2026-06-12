@@ -558,6 +558,57 @@ run_grouped_bss_probe() {
 	echo "$out" | diff -u "$golden" - >&2
 }
 
+# Runtime regression for C internal linkage of file-scope DATA (§6b).
+# Two TUs each define `static int dir_table` (different values) plus a
+# same-named block static behind a same-named static fn; one ordinary
+# global crosses TUs via extern.  Pre-fix the link died on a duplicate
+# public (`_dir_table`) because asm_to_omf auto-promoted data labels.
+run_static_data_probe() {
+	model="$1"
+	src="$QBE_DIR/minic/dos/examples/static_data_probe.c"
+	def="$QBE_DIR/minic/dos/examples/static_data_def.c"
+	golden="$QBE_DIR/minic/dos/tests/static_data_probe.golden.txt"
+	exe="$QBE_DIR/build/examples/static_data_probe/static_data_probe.exe"
+	"$QBE_DIR/tools/build-example.sh" --model="$model" "$src" "$def" >/dev/null
+	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
+	echo "$out" | diff -u "$golden" - >&2
+}
+
+# §6b newlibc DOS-hosted tests (Phase-6 step 2).  Each builds a newlibc
+# phase3 test TU + the portable subset (libgloss/VFS/FAT/block) +
+# minic/dos/newlibc/dos_shim.c via tools/build-newlibc-test.sh (small
+# model, --no-stdio libstub) and diffs DOSBox stdout against a golden.
+# Skipped when the newlibc tree is absent.  memory_test is intentionally
+# NOT here: it scans the Victor physical memory map (hardware-flavored,
+# MAME bare-metal material, not portable-subset).
+NEWLIBC_TESTS=(
+	snprintf_test
+	fat_bpb_test
+	fat_chain_test
+	fat_root_test
+	fat_dir_test
+	fat_file_test
+	fat_vfs_test
+	ramfs_test
+	stdio_route_test
+	bss_test
+	terminal_meta_test
+)
+
+run_newlibc_test() {
+	name="$1"
+	nl="${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}"
+	if [ ! -d "$nl" ]; then
+		echo "newlibc tree not found: $nl"
+		return 77
+	fi
+	golden="$QBE_DIR/minic/dos/tests/newlibc_$name.golden.txt"
+	exe="$QBE_DIR/build/newlibc-tests/$name/$name.exe"
+	"$QBE_DIR/tools/build-newlibc-test.sh" "$name" >/dev/null
+	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
+	echo "$out" | diff -u "$golden" - >&2
+}
+
 # Compile-time probe for C `volatile` on named locals.  volatile is a codegen
 # property (not runtime-observable in a self-contained program), so this
 # inspects the emitted i8086 asm: volf() must KEEP its volatile loads/stores
@@ -807,6 +858,16 @@ done
 
 run "medium runtime (grouped_bss_probe)" \
 	run_grouped_bss_probe
+
+run "small runtime (static_data_probe)" \
+	run_static_data_probe small
+
+run "medium runtime (static_data_probe)" \
+	run_static_data_probe medium
+
+for t in "${NEWLIBC_TESTS[@]}"; do
+	run "newlibc small ($t)" run_newlibc_test "$t"
+done
 
 run "volatile asm (named local)" \
 	run_volatile_asm_probe

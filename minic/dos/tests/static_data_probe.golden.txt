@@ -1,0 +1,6 @@
+a_table=100 (want 100)
+b_table=200 (want 200)
+a_bump=4 (want 4)
+a_bump2=5 (want 5)
+b_bump=32 (want 32)
+shared=42 (want 42)

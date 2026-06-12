@@ -9,11 +9,11 @@
 
 ## Where the project is (one paragraph)
 
-The original compiler goal is **complete**, and so is the MicroPython hardening campaign that followed it.  All **six memory models work** (tiny .COM / small / medium / compact / large / huge — small was the last broken one, fixed 2026-06-11).  The per-model runtime gate is **262/262** (`tools/test-dos.sh`).  MicroPython (108 TUs) runs on a real Victor 9000: full language surface, FLOAT, the `math` module, a 114 KB split GC heap, an interactive REPL — all Victor-verified byte-exact vs host python3.  MicroPython's remaining feature tracks are **PARKED**; its role now is a **regression corpus** (rebuild compact, byte-compare the 731,088-byte body after toolchain changes; Victor re-runs only when bytes move).  Upstream QBE is in sync through `e786f06`.  Stevie ships as a 146 KB medium-model .EXE, interactively verified on the Victor.
+The original compiler goal is **complete**, and so is the MicroPython hardening campaign that followed it.  All **six memory models work** (tiny .COM / small / medium / compact / large / huge — small was the last broken one, fixed 2026-06-11).  The per-model runtime gate is **287/287** (`tools/test-dos.sh`).  MicroPython (108 TUs) runs on a real Victor 9000: full language surface, FLOAT, the `math` module, a 114 KB split GC heap, an interactive REPL — all Victor-verified byte-exact vs host python3.  MicroPython's remaining feature tracks are **PARKED**; its role now is a **regression corpus** (rebuild compact, byte-compare the 731,088-byte body after toolchain changes; Victor re-runs only when bytes move).  Upstream QBE is in sync through `e786f06`.  Stevie ships as a 146 KB medium-model .EXE, interactively verified on the Victor.
 
 ## 🚧 Next frontier: newlibc for the Victor 9000 (Phase 6, designated 2026-06-11)
 
-Compile **`~/projects/newlibc`** — a much-progressed Victor 9000 C library + driver suite (bare-metal newlib port: crt0, libgloss, display/keyboard/timer/SASI drivers, VFS + read-only FAT, ~40 MAME-driven tests; phase 1 DOS drivers built with OpenWatcom, phase 3 bare-metal built with ia16-elf-gcc) — with **this** toolchain, and adopt its test suite as a standing robustness harness.  End state: newlibc replaces libstub as the real libc.  **See ROADMAP.md → Phase 6** for the survey, the known integration challenges (no `__attribute__((interrupt))` in minic; omf_link needs a raw-binary output mode; newlib proper is out of near-term scope; small model just gained its first consumer), and the gated bring-up sequence.
+Compile **`~/projects/newlibc`** — a much-progressed Victor 9000 C library + driver suite (bare-metal newlib port: crt0, libgloss, display/keyboard/timer/SASI drivers, VFS + read-only FAT, ~40 MAME-driven tests; phase 1 DOS drivers built with OpenWatcom, phase 3 bare-metal built with ia16-elf-gcc) — with **this** toolchain, and adopt its test suite as a standing robustness harness.  End state: newlibc replaces libstub as the real libc.  **Step 1 (triage sweep) DONE 2026-06-11 (§6a)**: 46/66 phase-3 TUs compile under small AND medium after seven minic dialect fixes.  **Step 2 (DOS-hosted portable subset) DONE 2026-06-11 (§6b)**: ELEVEN newlibc tests (snprintf, six FAT/VFS, ramfs, stdio_route, bss, terminal_meta) run DOS-hosted through the full newlibc stack (printf wrappers → syscalls → VFS → FAT-over-RAM-block) and are standing gate entries (`tools/build-newlibc-test.sh`, `minic/dos/newlibc/`, `libstub_to_exe.py --no-stdio`); two toolchain bugs fixed en route (static file-scope data linkage; decimal `UL` literal typing).  **See ROADMAP.md → Phase 6** for the plan and the remaining challenges (ISR definitions + extended-asm dialect; omf_link raw-binary output; newlib proper out of near-term scope).  Next: step 3 — omf_link raw-binary output + minic-built crt0 + MAME bare-metal hello.
 
 ---
 
@@ -51,7 +51,7 @@ Compile **`~/projects/newlibc`** — a much-progressed Victor 9000 C library + d
 
 ```sh
 make check                      # QBE SSA tests
-tools/test-dos.sh               # the 262-entry per-model runtime gate (DOSBox)
+tools/test-dos.sh               # the 274-entry per-model runtime gate (DOSBox)
 tools/build-example.sh --model=<tiny|small|medium|compact|large|huge> <file.c>
 tools/build-stevie.sh --exe     # stevie editor
 tools/build-micropython.sh --model=compact   # the MP regression corpus
