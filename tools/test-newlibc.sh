@@ -13,12 +13,40 @@
 # Each run degrades to "skip" (exit 77) when MAME/roms or the newlibc
 # tree is missing.
 #
-# Usage:  tools/test-newlibc.sh
+# Usage:  tools/test-newlibc.sh [--show] [test-name ...]
+#   --show      run MAME in a WINDOW, throttled to authentic 5 MHz speed
+#               (V9K_SHOW=1 in run-victor-baremetal.sh), so the Victor
+#               screen is watchable.  Golden-diffing works as usual, but
+#               each test takes its full seconds budget in wall time —
+#               combine with a test name to watch just one.
+#   test-name   run only the named test(s), e.g.:
+#               tools/test-newlibc.sh --show interrupt_bm
 
 set -eu
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 NL="${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}"
+
+SHOW=0
+ONLY=()
+for arg in "$@"; do
+	case "$arg" in
+		--show) SHOW=1 ;;
+		-h|--help)
+			cat >&2 <<-'USAGE'
+			usage: tools/test-newlibc.sh [--show] [test-name ...]
+			  --show      run MAME in a WINDOW, throttled to authentic
+			              5 MHz speed, so the Victor screen is watchable;
+			              combine with a test name to watch just one
+			  test-name   run only the named test(s), e.g.:
+			              tools/test-newlibc.sh --show interrupt_bm
+			USAGE
+			exit 0 ;;
+		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
+		*) ONLY+=("$arg") ;;
+	esac
+done
+export V9K_SHOW="$SHOW"
 
 # Each entry: `<name>:<run-seconds>:<keypost>:<serial-in-bytes>`.
 NEWLIBC_BM_TESTS=(
@@ -83,14 +111,29 @@ run_bm_test() {
 	echo "$out" | diff -u "$QBE_DIR/minic/dos/tests/$name.golden.txt" - >&2
 }
 
+matched=0
 for entry in "${NEWLIBC_BM_TESTS[@]}"; do
 	name="${entry%%:*}"; rest="${entry#*:}"
 	secs="${rest%%:*}"; rest="${rest#*:}"
 	keypost="${rest%%:*}"
 	serial_bytes="${rest#*:}"
+	if [ "${#ONLY[@]}" -gt 0 ]; then
+		want=0
+		for o in "${ONLY[@]}"; do
+			[ "$o" = "$name" ] && want=1
+		done
+		[ "$want" = 1 ] || continue
+	fi
+	matched=$((matched + 1))
 	run "newlibc bare-metal ($name)" \
 		run_bm_test "$name" "$secs" "$keypost" "$serial_bytes"
 done
+
+if [ "${#ONLY[@]}" -gt 0 ] && [ "$matched" -ne "${#ONLY[@]}" ]; then
+	echo "$0: unknown test name(s) in: ${ONLY[*]}" >&2
+	echo "  known: ${NEWLIBC_BM_TESTS[*]%%:*}" >&2
+	exit 2
+fi
 
 echo
 echo "newlibc bare-metal battery: $pass passed, $fail failed, $skip skipped"

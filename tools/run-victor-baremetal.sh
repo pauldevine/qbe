@@ -18,6 +18,12 @@
 #   $MAME            MAME binary   (default ~/projects/mame/mame, then PATH)
 #   $MAME_ROMS       MAME rompath  (default <mame dir>/roms)
 #   $VICTOR_LOAD_ADDR  load address (default 0x3000; must match the link)
+#   $V9K_SHOW=1      run MAME in a WINDOW, throttled to authentic 5 MHz
+#                    speed, so the Victor screen is watchable (display/
+#                    crtc/interrupt tests draw for real).  Serial capture
+#                    and golden-diffing work exactly as in headless mode;
+#                    the run takes its full seconds_to_run budget in wall
+#                    time.  Default: headless (-video none, -nothrottle).
 #
 # Exits 77 (skip) if MAME or its roms are missing.
 
@@ -40,6 +46,7 @@ KEYPOST="${V9K_KEYPOST:-}"
 KEYPOST_DELAY="${V9K_KEYPOST_DELAY:-3}"
 SERIAL_IN="${V9K_SERIAL_IN:-}"
 SERIAL_IN_DELAY="${V9K_SERIAL_IN_DELAY:-3}"
+SHOW="${V9K_SHOW:-0}"
 
 if [ -z "$BIN" ] || [ ! -f "$BIN" ]; then
 	echo "usage: $0 <path-to-prog.bin> [seconds_to_run]" >&2
@@ -197,7 +204,17 @@ RS232_ARGS=(-rs232a null_modem -bitbanger "$CAP")
 if [ -n "$SERIAL_IN_ABS" ]; then
 	RS232_ARGS=(-rs232a null_modem -rs232b null_modem -bitbanger1 "$CAP")
 fi
-SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}" "$MAME_BIN" victor9k \
+# Headless (default): no video, dummy SDL driver, -nothrottle (emulated
+# time runs as fast as the host allows).  V9K_SHOW=1: real window,
+# throttled — the screen runs at authentic 5 MHz speed and the run takes
+# seconds_to_run in wall time (the watchdog budget already covers it).
+VIDEO_ARGS=(-video none -nothrottle)
+if [ "$SHOW" = "1" ]; then
+	VIDEO_ARGS=(-window)
+else
+	export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}"
+fi
+"$MAME_BIN" victor9k \
 	-rompath "$MAME_ROMS" \
 	-homepath "$WORK/home" \
 	-cfg_directory "$WORK/home/cfg" \
@@ -210,7 +227,7 @@ SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-dummy}" "$MAME_BIN" victor9k \
 	-ramsize 896K \
 	-autoboot_script "$LUA" \
 	-autoboot_delay 0 \
-	-video none -sound none -nothrottle -skip_gameinfo \
+	"${VIDEO_ARGS[@]}" -sound none -skip_gameinfo \
 	-seconds_to_run "$(( RUN_SECS + 30 ))" \
 	"${RS232_ARGS[@]}" \
 	>/dev/null 2>&1 &
