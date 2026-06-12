@@ -696,9 +696,18 @@ block_scope_decl(Node *node, unsigned ctyp, int isarray)
 		if (varh[h].v[0] == 0)
 			break;
 		if (strcmp(varh[h].v, v) == 0) {
-			if (varh[h].glo == 0 && !varh[h].isextern &&
+			/* Rename when the new local would collide with (a) a
+			 * same-named LOCAL of a different type (the original
+			 * §1k inner-block case), or (b) ANY global, extern,
+			 * function, or enum constant — C says a block-scope
+			 * declaration shadows the file-scope binding (§6a:
+			 * newlibc vfs_open has a local `fat_mount` next to the
+			 * file-scope function fat_mount()). */
+			if ((varh[h].glo == 0 && !varh[h].isextern &&
 			    !varh[h].enumconst &&
-			    (varh[h].ctyp != ctyp || varh[h].isarray != isarray)) {
+			    (varh[h].ctyp != ctyp || varh[h].isarray != isarray))
+			    || varh[h].glo != 0 || varh[h].isextern
+			    || varh[h].enumconst) {
 				if (renamestksp >= NRename)
 					die("too many block-scoped renames");
 				sprintf(renamestk[renamestksp].mangled,
@@ -4537,8 +4546,11 @@ lval(Node *n)
 			die("invalid lvalue");
 		break;
 	case 'V':
-		if (!varget(n->u.v))
-			die("undefined variable");
+		if (!varget(n->u.v)) {
+			static char ediag[NString + 32];
+			sprintf(ediag, "undefined variable %s", n->u.v);
+			die(ediag);
+		}
 		sr = *varget(n->u.v);
 		/* A far global variable lives in far storage; a local/near one
 		 * does not (even if its value type is a far pointer). */
@@ -5372,6 +5384,27 @@ struct CIVal {
 };
 
 void cival_eval(Node *, struct CIVal *);
+
+/* File-scope scalar initializer that folded to a symbol address
+ * (+addend): `char **environ = __env;`, `int *p = &x;` — the scalar
+ * sibling of the aggregate path's `$sym+off` items (§6a). */
+void
+emit_global_sym_init(char *sym, long off)
+{
+	char buf[NString + 32];
+	if (parsed_type == NIL)
+		die("invalid void declaration");
+	if (nglo == NGlo)
+		die("too many globals");
+	if (off)
+		sprintf(buf, "{ %c $%s+%ld }", irtyp(parsed_type), sym, off);
+	else
+		sprintf(buf, "{ %c $%s }", irtyp(parsed_type), sym);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], parsed_ident);
+	varadd(parsed_ident, nglo++, parsed_type, 0);
+}
 
 #define NSAI 4096
 int  nsai = 0;
@@ -6407,7 +6440,10 @@ emit_local_init_list(unsigned ctyp, Node *list)
  *   'P' = *IDENT       (one extra pointer level)
  *   'A' = IDENT[]       (array; decays to pointer)
  *   'F' = IDENT()       (function returning base)
- *   'G' = *IDENT()      (function returning pointer to base) */
+ *   'G' = *IDENT()      (function returning pointer to base)
+ *   'H' = *IDENT(par1)  (ANSI prototype returning pointer to base;
+ *                        the param list is stashed on n->l so the
+ *                        extern walks can fnproto_record it) */
 Node *
 kr_name_node(char *name, char op)
 {
@@ -6910,12 +6946,16 @@ externdcl: EXTERN type IDENT ';'
          | EXTERN type IDENT '(' par1 ')' ';'
 {
 	/* Extern with typed prototype: extern int foo(int, int);
-	 * MiniC just records the return type. */
+	 * MiniC just records the return type.  varclr drops the par1
+	 * param names from the symtab — a file-scope prototype must not
+	 * leak its param bindings, or a later decl reusing the name with
+	 * a different type dies with a bogus double definition. */
 	if ($2 == NIL)
 		varadd($3->u.v, 1, FUNC(NIL), 0);
 	else
 		varadd($3->u.v, 1, FUNC($2), 0);
 	fnproto_record($3->u.v, $5, $2);
+	varclr();
 }
          | EXTERN type ext_decllist ';'
 {
@@ -6932,6 +6972,9 @@ externdcl: EXTERN type IDENT ';'
 			t = FUNC($2);
 		} else if (n->op == 'G') {
 			t = FUNC(IDIR($2));
+		} else if (n->op == 'H') {
+			t = FUNC(IDIR($2));
+			fnproto_record(n->u.v, n->l, IDIR($2));
 		} else if (n->op == 'A' || n->op == 'B') {
 			/* B = sized array declarator (the bare-NUM dimension form
 			 * reduces through ext_decl, NOT the dedicated rule above).
@@ -6955,6 +6998,7 @@ externdcl: EXTERN type IDENT ';'
 		if (n->op == 'B')
 			var_set_arraybytes(n->u.v, SIZE($2) * n->l->u.n);
 	}
+	varclr();
 }
          ;
 
@@ -6974,6 +7018,7 @@ ext_decl: IDENT                 { $$ = kr_name_node($1->u.v, 0); }
         | IDENT '[' ']'         { $$ = kr_name_node($1->u.v, 'A'); }
         | IDENT '[' NUM ']'     { $$ = kr_array_node($1->u.v, $3->u.n); }
         | '*' IDENT '(' ')'     { $$ = kr_name_node($2->u.v, 'G'); }
+        | '*' IDENT '(' par1 ')' { $$ = kr_name_node($2->u.v, 'H'); $$->l = $4; }
         | IDENT '(' ')'         { $$ = kr_name_node($1->u.v, 'F'); }
         | IDENT '=' expr        { $$ = kr_name_node($1->u.v, 0); $$->l = $3; }
         | '*' IDENT '=' expr    { $$ = kr_name_node($2->u.v, 'P'); $$->l = $4; }
@@ -7273,6 +7318,16 @@ type_and_ident: type IDENT
 	/* type __attribute__((xxx)) ident - attributes already set by attropt */
 	parsed_type = $1;
 	strcpy(parsed_ident, $3->u.v);
+}
+              | type TFAR attropt IDENT
+{
+	/* type __far __attribute__((xxx)) ident — ia16-gcc spells far ISRs
+	 * `void __far __attribute__((interrupt)) timer_isr(void)` (newlibc
+	 * interrupts.h).  The __far qualifies the FUNCTION (far call/ret),
+	 * which on this toolchain is a memory-model property, so it is
+	 * accepted and dropped from the parsed type. */
+	parsed_type = $1;
+	strcpy(parsed_ident, $4->u.v);
 };
 
 typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
@@ -7295,6 +7350,14 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	fprintf(of, "}\n\n");
 }
                | ansi_proto_register ';'
+               | ansi_proto_register ATTRIBUTE '(' '(' attrlist ')' ')' ';'
+{
+	/* Postfix attribute on a prototype:
+	 *   void _init(void) __attribute__((weak));   (newlibc syscalls.c)
+	 * The attribute flags attrlist set are reset by the next
+	 * definition's type_and_ident / init markers, so a prototype-only
+	 * weak/interrupt marker is recorded-and-dropped. */
+}
 {
 	/* ANSI function prototype: type name(args);  Registers the type
 	 * without emitting any IR for a stub function. */
@@ -7341,10 +7404,20 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	 * reduces via the '=' STR rule below (its '.' shifts ';'); '=' gaggr
 	 * is distinguished by its leading brace.  Non-constant initializers
 	 * die in const_eval. */
-	if (ISFLOAT(parsed_type))
+	if (ISFLOAT(parsed_type)) {
 		emit_global_float_init($2);
-	else
-		emit_global_int_init(const_eval($2));
+	} else {
+		/* cival_eval extends const_eval with symbol addresses, so
+		 * `char **environ = __env;` and `int *p = &x;` emit a
+		 * relocated `$sym+off` item (§6a) — pure-integer folds are
+		 * byte-identical to the old const_eval path. */
+		struct CIVal v;
+		cival_eval($2, &v);
+		if (v.issym)
+			emit_global_sym_init(v.sym, v.off);
+		else
+			emit_global_int_init((int)v.off);
+	}
 }
                | '=' gaggr ';'                   { emit_global_aggregate(parsed_type, parsed_ident, $2); }
                | '[' expr ']' ';'
@@ -7485,10 +7558,16 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 		} else if (n->op == 'A') {
 			t = IDIR(parsed_type);
 			varadd(n->u.v, 0, t, 1);
+		} else if (n->op == 'H') {
+			t = (parsed_type == NIL) ? FUNC(NIL)
+			                         : FUNC(IDIR(parsed_type));
+			varadd(n->u.v, 1, t, 0);
+			fnproto_record(n->u.v, n->l, IDIR(parsed_type));
 		} else {
 			varadd(n->u.v, 1, FUNC(parsed_type), 0);
 		}
 	}
+	varclr();
 }
                | '[' ']' '=' gaggr ';'
 {
@@ -7535,6 +7614,7 @@ ansi_proto_register: '(' init_ansi par0 ')'
 	curfntyp = parsed_type;
 	varadd(parsed_ident, 1, FUNC(curfntyp), 0);
 	fnproto_record(parsed_ident, $3, curfntyp);
+	varclr();
 };
 
 knr_func_proto: '(' init_kr kr_idlist ')' kr_param_dcls
@@ -7760,6 +7840,25 @@ par0: par1
     ;
 par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
     | type IDENT          { $$ = param($2->u.v, $1, 0); }
+    | type IDENT '[' ']' ',' par1
+{
+	/* Array parameter decays to pointer: int f(char buf[], ...) */
+	$$ = param($2->u.v, ($1 & FAR) ? IDIR_FAR($1) : IDIR($1), $6);
+}
+    | type IDENT '[' ']'
+{
+	$$ = param($2->u.v, ($1 & FAR) ? IDIR_FAR($1) : IDIR($1), 0);
+}
+    | type IDENT '[' expr ']' ',' par1
+{
+	/* Sized array parameter: the dimension is documentation only
+	 * (uint8_t out[11] is uint8_t *out), folded and discarded. */
+	$$ = param($2->u.v, ($1 & FAR) ? IDIR_FAR($1) : IDIR($1), $7);
+}
+    | type IDENT '[' expr ']'
+{
+	$$ = param($2->u.v, ($1 & FAR) ? IDIR_FAR($1) : IDIR($1), 0);
+}
     | type ',' par1       { $$ = abstract_param($1, $3); }
     | type                { $$ = abstract_param($1, 0); }
     | ELLIPSIS            { $$ = 0; /* variadic marker: ... proto only, no IR */ }
@@ -7805,17 +7904,18 @@ dcls:
 
 	if ($2 == NIL)
 		die("invalid void declaration");
-	v = $3->u.v;
 	if (g_td_arraydim > 0) {
 		/* Array-typedef local (`jmp_buf env;`): allocate the whole
 		 * array and register it as an array so it decays to a
 		 * pointer-to-element on use. */
 		int total = SIZE(g_td_arrayelem) * g_td_arraydim;
+		v = block_scope_decl($3, IDIR(g_td_arrayelem), 1);
 		varadd(v, 0, IDIR(g_td_arrayelem), 1);
 		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(),
 			iralign(g_td_arrayelem), total);
 	} else {
 	s = SIZE($2);
+	v = block_scope_decl($3, $2, 0);
 	varadd(v, 0, $2, 0);
 	/* fn-ptr typedef variable (`F fp;` where `typedef RET(*F)(...)`):
 	 * inherit the proto so an indirect call `fp(...)' coerces args (§2s). */
@@ -7839,7 +7939,7 @@ dcls:
 
 	if ($2 == NIL)
 		die("invalid void declaration");
-	v = $3->u.v;
+	v = block_scope_decl($3, $2, 0);
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
 	/* fn-ptr typedef variable with initializer (`F fp = somefunc;`):
@@ -7864,7 +7964,7 @@ dcls:
 
 	if ($2 == NIL)
 		die("invalid void declaration");
-	v = $3->u.v;
+	v = block_scope_decl($3, $2, 0);
 	s = SIZE($2);
 	varadd(v, 0, $2, 0);
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), s);
@@ -8050,6 +8150,10 @@ dcls:
 			t = FUNC($3);
 		else if (n->op == 'G')
 			t = FUNC(IDIR($3));
+		else if (n->op == 'H') {
+			t = FUNC(IDIR($3));
+			fnproto_record(n->u.v, n->l, IDIR($3));
+		}
 		else if (n->op == 'A' || n->op == 'B' || n->op == 'P')
 			t = IDIR($3);
 		else
@@ -8304,6 +8408,15 @@ gival: expr                   { $$ = $1; }
      | gaggr                  { $$ = $1; }
      ;
 
+/* Qualifier cluster that behaves like a lone `volatile` for type
+ * purposes: `const volatile T` and `volatile const T` (newlibc MMIO
+ * spelling `const volatile uint16_t __far *`) — const adds nothing in
+ * minic, volatile drives QVOLATILE exactly as before. */
+vol_qual: VOLATILE
+        | CONST VOLATILE
+        | VOLATILE CONST
+        ;
+
 type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; /* forming a pointer consumes any pending pointee-volatile (now in the type bit via IDIR) so the pointer OBJECT stays non-volatile; the trailing-VOLATILE rule re-sets it for the volatile-pointer case. */ }
         | type '*' TFAR              { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; }
         | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; }
@@ -8352,20 +8465,20 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
     | CONST TUNSIGNED TLNG     { $$ = LNG | UNSIGNED; }
     | CONST TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED; }
     | CONST TUNSIGNED          { $$ = INT | UNSIGNED; }
-    | VOLATILE TVOID        { $$ = NIL | QVOLATILE; g_decl_volatile = 1; }
-    | VOLATILE TCHAR        { $$ = CHR | QVOLATILE; g_decl_volatile = 1; }
-    | VOLATILE TSHORT       { $$ = INT | SHORT | QVOLATILE; g_decl_volatile = 1; }
-    | VOLATILE TINT         { $$ = INT | QVOLATILE; g_decl_volatile = 1; }
-    | VOLATILE TLNG         { $$ = LNG | QVOLATILE; g_decl_volatile = 1; }
-    | VOLATILE TLNGLNG      { $$ = LNG | QVOLATILE; g_decl_volatile = 1; }
-    | VOLATILE TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
-    | VOLATILE TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
-    | VOLATILE TUNSIGNED TINT     { $$ = INT | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
-    | VOLATILE TUNSIGNED TLNG     { $$ = LNG | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
-    | VOLATILE TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
-    | VOLATILE TUNSIGNED          { $$ = INT | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TVOID        { $$ = NIL | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TCHAR        { $$ = CHR | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TSHORT       { $$ = INT | SHORT | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TINT         { $$ = INT | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TLNG         { $$ = LNG | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TLNGLNG      { $$ = LNG | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TUNSIGNED TINT     { $$ = INT | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TUNSIGNED TLNG     { $$ = LNG | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TUNSIGNED          { $$ = INT | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
     | CONST TNAME    { $$ = $2; }
-    | VOLATILE TNAME { $$ = $2 | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TNAME { $$ = $2 | QVOLATILE; g_decl_volatile = 1; }
     | STRUCT IDENT {
         /* An undefined tag here is an incomplete type — legal when only
          * referenced through a pointer or extern decl (e.g.
@@ -8388,7 +8501,7 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
             idx = structadd_forward($3->u.v, 0);
         $$ = (idx << 3) + STRUCT_T;
     }
-    | VOLATILE STRUCT IDENT {
+    | vol_qual STRUCT IDENT {
         /* `volatile struct S` — the WHOLE aggregate is volatile, so every
          * member access through it (incl. via a `volatile struct S *p`
          * deref) must be a volatile load/store.  Encode QVOLATILE on the
@@ -8410,7 +8523,7 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
             idx = structadd_forward($3->u.v, 1);
         $$ = (idx << 3) + UNION_T;
     }
-    | VOLATILE UNION IDENT {
+    | vol_qual UNION IDENT {
         /* `volatile union U` — see VOLATILE STRUCT above. */
         int idx = structfind($3->u.v);
         if (idx < 0)

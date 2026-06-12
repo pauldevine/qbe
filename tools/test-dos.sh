@@ -166,6 +166,32 @@ RUNTIME_TESTS=(
 	# collides with FAR (24->26 move) + fnproto.rett direct-call decode.
 	"minic/dos/examples/float_dblptr_probe.c:minic/dos/tests/float_dblptr_probe.golden.txt:medium"
 	"minic/dos/examples/float_dblptr_probe.c:minic/dos/tests/float_dblptr_probe.golden.txt:compact"
+	# §6a extern pointer-returning ANSI prototype (extern char *f(int);)
+	# — newlibc hits it via errno.h extern int *__errno(void).
+	"minic/dos/examples/extern_ptrret_probe.c:minic/dos/tests/extern_ptrret_probe.golden.txt:small"
+	"minic/dos/examples/extern_ptrret_probe.c:minic/dos/tests/extern_ptrret_probe.golden.txt:medium"
+	# §6a file-scope prototype param names leaked into the global symtab
+	# (bogus double definition on later reuse with a different type).
+	"minic/dos/examples/proto_param_leak_probe.c:minic/dos/tests/proto_param_leak_probe.golden.txt:small"
+	"minic/dos/examples/proto_param_leak_probe.c:minic/dos/tests/proto_param_leak_probe.golden.txt:medium"
+	# §6a array parameter declarators (T a[], T a[11], char *const argv[])
+	# decay to pointers per C; par1 had no bracket forms at all.
+	"minic/dos/examples/array_param_probe.c:minic/dos/tests/array_param_probe.golden.txt:small"
+	"minic/dos/examples/array_param_probe.c:minic/dos/tests/array_param_probe.golden.txt:medium"
+	# §6a `void __far __attribute__((interrupt)) f(void);` PROTOTYPE parse
+	# (ia16-gcc far-ISR spelling; definitions stay a designed gap).
+	"minic/dos/examples/isr_far_attr_probe.c:minic/dos/tests/isr_far_attr_probe.golden.txt:small"
+	"minic/dos/examples/isr_far_attr_probe.c:minic/dos/tests/isr_far_attr_probe.golden.txt:medium"
+	# §6a scalar global `T *p = &x;` / `char **e = arr;` symbol-address
+	# init (cival_eval path).  NOT gated under far-data models: the §1g
+	# far static-DATA-ptr reloc gap is REAL at runtime (this probe under
+	# compact prints raw offsets 4194/4192 — segment missing).
+	"minic/dos/examples/static_sym_init_probe.c:minic/dos/tests/static_sym_init_probe.golden.txt:small"
+	"minic/dos/examples/static_sym_init_probe.c:minic/dos/tests/static_sym_init_probe.golden.txt:medium"
+	# §6a locals shadow file-scope bindings (global var / function /
+	# enum constant) via the extended block_scope_decl alpha-rename.
+	"minic/dos/examples/local_shadow_probe.c:minic/dos/tests/local_shadow_probe.golden.txt:small"
+	"minic/dos/examples/local_shadow_probe.c:minic/dos/tests/local_shadow_probe.golden.txt:medium"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:compact"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:large"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:huge"
