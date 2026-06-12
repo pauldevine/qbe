@@ -31,8 +31,8 @@ SMOKE_TESTS=(
 # --- .COM runtime tests ----------------------------------------------------
 #
 # Each entry: `<src>:<golden>:<model>` (model is tiny or small for .COM).
-# Built via tools/build-com-test.sh --model=<model>, run headlessly under
-# DOSBox via tools/run-dos-exe.sh.  The .COM libstub has STUB printf/file
+# Built via tools/build-com-test.sh --model=<model>, run in the batched
+# DOSBox boot alongside the .EXE runtime tests.  The .COM libstub has STUB printf/file
 # I/O (the real versions live in libstub_to_exe.py and are .EXE-only), so
 # .COM probes must output via inline-asm INT 21h AH=40h on top of the
 # real _sprintf in libstub.asm.  See minic/dos/examples/tinyprobe.c for
@@ -46,9 +46,10 @@ COM_RUNTIME_TESTS=(
 # --- DOS runtime tests -----------------------------------------------------
 #
 # Each entry: `<src>:<golden>:<model>`.  The probe is built via
-# tools/build-example.sh --model=<model>, run headlessly under DOSBox
-# via tools/run-dos-exe.sh; CRLF-stripped stdout is diff'd against the
-# golden.  Skipped (not failed) when DOSBox is missing.
+# tools/build-example.sh --model=<model>; all runtime probes then execute
+# together under ONE headless DOSBox boot (tools/run-dos-batch.sh, see
+# "batched runtime execution" below) and each CRLF-stripped stdout is
+# diff'd against its golden.  Skipped (not failed) when DOSBox is missing.
 #
 RUNTIME_TESTS=(
 	# Small model (.EXE, near code + near data).  All code coalesces into
@@ -166,6 +167,32 @@ RUNTIME_TESTS=(
 	# collides with FAR (24->26 move) + fnproto.rett direct-call decode.
 	"minic/dos/examples/float_dblptr_probe.c:minic/dos/tests/float_dblptr_probe.golden.txt:medium"
 	"minic/dos/examples/float_dblptr_probe.c:minic/dos/tests/float_dblptr_probe.golden.txt:compact"
+	# §6a extern pointer-returning ANSI prototype (extern char *f(int);)
+	# — newlibc hits it via errno.h extern int *__errno(void).
+	"minic/dos/examples/extern_ptrret_probe.c:minic/dos/tests/extern_ptrret_probe.golden.txt:small"
+	"minic/dos/examples/extern_ptrret_probe.c:minic/dos/tests/extern_ptrret_probe.golden.txt:medium"
+	# §6a file-scope prototype param names leaked into the global symtab
+	# (bogus double definition on later reuse with a different type).
+	"minic/dos/examples/proto_param_leak_probe.c:minic/dos/tests/proto_param_leak_probe.golden.txt:small"
+	"minic/dos/examples/proto_param_leak_probe.c:minic/dos/tests/proto_param_leak_probe.golden.txt:medium"
+	# §6a array parameter declarators (T a[], T a[11], char *const argv[])
+	# decay to pointers per C; par1 had no bracket forms at all.
+	"minic/dos/examples/array_param_probe.c:minic/dos/tests/array_param_probe.golden.txt:small"
+	"minic/dos/examples/array_param_probe.c:minic/dos/tests/array_param_probe.golden.txt:medium"
+	# §6a `void __far __attribute__((interrupt)) f(void);` PROTOTYPE parse
+	# (ia16-gcc far-ISR spelling; definitions stay a designed gap).
+	"minic/dos/examples/isr_far_attr_probe.c:minic/dos/tests/isr_far_attr_probe.golden.txt:small"
+	"minic/dos/examples/isr_far_attr_probe.c:minic/dos/tests/isr_far_attr_probe.golden.txt:medium"
+	# §6a scalar global `T *p = &x;` / `char **e = arr;` symbol-address
+	# init (cival_eval path).  NOT gated under far-data models: the §1g
+	# far static-DATA-ptr reloc gap is REAL at runtime (this probe under
+	# compact prints raw offsets 4194/4192 — segment missing).
+	"minic/dos/examples/static_sym_init_probe.c:minic/dos/tests/static_sym_init_probe.golden.txt:small"
+	"minic/dos/examples/static_sym_init_probe.c:minic/dos/tests/static_sym_init_probe.golden.txt:medium"
+	# §6a locals shadow file-scope bindings (global var / function /
+	# enum constant) via the extended block_scope_decl alpha-rename.
+	"minic/dos/examples/local_shadow_probe.c:minic/dos/tests/local_shadow_probe.golden.txt:small"
+	"minic/dos/examples/local_shadow_probe.c:minic/dos/tests/local_shadow_probe.golden.txt:medium"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:compact"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:large"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:huge"
@@ -472,6 +499,93 @@ run() {
 	fi
 }
 
+# --- batched runtime execution ----------------------------------------------
+#
+# Building a probe and RUNNING it are split into two phases so every runtime
+# image executes under a single DOSBox boot (tools/run-dos-batch.sh): the
+# emulator launch (~2-4 s) dominated gate wall-clock when each of ~185
+# runtime tests booted its own DOSBox, while the probes themselves finish in
+# milliseconds.  prep + a build command compile one image; on success
+# stage_runtime_case copies it into the batch dir (a private copy — the same
+# exe path is rebuilt at several models) alongside its golden.
+# flush_runtime_batch then runs the whole set in one boot and prints one
+# [ok]/[FAIL] line per test.  Only the run phase counts toward pass/fail
+# totals (a build failure counts there instead), so the gate's test count is
+# unchanged vs the per-test-launch era.
+BATCH_DIR="$(mktemp -d -t test-dos-batch.XXXXXX)"
+trap 'rm -rf "$BATCH_DIR"' EXIT
+MANIFEST="$BATCH_DIR/manifest.tsv"
+CASE_DESC=()
+CASE_GOLDEN=()
+CASE_OUT=()
+ncases=0
+
+# prep <desc> <build-cmd...> — build-phase wrapper: [built] on success (the
+# definitive [ok]/[FAIL] line for the test comes from flush_runtime_batch),
+# loud [FAIL]/[skip] on failure, counted here since the run phase never
+# sees the case.
+prep() {
+	desc="$1"; shift
+	if "$@" >/tmp/test-dos.out 2>&1; then
+		printf '%-44s[built]\n' "$desc"
+		return 0
+	else
+		rc=$?
+		printf '%-44s' "$desc"
+		if [ "$rc" -eq 77 ]; then
+			echo "[skip]"
+			sed 's/^/    /' /tmp/test-dos.out
+			skip=$((skip + 1))
+		else
+			echo "[FAIL]"
+			sed 's/^/    /' /tmp/test-dos.out
+			fail=$((fail + 1))
+		fi
+		return 1
+	fi
+}
+
+stage_runtime_case() {
+	desc="$1"; exe="$2"; golden="$3"
+	staged="$BATCH_DIR/c$ncases.${exe##*.}"
+	cp "$exe" "$staged"
+	printf '%s\t%s\n' "$staged" "$BATCH_DIR/c$ncases.out" >> "$MANIFEST"
+	CASE_DESC[$ncases]="$desc"
+	CASE_GOLDEN[$ncases]="$golden"
+	CASE_OUT[$ncases]="$BATCH_DIR/c$ncases.out"
+	ncases=$((ncases + 1))
+}
+
+flush_runtime_batch() {
+	[ "$ncases" -gt 0 ] || return 0
+	batch_rc=0
+	"$QBE_DIR/tools/run-dos-batch.sh" "$MANIFEST" \
+		>/tmp/test-dos-batch.log 2>&1 || batch_rc=$?
+	i=0
+	while [ "$i" -lt "$ncases" ]; do
+		printf '%-44s' "${CASE_DESC[$i]}"
+		outf="${CASE_OUT[$i]}"
+		if [ "$batch_rc" -eq 77 ]; then
+			echo "[skip]"
+			[ "$i" -eq 0 ] && sed 's/^/    /' /tmp/test-dos-batch.log
+			skip=$((skip + 1))
+		elif [ ! -f "$outf" ]; then
+			echo "[FAIL]"
+			echo "    no output captured (an earlier hang/crash aborted the batch; see /tmp/test-dos-batch.log)"
+			fail=$((fail + 1))
+		elif printf '%s\n' "$(cat "$outf")" \
+				| diff -u "${CASE_GOLDEN[$i]}" - >/tmp/test-dos.out 2>&1; then
+			echo "[ok]"
+			pass=$((pass + 1))
+		else
+			echo "[FAIL]"
+			sed 's/^/    /' /tmp/test-dos.out
+			fail=$((fail + 1))
+		fi
+		i=$((i + 1))
+	done
+}
+
 # Build stevie.exe via tools/build-stevie.sh --exe and fail if the
 # resulting binary exceeds the size budget.  Captures the build log
 # in /tmp/test-dos.out via the run() wrapper.
@@ -491,15 +605,12 @@ run_stevie_size() {
 	echo "stevie.exe = $size bytes (<= $limit)" >&2
 }
 
-# Build a probe at the requested memory model and diff its DOSBox stdout
-# against a golden.  Two-step: build (fail fast) then run+diff.  Exit 77
-# from run-dos-exe.sh propagates so missing-DOSBox shows "skip", not "fail".
-run_runtime_probe() {
+# Build a probe at the requested memory model (run+diff happens later via
+# the batch; see flush_runtime_batch).
+build_runtime_probe() {
 	src="$1"
-	golden="$2"
-	model="$3"
+	model="$2"
 	base="$(basename "$src" .c)"
-	exe="$QBE_DIR/build/examples/$base/$base.exe"
 	# Far-static-data probes opt into the additional-far-segment placement
 	# (statics outside DGROUP).  Gated by basename so only these exercise it
 	# until far-global direct access is complete (see NEXT_SESSION.md).
@@ -514,22 +625,37 @@ run_runtime_probe() {
 	case "$base" in split_stack_probe) ssflag="--split-stack" ;; esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag $ssflag "$QBE_DIR/$src" >/dev/null
-	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
-	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
 }
 
-# Runtime regression for OMF target-frame fixups into grouped near data.
-# This needs two translation units: the referenced _BSS globals live in one
-# object, while the data guard that old BSS-relative fixups corrupt lives in
-# another.  The single-source runtime table cannot express that shape.
-run_grouped_bss_probe() {
-	src="$QBE_DIR/minic/dos/examples/grouped_bss_probe.c"
-	def="$QBE_DIR/minic/dos/examples/grouped_bss_def.c"
-	golden="$QBE_DIR/minic/dos/tests/grouped_bss_probe.golden.txt"
-	exe="$QBE_DIR/build/examples/grouped_bss_probe/grouped_bss_probe.exe"
-	"$QBE_DIR/tools/build-example.sh" --model=medium "$src" "$def" >/dev/null
-	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$exe")" || return $?
-	echo "$out" | diff -u "$golden" - >&2
+# §6b newlibc DOS-hosted tests (Phase-6 step 2).  Each builds a newlibc
+# phase3 test TU + the portable subset (libgloss/VFS/FAT/block) +
+# minic/dos/newlibc/dos_shim.c via tools/build-newlibc-test.sh (small
+# model, --no-stdio libstub) and diffs DOSBox stdout against a golden.
+# Skipped when the newlibc tree is absent.  memory_test is intentionally
+# NOT here: it scans the Victor physical memory map (hardware-flavored,
+# MAME bare-metal material, not portable-subset).
+NEWLIBC_TESTS=(
+	snprintf_test
+	fat_bpb_test
+	fat_chain_test
+	fat_root_test
+	fat_dir_test
+	fat_file_test
+	fat_vfs_test
+	ramfs_test
+	stdio_route_test
+	bss_test
+	terminal_meta_test
+)
+
+build_newlibc_test() {
+	name="$1"
+	nl="${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}"
+	if [ ! -d "$nl" ]; then
+		echo "newlibc tree not found: $nl"
+		return 77
+	fi
+	"$QBE_DIR/tools/build-newlibc-test.sh" "$name" >/dev/null
 }
 
 # Compile-time probe for C `volatile` on named locals.  volatile is a codegen
@@ -736,16 +862,11 @@ run_volatile_copy_asm_probe() {
 	echo "volatile struct copy honors src->loads / dst->stores; plain twins clean" >&2
 }
 
-# Same as run_runtime_probe but for .COM via tools/build-com-test.sh.
-run_com_runtime_probe() {
+# Same as build_runtime_probe but for .COM via tools/build-com-test.sh.
+build_com_runtime_probe() {
 	src="$1"
-	golden="$2"
-	model="$3"
-	base="$(basename "$src" .c)"
-	com="$QBE_DIR/build/com-test/$base/$base.com"
+	model="$2"
 	"$QBE_DIR/tools/build-com-test.sh" --model="$model" "$QBE_DIR/$src" >/dev/null
-	out="$("$QBE_DIR/tools/run-dos-exe.sh" "$com")" || return $?
-	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
 }
 
 # Ensure qbe/minic are built before anything else.
@@ -766,8 +887,11 @@ for entry in "${COM_RUNTIME_TESTS[@]}"; do
 	rest="${entry#*:}"
 	golden="${rest%%:*}"
 	model="${rest##*:}"
-	desc="$model runtime ($(basename "$src" .c))"
-	run "$desc" run_com_runtime_probe "$src" "$golden" "$model"
+	base="$(basename "$src" .c)"
+	if prep "$model runtime ($base)" build_com_runtime_probe "$src" "$model"; then
+		stage_runtime_case "$model runtime ($base)" \
+			"$QBE_DIR/build/com-test/$base/$base.com" "$QBE_DIR/$golden"
+	fi
 done
 
 for entry in "${RUNTIME_TESTS[@]}"; do
@@ -775,12 +899,52 @@ for entry in "${RUNTIME_TESTS[@]}"; do
 	rest="${entry#*:}"
 	golden="${rest%%:*}"
 	model="${rest##*:}"
-	desc="$model runtime ($(basename "$src" .c))"
-	run "$desc" run_runtime_probe "$src" "$golden" "$model"
+	base="$(basename "$src" .c)"
+	if prep "$model runtime ($base)" build_runtime_probe "$src" "$model"; then
+		stage_runtime_case "$model runtime ($base)" \
+			"$QBE_DIR/build/examples/$base/$base.exe" "$QBE_DIR/$golden"
+	fi
 done
 
-run "medium runtime (grouped_bss_probe)" \
-	run_grouped_bss_probe
+# OMF target-frame fixups into grouped near data: needs two translation
+# units (the referenced _BSS globals in one object, the data guard that old
+# BSS-relative fixups corrupt in another) — a shape the single-source
+# runtime table cannot express.
+if prep "medium runtime (grouped_bss_probe)" \
+	"$QBE_DIR/tools/build-example.sh" --model=medium \
+	"$QBE_DIR/minic/dos/examples/grouped_bss_probe.c" \
+	"$QBE_DIR/minic/dos/examples/grouped_bss_def.c"; then
+	stage_runtime_case "medium runtime (grouped_bss_probe)" \
+		"$QBE_DIR/build/examples/grouped_bss_probe/grouped_bss_probe.exe" \
+		"$QBE_DIR/minic/dos/tests/grouped_bss_probe.golden.txt"
+fi
+
+# C internal linkage of file-scope DATA (§6b): two TUs each define
+# `static int dir_table` (different values) plus a same-named block static
+# behind a same-named static fn; one ordinary global crosses TUs via extern.
+# Pre-fix the link died on a duplicate public (`_dir_table`) because
+# asm_to_omf auto-promoted data labels.
+for model in small medium; do
+	if prep "$model runtime (static_data_probe)" \
+		"$QBE_DIR/tools/build-example.sh" --model="$model" \
+		"$QBE_DIR/minic/dos/examples/static_data_probe.c" \
+		"$QBE_DIR/minic/dos/examples/static_data_def.c"; then
+		stage_runtime_case "$model runtime (static_data_probe)" \
+			"$QBE_DIR/build/examples/static_data_probe/static_data_probe.exe" \
+			"$QBE_DIR/minic/dos/tests/static_data_probe.golden.txt"
+	fi
+done
+
+for t in "${NEWLIBC_TESTS[@]}"; do
+	if prep "newlibc small ($t)" build_newlibc_test "$t"; then
+		stage_runtime_case "newlibc small ($t)" \
+			"$QBE_DIR/build/newlibc-tests/$t/$t.exe" \
+			"$QBE_DIR/minic/dos/tests/newlibc_$t.golden.txt"
+	fi
+done
+
+# One DOSBox boot for everything staged above.
+flush_runtime_batch
 
 run "volatile asm (named local)" \
 	run_volatile_asm_probe

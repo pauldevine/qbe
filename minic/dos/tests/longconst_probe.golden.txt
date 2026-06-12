@@ -4,3 +4,5 @@ c ok
 structlong ok
 vararg 222333
 addconst ok
+ulvararg 12345
+ulassign ok

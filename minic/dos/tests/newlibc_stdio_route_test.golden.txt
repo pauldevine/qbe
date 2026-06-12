@@ -1,0 +1,8 @@
+
+===============================================
+  Victor 9000 Phase 3 stdio Routing Test
+===============================================
+
+..
+
+PASS: stdio routing test complete.

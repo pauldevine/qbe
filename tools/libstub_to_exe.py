@@ -2403,9 +2403,21 @@ def unfar_epilogue(text):
     return '\n'.join(out)
 
 
-def build_epilogue(model):
+def build_epilogue(model, no_stdio=False):
     """Assemble the EPILOGUE; the 4-byte stdio sentinels + _far_fX helpers
     are appended only under far-data models."""
+    if no_stdio:
+        # --no-stdio (newlibc links, §6b): the C library under test
+        # provides the whole stdio surface (printf family via its own
+        # formatter + _write -> VFS), so every libstub stdio block is
+        # suppressed to avoid duplicate publics.  Only malloc/free
+        # survive from the EXE epilogue.  libstub.asm's near
+        # _stdin/_stdout/_stderr sentinels are KEPT: `FILE { int _file }`
+        # with _file first makes the one-word sentinel structs directly
+        # compatible with newlib-shaped stream_fd().  Near-code only —
+        # far models route printf through minic's far_stdlib mangling,
+        # which a newlibc-provided printf doesn't answer to yet.
+        return ''.join(unfar_epilogue(p) for p in [MALLOC_EXE])
     if near_code_model(model):
         # Small/tiny .EXE: keep the EXE-specific malloc/fileio replacements
         # (libstub.asm's versions reference .COM-only labels) but in near
@@ -2455,10 +2467,13 @@ def transform(line):
 def main():
     args = sys.argv[1:]
     model = 'medium'
+    no_stdio = False
     while args and args[0].startswith('--'):
         a = args.pop(0)
         if a.startswith('--model='):
             model = a[len('--model='):]
+        elif a == '--no-stdio':
+            no_stdio = True
         else:
             print('libstub_to_exe: unknown option: ' + a, file=sys.stderr)
             sys.exit(2)
@@ -2566,6 +2581,20 @@ def main():
         # which is exactly the data block we want to suppress.
         SKIP_GLOBALS = set(SKIP_GLOBALS)
         SKIP_GLOBALS.add('_stdin')
+    if no_stdio:
+        if not near_code_model(model):
+            print('libstub_to_exe: --no-stdio requires a near-code model '
+                  '(small/tiny); far models route stdio through far_stdlib '
+                  'mangling', file=sys.stderr)
+            sys.exit(2)
+        # §6b: the libstub.asm stdio symbols that the newlibc subset (or
+        # the dos_shim.c bottom layer: `stat`) defines itself and that
+        # are NOT already EXE-replaced (those are in the base
+        # SKIP_GLOBALS and their FILEIO_EXE replacements are dropped by
+        # build_epilogue).  No kept libstub.asm code calls any of these
+        # (verified: no `call _sprintf/_putchar/_fgets/_abort/_stat`).
+        SKIP_GLOBALS = set(SKIP_GLOBALS)
+        SKIP_GLOBALS |= {'_sprintf', '_fgets', '_putchar', '_abort', '_stat'}
     SKIP_LABELS  = {'_heap_initialized', '_heap_ptr', '_heap_top'}
 
     # Second pass: route lines.  When we encounter a label whose kind is
@@ -2648,7 +2677,7 @@ def main():
         out_lines.append(raw if near_code else transform(raw))
         i += 1
 
-    out_lines.append(build_epilogue(model))
+    out_lines.append(build_epilogue(model, no_stdio))
 
     with open(out_path, 'w') as f:
         f.write('\n'.join(out_lines) + '\n')

@@ -62,5 +62,14 @@ int main(void)
 	a = 100000L + 50000L;          /* 150000, overflows 16 bits */
 	if (a == 150000L)  printf("addconst ok\r\n"); else printf("addconst FAIL %ld\r\n", a);
 
+	/* §6b: a U-then-L suffix still means LONG.  The decimal lexer's `u`
+	 * branch consumed the trailing L of `12345UL` without setting the
+	 * long flag, so the literal was typed int: pushed as ONE stack word
+	 * (%lu read a garbage high word — newlibc snprintf_test), and the
+	 * long-var assignment sign-extended bit 15 (50001 -> -15535). */
+	printf("ulvararg %lu\r\n", 12345UL);
+	a = 50001UL;
+	if (a == 50001L) printf("ulassign ok\r\n"); else printf("ulassign FAIL %ld\r\n", a);
+
 	return 0;
 }

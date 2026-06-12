@@ -59,14 +59,18 @@ EXE_BASE="$(basename "$EXE")"
 SHORT_NAME="RUN.${EXE_BASE##*.}"        # RUN.EXE or RUN.COM
 SHORT_PATH="$EXE_DIR/$SHORT_NAME"
 OUT_PATH="$EXE_DIR/OUT.TXT"
+DONE_PATH="$EXE_DIR/DONE.TXT"
 
 cleanup() {
-	rm -f "$SHORT_PATH" "$OUT_PATH"
+	rm -f "$SHORT_PATH" "$OUT_PATH" "$DONE_PATH"
 }
 trap cleanup EXIT
 
 cp "$EXE" "$SHORT_PATH"
 
+# DONE.TXT is the completion sentinel: it only appears after the program
+# returns to COMMAND.COM, so the host can poll for it with a timeout
+# instead of blocking forever on a hung program (`open -W`'s failure mode).
 CONF="$(mktemp -t run-dos-exe-conf.XXXXXX)"
 trap 'rm -f "$CONF"; cleanup' EXIT
 cat > "$CONF" <<EOF
@@ -74,6 +78,7 @@ cat > "$CONF" <<EOF
 mount c "$EXE_DIR"
 c:
 $SHORT_NAME > OUT.TXT
+echo done > DONE.TXT
 exit
 EOF
 
@@ -99,17 +104,42 @@ EOF
 #
 # Elsewhere (Linux, or $DOSBOX pointing at a raw binary), exec the binary
 # directly with the SDL dummy drivers for a truly headless, windowless run.
+#
+# Completion is detected by polling DONE.TXT rather than waiting on the
+# process (`open -W` has no timeout, so a hung DOS program — e.g. a
+# bare-metal `while(1) hlt;` tail — blocked the harness forever).  On
+# timeout the instance we launched is killed; $CONF's mktemp path makes the
+# pkill -f match specific to it.
+DOSBOX_PID=""
 run_dosbox() {
 	if [ -n "$DOSBOX_APP" ]; then
-		open -a "$DOSBOX_BIN" -g -j -W -n --args -conf "$CONF" -exit
+		open -a "$DOSBOX_BIN" -g -j -n --args -conf "$CONF" -exit
 	else
 		SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
-			"$DOSBOX_BIN" -conf "$CONF" -exit
+			"$DOSBOX_BIN" -conf "$CONF" -exit &
+		DOSBOX_PID=$!
 	fi
 }
 
-if ! run_dosbox >/dev/null 2>&1; then
-	echo "run-dos-exe: DOSBox exited non-zero" >&2
+run_dosbox >/dev/null 2>&1
+
+ticks=0
+limit=$((TIMEOUT_SEC * 5))
+while [ ! -f "$DONE_PATH" ] && [ "$ticks" -lt "$limit" ]; do
+	sleep 0.2
+	ticks=$((ticks + 1))
+done
+
+if [ ! -f "$DONE_PATH" ]; then
+	if [ -n "$DOSBOX_PID" ]; then
+		kill "$DOSBOX_PID" 2>/dev/null || true
+	else
+		pkill -f "$CONF" 2>/dev/null || true
+	fi
+	sleep 0.3
+	echo "run-dos-exe: $EXE_BASE TIMEOUT after ${TIMEOUT_SEC}s (DOSBox killed)" >&2
+	# Show whatever partial output the program managed to write.
+	[ -f "$OUT_PATH" ] && tr -d '\r' < "$OUT_PATH" >&2
 	exit 1
 fi
 

@@ -1,0 +1,102 @@
+
+===============================================
+  Victor 9000 Phase 3 RAMFS Test
+===============================================
+
+PASS: stat(/) reports directory.
+PASS: stat(/dev) reports directory.
+PASS: stat(/ram) reports directory.
+PASS: stat(//dev//) reports directory.
+PASS: stat(//ram//) reports directory.
+PASS: opendir(/) lists expected entries.
+PASS: opendir(/dev) lists expected entries.
+PASS: opendir(/ram) lists expected entries.
+PASS: opendir(//dev//) lists expected entries.
+PASS: opendir(//ram//) lists expected entries.
+PASS: dirent invalid handle errors.
+PASS: stat(/ram/readme.txt) reports regular file.
+PASS: duplicate slashes resolve RAMFS files.
+PASS: duplicate slashes resolve device nodes.
+PASS: fstat(/ram/readme.txt) reports regular file.
+PASS: zero-length read accepts null buffer.
+PASS: read() prefix matches.
+PASS: read() full file matches.
+PASS: lseek(SEEK_END) returns file size.
+PASS: read() reports EOF at file end.
+PASS: write-open of RAMFS file fails with EACCES.
+PASS: stat(/ram/readme.txt/) fails with errno 20.
+PASS: stat(/ram/readme.txt/child) fails with errno 20.
+PASS: stat(/ram//readme.txt//child) fails with errno 20.
+PASS: stat(/dev/console/) fails with errno 20.
+PASS: stat(/dev/console/child) fails with errno 20.
+PASS: stat(//dev//console//child) fails with errno 20.
+PASS: stat(/ram/missing.txt) fails with errno 2.
+PASS: stat(/ram/missing/child.txt) fails with errno 2.
+PASS: stat(/dev/missing/child) fails with errno 2.
+PASS: stat() fails with errno 2.
+PASS: stat(ram/readme.txt) fails with errno 2.
+PASS: stat(dev/console) fails with errno 2.
+PASS: stat(/missing/child.txt) fails with errno 2.
+PASS: stat(/ram/readme.txt, NULL) fails with errno 22.
+PASS: stat(/ram/readme.txt/child, NULL) fails with errno 20.
+PASS: stat(/ram/missing.txt, NULL) fails with errno 2.
+PASS: stat(/dev/console/child, NULL) fails with errno 20.
+PASS: open(/ram/readme.txt/) fails with errno 20.
+PASS: open(/ram/readme.txt/child) fails with errno 20.
+PASS: open(/ram//readme.txt//child) fails with errno 20.
+PASS: open(/dev/console/) fails with errno 20.
+PASS: open(/dev/console/child) fails with errno 20.
+PASS: open(//dev//console//child) fails with errno 20.
+PASS: open(/dev/console/child) fails with errno 20.
+PASS: open(/ram/missing.txt) fails with errno 2.
+PASS: open(/ram/new.txt) fails with errno 30.
+PASS: open(/ram//new.txt) fails with errno 30.
+PASS: open(/ram/new.txt) fails with errno 2.
+PASS: open(/ram/missing/child.txt) fails with errno 2.
+PASS: open(/dev/missing/child) fails with errno 2.
+PASS: open(/ram/readme.txt) fails with errno 30.
+PASS: open() fails with errno 2.
+PASS: open() fails with errno 2.
+PASS: open(ram/readme.txt) fails with errno 2.
+PASS: open(new.txt) fails with errno 2.
+PASS: open(/new.txt) fails with errno 30.
+PASS: open(/new.txt) fails with errno 2.
+PASS: open(/missing/child.txt) fails with errno 2.
+PASS: open(/) fails with errno 21.
+PASS: open(//ram//) fails with errno 21.
+PASS: opendir(/ram/readme.txt) fails with errno 20.
+PASS: opendir(/ram/readme.txt/) fails with errno 20.
+PASS: opendir(/ram/readme.txt/child) fails with errno 20.
+PASS: opendir(/ram//readme.txt//child) fails with errno 20.
+PASS: opendir(/dev/console) fails with errno 20.
+PASS: opendir(/dev/console/) fails with errno 20.
+PASS: opendir(/dev/console/child) fails with errno 20.
+PASS: opendir(//dev//console//child) fails with errno 20.
+PASS: opendir(/ram/missing.txt) fails with errno 2.
+PASS: opendir(/dev/missing/child) fails with errno 2.
+PASS: opendir() fails with errno 2.
+PASS: opendir(ram) fails with errno 2.
+PASS: unlink(/ram/readme.txt) fails with errno 30.
+PASS: unlink(/ram//readme.txt) fails with errno 30.
+PASS: unlink(/ram/readme.txt/) fails with errno 20.
+PASS: unlink(/ram/readme.txt/child) fails with errno 20.
+PASS: unlink(/ram//readme.txt//child) fails with errno 20.
+PASS: unlink(/ram) fails with errno 21.
+PASS: unlink(//ram//) fails with errno 21.
+PASS: unlink(/dev/console) fails with errno 30.
+PASS: unlink(//dev//console) fails with errno 30.
+PASS: unlink(/dev/console/) fails with errno 20.
+PASS: unlink(/dev/console/child) fails with errno 20.
+PASS: unlink(//dev//console//child) fails with errno 20.
+PASS: unlink(/ram/missing.txt) fails with errno 2.
+PASS: unlink(/ram/missing/child.txt) fails with errno 2.
+PASS: unlink(/dev/missing/child) fails with errno 2.
+PASS: unlink() fails with errno 2.
+PASS: unlink(ram/readme.txt) fails with errno 2.
+PASS: unlink(/new.txt) fails with errno 2.
+PASS: unlink(/) fails with errno 21.
+PASS: fread() prefix matches.
+PASS: fgets() reads first RAMFS line.
+PASS: fgets() reads second RAMFS line.
+
+RAMFS test complete.

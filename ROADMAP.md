@@ -3,9 +3,9 @@
 **Project:** C11/C17 + GNU-extensions C Compiler for 8086 DOS using QBE Backend
 **Standard:** C11 feature set + GNU extensions (`__attribute__`, inline `__asm__`, `__far`); equivalently C17-level (C17 added no new language features over C11).  No C23 language features.  C only — no C++.
 **Original Timeline:** 10-12 weeks to production release
-**Actual Progress:** Original compiler goal COMPLETE; now in an open-ended hardening phase driven by a real-world MicroPython port (as of 2026-06-07)
+**Actual Progress:** Original compiler goal COMPLETE; MicroPython hardening phase COMPLETE (MicroPython runs on real Victor 9000 hardware and now serves as the regression corpus).  **Next frontier: newlibc for the Victor 9000 (Phase 6).**
 **Real target hardware:** Victor 9000 / Sirius 1 (~896 KB RAM), not the IBM-PC 640 KB ceiling
-**Last Updated:** 2026-06-07
+**Last Updated:** 2026-06-11
 
 ---
 
@@ -13,92 +13,108 @@
 
 This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Actual Current Status" section below tracks what's actually shipped against that plan; the long Phase 1–4 sections that follow it are the original plan, preserved for reference but not edited as work landed.
 
-**The original 4-phase plan is done.** Since ~2026-05-28 the project has been in a *hardening phase*: porting **MicroPython** as a real-world stress test on real Victor 9000 hardware. Each MicroPython failure is reduced to a focused `minic/dos/examples/*_probe.c`, the underlying compiler/backend/runtime bug is fixed, and the probe is added to the `tools/test-dos.sh` gate (now **215/215**). Day-to-day status lives in `CLAUDE.md` and `NEXT_SESSION.md`; this file is the high-level reconciliation.
+**The original 4-phase plan is done, and so is the MicroPython hardening phase (Phase 5).** From ~2026-05-28 to 2026-06-11 the project ported **MicroPython** as a real-world stress test on real Victor 9000 hardware: each failure was reduced to a focused `minic/dos/examples/*_probe.c`, the underlying compiler/backend/runtime bug was fixed, and the probe was added to the `tools/test-dos.sh` gate (now **287/287**). MicroPython is feature-complete-enough and is retained as a **regression corpus** — after toolchain changes, the 108-TU compact build is rebuilt and byte-compared; Victor re-runs happen only when bytes move. **Phase 6 — adopting `~/projects/newlibc` as the real C library and test harness — is the designated next frontier (2026-06-11).** Day-to-day status lives in `CLAUDE.md` and `NEXT_SESSION.md`; this file is the high-level reconciliation.
 
 ---
 
-## Actual Current Status (Updated 2026-06-07)
+## Actual Current Status (Updated 2026-06-11)
 
 **Component Status:**
 
 | Component | Status | Details | Evidence |
 |-----------|--------|---------|----------|
-| **MiniC Compiler** | ✅ Complete | C89/C99 + C11 features | minic/minic.y |
-| **i8086 Backend** | ✅ Complete | All integer + FPU ops | i8086/*.c |
-| **8087 FPU Support** | ✅ **COMPLETE** | Full hardware float/double (PR #11) | i8086/emit.c:76-131 |
-| **Inline Assembly** | ✅ **COMPLETE** | GCC-style extended asm (commits d44ea80, c0ddbff) | minic/minic.y:2124-3292 |
+| **MiniC Compiler** | ✅ Complete | C89/C99 + C11 features, GNU extensions, `volatile`, block scope (alpha-renaming), struct by-value/return, anonymous aggregates, designated/compound initializers, multi-declarator init, typedef shadowing — hardened against the full MicroPython py/ corpus | minic/minic.y |
+| **i8086 Backend** | ✅ Complete | All integer + FPU + soft-float ops; emit-bracket liveness discipline audited mechanically (112k regions, 0 violations) | i8086/*.c, tools/run-emit-audit.sh |
+| **8087 FPU Support** | ✅ **COMPLETE** | Full hardware float/double (PR #11) | i8086/emit.c |
+| **Soft-Float (no-8087)** | ✅ **COMPLETE incl. soft-libm** | Native `float` (Ks) lowered to `_sf_*` helper calls; arithmetic/compare/int↔float, far-data load/store, **plus soft-libm**: correctly-rounded `sqrtf`, Cephes `sinf`/`cosf`/`tanf`/`atanf`/`atan2f`/`asinf`/`acosf`, `frexpf`/`ldexpf`/`modff`, `expf`/`logf`/`powf`/`fmodf`.  Double (Kd) deliberately unimplemented — single-precision only. | minic/dos/softfloat.c, build/sf-math-host-test.c |
+| **Inline Assembly** | ✅ **COMPLETE** | GCC-style extended asm with clobber lists | minic/minic.y |
 | **C11 Features** | ✅ **COMPLETE** | All 6 target features (PR #12) | minic/test/c11/ |
-| **Far Pointers** | ✅ **COMPLETE** | Small model support (PR #13) | commit 6492370 |
-| **ANSI Functions** | ✅ **COMPLETE** | Function definitions (PR #15) | commit 03d0b81 |
-| **32-bit Long** | ✅ Complete | DX:AX pairs + div/rem via libstub helpers (c53ce0a) | i8086/README.md:320 |
-| **Function Pointers** | ✅ Complete | Full support with typedef | i8086/README.md:321 |
-| **Struct Bitfields** | ✅ Complete | Packing and read/write | i8086/README.md:322 |
-| **DOS Runtime** | ✅ **COMPLETE** | crt0_exe.asm + real printf/sprintf, freelist malloc/free, file I/O | minic/dos/libstub.asm |
-| **Memory Models** | ✅ Tiny + Medium + Compact + Large + Huge incl. >64K arrays + 32-bit far load/store (Small .EXE still broken) | Per-model runtime gate at **215/215** in tools/test-dos.sh (was 59/59 at 2026-05-25; grown by the MicroPython-driven probes).  Huge >64K data via paragraph-aligned `_HUGE_<sym>` segments; huge stack ptr arith via `_qbe_huge_add`; `long` and `float` through a far pointer round-trip full 32 bits via `Oloadfl`/`Ostorefl` / `Oloadfs`/`Ostorefs`.  Small .EXE still hangs DOSBox (libstub_to_exe ret→retf rewrite mismatches small's near-call ABI). | tools/build-com-test.sh, tools/build-stevie.sh, tools/build-example.sh |
+| **Memory Models** | ✅ **ALL SIX WORK** | tiny (.COM) / **small** / medium / compact / large / huge — small was the last broken one, **fixed 2026-06-11 §5c** (`libstub_to_exe.py` model-conditional near-ABI + `omf_link` CODE-segment coalescing by name); huge holds >64K arrays via `_HUGE_<sym>` segments.  Per-model runtime gate **287/287** in tools/test-dos.sh. | tools/test-dos.sh, [[per-model-gate]] |
+| **DOS Runtime (libstub)** | ✅ Complete (to be superseded by newlibc, Phase 6) | crt0_exe.asm + printf/sprintf, freelist malloc/free, file I/O, far-data `_far_*` helper family, setjmp/longjmp (medium/far models) | minic/dos/libstub.asm, tools/libstub_to_exe.py |
 | **DOS API Library** | ✅ **COMPLETE** | int86/int86x/intdos/intdosx/segread + video/keyboard/mouse wrappers | minic/dos/libstub.asm, minic/include/dos.h |
-| **Soft-Float (no-8087)** | ✅ **MODEL-COMPLETE** | Native `float` (Ks) lowered to `_sf_*` helper calls (no 8087 needed); arithmetic/compare/int↔float (medium) + far-data load/store via `loadfs`/`storefs` (compact/large/huge).  Double (Kd) deliberately unimplemented — single-precision only. | minic/dos/softfloat.c, i8086/emit.c, softfloat_probe.c / float_fardata_probe.c |
-| **MicroPython Port** | ⚠️ **In hardening** | Builds (106/106 TUs), links, and runs on a real Victor 9000 over a SASI disk.  Language surface working: classes/inheritance, generators, exceptions/finally, comprehensions, closures, string methods, slicing, `str()`/`repr()`, dict/list rendering, GC.  Bounded by image-size ceiling and a deep-recursion stack tradeoff. | MICROPYTHON_PORT.md, tools/build-micropython.sh, tools/run-victor-sasi.sh |
+| **OMF Link Toolchain** | ✅ Complete | asm→OMF, MZ .EXE linker with --gc-sections (per-function), separate stack (SS≠DS), code-segment splitting + coalescing, all six models | tools/omf_link.py, tools/asm_to_omf.py |
+| **Type encoding** | ✅ Hardened | FAR bit 26 / QVOLATILE 27 (relocated 2026-06-11 to clear the FLOAT@2-shifts collision); `fnproto.rett`/`fpproto.rett` side tables make direct + fn-pointer return types layout-independent.  Residual: far-data nested-far depth is ONE level (`T**` ok, `T***` loses innermost FAR). | minic/minic.y (FAR define comment) |
+| **Upstream QBE** | ✅ In sync | 211-commit rebase landed via PR #23 (2026-06-06); synced through `e786f06` (2026-06-11) | git remote `upstream` |
+| **MicroPython Port** | ✅ **COMPLETE — now the regression corpus** | 108/108 TUs, runs on real Victor 9000 over SASI disk.  Full language surface, FLOAT + `math` module (Victor-verified byte-exact vs host python3), 114 KB split GC heap, interactive REPL with DOS-native line editor, disk-loaded PROG.PY.  Body 731,088 B, ~93 KB under the ~824 KB ceiling.  Remaining feature tracks PARKED; its role now is rebuild + byte-compare after toolchain changes. | MICROPYTHON_PORT.md, tools/build-micropython.sh |
+| **Stevie editor** | ✅ Complete | 146,672-byte medium-model .EXE; interactively verified on real Victor (2026-06-10) | tools/build-stevie.sh |
 
-**Phase Completion (vs original plan):**
+**Phase Completion:**
 - Phase 0 (Validation): ✅ **100% COMPLETE**
-- Phase 1 (Integer DOS): ✅ **100% COMPLETE** (crt0_exe.asm + real runtime in libstub.asm)
+- Phase 1 (Integer DOS): ✅ **100% COMPLETE**
 - Phase 2 (8087 FPU): ✅ **100% COMPLETE** (PR #11)
-- Phase 3 (DOS Integration): ✅ **~95% COMPLETE** (runtime, API wrappers, examples, full memory-model matrix incl. far DOS-API + far stdio FILE* under large/huge all done; small .EXE ABI mismatch + tiny .COM stevie shrink still pending)
+- Phase 3 (DOS Integration): ✅ **100% COMPLETE** — full memory-model matrix closed when small landed 2026-06-11
 - Phase 4 (C11 Features): ✅ **100% COMPLETE** (PR #12)
-- Phase 5 (MicroPython hardening, not in original plan): ⚠️ **In progress** — see the dedicated section below
+- Phase 5 (MicroPython hardening): ✅ **COMPLETE 2026-06-11** — see the dedicated section below
+- Phase 6 (newlibc for Victor 9000): 🚧 **NEXT FRONTIER** — see the dedicated section below
 
-**Completed Features NOT in Original Roadmap:**
-- ✅ Inline assembly with clobber lists
-- ✅ Far pointer support
-- ✅ ANSI C function definitions
-- ✅ Variadic function support
-- ✅ OMF link toolchain (`tools/omf_link.py`, `tools/asm_to_omf.py`, `tools/libstub_to_exe.py`)
-- ✅ Stevie editor (`stevie.exe`) ports cleanly as the flagship integration test
-- ✅ Soft-float (no-8087 single-precision `float`), model-complete incl. far-data
-- ✅ MicroPython port — builds, links, and runs on real Victor 9000 hardware
+**What's Actually Open (compiler / backend / toolchain; no consumer pain today):**
+1. **huge `_qbe_huge_add` ≥0x8000 variable-index gap** (§4i) — the last documented hole in huge far-pointer arith.
+2. **`jmp_buf bufs[6]`** (§4v) — array-of-jmp_buf cross-frame longjmp misbehaved; still unreduced.
+3. **minic static-initializer float const-expr folding** (`static float x = 2.0f*3.14f;` dies) — would also unlock `MICROPY_PY_MATH_CONSTANTS`.
+4. **Small-model setjmp/longjmp** — SETJMP epilogue is structurally far; a near impl is needed only if a small-model consumer appears.
+5. **Multi-decl items after the first skip `block_scope_decl`** — loud "double definition", not silent.
+6. **Kw spill-slot sharing** — Kl/Ks got §4w interference coloring; plain Kw never shares.  Frame-size lever, no consumer pain.
 
-**What's Actually Missing (compiler / backend / toolchain):**
-1. **Small .EXE architecturally broken** — `tools/libstub_to_exe.py` rewrites every `ret` to `retf`, which mismatches small model's near-call ABI → DOSBox hangs.  Needs either near+far libstub variants or model-conditional `ret` rewrite.  See `[[per-model-gate]]`.  *This is the only open item from the original-plan backend list; the rest below are closed.*
-2. **211-commit upstream-qbe rebase** — pure plumbing; deferred until the i8086 backend stabilises.
-3. **Polish on the legacy examples** — 16 older `dos_putchar`-style files in `minic/dos/examples/` predate the `<dos.h>` API; modern dialect now demonstrated by `mouse_demo.c` / `vga_pixels.c` / `kbtest.c` / `cprobe.c` / `cstrprobe.c`.
-
-**Parked / proven-out (kept for history):**
-- ~~Tiny .COM stevie shrink~~ — **PARKED**: stevie is a medium-model program by design, ships as `.EXE` (148 KB).  Tiny pipeline still gated by `com_smoke.c` etc.
-- ~~Latent Kl-CAddr arith matrix~~ — **CLOSED 2026-05-25 (aa–ee)**: full Kl-CAddr matrix portable across compact/large/huge.
-- ~~Huge Phase B / B' storel-via-Kl-slot~~ — **CLOSED (ff/gg)**: spilled-Kl-ptr slots deref through ES:BX; Var-operand carveout removed.
-- ~~storefar/loadfar lacks 32-bit width~~ — **CLOSED (hh)**: `Oloadfl`/`Ostorefl`; `long` round-trips full 32 bits through a far ptr.
-- ~~i8086 compact loadfb AX-aliasing~~ — **CLOSED (jj)**: narrow far-loads bracketed with `kl_save_axdx`.
-- ~~Phase B'' narrower stores~~ — **CLOSED as PROVEN UNREACHABLE 2026-05-28 (pp)**: cannot be produced by the current rega/isel; symmetric fix written, SSA-green, then reverted rather than ship untested-unreachable code.
-
-**Note on tiny model:** Stevie itself doesn't fit in .COM (currently ~87KB; see `[[minic-pointer-bloat]]` for history) and that's expected — stevie is a medium-model program by design. The tiny-model pipeline is gated end-to-end by `tools/test-dos.sh` against `minic/dos/tests/com_smoke.c` at a 4 KB ceiling, which catches regressions in libstub size, codegen bloat, or the memref-base rega hint without holding stevie hostage to the 64 KB cap.
+**Parked (kept for history):**
+- Tiny .COM stevie shrink — stevie is a medium-model program by design, ships as `.EXE`.  See `[[minic-pointer-bloat]]`.
+- MicroPython feature tracks (math SPECIAL_FUNCTIONS, isclose, MATH_CONSTANTS, third GC area, MP_STACK_LIMIT lever) — parked unless a toolchain fix unlocks them for free.
+- The 2026-05-2x Kl-CAddr / Phase B/B'/B'' / storefl / loadfb matrix — all CLOSED (see git history and NEXT_SESSION.md).
 
 ---
 
-## Phase 5: MicroPython Port (hardening) ⚠️ IN PROGRESS
+## Phase 5: MicroPython Port (hardening) ✅ COMPLETE (2026-05-28 → 2026-06-11)
 
-**Goal:** Use a real, large, third-party C program (MicroPython) as a stress test to flush out remaining compiler/backend/runtime bugs — and ultimately run Python on a real Victor 9000.
-**Status:** ⚠️ MicroPython builds, links, and runs interactively on real Victor 9000 hardware; an open-ended list of edge-case bugs is being driven out one reduced probe at a time.
+**Goal (achieved):** Use a real, large, third-party C program (MicroPython) as a stress test to flush out remaining compiler/backend/runtime bugs — and run Python on a real Victor 9000.
 
-**Method (the working loop):**
-1. Run a real MicroPython feature/script on the compact far-data Victor build.
+**Method (the loop that did it):**
+1. Run a MicroPython feature/script on the compact far-data Victor build.
 2. When it fails, reduce the failure to a tiny `minic/dos/examples/*_probe.c`.
 3. Fix the underlying QBE / MiniC / i8086 / runtime bug.
 4. Add the reduced probe to `tools/test-dos.sh` before relying on the behavior.
-5. Watch image size against the ~896 KB Victor load ceiling.
 
-**Working today (verified on real Victor hardware):**
-- Build/link: 106/106 translation units → OMF objects → linked `.exe`, under the ceiling.
-- Bring-up keystones: `static`-linkage emission, `setjmp`/`longjmp` (NLR), per-symbol code-segment splitting, far-data placement, GC.
-- Language surface: classes & inheritance, generators, exceptions/finally + tracebacks, list/dict/filter comprehensions, closures & `nonlocal`, kwargs/defaults, tuple unpacking, string methods, slicing, `str()`/`repr()`, dict/list rendering, allocation churn / GC.
-- Interactive REPL with a DOS-native line editor (history, arrow keys) and disk-loaded `PROG.PY`.
+This loop grew the gate from 59 to **262 entries** and fixed on the order of 60 real compiler/backend/linker/runtime bugs — frontend grammar and scoping, type-encoding collisions, register-liveness clobbers (now mechanically audited via `tools/run-emit-audit.sh`), load-forwarding truncation, ABI coercion gaps, linker dead-stripping and segment layout.
 
-**Open MicroPython-side items:**
-1. **Enable floats** (`MICROPY_FLOAT_IMPL_FLOAT`) — the far-data soft-float backend is now ready (§3w); next is turning it on in the MicroPython build and running a float feature probe on Victor.  *Risk:* pulls in `objfloat.c` + float formatting and may bump the image-size ceiling.
-2. **Image-size ceiling (~896 KB)** — builds run close to it; this constrains heap size and how many features ship at once.  No free shrink lever found; gains come from feature/config trims or dead-stripping.
-3. **Deep-recursion frontier** — bounded by a transient-C-stack vs. image-size tradeoff, not a clean compiler bug.  `MICROPY_STACKLESS_STRICT` fixes recursion depth but doesn't fit the ceiling as the default build.
-4. **Config-gated features** (e.g. `%` string formatting, extended `[::-1]` slices, `str.count`) are MicroPython minimal-config decisions, not compiler gaps — enable per need vs. image budget.
+**Shipped and Victor-verified:**
+- Full language surface: classes & inheritance, generators, exceptions/finally + tracebacks, comprehensions, closures & `nonlocal`, kwargs/defaults, tuple unpacking, string methods, slicing, `str()`/`repr()`, GC churn.
+- **FLOAT** (`MICROPY_FLOAT_IMPL_FLOAT`) — 29-line float probe byte-exact vs host python3.
+- **`math` module** — soft-libm in softfloat.c; math probe byte-exact vs host python3.
+- **114 KB split GC heap** (`MICROPY_GC_SPLIT_HEAP`, two areas) — heap-split stress probe byte-exact.
+- Interactive REPL with DOS-native line editor (history, arrows) + disk-loaded `PROG.PY`.
+- Image: body 731,088 bytes, ~93 KB under the ~824 KB Victor load ceiling.
+
+**Ongoing role — regression corpus:** after any toolchain change, rebuild the 108-TU compact image (`tools/build-micropython.sh --model=compact`) and byte-compare the body.  Byte-identical ⇒ no Victor run needed; bytes moved ⇒ diff the asm and re-run the Victor feature probes (`tools/run-victor-sasi.sh`).
 
 **Reference docs:** `MICROPYTHON_PORT.md`, `NEXT_SESSION.md` (per-session detail), `CLAUDE.md` (live status header).
+
+---
+
+## Phase 6: newlibc for the Victor 9000 🚧 NEXT FRONTIER (designated 2026-06-11)
+
+**Goal:** Make the QBE/minic/i8086 toolchain compile and run **`~/projects/newlibc`** — a much-progressed C library + driver suite for the Victor 9000 — and adopt its test suite as a standing test/robustness harness for this toolchain.  Long-term, newlibc replaces libstub as the real libc, retiring the libstub_to_exe EPILOGUE machinery (python-string printf engine, per-model ret-rewrite, `_far_*` near/far duplication, the `[[libstub-null-ptr-dx]]` bug family).
+
+**What exists in `~/projects/newlibc` (surveyed 2026-06-11):**
+- Three phases: `phase1_dos_drivers/` (DOS-hosted driver validation, OpenWatcom-built), `phase2_baremetal/` (bootstrap), `phase3_newlib/` (production: bare-metal newlib integration, built with **ia16-elf-gcc**, small model at load address 0x3000, ~55–62 KB binaries; medium model secondary).
+- Phase 3 is complete per its own docs: crt0 + custom linker script, libgloss syscalls, integer-only printf/scanf wrappers, malloc via `_sbrk`, VFS with `/dev/*` + read-only FAT12/FAT16 over a **SASI driver**, display (CRTC + loaded fonts — Victor has no char ROM), keyboard (VIA 6522), timer (8253 ch.2 on IR2 — NOT IBM-PC IRQ0), PIC, serial.
+- **~40 test programs** run under MAME's victor9k driver — printf/scanf, FAT, fonts, display, keyboard, serial, interrupts, memory/segment diagnostics, SASI/block layer.  This suite is the robustness harness we want.
+- ~22K lines / ~82 files in phase 3; docs include `VICTOR_HARDWARE_REFERENCE.md`, `FONT_SYSTEM_GUIDE.md`, `SASI_DRIVER_REFERENCE.md`.
+
+**Why this is the right next stress test:** MicroPython exercised the compiler on a huge *portable* C codebase under DOS.  newlibc exercises what MicroPython could not: bare-metal startup (no DOS), memory-mapped I/O through far pointers, `volatile` correctness against real hardware registers, interrupt service routines, linker control of physical layout, and a second large body of third-party C written for *other* compilers (OpenWatcom idioms in phase 1, GCC idioms in phase 3).
+
+**Known integration challenges (from the survey — to be validated by probes, not assumed):**
+1. **Compiler dialect:** phase 3 uses GCC-style `__asm__ volatile` with constraints (minic has this), `__far` pointers + MK_FP (minic has this), `volatile` MMIO (minic has this §3j–§3m), but also `__attribute__((interrupt))` ISRs — minic has **no interrupt-function support**; needs either a minic feature (save-all + IRET epilogue) or hand-written asm shims.
+2. **Output format:** phase 3 links ELF via a custom linker script (`v9000.ld`) and objcopys to a raw binary at 0x3000.  Our toolchain emits OMF → MZ .EXE.  omf_link needs a raw-binary output mode with controlled load address/layout (or a DOS-hosted first target that sidesteps it).
+3. **newlib proper:** phase 3 links newlib's `libc.a`/`libm.a` (built by ia16-elf-gcc).  Compiling *newlib itself* with minic is a separate, much larger question — the near-term scope is newlibc's own code (libgloss, drivers, VFS, tests) with libstub or minic-compiled replacements filling the libc gaps.
+4. **Memory model fit:** newlibc targets small model (near/near, 64 KB) — which the toolchain only started supporting 2026-06-11 (§5c), and which still lacks setjmp/longjmp.  Good news: this gives small model its first real consumer.  Medium model is the documented growth path on both sides.
+
+**Suggested bring-up sequence (each step gated before the next):**
+1. **Survey + triage session:** ✅ DONE 2026-06-11 (§6a) — per-TU sweep took phase3 from 21/66 to 46/66 TUs compiling (seven minic dialect fixes); the whole portable subset compiles; remaining failures are inline-asm/ISR (step 4 material).
+2. **Portable-subset milestone:** ✅ DONE 2026-06-11 (§6b) — eleven phase3 tests (snprintf, six FAT/VFS, ramfs, stdio_route, bss, terminal_meta) run DOS-hosted in DOSBox and are `test-dos.sh` gate entries; built by `tools/build-newlibc-test.sh` (small model) with `minic/dos/newlibc/dos_shim.c` at the bottom and `libstub_to_exe.py --no-stdio` (newlibc's printf family + syscalls/VFS replace libstub stdio).  Fixed en route: static file-scope data linkage (minic `export data` + asm_to_omf no data auto-promote) and decimal `UL` literal typing.
+3. **Bare-metal output:** raw-binary emission from omf_link (load addr, no PSP/MZ), a minic-built crt0 path, MAME victor9k boot of a minimal newlibc `hello`.
+4. **Drivers + ISRs:** decide interrupt-handler strategy (minic feature vs asm shims); bring up display/keyboard/timer tests under MAME.
+5. **Harness adoption:** wire the newlibc test suite into a `tools/test-newlibc.sh` gate alongside `test-dos.sh`; newlibc becomes the second standing regression corpus (with MicroPython remaining the byte-compare corpus).
+6. **libstub retirement (end-state):** programs built by this toolchain link against minic-built newlibc instead of libstub.
+
+**Rules of engagement (carried from Phase 5):** probe-first; every fixed bug gets a reduced `*_probe.c` in the gate before the behavior is relied on; `tools/run-emit-audit.sh` after any emit.c change; MP byte-compare after any toolchain change.
 
 ---
 
@@ -1118,8 +1134,8 @@ The following features were implemented but were not part of the original roadma
 
 ---
 
-**Roadmap Version:** 4.0 (original 4-phase compiler goal complete; reframed around the MicroPython hardening phase + soft-float model-complete)
-**Last Updated:** 2026-06-07
+**Roadmap Version:** 5.0 (Phases 0–5 complete; reframed around Phase 6 — newlibc for the Victor 9000)
+**Last Updated:** 2026-06-11
 **Original Date:** 2025-11-21
-**Actual Status:** Original compiler goal (Phases 0–4) COMPLETE.  tiny/medium/compact/large/huge runtime-verified via a **215/215** per-model probe gate; soft-float single-precision is model-complete (medium + far-data, no 8087); MicroPython builds, links, and runs interactively on real Victor 9000 hardware.  Now in an open-ended hardening phase (Phase 5) where MicroPython surfaces edge-case bugs that get reduced to gated probes and fixed.
-**Next Priority:** (1) **Enable MicroPython floats** (`MICROPY_FLOAT_IMPL_FLOAT`) now that far-data soft-float is ready (§3w) — watch the ~896 KB Victor image ceiling; (2) MicroPython image-size / deep-recursion tradeoff; (3) small .EXE ABI mismatch (`[[per-model-gate]]`); (4) 211-commit upstream-qbe rebase (deferred).
+**Actual Status:** Original compiler goal (Phases 0–4) COMPLETE.  All six memory models (tiny/small/medium/compact/large/huge) runtime-verified via a **287/287** per-model probe gate; soft-float single-precision complete including soft-libm; MicroPython feature-complete on real Victor 9000 hardware (FLOAT + math + 114 KB split heap + REPL) and retained as the byte-compare regression corpus; upstream QBE in sync through `e786f06`.
+**Next Priority:** **Phase 6 — newlibc for the Victor 9000** (see the Phase 6 section): compile `~/projects/newlibc` with this toolchain, adopt its ~40-test MAME suite as a standing robustness harness, and ultimately retire libstub.  Secondary: the open correctness tracks in "What's Actually Open" above.
