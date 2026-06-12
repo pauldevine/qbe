@@ -1,0 +1,10 @@
+Victor 9000 bare-metal interrupt-stability test (qbe/minic)
+phase 1: timer ISR + 8253 + PIC + sti
+phase 2: display init UNDER live interrupts
+phase 3: ticks advanced during font copy + CRTC setup: yes
+phase 4: display intact after init (blank + homed): yes
+phase 5: 60 scrolling lines under live interrupts: yes
+phase 6: ISR stayed live through the stress: yes
+phase 7: delay(500ms) elapsed in [50..80]: yes
+phase 8: screen content still intact after delay: yes
+PASS: bare-metal interrupt-stability checks completed.

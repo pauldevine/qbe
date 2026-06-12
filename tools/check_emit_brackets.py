@@ -319,6 +319,13 @@ def run_file(path, report):
                 cur = Region("ins", m.group(1), m.group(3),
                              parse_live(m.group(4)), path, n, func)
             else:
+                if mt.group(2) == "isr":
+                    # Interrupt-function ret region: the iret epilogue
+                    # restores the INTERRUPTED context, so every register
+                    # (including ES/DS) legitimately differs from region
+                    # entry.  One fixed emit-site template — skip.
+                    cur = None
+                    continue
                 cur = Region("term", "jmp" + mt.group(1), "-",
                              parse_live(mt.group(2)), path, n, func)
             continue

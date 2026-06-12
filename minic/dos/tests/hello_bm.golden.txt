@@ -1,0 +1,6 @@
+Victor 9000 bare-metal hello (qbe/minic, raw binary @ 0x3000)
+  6 * 7 = 42
+  baud divisor 1250000/(9600*16) = 8
+  strlen("Victor 9000") = 11
+  hex check: 0xbeef
+PASS: bare-metal hello checks completed.

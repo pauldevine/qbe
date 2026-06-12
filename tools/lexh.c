@@ -6,32 +6,43 @@
 #include <limits.h>
 #include <stdint.h>
 
+/* This list must exactly mirror the runtime kwmap in parse.c: every
+ * PUBLIC op name from ops.h (everything before the INTERNAL OPERATIONS
+ * marker) plus parse.c's explicit kwmap alias entries.  A stale list
+ * here finds a K that lexinit()'s perfect-hash assert then rejects. */
 char *tok[] = {
 
+	/* public ops (ops.h order) */
 	"add", "sub", "neg", "div", "rem", "udiv", "urem", "mul",
-	"and", "or", "xor", "sar", "shr", "shl", "stored",
-	"stores", "storel", "storew", "storeh", "storeb",
-	"load", "loadsw", "loaduw", "loadsh", "loaduh",
-	"loadsb", "loadub", "extsw", "extuw", "extsh",
-	"extuh", "extsb", "extub", "exts", "truncd",
-	"stosi", "dtosi", "stoui", "dtoui", "uwtof",
-	"ultof", "swtof", "sltof", "cast", "copy",
-	"alloc4", "alloc8", "alloc16", "culew", "cultw",
-	"cslew", "csltw", "csgtw", "csgew", "cugtw",
-	"cugew", "ceqw", "cnew", "culel", "cultl", "cslel",
-	"csltl", "csgtl", "csgel", "cugtl", "cugel",
-	"ceql", "cnel", "cles", "clts", "cgts", "cges",
-	"cnes", "ceqs", "cos", "cuos", "cled", "cltd",
-	"cgtd", "cged", "cned", "ceqd", "cod", "cuod",
-	"vaarg", "vastart", "...", "env", "dbgloc",
-	"loadfb", "loadfh", "loadfw", "loadfl", "storefb", "storefh", "storefw", "storefl",
-	"mkfar", "farseg", "faroff",
+	"and", "or", "xor", "sar", "shr", "shl",
+	"ceqw", "cnew", "csgew", "csgtw", "cslew", "csltw",
+	"cugew", "cugtw", "culew", "cultw",
+	"ceql", "cnel", "csgel", "csgtl", "cslel", "csltl",
+	"cugel", "cugtl", "culel", "cultl",
+	"ceqs", "cges", "cgts", "cles", "clts", "cnes", "cos", "cuos",
+	"ceqd", "cged", "cgtd", "cled", "cltd", "cned", "cod", "cuod",
+	"storeb", "storeh", "storew", "storel", "stores", "stored",
+	"loadsb", "loadub", "loadsh", "loaduh", "loadsw", "loaduw",
+	"load",
+	"extsb", "extub", "extsh", "extuh", "extsw", "extuw",
+	"exts", "truncd",
+	"stosi", "stoui", "dtosi", "dtoui",
+	"swtof", "uwtof", "sltof", "ultof",
+	"cast",
+	"alloc4", "alloc8", "alloc16",
+	"vaarg", "vastart",
+	"copy", "dbgloc", "asm",
+	"loadfb", "loadfh", "loadfw", "loadfl", "loadfs",
+	"storefb", "storefh", "storefw", "storefl", "storefs",
+	"mkfar", "farseg", "faroff", "addfo", "subfo", "vargp",
 
-	"call", "phi", "jmp", "jnz", "ret", "hlt", "export",
+	/* parse.c kwmap aliases */
+	"loadw", "loadl", "loads", "loadd", "alloc1", "alloc2",
+	"blit", "call", "env", "phi", "jmp", "jnz", "ret", "hlt",
+	"export", "thread", "extern", "common", "interrupt",
 	"function", "type", "data", "section", "align", "dbgfile",
-	"blit", "l", "w", "sh", "uh", "h", "sb", "ub", "b",
-	"d", "s", "z", "loadw", "loadl", "loads", "loadd",
-	"alloc1", "alloc2", "thread", "extern", "common", "volatile",
+	"sb", "ub", "sh", "uh", "b", "h", "w", "l", "s", "d", "z",
+	"volatile", "...",
 
 };
 enum {

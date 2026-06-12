@@ -66,8 +66,43 @@ run_victor_probe() {
 	echo "$out" | diff -u "$QBE_DIR/$golden" - >&2
 }
 
+# Bare-metal raw-binary run (§6c): build hello_bm via the raw-binary link
+# path, load it at 0x3000 with the MAME Lua loader (no DOS, no disk), diff
+# serial output against the golden.  Skips (77) when the newlibc tree is
+# absent (v9k_hw.h) or MAME is missing.
+run_baremetal_hello() {
+	if [ ! -d "${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}" ]; then
+		echo "newlibc tree not found (set \$NEWLIBC_DIR)"; return 77
+	fi
+	"$QBE_DIR/tools/build-newlibc-baremetal.sh" hello_bm >/dev/null
+	out="$("$QBE_DIR/tools/run-victor-baremetal.sh" \
+		"$QBE_DIR/build/newlibc-baremetal/hello_bm/hello_bm.bin" 15)" \
+		|| return $?
+	echo "$out" | diff -u "$QBE_DIR/minic/dos/tests/hello_bm.golden.txt" - >&2
+}
+
+# Bare-metal timer-interrupt run (§6d): the compiler-emitted
+# __attribute__((interrupt)) ISR (QBE `interrupt` linkage) taking live
+# 8253-channel-2 IR2 ticks through the re-initialized memory-mapped PIC.
+# Deterministic booleans/ranges only — MAME clocks channel 2 at 125 KHz
+# vs the documented 100 KHz, so absolute tick-vs-wall numbers vary.
+run_baremetal_timer() {
+	if [ ! -d "${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}" ]; then
+		echo "newlibc tree not found (set \$NEWLIBC_DIR)"; return 77
+	fi
+	"$QBE_DIR/tools/build-newlibc-baremetal.sh" timer_bm >/dev/null
+	out="$("$QBE_DIR/tools/run-victor-baremetal.sh" \
+		"$QBE_DIR/build/newlibc-baremetal/timer_bm/timer_bm.bin" 30)" \
+		|| return $?
+	echo "$out" | diff -u "$QBE_DIR/minic/dos/tests/timer_bm.golden.txt" - >&2
+}
+
 run "build qbe + minic" \
 	make -C "$QBE_DIR" -s qbe minic/minic
+
+run "victor bare-metal (hello_bm, raw @ 0x3000)" run_baremetal_hello
+
+run "victor bare-metal (timer_bm, live ISR)" run_baremetal_timer
 
 for entry in "${VICTOR_TESTS[@]}"; do
 	src="${entry%%:*}"

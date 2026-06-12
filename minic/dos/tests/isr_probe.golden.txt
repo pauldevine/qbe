@@ -1,0 +1,5 @@
+install: have seg 1 off 1
+first: count=1 ica=1 mix=33337
+five: count=6 ica=6 sum=25
+hammer: count=1006 ica=238
+PASS

@@ -1,0 +1,9 @@
+Victor 9000 bare-metal timer/ISR test (qbe/minic)
+phase 1: install timer ISR (INT 0x42)
+phase 2: 8253 ch2 100 Hz + PIC IR2 unmask
+phase 3: sti
+phase 4: ticks advance: yes
+phase 5: delay(500ms) elapsed in [50..80]: yes
+phase 6: 1500ms under live interrupts: survived
+phase 7: cli freezes ticks: yes
+PASS: bare-metal timer ISR checks completed.

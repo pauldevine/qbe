@@ -1,0 +1,16 @@
+Victor 9000 bare-metal cooked-console test (qbe/minic)
+phase 1: PIC re-init + timer ISR (INT 0x42)
+phase 2: 8253 ch2 100 Hz + IR2 unmask
+phase 3: tty init (display + keyboard, IR6)
+phase 4: sti
+phase 5: prompt + cooked line read
+v9k> vx 9k
+phase 6: got 4 byte(s) "v9k\n"
+phase 7: line is "v9k\n": yes
+phase 8: screen shows the EDITED line "v9k> v9k": yes
+phase 9: cursor wrapped to row 1 col 0: yes
+phase 10: single cooked getc: z
+got 'z'
+phase 11: keyboard ISR entered, no overruns: yes
+phase 12: timer still ticking: yes
+PASS: bare-metal cooked-console checks completed.

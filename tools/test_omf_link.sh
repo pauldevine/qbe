@@ -188,10 +188,17 @@ echo "[test2] assembling stubs and entry..."
 "$NASM" -f obj -o "$TMP/stevie_entry.obj" "$ENTRY"
 
 echo "[test2] linking 24 stevie objs + stubs + entry..."
+# build/stevie-orig may carry its own crt0_exe.obj (a real _start) from the
+# stevie build; exclude it — this smoke test supplies a synthetic entry.
+STEVIE_OBJS=()
+for o in "$ROOT"/build/stevie-orig/*.obj; do
+        case "$o" in */crt0_exe.obj) continue ;; esac
+        STEVIE_OBJS+=("$o")
+done
 python3 "$LINK" -o "$TMP/stevie.exe" --map "$TMP/stevie.map" \
         --entry _start --stack-size 4096 \
         "$TMP/stevie_entry.obj" \
-        "$ROOT"/build/stevie-orig/*.obj \
+        "${STEVIE_OBJS[@]}" \
         "$TMP/runtime_stubs.obj"
 
 echo "[test2] decoding MZ header..."
@@ -208,6 +215,45 @@ print('  CS:IP=%04X:%04X  SS:SP=%04X:%04X  total_file=%d' %
       (cs, ip, ss, sp, len(data)))
 assert sig == b'MZ'
 print('[test2] OK')
+PYEOF
+
+# ---------------- Test 3: raw-binary output (--raw-binary) ----------------
+# Re-link test 1's objects as a flat bare-metal binary at 0x3000 and verify
+# the structure: no MZ header, the synthesized register-setup stub at the
+# image head, link-time-absolute selectors (no relocation table exists in
+# this format), and the far call's selector resolving to the load-paragraph-
+# based frame of TEST_B_TEXT.
+
+echo
+echo "[test3] linking raw binary @ 0x3000..."
+python3 "$LINK" -o "$TMP/test.bin" --raw-binary --load-addr 0x3000 \
+                 --entry _start "$TMP/test_a.obj" "$TMP/test_b.obj"
+
+python3 - "$TMP/test.bin" <<'PYEOF'
+import struct, sys
+data = open(sys.argv[1], 'rb').read()
+assert data[0:2] != b'MZ', "raw binary must not carry an MZ header"
+# Stub: cli; mov ax,SS; mov ss,ax; mov sp,SP; mov ax,DS; mov ds,ax;
+#       mov es,ax; jmp far CS:IP  — fixed offsets within the 32-byte head.
+assert data[0] == 0xFA, "stub must start with cli"
+assert data[1] == 0xB8 and data[4:6] == b'\x8e\xd0', "mov ax,SS / mov ss,ax"
+assert data[6] == 0xBC, "mov sp,imm16"
+assert data[9] == 0xB8 and data[12:14] == b'\x8e\xd8', "mov ax,DS / mov ds,ax"
+assert data[14:16] == b'\x8e\xc0', "mov es,ax"
+assert data[16] == 0xEA, "far jmp to entry"
+ip, cs = struct.unpack_from('<HH', data, 17)
+# Stub head is 32 bytes -> TEST_A_TEXT at image para 2 -> 0x300 + 2.
+assert (cs, ip) == (0x302, 0), "entry must be 0302:0000, got %04X:%04X" % (cs, ip)
+# TEST_A_TEXT content: call far _foo = 9A <off16> <seg16>.
+assert data[32] == 0x9A, "call far at TEST_A_TEXT start"
+foo_off, foo_seg = struct.unpack_from('<HH', data, 33)
+# TEST_A_TEXT is 9 bytes (32..41); TEST_B_TEXT paragraph-aligns to byte 48
+# -> image para 3 -> absolute selector 0x303, offset 0.
+assert (foo_seg, foo_off) == (0x303, 0), \
+    "far target must be 0303:0000, got %04X:%04X" % (foo_seg, foo_off)
+print('  stub OK, entry %04X:%04X, far call -> %04X:%04X (absolute)'
+      % (cs, ip, foo_seg, foo_off))
+print('[test3] OK')
 PYEOF
 
 echo

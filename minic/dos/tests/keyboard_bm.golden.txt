@@ -1,0 +1,12 @@
+Victor 9000 bare-metal keyboard/ISR test (qbe/minic)
+phase 1: PIC re-init + timer ISR (INT 0x42)
+phase 2: 8253 ch2 100 Hz + IR2 unmask
+phase 3: keyboard VIA init + ISR (INT 0x46) + IR6 unmask
+phase 4: sti
+phase 5: no key pending at start: yes
+phase 6: waiting for 3 typed chars: got "v9k"
+phase 7: chars match "v9k": yes
+phase 8: keyboard ISR entered: yes
+phase 9: no ring-buffer overruns: yes
+phase 10: timer still ticking alongside IR6: yes
+PASS: bare-metal keyboard ISR checks completed.

@@ -6635,6 +6635,13 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 const char *
 fn_export_kw(void)
 {
+	/* __attribute__((interrupt)): pass the ISR property to QBE as
+	 * `interrupt` linkage — the i8086 backend emits the full ISR
+	 * prologue/epilogue (all-register save, static-memory ES save,
+	 * DS/ES=DGROUP, iret).  The body itself ends in a normal `ret`. */
+	if (cur_fn_interrupt)
+		return pending_static ? "interrupt function"
+		                      : "export interrupt function";
 	return pending_static ? "function" : "export function";
 }
 
@@ -6808,16 +6815,12 @@ prog: | prog kfunc | prog attr_kfunc | prog typed_decl | prog attr_typed_decl | 
 
 attr_kfunc: attrspec storageopt inlineopt init_attr prot_knr '{' dcls stmts '}'
 {
-	if (cur_fn_interrupt) {
-		/* Interrupt handler - emit iret instead of ret */
-		if (!stmt($8, -1, -1))
-			fprintf(of, "\tasm \"iret\"\n");
-		else
-			fprintf(of, "\tasm \"iret\"\n");
-	} else {
-		if (!stmt($8, -1, -1))
-			fprintf(of, "\tret 0\n");
-	}
+	/* Interrupt handlers end in a normal `ret` too: the ISR property
+	 * travels as QBE `interrupt` linkage (see fn_export_kw) and the
+	 * backend turns every ret of the function into the full
+	 * register-restore + iret epilogue. */
+	if (!stmt($8, -1, -1))
+		fprintf(of, "\tret 0\n");
 	fprintf(of, "}\n\n");
 };
 
@@ -7368,20 +7371,15 @@ type_and_ident: type IDENT
 
 typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 {
-	/* ANSI function body */
-	if (cur_fn_interrupt) {
-		/* Interrupt handler - emit iret */
-		if (!stmt($4, -1, -1))
-			fprintf(of, "\tasm \"iret\"\n");
+	/* ANSI function body.  Interrupt handlers end in a normal `ret`
+	 * too: the ISR property travels as QBE `interrupt` linkage (see
+	 * fn_export_kw) and the backend turns every ret of the function
+	 * into the full register-restore + iret epilogue. */
+	if (!stmt($4, -1, -1)) {
+		if (curfntyp == NIL)
+			fprintf(of, "\tret\n");
 		else
-			fprintf(of, "\tasm \"iret\"\n");
-	} else {
-		if (!stmt($4, -1, -1)) {
-			if (curfntyp == NIL)
-				fprintf(of, "\tret\n");
-			else
-				fprintf(of, "\tret 0\n");
-		}
+			fprintf(of, "\tret 0\n");
 	}
 	fprintf(of, "}\n\n");
 }
@@ -7782,16 +7780,10 @@ attritem: IDENT {
 
 kfunc: storageopt inlineopt attropt init prot_knr '{' dcls stmts '}'
 {
-	if (cur_fn_interrupt) {
-		/* Interrupt handler - emit iret instead of ret */
-		if (!stmt($8, -1, -1))
-			fprintf(of, "\tasm \"iret\"\n");
-		else
-			fprintf(of, "\tasm \"iret\"\n");
-	} else {
-		if (!stmt($8, -1, -1))
-			fprintf(of, "\tret 0\n");
-	}
+	/* Interrupt handlers end in a normal `ret` too — see
+	 * fn_export_kw (QBE `interrupt` linkage). */
+	if (!stmt($8, -1, -1))
+		fprintf(of, "\tret 0\n");
 	fprintf(of, "}\n\n");
 };
 

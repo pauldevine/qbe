@@ -59,6 +59,7 @@ enum Token {
 	Tthread,
 	Textern,
 	Tcommon,
+	Tinterrupt,
 	Tfunc,
 	Ttype,
 	Tdata,
@@ -120,6 +121,7 @@ static char *kwmap[Ntok] = {
 	[Tthread] = "thread",
 	[Textern] = "extern",
 	[Tcommon] = "common",
+	[Tinterrupt] = "interrupt",
 	[Tfunc] = "function",
 	[Ttype] = "type",
 	[Tdata] = "data",
@@ -147,7 +149,7 @@ enum {
 	TMask = 16383, /* for temps hash */
 	BMask = 8191, /* for blocks hash */
 
-	K = 362902335, /* found using tools/lexh.c */
+	K = 520135915, /* found using tools/lexh.c */
 	M = 23,
 };
 
@@ -1242,6 +1244,9 @@ parselnk(Lnk *lnk)
 		case Tcommon:
 			lnk->common = 1;
 			break;
+		case Tinterrupt:
+			lnk->isr = 1;
+			break;
 		case Tsection:
 			if (lnk->sec)
 				err("only one section allowed");
@@ -1256,6 +1261,8 @@ parselnk(Lnk *lnk)
 		default:
 			if (t == Tfunc && lnk->thread)
 				err("only data may have thread linkage");
+			if (t == Tdata && lnk->isr)
+				err("only functions may have interrupt linkage");
 			if (haslnk && t != Tdata && t != Tfunc)
 				err("only data and function have linkage");
 			return t;

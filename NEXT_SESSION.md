@@ -1,153 +1,112 @@
-# Next session (§6c — continue Phase 6.  §6b [2026-06-11, this session] completed **step 2: the newlibc portable subset runs DOS-hosted and is gated.**  ELEVEN phase3 tests (snprintf, fat_bpb/chain/root/dir/file, fat_vfs, ramfs, stdio_route, bss, terminal_meta) now build small-model via `tools/build-newlibc-test.sh` — test TU (`-Dmain=newlibc_test_main`) + libgloss/VFS/FAT/block + `minic/dos/newlibc/dos_shim.c` against crt0 + `libstub_to_exe.py --no-stdio` — and byte-diff against goldens in `tools/test-dos.sh`.  The full newlibc stack (printf wrappers → syscalls → VFS → devices/FAT-over-RAM-block) executes through THIS toolchain in DOSBox.  Two toolchain bugs fixed en route (static file-scope DATA linkage; decimal `UL` literal typing), both probe-gated.  Gate 274→**287/287**.  MP compact byte-identical (rigorous: pre-change toolchain rebuilt from git and whole-image `cmp`'d).  Next: **step 3** — omf_link raw-binary output + minic-built crt0 + MAME bare-metal hello at load addr 0x3000; then step 4 (drivers/ISRs/extended-asm).)
+# Next session (§6i — continue Phase 6.  §6h [2026-06-12, this session] completed **step 4e: stdio runs through the REAL newlibc stack on the bare machine — printf()/fgets() with no DOS underneath.**  The seam-shape question is ANSWERED: **newlibc's VFS `/dev/console` routing moved bare-metal**, NOT a libstub-level swap (the upper stack was already proven under this toolchain DOS-hosted, `bm_tty` was built to the exact `console_dev_read/write` contract in §6g, and a libstub-level swap would invest in the thing being retired).  New `minic/dos/newlibc/bm_shim.c` is the bare-metal counterpart of `dos_shim.c` — the SAME newlibc layering (`printf_wrappers → syscalls → vfs`, fds 0/1/2 = `/dev/console`) with the bottom device ops routed to bm_tty instead of INT 21h, the timer surface to bm_timer, the display surface to bm_display, plus the POSIX unprefixed aliases, `_impure_ptr`/heap link satisfaction, and the dos_shim-shaped minimal FILE layer; `bm_stdio.h` declares `bm_stdio_init()` (= `vfs_init()`) and is the build probe — `build-newlibc-baremetal.sh` links the full portable-subset TU set (printf/scanf wrappers, syscalls, reent_stubs, dirent, unlink, vfs, fat, block — same set as the DOS-hosted build) when a program includes it.  New battery test `stdio_bm` (113,904-byte image, the whole newlibc stack aboard): printf format sweep (`%d %u %04x %s %c`, return-value check), `write(1)` direct, fputc/fputs to stdout+stderr, `fprintf(/dev/null)` ret 9, ramfs `fopen+fread` of `/ram/readme.txt`, `isatty(0)=1 isatty(1)=1`, then the harness types **`vx\b9k\nz`** and `fgets(stdin)` hands back exactly `"v9k\n"` — keyboard ISR → bm_tty cooked read (real Backspace edit) → `console_dev_read` → `vfs_read(0)` → `_read` → `read` → fgets — then `getchar()` → `'z'` and `times()` advancing.  **FIRST-RUN PASS, zero compiler changes** (fourth driver/stdio session in a row riding the §6d ISR ABI).  Also this session: `~/projects/newlibc` moved again (3 commits past `5727ffb`: FAT WRITE support + SASI WRITE(6), medium-model default, vshell write commands) — all 11 DOS-hosted gated tests still PASS with NO golden refresh (the write support is dispatch-table-based: `vfs.c` only holds a `fat_write_ops` pointer installed at runtime by `fat_write.o`, which we don't link; read-only paths unchanged).  Gates: test-newlibc **11/11**, test-dos **289/289**, test_omf_link all pass; NO toolchain change so no emit audit / MP byte-compare triggered.  Next: **step 4f candidates** — block/SASI driver port (MAME `-scsi:0 harddisk`) for bare-metal FAT, now directly useful since upstream just grew FAT WRITE + SASI WRITE(6) to port against; newlibc-tests (snprintf/stdio_route/…) re-run BARE-METAL through bm_stdio (many should be near-free now); scanf-over-cooked-tty when a consumer appears; run-dos-exe.sh stdin redirect for the 3 remaining DOS-hosted tests.)
 
-## §6b session notes (2026-06-11)
+## §6h session notes (2026-06-12)
 
-### The two toolchain fixes (probe-gated, loud-verified pre-fix)
-1. **Static file-scope DATA had no internal linkage** — minic NEVER emitted `export`
-   on data (`export data` is valid QBE it just didn't use), and asm_to_omf.py
-   compensated by auto-promoting EVERY data `_xxx:` label to an OMF public; two TUs
-   reusing a static name died "duplicate public symbol" (newlibc: libgloss/dirent.c
-   and vfs/vfs.c both define `static … dir_table[]`).  Fix mirrors §1q's function
-   story end-to-end: minic marks non-static file-scope data `export data` (new
-   `glostatic[]` flag; an `nglo` watermark `glo_decl_start` captured in
-   type_and_ident and retro-marked by the STATIC typed_decl variants — the variants
-   reduce AFTER typed_decl_rest registers the slots, and the lexer's pending_static
-   is already reset by then; `emit_static_local` marks mangled function-locals;
-   `STATIC structstart` marks its sai slot) and asm_to_omf.py's data auto-promotion
-   is REMOVED — `.globl` is now authoritative for code AND data.
-   `static_data_probe` (TWO TUs, small+medium gate entries: same-name file statics,
-   same-name block statics behind same-name static fns, plus a cross-TU extern
-   global proving export still works).
-2. **Decimal `12345UL` was typed int** — the decimal lexer's `u`-suffix branch
-   consumed a trailing `L` without setting suffix_l (hex/octal were correct), so a
-   `UL` literal ≤0xFFFF was pushed as ONE stack word; newlibc's snprintf_test `%lu`
-   read a garbage high word (`12345UL` printed 1093808185 = 0x4132<<16 | 12345).
-   longconst_probe gained ulvararg/ulassign cases (golden regenerated, medium+large).
+### The seam decision (libstub swap vs VFS routing — VFS routing won)
+- dos_shim.c and bm_shim.c are deliberate parallels: same extern surface
+  (console_dev_*/tty_dev_*, timer_*, display_*, POSIX aliases, FILE
+  layer, _impure_ptr, __heap_start/__heap_end), different bottom —
+  INT 21h there, bm_tty/bm_timer/bm_display here.  A future model only
+  needs a third shim.
+- bm_stdio_init() is just vfs_init(); driver bring-up stays explicit in
+  the program (the interrupt-window ordering — interrupts_init, timer,
+  tty, sti — is the program's to own, per the §6d/§6g rules).
+- The newlibc stack TUs have ZERO `#ifdef DOS` — identical sources
+  compile bare-metal; only the shim differs.  No -Dmain rename, no
+  HALT2DOS (syscalls.c `_exit`'s hlt loop is bare-metal-correct).
+- libstub --no-stdio still provides the `_stdin/_stdout/_stderr`
+  sentinels (FILE._file = 0/1/2) that printf_wrappers' stream_fd()
+  expects — `fgets(stdin)` routes to fd 0 because `_stdin_file` holds 0.
 
-### Step-2 infrastructure (committed, not probe-grade)
-- `tools/build-newlibc-test.sh`: small model only (far models would need newlibc's
-  printf to answer minic's far_stdlib mangling — later phase).  `NEWLIBC_DIR`
-  overrides `~/projects/newlibc/phase3_newlib`.
-- `minic/dos/newlibc/shiminc/`: the §6a triage shim headers PROMOTED to the
-  committed tree (gate reproducibility); `build/newlibc-triage/sweep.sh` still has
-  its own copy (probe-grade, can be repointed later).
-- `minic/dos/newlibc/dos_shim.c`: console/tty device ops (INT 21h AH=3F/40 via
-  libstub int86), 100Hz wall-clock timer (AH=2Ch), display_puts→console,
-  POSIX unprefixed aliases (open/read/write/…→`_`-syscalls), minimal
-  FILE-table fopen/fclose/fread/fgetc over VFS fds (libstub's one-word
-  `_stdin/_stdout/_stderr` sentinels are layout-compatible with newlib's
-  `FILE{int _file;…}` first member — kept), `_impure_ptr`/`__heap_start/_end`
-  link satisfaction, and `main()` = `vfs_init()` (board_init()'s job on metal)
-  then `newlibc_test_main()`.
-- `libstub_to_exe.py --no-stdio` (near-code only): drops FILEIO_EXE+FAR_SPRINTF_EXE
-  and skips libstub.asm `_sprintf/_fgets/_putchar/_abort/_stat` so the newlibc
-  printf family + dos_shim own those names; keeps malloc/free, str/mem fns,
-  int86/intdos, `_qbe_*` helpers, and the stdio sentinels.
-- Gate: `run_newlibc_test` in tools/test-dos.sh, skip (77) when the newlibc tree
-  is absent; goldens `minic/dos/tests/newlibc_<test>.golden.txt`.
+### stdio_bm test
+- Same keypost as tty_bm ("vx\b9k\nz") but the line returns through
+  fgets(stdin) — the full newlibc read path over the cooked console.
+- printf returns 47 for the format-sweep line (golden-locked); the
+  echo bytes (raw 0x08s in `v9k> vx\b \b9k`) live in the golden,
+  deterministic as in tty_bm.
+- 45-second budget is ample (run completed well inside it; the 113 KB
+  image's Lua load is the main extra cost over tty_bm's 30 s).
 
-### Excluded / deferred tests (with reasons)
-- memory_test: scans the Victor physical memory map — hardware-flavored, fails
-  DOS-hosted by design; belongs to step-3+ MAME bare-metal.
-- stdin_test / scanf_test / read_test: need stdin feeding — run-dos-exe.sh has no
-  input-redirect support yet (DOS `< file` works per the §3n REPL work; small
-  harness lever if wanted).
-- hello: BUILDS and is shimmed (timer/display/malloc) but prints wall-clock tick
-  values — not golden-able as-is.
+### Upstream drift check (the §6g TRAP, exercised again)
+- 3 new commits (fbd8dd5/8dfd23e/5f8996b): FAT write + SASI WRITE(6),
+  medium default, vshell RW.  vfs.c +252 lines compiled clean under
+  minic; all 11 DOS-hosted goldens UNCHANGED because fat_write is a
+  runtime-installed dispatch table (`vfs_set_fat_write_ops`), not a
+  link dependency — read-only mounts never touch it.
+- The uncommitted working-tree changes in ~/projects/newlibc also flow
+  into our builds (we compile the tree as-is) — same drill: TEXT-diff
+  drift = source movement, not a toolchain regression.
 
 ### Open tracks (new + carried)
-- newlibc step 3: omf_link raw-binary output mode + minic-built crt0 + MAME
-  bare-metal hello (load addr 0x3000, serial output); then tools/test-newlibc.sh.
-- run-dos-exe.sh stdin redirect (unlocks 3 more newlibc tests).
-- newlibc-under-far-models stdio story (minic far_stdlib mangling vs newlibc's
-  own printf) — decide when a far consumer appears.
-- Carried: far static-DATA-ptr reloc (§1g, static_sym_init_probe reproduces);
-  extended-asm output constraints + Intel template translation (step 4); ISR
-  definition strategy (step 4); param/static-local shadowing a global; huge
-  `_qbe_huge_add` ≥0x8000 (§4i); `jmp_buf bufs[6]` (§4v, unreduced); minic
-  static-init FLOAT const-expr folding; small setjmp/longjmp; multi-decl items
-  after the first skip block_scope_decl; Kw spill-slot sharing.
+- newlibc step 4f: block/SASI bare-metal driver port (MAME -scsi:0
+  harddisk) for bare-metal FAT — upstream's new FAT WRITE + SASI
+  WRITE(6) is the natural porting target; re-run DOS-hosted newlibc
+  tests bare-metal through bm_stdio (near-free candidates: snprintf,
+  stdio_route, ramfs); scanf-over-tty when a consumer appears; serial
+  TX ISR when a consumer appears.
+- run-dos-exe.sh stdin redirect (unlocks 3 more DOS-hosted newlibc tests).
+- newlibc-under-far-models stdio story — when a far consumer appears.
+- Carried: far static-DATA-ptr reloc (§1g); param/static-local shadowing a
+  global; huge `_qbe_huge_add` ≥0x8000 (§4i); `jmp_buf bufs[6]` (§4v,
+  unreduced); minic static-init FLOAT const-expr folding; small
+  setjmp/longjmp (newlibc may want it); multi-decl items after the first
+  skip block_scope_decl; Kw spill-slot sharing.
 
 ---
 
-# Next session (§6b — continue Phase 6.  §6a [2026-06-11, this session] ran the newlibc TRIAGE SWEEP (Phase-6 step 1) and fixed SEVEN minic dialect gaps it exposed: the per-TU sweep (`build/newlibc-triage/sweep.sh` + `shiminc/` newlib-shaped shim headers) took phase3_newlib from **21/66 → 46/66 TUs compiling** under BOTH small and medium, and the **entire portable subset (libgloss ×7, vfs ×2, every non-asm test) now compiles** — exactly the step-2 target population.  Every remaining failure is inline-asm-flavored (drivers + dos_tests) or the ISR-definition gap — i.e. step-4 work, none of it portable-subset.  Six new probes, gate 262→274.  Next: **step 2 proper** — link the portable subset against libstub, run VFS/FAT/printf tests DOS-hosted in DOSBox, gate them; then step 3 (omf_link raw-binary output + minic crt0).)
+# Next session (§6h — continue Phase 6.  §6g [2026-06-12, this session] completed **step 4d: the cooked console — the Victor is now its own terminal.**  `bm_tty.c/h` (minic/dos/newlibc/) is the minic port of newlibc's `console_dev_read`/`console_dev_write` pair: every output byte mirrors to BOTH the bm_display screen and the serial console (so a headless harness sees what the screen shows), and cooked input comes from the interrupt-driven keyboard with line editing — Backspace/DEL rub out the previous byte (`"\b \b"` echoed to both devices), keyboard Return (CR) is exposed to readers as `'\n'`, the read ends at newline or count — plus a single-byte `bm_tty_getc`.  This is the stdio seam: a future `read(0,…)`/`write(1,…)` routes here instead of libstub's DOS INT 21h.  New battery test `tty_bm`: the harness types **`vx\b9k\nz`** through MAME's natural keyboard, so the rubout is a REAL Backspace keystroke travelling VIA CS2 → IR6 → compiler-emitted ISR → ring buffer → line editor — the cooked read returns exactly `"v9k\n"`, the VRAM readback proves the screen shows the EDITED line (`v9k> v9k`, rubbed-out cell blank), the cursor wraps to row 1, and the queued `z` arrives through `bm_tty_getc`.  FIRST-RUN PASS, **zero compiler changes** (third driver session running on the §6d ISR ABI).  Harness: `run-victor-baremetal.sh` `V9K_KEYPOST` is now BYTE-SAFE — every byte is passed to Lua as a `\ddd` decimal escape, so control characters type real Victor keys (`\b` → Backspace key 26, `\n` → Return via the S88 path), both arriving byte-exact on the first try; `test-newlibc.sh` keypost fields decode through `printf %b` (entries can write `vx\b9k\nz` textually); `build-newlibc-baremetal.sh` gained the `bm_tty.h` probe.  The `tty_bm` golden contains the literal echo bytes (raw 0x08s in `v9k> vx\b \b9k`) — deterministic, diff-clean.  Gates: test-newlibc **10/10**, test-dos **289/289** after refreshing THREE stale DOS-hosted goldens (`newlibc_fat_root/fat_file/ramfs_test`) — the `~/projects/newlibc` tree moved under us (upstream `5727ffb` "POSIX errno audit": invalid-8.3 EINVAL→ENOENT, past-EOF lseek now POSIX-legal, one new O_CREAT check; every changed line still PASS, i.e. source drift, not a toolchain regression — message TEXT changed, which a miscompile can't do), test_omf_link all pass; NO toolchain change so no emit audit / MP byte-compare triggered.  Next: **step 4e** — route stdio through bm_tty: a bare-metal `read(0)`/`write(1)` seam (decide its shape — libstub-level swap vs newlibc's VFS `/dev/console` routing moved bare-metal) toward actually retiring libstub's INT 21h stdio; block/SASI driver port (MAME `-scsi:0 harddisk`) toward bare-metal FAT; serial TX ISR if a consumer appears; run-dos-exe.sh stdin redirect for the 3 remaining DOS-hosted tests.)
 
-## §6a session notes (2026-06-11)
+## §6g session notes (2026-06-12)
 
-### The seven minic fixes (each probe-gated, all loud-verified pre-fix)
-1. **`extern T *f(args);`** — extern + pointer-return + ANSI params had NO production
-   (only K&R `*f()`); errno.h's `extern int *__errno(void);` killed ~29 TUs at line 1.
-   New ext_decl kind `'H'` (par1 stashed on `->l`, fnproto_record'd in the extern walks).
-   `extern_ptrret_probe`.
-2. **File-scope prototype param leak** — par1's param() varadds names at file scope and
-   nothing removed them after a PROTOTYPE; a later decl reusing the name with a different
-   type died "double definition" (`int first(char *buf,…); extern long second(…,const
-   void *buf,…)`).  Fixed: `varclr()` at the end of every file-scope prototype-only
-   reduction (ansi_proto_register, EXTERN par1, both ext_decllist walks).  Definitions
-   were always safe (init_ansi/init_kr varclr first).  `proto_param_leak_probe`.
-3. **Array parameter declarators** — par1 had no `'['…']'` forms at all: `uint8_t out[11]`,
-   `char buf[]`, `char *const argv[]` all parse-errored (the *const was a red herring —
-   `type '*' CONST` existed).  Four new par1 productions, decay to (far-aware) pointer,
-   dimension folded and discarded.  `array_param_probe`.
-4. **`void __far __attribute__((interrupt)) f(void);`** — the ia16-gcc far-ISR spelling
-   (interrupts.h) had no production for the interposed `__far`; new
-   `type TFAR attropt IDENT` in type_and_ident accepts-and-drops the __far.  PROTOTYPE
-   only: ISR *definitions* remain a designed gap (the vestigial interrupt emission
-   produces `asm "iret"` with no block terminator — QBE rejects — and would skip the
-   epilogue anyway; Phase-6 step 4 decides the real ISR strategy).  `isr_far_attr_probe`.
-5. **`const volatile T`** — qualifier pair missing everywhere; new `vol_qual` nonterminal
-   (VOLATILE | CONST VOLATILE | VOLATILE CONST) replaced the bare-VOLATILE heads in all
-   type productions (incl. STRUCT/UNION/TNAME).  Covered by the font_test-shaped probe
-   cases inside array_param/others; no dedicated probe (parse-only, exercised by sweep).
-6. **Scalar global symbol-address init** — `char **environ = __env;` / `int *p = &x;` /
-   `int *mid = &arr[2];` died (the `'=' expr ';'` rule folded with const_eval only; the
-   aggregate path §1b/§1g could already emit `$sym+off`).  Now routed through cival_eval
-   → new emit_global_sym_init.  `static_sym_init_probe` (small+medium).  **The probe
-   under compact CONFIRMED the §1g far static-DATA-ptr reloc gap at runtime** (prints raw
-   offsets 4194/4192 — segment missing) — now a reproducible open track, NOT gated far.
-7. **Locals shadow file-scope bindings** — minic had NO local-shadows-global support
-   (`int g; int f(){int g;}` died), only §1k local-vs-local inner-block renames.  newlibc
-   vfs_open declares `const fat_mount_t *fat_mount;` next to the file-scope function
-   fat_mount() (found by automated delta-reduction of the 785-line failing prefix).
-   Fixed: block_scope_decl's rename trigger extended to any global/extern/function/enum
-   binding + block_scope_decl wired into the dcls-chain local rules (fn-body depth) —
-   the stmt-context rules already had it.  `local_shadow_probe` (global var + function +
-   enum constant all shadowed, post-shadow global intact).
-   Plus: postfix prototype attribute `void _init(void) __attribute__((weak));` (new
-   `ansi_proto_register ATTRIBUTE…';'` production), and `die("undefined variable")` now
-   prints the NAME (4 shim-gap diagnoses fell out instantly).
+### bm_tty (minic/dos/newlibc/bm_tty.c, bm_tty.h)
+- The console_dev_read/console_dev_write contract, preserved exactly:
+  echo screen-first then serial; rubout is "\b \b" to both devices
+  (bm_display_putc('\b') is already destructive, but the ' '+'\b' pair
+  keeps the two devices in lockstep with newlibc's sequence); CR→LF so
+  line readers see '\n'; reads block on bm_keyboard_getc.
+- bm_tty_init = bm_display_init + bm_keyboard_init, so it inherits the
+  keyboard's window: AFTER bm_interrupts_init (PIC re-init), BEFORE
+  bm_interrupts_enable.
+- bm_tty_write/bm_tty_read are the future fd-1/fd-0 device entries;
+  bm_tty_getc/bm_tty_putc are the byte pair.
 
-### Sweep infrastructure (build/newlibc-triage/, intentionally untracked probe-grade)
-- `sweep.sh [model]`: per-TU clang -E (-nostdinc **-D__ia16__** — keeps `__far` real and
-  selects the GCC MK_FP branch in v9k_hw.h, which matches minic semantics) → minic →
-  qbe → asm_to_omf → nasm, keep-going, stage-bucketed report.
-- `shiminc/`: newlib-shaped shim headers (errno/unistd/fcntl/reent/dirent/stdio with
-  struct FILE._file/sys/stat with S_IF*+S_BLKSIZE/sys/types with dev_t/time/limits/io/
-  conio→dos.h/i86→dos.h).  These prefigure the real newlibc-port headers.
-- minic line numbers in errors are 0-based-ish (error:0 = line 1); statements are emitted
-  at the function-close reduce, so stmt-level errors report the `}` line — bisect inside.
+### tty_bm test
+- Input "vx\b9k\nz" exercises: ordinary chars, a real Backspace edit,
+  Return (S88 path → CR → cooked '\n'), and a queued post-line byte.
+- Checks: line == "v9k\n" (4 bytes); screen row 0 == "v9k> v9k" with
+  cell 8 blank (the rubbed-out 'x' is GONE from VRAM); cursor at (1,0)
+  after the newline echo; bm_tty_getc → 'z'; ISR count > 0, overruns 0;
+  timer alive.  All phases print first (5 MHz 8088 rule).
 
-### Remaining failures (all step-4 flavored, NONE portable-subset)
-- 6 dos_tests: Watcom `_asm { … }` blocks (phase-1-style TUs; park or rewrite later).
-- 5 qbe-stage: extended-asm `"=r"` OUTPUT constraints — minic substitutes the slot into
-  the template but QBE sees a slot that is read-never-stored and rejects; ALSO
-  interrupts.c ISR definition (designed gap, see fix 4).
-- 8 nasm-stage: AT&T/ia16 mnemonics leak through the template (`pushfw/popw %0`,
-  `movw %es`) — nasm wants Intel.  Driver asm will need per-target porting in step 4
-  anyway (it was written for ia16-gcc).
-- 46/66 small AND medium, identical fail sets.
+### Harness facts
+- V9K_KEYPOST encoding: `od -An -v -tu1 | awk → \ddd` — any byte
+  survives the single-quoted Lua literal.  MAME natkeyboard maps 0x08
+  to the Victor Backspace key and 0x0A to Return; both validated here.
+- test-newlibc.sh keypost field goes through `printf %b`; existing
+  plain-text entries (keyboard_bm "v9k") are unaffected.
+- The default 3 s keypost delay is FINE for tty_bm: display init's 8 KB
+  font copy is only ~0.1 s of 8088 time (interrupt_bm's slowness was
+  the 60-line scroll stress, not init).
+- DOS-hosted newlibc goldens track a MOVING upstream: ~/projects/newlibc
+  is under active development, so a [FAIL] whose diff shows changed
+  message TEXT (not garbage) = upstream source drift — check newlibc
+  git log, eyeball the new behavior, refresh the golden via
+  build-newlibc-test.sh + run-dos-exe.sh.  This session: 5727ffb errno
+  audit changed fat_root/fat_file/ramfs expectations.
 
 ### Open tracks (new + carried)
-- far static-DATA-ptr reloc (§1g, now runtime-reproduced by static_sym_init_probe under
-  compact) — needed before newlibc-style tables-of-pointers work in far-data models.
-- minic extended-asm output-constraint store marking + Intel-syntax template translation
-  (the qbe/nasm buckets above) — step 4.
-- ISR definition strategy (minic save-all+iret codegen vs asm shims) — step 4.
-- Param/static-local shadowing a global still dies (only plain locals fixed).
-- Carried: huge `_qbe_huge_add` ≥0x8000 (§4i); `jmp_buf bufs[6]` (§4v, unreduced); minic
-  static-init FLOAT const-expr folding; small setjmp/longjmp; multi-decl items after the
-  first skip block_scope_decl; Kw spill-slot sharing.
+- newlibc step 4e: stdio-over-bm_tty — the bare-metal read(0)/write(1)
+  seam that retires libstub's INT 21h stdio (decide: libstub-level swap
+  vs newlibc VFS /dev/console routing moved bare-metal); block/SASI
+  driver port (MAME -scsi:0 harddisk) for bare-metal FAT; serial TX ISR
+  when a consumer appears.
+- run-dos-exe.sh stdin redirect (unlocks 3 more DOS-hosted newlibc tests).
+- newlibc-under-far-models stdio story — when a far consumer appears.
+- Carried: far static-DATA-ptr reloc (§1g); param/static-local shadowing a
+  global; huge `_qbe_huge_add` ≥0x8000 (§4i); `jmp_buf bufs[6]` (§4v,
+  unreduced); minic static-init FLOAT const-expr folding; small
+  setjmp/longjmp (newlibc may want it); multi-decl items after the first
+  skip block_scope_decl; Kw spill-slot sharing.
 
 ---
-
-Older session headers (§5c and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).
+Older session headers (§6e and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).
