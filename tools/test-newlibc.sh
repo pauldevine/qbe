@@ -101,6 +101,22 @@ NEWLIBC_BM_TESTS=(
 	# the full bm_stdio driver set, so it needs a 4096 stack (data+bss
 	# 60688; 8192 overflows 64KB).  RAM-only ops are fast; output is short.
 	"fat_write_unit_test:60::::medium:4096"
+	# §6o: the two KEYBOARD-INPUT tests, driven bare-metal through the
+	# cooked bm_tty console (NOT the §6n DOS `< IN.TXT` redirect — on
+	# hardware they read CON, echoed, via the interrupt-driven keyboard).
+	# getchar/fgets/scanf reach _read(0,...) -> console_dev_read ->
+	# bm_tty_read; getchar reads ONE keystroke (count=1, no Enter), the
+	# line readers stop at the echoed Return.  The keypost is one
+	# natkeyboard burst into the IR6 ring, so timing is irrelevant -- but
+	# a trailing throwaway char AFTER the final `\n` is REQUIRED to commit
+	# that Return into the ring before the program blocks on it (the §6h
+	# stdio_bm lesson: a `\n` at the very end of a post is not flushed).
+	# stdin_test: `Ahello\nz` -> getchar='A', fgets="hello\n" (z unused).
+	# scanf_test: `victor 42\nz` -> %15s="victor" %d=42 (\n ends %d).
+	# Goldens differ from the §6n DOS redirect goldens because the cooked
+	# console ECHOES the typed input; build small-model (no fat_write.c).
+	"stdin_test:35:Ahello\nz::"
+	"scanf_test:35:victor 42\nz::"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 

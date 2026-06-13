@@ -1,0 +1,25 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+===============================================
+  Victor 9000 Phase 3 stdin Keyboard Test
+===============================================
+
+Input is from /dev/console via the keyboard.
+Console reads echo input and support Backspace editing.
+
+Test 1: getchar()
+Press one printable key:
+> A
+getchar returned: 'A' (0x41)
+
+Test 2: fgets()
+Type a short line, use Backspace if needed, then press Return:
+> hello
+
+fgets returned 6 bytes: "hello\n"
+PASS: fgets stopped at newline.
+
+stdin test complete.
+bm_testhost: test returned 0
