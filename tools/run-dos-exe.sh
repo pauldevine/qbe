@@ -60,13 +60,29 @@ SHORT_NAME="RUN.${EXE_BASE##*.}"        # RUN.EXE or RUN.COM
 SHORT_PATH="$EXE_DIR/$SHORT_NAME"
 OUT_PATH="$EXE_DIR/OUT.TXT"
 DONE_PATH="$EXE_DIR/DONE.TXT"
+IN_PATH="$EXE_DIR/IN.TXT"
+
+# Optional stdin redirect: $DOS_STDIN points at a host file whose bytes are
+# fed to the program as DOS stdin (`PROG < IN.TXT`).  Used by the keyboard
+# tests (stdin_test/scanf_test) whose getchar/fgets/scanf read handle 0 via
+# INT 21h AH=3Fh — a DOS redirect makes that deterministic (no echo, unlike
+# the cooked CON device).  Copied in 8.3-safe as IN.TXT.
+REDIR_IN=""
+if [ -n "${DOS_STDIN:-}" ]; then
+	if [ ! -f "$DOS_STDIN" ]; then
+		echo "run-dos-exe: \$DOS_STDIN not found: $DOS_STDIN" >&2
+		exit 2
+	fi
+	REDIR_IN="< IN.TXT "
+fi
 
 cleanup() {
-	rm -f "$SHORT_PATH" "$OUT_PATH" "$DONE_PATH"
+	rm -f "$SHORT_PATH" "$OUT_PATH" "$DONE_PATH" "$IN_PATH"
 }
 trap cleanup EXIT
 
 cp "$EXE" "$SHORT_PATH"
+[ -n "$REDIR_IN" ] && cp "$DOS_STDIN" "$IN_PATH"
 
 # DONE.TXT is the completion sentinel: it only appears after the program
 # returns to COMMAND.COM, so the host can poll for it with a timeout
@@ -77,7 +93,7 @@ cat > "$CONF" <<EOF
 [autoexec]
 mount c "$EXE_DIR"
 c:
-$SHORT_NAME > OUT.TXT
+$SHORT_NAME ${REDIR_IN}> OUT.TXT
 echo done > DONE.TXT
 exit
 EOF

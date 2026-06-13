@@ -1,0 +1,20 @@
+
+===============================================
+  Victor 9000 Phase 3 stdin Keyboard Test
+===============================================
+
+Input is from /dev/console via the keyboard.
+Console reads echo input and support Backspace editing.
+
+Test 1: getchar()
+Press one printable key:
+> 
+getchar returned: 'A' (0x41)
+
+Test 2: fgets()
+Type a short line, use Backspace if needed, then press Return:
+> 
+fgets returned 6 bytes: "hello\n"
+PASS: fgets stopped at newline.
+
+stdin test complete.

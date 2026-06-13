@@ -1,0 +1,13 @@
+
+===============================================
+  Victor 9000 Phase 3 scanf Keyboard Test
+===============================================
+
+Input is from /dev/console via the keyboard.
+Type: victor 42
+> 
+scanf returned 2 item(s).
+word="victor" value=42
+PASS: scanf parsed keyboard-backed stdin.
+
+scanf test complete.

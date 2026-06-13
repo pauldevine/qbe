@@ -9,13 +9,17 @@
 #
 # Usage:  tools/run-dos-batch.sh <manifest.tsv> [timeout_sec]
 #
-#   manifest.tsv: one program per line, two TAB-separated fields:
-#       <path/to/program.exe-or-.com> <TAB> <host-output-file>
+#   manifest.tsv: one program per line, two or three TAB-separated fields:
+#       <path/to/program.exe-or-.com> <TAB> <host-output-file> [<TAB> <host-stdin-file>]
 #   Each program is copied into a fresh staging directory as Tnnnn.EXE/.COM
 #   (8.3-safe) and run with `Tnnnn.EXE > Tnnnn.TXT`; on completion the
 #   CRLF-stripped TXT is written to the host-output-file.  A program that
 #   produced no TXT (hang/crash aborted the batch) gets NO output file —
 #   callers treat a missing file as failure.
+#   An optional third field is a host file fed to the program as DOS stdin
+#   (`Tnnnn.EXE < Tnnnn.IN > Tnnnn.TXT`); staged 8.3-safe as Tnnnn.IN.  Used
+#   by the keyboard tests (stdin_test/scanf_test) that read handle 0 via INT
+#   21h AH=3Fh — a DOS redirect makes that deterministic (no echo).
 #
 #   timeout_sec: host-side watchdog (default 30 + 1s/program).  The DOS side
 #   writes DONE.TXT after the last program; if it doesn't appear in time the
@@ -45,18 +49,25 @@ if [ -z "$MANIFEST" ] || [ ! -f "$MANIFEST" ]; then
 	exit 2
 fi
 
-# Parse the manifest (bash-3.2-safe indexed arrays).
+# Parse the manifest (bash-3.2-safe indexed arrays).  Third field (host
+# stdin file) is optional; absent → empty.
 EXES=()
 OUTS=()
+INS=()
 n=0
-while IFS=$'\t' read -r exe out; do
+while IFS=$'\t' read -r exe out stdin; do
 	[ -n "$exe" ] || continue
 	if [ ! -f "$exe" ]; then
 		echo "run-dos-batch: missing program: $exe" >&2
 		exit 2
 	fi
+	if [ -n "$stdin" ] && [ ! -f "$stdin" ]; then
+		echo "run-dos-batch: missing stdin file: $stdin" >&2
+		exit 2
+	fi
 	EXES[$n]="$exe"
 	OUTS[$n]="$out"
+	INS[$n]="$stdin"
 	n=$((n + 1))
 done < "$MANIFEST"
 if [ "$n" -eq 0 ]; then
@@ -100,7 +111,12 @@ while [ "$i" -lt "$n" ]; do
 	ext="$(echo "${exe##*.}" | tr '[:lower:]' '[:upper:]')"   # EXE or COM
 	name="$(printf 'T%04d' "$i")"
 	cp "$exe" "$STAGE/$name.$ext"
-	printf '%s.%s > %s.TXT\r\n' "$name" "$ext" "$name" >> "$BAT"
+	redir=""
+	if [ -n "${INS[$i]}" ]; then
+		cp "${INS[$i]}" "$STAGE/$name.IN"
+		redir="< $name.IN "
+	fi
+	printf '%s.%s %s> %s.TXT\r\n' "$name" "$ext" "$redir" "$name" >> "$BAT"
 	i=$((i + 1))
 done
 printf 'echo done > DONE.TXT\r\n' >> "$BAT"

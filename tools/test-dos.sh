@@ -557,10 +557,12 @@ prep() {
 }
 
 stage_runtime_case() {
-	desc="$1"; exe="$2"; golden="$3"
+	desc="$1"; exe="$2"; golden="$3"; stdin="${4:-}"
 	staged="$BATCH_DIR/c$ncases.${exe##*.}"
 	cp "$exe" "$staged"
-	printf '%s\t%s\n' "$staged" "$BATCH_DIR/c$ncases.out" >> "$MANIFEST"
+	# Optional 4th arg = host file fed as DOS stdin (3rd manifest field);
+	# absent → empty field → no redirect in run-dos-batch.sh.
+	printf '%s\t%s\t%s\n' "$staged" "$BATCH_DIR/c$ncases.out" "$stdin" >> "$MANIFEST"
 	CASE_DESC[$ncases]="$desc"
 	CASE_GOLDEN[$ncases]="$golden"
 	CASE_OUT[$ncases]="$BATCH_DIR/c$ncases.out"
@@ -953,6 +955,21 @@ for t in "${NEWLIBC_TESTS[@]}"; do
 		stage_runtime_case "newlibc small ($t)" \
 			"$QBE_DIR/build/newlibc-tests/$t/$t.exe" \
 			"$QBE_DIR/minic/dos/tests/newlibc_$t.golden.txt"
+	fi
+done
+
+# §6n: the keyboard-input tests — getchar/fgets (stdin_test) and scanf
+# (scanf_test) read DOS handle 0 via INT 21h AH=3Fh through newlibc's
+# /dev/console.  A DOS stdin redirect (`< IN.TXT`, the run-dos-batch.sh 3rd
+# manifest field via stage_runtime_case's 4th arg) feeds the input
+# deterministically — no echo, unlike the cooked CON device on real
+# hardware.  Both build small-model (portable stdio, no fat_write bulk).
+for t in stdin_test scanf_test; do
+	if prep "newlibc small ($t)" build_newlibc_test "$t"; then
+		stage_runtime_case "newlibc small ($t)" \
+			"$QBE_DIR/build/newlibc-tests/$t/$t.exe" \
+			"$QBE_DIR/minic/dos/tests/newlibc_$t.golden.txt" \
+			"$QBE_DIR/minic/dos/tests/newlibc_$t.stdin.txt"
 	fi
 done
 
