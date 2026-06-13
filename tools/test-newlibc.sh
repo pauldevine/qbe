@@ -121,6 +121,17 @@ NEWLIBC_BM_TESTS=(
 	"sasi_fat_smoke_test:60:::hd"
 	"sasi_fat_dir_test:90:::hd:medium"
 	"sasi_fat_write_test:240:::hd:medium"
+	# §6q: the UNMODIFIED upstream RAW BLOCK probe, run bare-metal on the
+	# real -scsi:0 disk through bm_testhost.  Registers the SASI block
+	# device, reads LBA 0 twice (cache-invalidated between) and checks the
+	# checksum repeats, dumps the first 32 bytes, and prints the SASI bus
+	# diagnostics.  This is the read-only block-layer counterpart to the
+	# §6i sasi_bm minic TU and the §6p FAT family — the upstream test
+	# itself, not a hand-mirrored port.  Read-only, but still MEDIUM:
+	# 65577B code in small is 41B over the 64KB _TEXT ceiling (it wraps and
+	# hangs, the §6p sasi_fat_dir_test lesson); medium is 70944B multi-CS.
+	# Reads LBA 0 only, so the budget is modest despite medium.
+	"sasi_sector_test:60:::hd:medium"
 	# §6o: the two KEYBOARD-INPUT tests, driven bare-metal through the
 	# cooked bm_tty console (NOT the §6n DOS `< IN.TXT` redirect — on
 	# hardware they read CON, echoed, via the interrupt-driven keyboard).

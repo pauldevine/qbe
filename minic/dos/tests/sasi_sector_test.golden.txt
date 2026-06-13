@@ -1,0 +1,28 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+Victor 9000 SASI raw sector probe
+=================================
+
+Initial SASI bus snapshot:
+  bus=0x00 BSY=0 REQ=0 C/D=0 I/O=0 MSG=0
+Registered SASI target 0 as block device 0.
+PASS: SASI controller initialized.
+SASI diagnostics (after init):
+  target=0 cmd=0x03 lba=0 step=message-phase(9) error=0
+  bus=0x1F BSY=1 REQ=1 C/D=1 I/O=1 MSG=1
+  status=0x00 message=0x00 sense_len=4 sense=00 00 00 00
+Geometry: 59058 sectors x 512 bytes, flags=0x1
+PASS: read LBA 0.
+SASI diagnostics (after first LBA 0 read):
+  target=0 cmd=0x08 lba=0 step=message-phase(9) error=0
+  bus=0x1F BSY=1 REQ=1 C/D=1 I/O=1 MSG=1
+  status=0x00 message=0x00 sense_len=0 sense=00 00 00 00
+HEX:   02 00 01 00 74 61 6E 64 6F 6E 5F 37 30 33 5F 6D 61 6D 65 00 00 02 44 00 00 00 00 00 0C 13 00 00 
+ASCII: ....tandon_703_mame...D.........
+Repeat read checksum: first=0x8DDD second=0x8DDD
+PASS: repeated uncached LBA 0 read matched.
+LBA 0 has no boot-sector signature; check for a Victor volume label wrapper before FAT mounting.
+
+SASI sector probe complete.
+bm_testhost: test returned 0

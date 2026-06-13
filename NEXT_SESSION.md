@@ -1,3 +1,38 @@
+# Next session (§6r — continue Phase 6.  §6q [2026-06-13, this session] ran the UNMODIFIED upstream `sasi_sector_test` raw-block probe **BARE-METAL on the REAL `-scsi:0` Victor disk through bm_testhost + the full bm_stdio/block/SASI stack, with ZERO compiler/toolchain/build-script changes — battery 29/29 → 30/30.**  This is the read-only block-layer counterpart to §6i's hand-mirrored `sasi_bm` minic TU and to the §6p SASI-FAT family: it runs the upstream test ITSELF (the §6j/§6p philosophy applied one layer below FAT).  The test registers the SASI block device, `block_init`s the controller, reads LBA 0 twice with a `block_cache_invalidate` between, verifies the two checksums match (0x8DDD), dumps the first 32 bytes (the `tandon_703_mame` volume label — LBA 0 has no boot-sector signature), and prints the SASI bus/diagnostic state at each phase (geometry 59058 sectors × 512 bytes, flags=0x1).  **FIRST-RUN PASS** against a scratch copy of `victor_30mb.img` (the harness `hd` field → §6i `V9K_HARD_DISK` scratch-copy attach; read-only, so the base image is never touched anyway).  **Model lesson re-confirmed (the §6k/§6l/§6p 64 KB `_TEXT` ceiling, read path AGAIN):** a "read-only" test is NOT automatically small-model — `sasi_sector_test` is 65,577 B code in small, just **41 bytes** over the 65,536 single-`_TEXT` ceiling, so the small image wraps and would hang (the §6p `sasi_fat_dir_test` symptom); it builds MEDIUM at 70,944 B multi-CS and runs clean.  It reads LBA 0 only (no Phase-8 multi-cluster write), so a modest **60-emulated-second** budget suffices despite medium.  Like the §6p SASI tests this can ONLY run bare-metal (the DOS host has no raw SASI), so its golden `minic/dos/tests/sasi_sector_test.golden.txt` is captured from a clean bare-metal MAME run, not diffed against a DOS golden.  **This session needed NOTHING new** — §6p already widened `build-newlibc-baremetal.sh`'s SASI TU probe from `bm_sasi\.h` to `sasi\.h` (this test `#include`s both `block.h` and `sasi.h`, and `bm_sasi.c` is the only SASI impl we link), and bm_testhost test-host mode + the bm_stdio/block/SASI stack already cover the path.  The lone changes are one battery entry (`sasi_sector_test:60:::hd:medium`) + one golden; the other 29 entries are byte-unaffected, and with no compiler/toolchain source touched there is **no emit audit and no MP byte-compare**.  Verified `tools/test-newlibc.sh sasi_sector_test` → **[ok]** end-to-end (medium build + disk scratch-copy + golden diff).  Next: `fat_victor_label_test` is the remaining FAT-label test but it is RAM-disk style (already covered-style, no `hd`); the newlibc-under-far-DATA-models (compact/large) stdio story when a far-DATA consumer appears; or pick from the carried open tracks below.)
+
+## §6q session notes (2026-06-13)
+
+### Nothing new needed — pure battery plumbing (one entry + one golden)
+- `sasi_sector_test` `#include`s `block.h` + `sasi.h`; §6p already widened
+  the build-script SASI TU probe to `sasi\.h`, so `bm_sasi.c` links with no
+  change.  bm_testhost mode + the bm_stdio/block/SASI stack already cover
+  the path.  The only diff is `tools/test-newlibc.sh` + the new golden.
+
+### Model lesson (the 64 KB _TEXT ceiling, read path, AGAIN)
+- 65,577 B code in small — 41 B over 65,536.  Small wraps and hangs (the
+  §6p `sasi_fat_dir_test` symptom).  MEDIUM: 70,944 B multi-CS, runs clean.
+- "read-only" ≠ "small-model".  Third confirmation (`sasi_fat_dir_test`
+  was the second).  When a bare-metal newlibc test pulls more than the
+  minimal block/FAT/VFS stack, expect to need medium.
+
+### Bare-metal-only (no DOS golden)
+- Needs raw SASI; the DOS host (dos_shim → INT 21h) has no `-scsi:0`.
+  Golden captured from a clean bare-metal MAME run; read-only + a fixed
+  disk label (`tandon_703_mame`) → deterministic (checksum 0x8DDD repeats).
+
+### Open tracks (carried)
+- `fat_victor_label_test` — the RAM-disk-style label test (no `hd`, the
+  RAM-volume style); low value to add but available.
+- newlibc-under-far-DATA-models (compact/large) stdio — needs
+  `far_stdlib`-aware routing; defer until a far-DATA consumer appears.
+- Carried: far static-DATA-ptr reloc (§1g); param/static-local shadowing a
+  global; huge `_qbe_huge_add` ≥0x8000 (§4i); `jmp_buf bufs[6]` (§4v,
+  unreduced); minic static-init FLOAT const-expr folding; small
+  setjmp/longjmp (newlibc may want it); multi-decl items after the first
+  skip block_scope_decl; Kw spill-slot sharing.
+
+---
+
 # Next session (§6q — continue Phase 6.  §6p [2026-06-13, this session] ran **three UNMODIFIED upstream SASI-backed FAT tests BARE-METAL on the REAL `-scsi:0` Victor disk through bm_testhost + the full bm_stdio/VFS/FAT stack, with ZERO compiler/toolchain changes — battery 26/26 → 29/29.**  Where §6l's `fatwrite_bm` was a hand-mirrored minic TU, this session runs the upstream tests THEMSELVES (the §6j philosophy applied to the disk/write family): `sasi_fat_smoke_test` (read CONFIG.SYS read-only), `sasi_fat_dir_test` (root + subdir iteration via `vfs_mount_victor_fat`), and the headline `sasi_fat_write_test` — create/write 2000 bytes across clusters / read-back / append / unlink on the real disk via `vfs_mount_victor_fat_rw` + SASI WRITE(6), CONFIG.SYS checked intact before AND after.  All three were **FIRST-RUN PASS** on MAME against a scratch copy of `victor_30mb.img` (the harness `hd` field → `V9K_HARD_DISK` scratch-copy attach, §6i).  These tests can ONLY run bare-metal — the DOS host has no raw SASI — so their goldens (`minic/dos/tests/sasi_fat_{smoke,dir,write}_test.golden.txt`) are captured from the bare-metal run, not diffed against a DOS golden (unlike the §6j RAM-disk tests).  **The single toolchain-adjacent change was a build-script probe:** the upstream tests `#include "sasi.h"` (the upstream API header) while `build-newlibc-baremetal.sh`'s SASI TU probe keyed only on `bm_sasi.h`; widening the `grep` pattern to `sasi\.h` (which matches both, since `bm_sasi.h` is a byte-for-byte API-compatible port and `bm_sasi.c` is the only SASI implementation we ever link) makes the unmodified upstream tests pull `bm_sasi.c` — no compiler/qbe/emit source touched.  **Model lesson (the §6k/§6l 64 KB `_TEXT` ceiling, re-confirmed on the read path):** `sasi_fat_smoke_test` fits small (64,771 B code, just under 65,536), but `sasi_fat_dir_test` adds `dirent.c`/`opendir`/`readdir` and overflows small (66,435 B → wraps → hung after `tty+sti`); it builds MEDIUM (71,819 B, multi-CS).  `sasi_fat_write_test` pulls `fat_write.c` (88,797 B) so it is MEDIUM like `fatwrite_bm`, and its Phase-8 multi-cluster SASI write on the 5 MHz 8088 dominates the budget (240 emulated seconds, the §6f slowness rule).  Battery entries `sasi_fat_smoke_test:60:::hd`, `sasi_fat_dir_test:90:::hd:medium`, `sasi_fat_write_test:240:::hd:medium`; verified `tools/test-newlibc.sh sasi_fat_smoke_test sasi_fat_dir_test sasi_fat_write_test` → **[ok] [ok] [ok]** end-to-end through the battery harness (golden-diff, model + hd + budget fields all exercised).  The other 26 entries are byte-unaffected (the probe change only adds `bm_sasi.c` to sources that include `sasi.h`, none of them newly), and with no compiler source touched there is **no emit audit and no MP byte-compare**.  Next: the remaining read-only FAT family on the real disk if wanted (`sasi_sector_test` raw block, `fat_victor_label_test` is RAM-disk so already-style covered); the newlibc-under-far-DATA-models (compact/large) stdio story when a far-DATA consumer appears; or pick from the carried open tracks below.)
 
 ## §6p session notes (2026-06-13)
@@ -43,48 +78,4 @@
 
 ---
 
-# Next session (§6p — continue Phase 6.  §6o [2026-06-13, this session] drove the two keyboard-input newlibc tests **BARE-METAL through the cooked `bm_tty` console, with ZERO compiler/toolchain changes — `stdin_test` (getchar/fgets) and `scanf_test` (scanf) are now standing bare-metal battery entries, 24/24 → 26/26.**  §6n had just gated these same two tests DOS-hosted via a `< IN.TXT` redirect (raw, no echo); this session runs them on the bare machine where they read CON through the interrupt-driven keyboard (IR6) and the cooked console ECHOES the input — so the goldens are necessarily different files from §6n's.  The path is `getchar`/`fgets`/`scanf` → `_read(0,…)` → `console_dev_read` → `bm_tty_read`: in the `bm_shim` FILE layer `fgetc`/`getchar` do `_read(fd,&c,1)`, and `bm_tty_read(buf,1)` returns after exactly ONE keystroke (no Enter needed, the `i==count` loop bound), while `fgets`/`scanf` consume up to the echoed Return/whitespace; all input arrives as a single `V9K_KEYPOST` natkeyboard burst that the keyboard ISR queues in the IR6 ring, so keypost-vs-program timing is irrelevant.  **The one real gotcha (a re-confirmation of the §6h `stdio_bm` flush lesson, NOT a new bug): a `\n` at the very END of a natkeyboard post is not committed to the ring before the program blocks reading it — a throwaway char AFTER the final `\n` is required.**  The first attempt (`Ahello\n`) hung in fgets having echoed `hello` but no newline; `Ahello\nz` (the `z` unused by the test) made it a FIRST-RUN PASS — getchar='A', fgets="hello\n".  `scanf_test` keypost `victor 42\nz` → `%15s`="victor", `%d`=42 (the `\n` ends `%d`, the `z` flushes it), also FIRST-RUN PASS.  Both build small-model (114 KB raw images; no `fat_write.c` bulk, so no medium needed unlike §6k–§6m).  Battery entries `stdin_test:35:Ahello\nz::` and `scanf_test:35:victor 42\nz::`; goldens `minic/dos/tests/{stdin,scanf}_test.golden.txt` captured from clean MAME runs.  Verified `tools/test-newlibc.sh stdin_test scanf_test` → **[ok] [ok]**; the other 24 battery entries are byte-unaffected (only `test-newlibc.sh` + the two new goldens changed), so battery is **26/26**, and with no compiler source touched there is **no emit audit and no MP byte-compare**.  Next: the newlibc-under-far-DATA-models (compact/large) stdio story when a far-DATA consumer appears; `fat_write` over the real `-scsi:0` disk for the six bare-metal FAT tests (bm_sasi WRITE(6) + `vfs_mount_victor_fat_rw` proven); or pick from the carried open tracks below.)
-
-## §6o session notes (2026-06-13)
-
-### Pure harness plumbing — no compiler change (again)
-- `stdin_test`/`scanf_test` build small-model via test-host mode
-  (`-Dmain=newlibc_test_main` + `bm_testhost.c`), which already wires up
-  `bm_tty_init()` (display + IR6 keyboard) and `bm_stdio_init()` (VFS fds
-  0/1/2 → /dev/console).  No build-script or driver change was needed —
-  only two new `NEWLIBC_BM_TESTS` entries + two goldens.
-- The bare-metal goldens ECHO the typed input (cooked console), so they
-  differ from §6n's DOS `< IN.TXT` redirect goldens (raw, no echo).  Both
-  are correct for their host; keep them as separate files.
-
-### The flush gotcha (re-confirmed, not new)
-- A `\n` at the END of a `V9K_KEYPOST` natkeyboard post is NOT committed
-  to the IR6 ring before the program blocks reading it: `Ahello\n` hung in
-  fgets having echoed `hello` with no newline.  A throwaway char AFTER the
-  final `\n` flushes it — `Ahello\nz`.  This is the §6h `stdio_bm` lesson
-  (its keypost was `vx\b9k\nz`, the `z` after the `\n`).  Applies to any
-  future keypost-driven test whose last needed byte is the Return.
-
-### Buffering semantics that set the keypost
-- `getchar`/`fgetc` (bm_shim) do `_read(fd,&c,1)` → `bm_tty_read(buf,1)`,
-  which returns after ONE non-backspace keystroke (the `i < count` loop
-  ends at i==1), no Enter required — so getchar consumes exactly one char.
-  `fgets`/`scanf` read on until the echoed `\n`/whitespace.  `Ahello\nz`:
-  getchar='A', fgets reads "hello\n", `z` left unused.  `victor 42\nz`:
-  `%15s`="victor" (stops at space), `%d`=42 (stops at `\n`).
-
-### Open tracks (carried)
-- newlibc-under-far-DATA-models (compact/large) stdio — needs
-  `far_stdlib`-aware routing; defer until a far-DATA consumer appears.
-- `fat_write` over the REAL `-scsi:0` disk read-WRITE for the six
-  bare-metal FAT tests (bm_sasi WRITE(6) + `vfs_mount_victor_fat_rw`
-  proven).
-- Carried: far static-DATA-ptr reloc (§1g); param/static-local shadowing a
-  global; huge `_qbe_huge_add` ≥0x8000 (§4i); `jmp_buf bufs[6]` (§4v,
-  unreduced); minic static-init FLOAT const-expr folding; small
-  setjmp/longjmp (newlibc may want it); multi-decl items after the first
-  skip block_scope_decl; Kw spill-slot sharing.
-
----
-
-Older session headers (§6n and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).
+Older session headers (§6o and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).
