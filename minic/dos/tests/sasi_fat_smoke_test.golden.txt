@@ -1,0 +1,17 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+===============================================
+  Victor 9000 Phase 3 SASI FAT Smoke Test
+===============================================
+
+Registered SASI target 0 as block device 0.
+PASS: SASI controller initialized.
+Geometry: 59058 sectors x 512 bytes, flags=0x1
+PASS: mounted Victor virtual volume 0 at /fat.
+PASS: found /fat/CONFIG.SYS (220 bytes).
+PASS: read CONFIG.SYS through SASI-backed FAT VFS.
+
+PASS: SASI FAT smoke test complete.
+bm_testhost: test returned 0

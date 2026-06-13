@@ -101,6 +101,26 @@ NEWLIBC_BM_TESTS=(
 	# the full bm_stdio driver set, so it needs a 4096 stack (data+bss
 	# 60688; 8192 overflows 64KB).  RAM-only ops are fast; output is short.
 	"fat_write_unit_test:60::::medium:4096"
+	# §6p: the UNMODIFIED upstream SASI-backed FAT tests, run bare-metal on
+	# the REAL -scsi:0 disk (hd field -> V9K_HARD_DISK scratch copy) through
+	# bm_testhost + the full bm_stdio/VFS/FAT stack.  These can ONLY run
+	# bare-metal (the DOS host has no raw SASI), so their goldens are
+	# captured from the bare-metal run, not diffed against a DOS golden.
+	# The upstream tests include "sasi.h" (build-newlibc-baremetal.sh's
+	# SASI TU probe now matches it as well as bm_sasi.h; bm_sasi.c is the
+	# byte-for-byte port).  sasi_fat_smoke_test reads CONFIG.SYS read-only
+	# (small: 64771B code, just under the 64KB _TEXT ceiling).  The other
+	# two need MEDIUM: dir adds dirent.c (66435B small -> over), and write
+	# pulls fat_write.c (88797B).  sasi_fat_write_test is the headline —
+	# create/write 2000B/read-back/append/unlink on the real disk via
+	# vfs_mount_victor_fat_rw + SASI WRITE(6), an UNMODIFIED upstream test
+	# (fatwrite_bm was a hand-mirrored minic TU); CONFIG.SYS checked intact
+	# before+after.  Phase-8 multi-cluster SASI write on the 5 MHz 8088
+	# dominates its budget (240 s, the §6f slowness rule), same as
+	# fatwrite_bm.
+	"sasi_fat_smoke_test:60:::hd"
+	"sasi_fat_dir_test:90:::hd:medium"
+	"sasi_fat_write_test:240:::hd:medium"
 	# §6o: the two KEYBOARD-INPUT tests, driven bare-metal through the
 	# cooked bm_tty console (NOT the §6n DOS `< IN.TXT` redirect — on
 	# hardware they read CON, echoed, via the interrupt-driven keyboard).

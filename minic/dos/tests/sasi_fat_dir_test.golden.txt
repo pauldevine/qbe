@@ -1,0 +1,16 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+===============================================
+  Victor 9000 Phase 3 SASI FAT Dir Test
+===============================================
+
+PASS: SASI target 0 initialized as block device 0.
+PASS: mounted Victor virtual volume 0 at /fat.
+PASS: VFS root listing includes the fat mount.
+PASS: SASI-backed root directory iteration found known entries.
+PASS: SASI-backed subdirectory iteration reached EOF.
+
+PASS: SASI FAT directory test complete.
+bm_testhost: test returned 0

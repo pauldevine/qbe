@@ -153,8 +153,11 @@ if [ "$TESTHOST" = 1 ] || grep -q 'bm_stdio\.h' "$SRC"; then
 	              "$NL/drivers/block.c")
 fi
 # bm_sasi.h pulls the SASI/Xebec block driver (§6i) + the block-device
-# registry it registers with.
-if grep -q 'bm_sasi\.h' "$SRC"; then
+# registry it registers with.  Unmodified upstream SASI tests (§6p) include
+# the API header by its upstream name "sasi.h"; bm_sasi.h is a byte-for-byte
+# compatible port (same struct layout, names, constants), so either include
+# links bm_sasi.c.  The pattern matches both `sasi.h` and `bm_sasi.h`.
+if grep -q 'sasi\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_sasi.c"
 	              "$NL/drivers/block.c")
 fi

@@ -1,0 +1,20 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+===============================================
+  Victor 9000 Phase 3 SASI FAT Write Test
+  (scratch disk image only!)
+===============================================
+
+PASS: SASI controller initialized (writes enabled).
+PASS: mounted Victor volume 0 read-write at /hd.
+PASS: CONFIG.SYS intact before writes.
+PASS: created and wrote 2000 bytes.
+PASS: read back 2000 bytes through SASI WRITE(6)/READ(6).
+PASS: append verified.
+PASS: unlink removed the test file.
+PASS: CONFIG.SYS intact after writes.
+
+PASS: SASI FAT write test complete.
+bm_testhost: test returned 0
