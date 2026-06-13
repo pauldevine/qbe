@@ -660,13 +660,15 @@ NEWLIBC_TESTS=(
 )
 
 build_newlibc_test() {
-	name="$1"
+	name="$1"; shift
 	nl="${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}"
 	if [ ! -d "$nl" ]; then
 		echo "newlibc tree not found: $nl"
 		return 77
 	fi
-	"$QBE_DIR/tools/build-newlibc-test.sh" "$name" >/dev/null
+	# Extra args ($@) forward to build-newlibc-test.sh — e.g. the §6k
+	# fat_write_test entry passes --model=medium --stack-size=5120.
+	"$QBE_DIR/tools/build-newlibc-test.sh" "$name" "$@" >/dev/null
 }
 
 # Compile-time probe for C `volatile` on named locals.  volatile is a codegen
@@ -953,6 +955,19 @@ for t in "${NEWLIBC_TESTS[@]}"; do
 			"$QBE_DIR/minic/dos/tests/newlibc_$t.golden.txt"
 	fi
 done
+
+# §6k: the upstream FAT WRITE test runs MEDIUM, not small.  fat_write.c
+# (~18KB) on top of the FAT/VFS/stdio stack overflows the small model's
+# single-_TEXT 64KB code ceiling; medium splits code across far CS
+# segments (near data stays in one DGROUP).  Exercises vfs_mount_fat_rw +
+# create/write/append/truncate/unlink/mkdir/rmdir/rename over a RAM disk.
+# Smaller stack: the test's ramdisk media[] crowds the near-data DGROUP.
+if prep "newlibc medium (fat_write_test)" \
+	build_newlibc_test fat_write_test --model=medium --stack-size=5120; then
+	stage_runtime_case "newlibc medium (fat_write_test)" \
+		"$QBE_DIR/build/newlibc-tests/fat_write_test/fat_write_test.exe" \
+		"$QBE_DIR/minic/dos/tests/newlibc_fat_write_test.golden.txt"
+fi
 
 # One DOSBox boot for everything staged above.
 flush_runtime_batch

@@ -41,19 +41,23 @@ def apply_local_prefix(line, prefix):
     return line
 
 
-def transform_line(line, prefix, far_data=False):
+def transform_line(line, prefix, far_data=False, split_sym_long=False):
     """Apply the same syntactic rewrites the sed/perl pipeline did,
     but leave section markers in place — the caller routes lines into
     per-section buckets.  May return a multi-LINE string (joined with
     '\\n'); the caller splits before bucketing.
 
-    far_data: under a far-data model every data POINTER is a 4-byte
-    seg:off far pointer.  A relocatable `.long _sym[+N]` data initializer
-    is therefore a far pointer and must carry BOTH offset and segment.
-    Emitting it as `dd _sym` makes nasm produce a 32-bit *offset* fixup
-    (OMF loc 9) — the segment word is left 0, so the pointer is wrong.
-    Split it into `dw _sym+N` (loc-1 offset) + `dw seg _sym` (loc-2
-    segment + runtime reloc), both of which omf_link already resolves."""
+    split_sym_long: a relocatable `.long _sym[+N]` initializer is a 4-byte
+    far pointer (seg:off) and must carry BOTH offset and segment.  Emitting
+    it as `dd _sym` makes nasm produce a 32-bit *offset* fixup (OMF loc 9) —
+    the segment word is left 0, so the pointer is wrong, and an indirect far
+    CALL through it (e.g. a function-pointer field in a static device-ops
+    table) wild-jumps.  Split into `dw _sym+N` (loc-1 offset) + `dw seg _sym`
+    (loc-2 segment + runtime reloc), both of which omf_link already resolves.
+    True under far-DATA models (every data pointer is far) AND under medium
+    (near-DATA but FAR-CODE: minic emits `.long _sym` only for 4-byte far
+    CODE pointers — function pointers in static initializers — or explicit
+    __far data pointers; both are seg:off)."""
     # 32-bit op stub note
     line = re.sub(r'; TODO: 32-bit op \d+',
                   '; XXX 32-bit op stub - codegen incomplete', line)
@@ -84,10 +88,10 @@ def transform_line(line, prefix, far_data=False):
     # GAS data directives → NASM
     line = re.sub(r'^\s*\.byte (.*)$',  r'db \1', line)
     line = re.sub(r'^\s*\.short (.*)$', r'dw \1', line)
-    # Far-data: a relocatable `.long _sym[+N]` is a 4-byte far pointer —
-    # split into offset + segment words (see docstring).  Numeric `.long`
-    # (a real 32-bit constant) falls through to `dd`.
-    if far_data:
+    # A relocatable `.long _sym[+N]` is a 4-byte far pointer — split into
+    # offset + segment words (see docstring).  Numeric `.long` (a real
+    # 32-bit constant) falls through to `dd`.
+    if split_sym_long:
         m = re.match(r'^\s*\.long\s+(_?[A-Za-z][\w]*)\s*(\+\s*\d+)?\s*$', line)
         if m:
             sym = m.group(1)
@@ -314,6 +318,16 @@ def main():
     # data pointer is a 4-byte far pointer (offset + segment).  Needed in the
     # line loop below for transform_line's `.long _sym` → dw/dw-seg split.
     far_data = far_static_data and model in ('compact', 'large', 'huge')
+    # Whether a relocatable `.long _sym` initializer must be split into
+    # offset+segment words.  True for far-DATA models (already), and for
+    # medium: medium is near-DATA but FAR-CODE (NEAR_CODE() is tiny/small
+    # only), so its only `.long _sym` initializers are 4-byte far CODE
+    # pointers (function pointers in static tables) — those need seg:off or
+    # an indirect far CALL through them jumps to segment 0.  Scoped to
+    # medium here (not the whole far-code set) so the compact/large/huge
+    # corpus path stays byte-identical; their code pointers ride the
+    # existing far_data split when --far-static-data is in play.
+    split_sym_long = far_data or model == 'medium'
 
     sections = {'text': [], 'data': [], 'bss': []}
     # `huge_sections` is OrderedDict-like: maps `_HUGE_<sym>` → list of
@@ -401,7 +415,8 @@ def main():
         # Apply transforms (after section/globl handling).  transform_line
         # may return a multi-line string (far-pointer `.long` split into
         # dw offset + dw seg); bucket each resulting line independently.
-        for line in transform_line(line, prefix, far_data).split('\n'):
+        for line in transform_line(line, prefix, far_data,
+                                   split_sym_long).split('\n'):
             # Track defined labels & referenced symbols
             lbl = is_label_def(line.strip())
             if lbl:

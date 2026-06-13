@@ -16,23 +16,36 @@
 set -eu
 
 MODEL="small"
+# Default DGROUP stack.  Tests with large static data (e.g. the §6k
+# FAT-write tests' multi-KB ramdisk media[]) crowd the 64KB DGROUP and
+# need a smaller stack; fat_write.c keeps its sector scratch static, so
+# the write path's own stack need stays low.  Overridable per test.
+STACK_SIZE=8192
 SRC=""
 for arg in "$@"; do
 	case "$arg" in
 		--model=*) MODEL="${arg#--model=}" ;;
+		--stack-size=*) STACK_SIZE="${arg#--stack-size=}" ;;
 		-h|--help)
-			echo "usage: $0 [--model=small] <test-name|path/to/test.c>" >&2
+			echo "usage: $0 [--model=small] [--stack-size=N] <test-name|path/to/test.c>" >&2
 			exit 0 ;;
 		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
 		*) SRC="$arg" ;;
 	esac
 done
-[ -n "$SRC" ] || { echo "usage: $0 [--model=small] <test-name|path.c>" >&2; exit 2; }
+[ -n "$SRC" ] || { echo "usage: $0 [--model=small] [--stack-size=N] <test-name|path.c>" >&2; exit 2; }
 
 case "$MODEL" in
 	small) ;;
-	*) echo "$0: only --model=small is supported (newlibc's native model;" \
-	       "far models need far_stdlib-aware newlibc stdio)" >&2; exit 2 ;;
+	# medium = far CODE, near DATA: code splits across multiple <=64KB CS
+	# segments (escapes the small model's single-_TEXT 64KB ceiling that
+	# blocks fat_write.c), while data stays in one DGROUP.  minic does NOT
+	# far_stdlib-mangle calls under NEAR_DATA() (which includes medium), so
+	# newlibc's own printf/str/mem stdio is called by its real name — the
+	# far_stdlib concern is a far-DATA (compact/large) issue, not medium's.
+	medium) ;;
+	*) echo "$0: only --model=small|medium is supported; far-DATA models" \
+	       "(compact/large) need far_stdlib-aware newlibc stdio" >&2; exit 2 ;;
 esac
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -63,6 +76,18 @@ SUPPORT_TUS=(
 	"$NL/drivers/block.c"
 	"$DOS_DIR/newlibc/dos_shim.c"
 )
+
+# fat_write.h pulls the FAT write layer (§6k): chain alloc/free, file
+# create/write/truncate/unlink, the writable VFS mounts, and the runtime
+# dispatch table it installs into vfs.c via vfs_set_fat_write_ops().  Only
+# tests that exercise the write API include it, so read-only tests keep
+# their footprint (the linking policy fat_write.h documents).
+if grep -q 'fat_write\.h' "$SRC"; then
+	SUPPORT_TUS+=("$NL/vfs/fat_write.c"
+	              "$NL/libgloss/mkdir.c"
+	              "$NL/libgloss/rmdir.c"
+	              "$NL/libgloss/rename.c")
+fi
 
 mkdir -p "$OUT_DIR"
 ERR="$OUT_DIR/build.err"
@@ -116,8 +141,12 @@ for tu in "${SUPPORT_TUS[@]}"; do
 	OBJ_FILES+=("$OUT_DIR/$tu_base.obj")
 done
 
-# crt0 + --no-stdio libstub (near code).
-nasm -DNEAR_CODE=1 -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" 2>>"$ERR" \
+# crt0 + --no-stdio libstub.  small/tiny: -DNEAR_CODE (_main reached by a
+# near call, all code in one _TEXT).  medium: far code (crt0 far-calls
+# _main; no NEAR_CODE), matching build-example.sh's model gate.
+CRT0_FLAGS=""
+[ "$MODEL" = small ] && CRT0_FLAGS="-DNEAR_CODE=1"
+nasm $CRT0_FLAGS -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" 2>>"$ERR" \
 	|| fail "crt0 assemble failed"
 "$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" --no-stdio \
 	"$DOS_DIR/libstub.asm" "$OUT_DIR/libstub_exe.asm" 2>>"$ERR" \
@@ -129,7 +158,7 @@ nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR" \
 	-o "$OUT_DIR/$base.exe" \
 	--map "$OUT_DIR/$base.map" \
 	--entry _start \
-	--stack-size 8192 \
+	--stack-size "$STACK_SIZE" \
 	--gc-sections \
 	"$OUT_DIR/crt0_exe.obj" \
 	"${OBJ_FILES[@]}" \

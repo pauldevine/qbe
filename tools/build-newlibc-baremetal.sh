@@ -133,6 +133,13 @@ if grep -q 'bm_sasi\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_sasi.c"
 	              "$NL/drivers/block.c")
 fi
+# fat_write.h pulls the FAT write layer (§6k): chain alloc/free, file
+# create/write/truncate/unlink, the writable VFS mounts, and the runtime
+# dispatch table it installs into vfs.c via vfs_set_fat_write_ops().  The
+# read-only fat.c/vfs.c/block.c it builds on come from the bm_stdio set.
+if grep -q 'fat_write\.h' "$SRC"; then
+	SUPPORT_TUS+=("$NL/vfs/fat_write.c")
+fi
 # A program may pull the same support TU via more than one header probe
 # (keyboard + serial both need interrupts/pic); dedup, preserving order.
 DEDUP_TUS=()

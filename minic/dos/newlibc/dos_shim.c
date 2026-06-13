@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <time.h>
 #include <dos.h>
+#include <fcntl.h>
 
 /* ---- newlibc syscall layer (libgloss/syscalls.c) ---- */
 extern int _open(const char *path, int flags, int mode);
@@ -248,11 +249,22 @@ FILE *fopen(const char *path, const char *mode)
 {
 	int i;
 	int fd;
+	int flags;
 
-	/* "r" -> O_RDONLY(0), anything else -> O_WRONLY(1); whether a
-	 * write target exists is the VFS's call (e.g. /dev/null says yes,
-	 * the read-only FAT says no). */
-	fd = _open(path, mode[0] == 'r' ? 0 : 1, 0);
+	/* Map the stdio mode string to open() flags, the way newlib's real
+	 * fopen does.  "w"/"a" must create (and "w" truncate) — the §6k
+	 * FAT-write tests are the first DOS-hosted consumers of that; before,
+	 * only "r" was ever used.  A trailing '+' adds read access. */
+	switch (mode[0]) {
+	case 'w': flags = O_WRONLY | O_CREAT | O_TRUNC;  break;
+	case 'a': flags = O_WRONLY | O_CREAT | O_APPEND; break;
+	default:  flags = O_RDONLY;                      break;  /* 'r' */
+	}
+	if (mode[1] == '+' || (mode[1] != 0 && mode[2] == '+')) {
+		flags &= ~O_ACCMODE;
+		flags |= O_RDWR;
+	}
+	fd = _open(path, flags, 0644);
 	if (fd < 0)
 		return 0;
 	for (i = 0; i < SHIM_NFILES; i++) {
@@ -289,6 +301,19 @@ int fread(void *buf, size_t size, size_t nmemb, FILE *fp)
 	if (got <= 0)
 		return 0;
 	return (int)((size_t)got / size);
+}
+
+int fwrite(const void *buf, size_t size, size_t nmemb, FILE *fp)
+{
+	/* int return to match the shiminc stdio.h prototype; reports whole
+	 * elements written, like fread.  The §6k FAT-write tests are the
+	 * first DOS-hosted consumers of the write side of the FILE layer. */
+	long put;
+
+	put = (long)_write(fp->_file, buf, size * nmemb);
+	if (put <= 0)
+		return 0;
+	return (int)((size_t)put / size);
 }
 
 int fgetc(FILE *fp)

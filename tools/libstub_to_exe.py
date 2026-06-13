@@ -2372,6 +2372,15 @@ def near_code_model(model):
     return model in ('tiny', 'small')
 
 
+def near_data_model(model):
+    """Tiny/small/medium keep data in one DGROUP (2-byte data pointers).
+    minic's call_target_name() does NOT far_stdlib-mangle stdio/str/mem
+    calls under NEAR_DATA(), so these models call a stdio provider (e.g.
+    newlibc under --no-stdio) by its real name — the far_stdlib routing is
+    a far-DATA (compact/large/huge) concern only."""
+    return model not in ('compact', 'large', 'huge')
+
+
 def unfar_epilogue(text):
     """Reverse the far-call ABI the EXE epilogue blocks are authored in,
     for near-code models: `retf` -> `ret`, `call far X` -> `call X`, and
@@ -2582,10 +2591,10 @@ def main():
         SKIP_GLOBALS = set(SKIP_GLOBALS)
         SKIP_GLOBALS.add('_stdin')
     if no_stdio:
-        if not near_code_model(model):
-            print('libstub_to_exe: --no-stdio requires a near-code model '
-                  '(small/tiny); far models route stdio through far_stdlib '
-                  'mangling', file=sys.stderr)
+        if not near_data_model(model):
+            print('libstub_to_exe: --no-stdio requires a near-DATA model '
+                  '(small/tiny/medium); far-DATA models route stdio through '
+                  'far_stdlib mangling', file=sys.stderr)
             sys.exit(2)
         # §6b: the libstub.asm stdio symbols that the newlibc subset (or
         # the dos_shim.c bottom layer: `stat`) defines itself and that
