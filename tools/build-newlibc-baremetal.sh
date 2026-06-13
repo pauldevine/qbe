@@ -111,6 +111,12 @@ if grep -q 'bm_stdio\.h' "$SRC"; then
 	              "$NL/vfs/fat.c"
 	              "$NL/drivers/block.c")
 fi
+# bm_sasi.h pulls the SASI/Xebec block driver (§6i) + the block-device
+# registry it registers with.
+if grep -q 'bm_sasi\.h' "$SRC"; then
+	SUPPORT_TUS+=("$NLC_DIR/bm_sasi.c"
+	              "$NL/drivers/block.c")
+fi
 # A program may pull the same support TU via more than one header probe
 # (keyboard + serial both need interrupts/pic); dedup, preserving order.
 DEDUP_TUS=()

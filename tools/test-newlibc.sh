@@ -48,23 +48,28 @@ for arg in "$@"; do
 done
 export V9K_SHOW="$SHOW"
 
-# Each entry: `<name>:<run-seconds>:<keypost>:<serial-in-bytes>`.
+# Each entry: `<name>:<run-seconds>:<keypost>:<serial-in-bytes>:<disk>`.
 # The keypost field goes through `printf %b`, so \b/\n escapes type the
 # Victor Backspace/Return keys (run-victor-baremetal.sh passes any byte
-# to MAME's natural keyboard).
+# to MAME's natural keyboard).  A `hd` disk field attaches the known
+# MAME Victor hard disk image as SASI target 0 (V9K_HARD_DISK; the
+# harness runs against a scratch copy, so WRITE(6) tests are safe).
+# Override the image with $V9K_HARD_DISK_IMAGE.
 NEWLIBC_BM_TESTS=(
-	"hello_bm:15::"
-	"timer_bm:30::"
-	"display_bm:20::"
-	"keyboard_bm:25:v9k:"
-	"serial_bm:25::victor"
-	"memory_bm:15::"
-	"crtc_bm:20::"
-	"pic_bm:35::"
-	"interrupt_bm:120::"
-	"tty_bm:30:vx\b9k\nz:"
-	"stdio_bm:45:vx\b9k\nz:"
+	"hello_bm:15:::"
+	"timer_bm:30:::"
+	"display_bm:20:::"
+	"keyboard_bm:25:v9k::"
+	"serial_bm:25::victor:"
+	"memory_bm:15:::"
+	"crtc_bm:20:::"
+	"pic_bm:35:::"
+	"interrupt_bm:120:::"
+	"tty_bm:30:vx\b9k\nz::"
+	"stdio_bm:45:vx\b9k\nz::"
+	"sasi_bm:90:::hd"
 )
+HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 
 pass=0
 fail=0
@@ -95,6 +100,7 @@ run_bm_test() {
 	secs="$2"
 	keypost="$(printf '%b' "$3")"
 	serial_bytes="$4"
+	disk="$5"
 
 	if [ ! -d "$NL" ]; then
 		echo "newlibc tree not found: $NL"
@@ -109,8 +115,13 @@ run_bm_test() {
 		serial_in="$out_dir/serial_in.bin"
 		printf '%s' "$serial_bytes" > "$serial_in"
 	fi
+	hard_disk=""
+	if [ "$disk" = "hd" ]; then
+		hard_disk="$HARD_DISK_IMAGE"
+	fi
 
 	out="$(V9K_KEYPOST="$keypost" V9K_SERIAL_IN="$serial_in" \
+		V9K_HARD_DISK="$hard_disk" \
 		"$QBE_DIR/tools/run-victor-baremetal.sh" \
 		"$out_dir/$name.bin" "$secs")" || return $?
 	echo "$out" | diff -u "$QBE_DIR/minic/dos/tests/$name.golden.txt" - >&2
@@ -120,8 +131,9 @@ matched=0
 for entry in "${NEWLIBC_BM_TESTS[@]}"; do
 	name="${entry%%:*}"; rest="${entry#*:}"
 	secs="${rest%%:*}"; rest="${rest#*:}"
-	keypost="${rest%%:*}"
-	serial_bytes="${rest#*:}"
+	keypost="${rest%%:*}"; rest="${rest#*:}"
+	serial_bytes="${rest%%:*}"
+	disk="${rest#*:}"
 	if [ "${#ONLY[@]}" -gt 0 ]; then
 		want=0
 		for o in "${ONLY[@]}"; do
@@ -131,7 +143,7 @@ for entry in "${NEWLIBC_BM_TESTS[@]}"; do
 	fi
 	matched=$((matched + 1))
 	run "newlibc bare-metal ($name)" \
-		run_bm_test "$name" "$secs" "$keypost" "$serial_bytes"
+		run_bm_test "$name" "$secs" "$keypost" "$serial_bytes" "$disk"
 done
 
 if [ "${#ONLY[@]}" -gt 0 ] && [ "$matched" -ne "${#ONLY[@]}" ]; then

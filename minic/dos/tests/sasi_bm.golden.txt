@@ -1,0 +1,19 @@
+Victor 9000 bare-metal SASI+FAT test (qbe/minic)
+phase 1: PIC re-init + timer ISR (INT 0x42)
+phase 2: 8253 ch2 100 Hz + IR2 unmask
+phase 3: tty init (display + keyboard, IR6)
+phase 4: sti
+phase 5: vfs init (fds 0/1/2 -> /dev/console)
+phase 6: SASI register + controller init
+phase 6: controller up (reset + TUR + RAM/CTRL tests)
+phase 7: geometry: 59058 sectors x 512 bytes, flags=0x0
+phase 8: read LBA 0 (Victor disk label)
+phase 8: LBA0[0..15] = 02 00 01 00 74 61 6E 64 6F 6E 5F 37 30 33 5F 6D
+phase 9: repeat uncached read + checksum: 0x8DDD vs 0x8DDD -- match
+phase 10: mount Victor volume 0 at /fat: ok
+phase 11: stat /fat/CONFIG.SYS: size=220 -- yes
+phase 12: open+read prefix: matches known image contents
+phase 13: fopen+fgets first line: "buffers = 15"
+phase 14: WRITE(6) round-trip @ LBA 59057: pattern verified
+phase 15: re-read CONFIG.SYS after write: still intact
+PASS: bare-metal SASI+FAT checks completed.

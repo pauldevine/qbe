@@ -45,10 +45,17 @@ LOAD_ADDR="${VICTOR_LOAD_ADDR:-0x3000}"
 #                       attached mid-run from Lua so nothing is lost
 #                       while the program is still initializing
 #   $V9K_SERIAL_IN_DELAY seconds before attaching (default 3)
+#   $V9K_HARD_DISK      SASI hard disk image attached as target 0
+#                       (-scsi:0 harddisk -hard1), for bare-metal disk
+#                       drivers (§6i).  The image is copied to a scratch
+#                       file first, run-victor-sasi.sh-style, so the
+#                       base image never mutates (WRITE(6) tests are
+#                       safe).  Skips (exit 77) if the image is missing.
 KEYPOST="${V9K_KEYPOST:-}"
 KEYPOST_DELAY="${V9K_KEYPOST_DELAY:-3}"
 SERIAL_IN="${V9K_SERIAL_IN:-}"
 SERIAL_IN_DELAY="${V9K_SERIAL_IN_DELAY:-3}"
+HARD_DISK="${V9K_HARD_DISK:-}"
 SHOW="${V9K_SHOW:-0}"
 
 if [ -z "$BIN" ] || [ ! -f "$BIN" ]; then
@@ -98,6 +105,18 @@ trap cleanup EXIT INT TERM
 CAP="$WORK/serial.txt"
 : > "$CAP"
 for d in cfg nvram inp sta snap diff comments; do mkdir -p "$WORK/home/$d"; done
+
+# --- Optional SASI hard disk (scratch copy, never the base image) --------
+RUN_IMG=""
+if [ -n "$HARD_DISK" ]; then
+	if [ ! -f "$HARD_DISK" ]; then
+		echo "run-victor-baremetal: SASI disk image not found: $HARD_DISK" >&2
+		exit 77
+	fi
+	RUN_IMG="$WORK/run.img"
+	cp "$HARD_DISK" "$RUN_IMG"
+	chmod u+w "$RUN_IMG"
+fi
 
 # --- Lua autoboot loader (the newlibc phase-3 pattern) -------------------
 BIN_ABS="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
@@ -211,6 +230,10 @@ RS232_ARGS=(-rs232a null_modem -bitbanger "$CAP")
 if [ -n "$SERIAL_IN_ABS" ]; then
 	RS232_ARGS=(-rs232a null_modem -rs232b null_modem -bitbanger1 "$CAP")
 fi
+DISK_ARGS=()
+if [ -n "$RUN_IMG" ]; then
+	DISK_ARGS=(-scsi:0 harddisk -hard1 "$RUN_IMG")
+fi
 # Headless (default): no video, dummy SDL driver, -nothrottle (emulated
 # time runs as fast as the host allows).  V9K_SHOW=1: real window,
 # throttled — the screen runs at authentic 5 MHz speed and the run takes
@@ -237,6 +260,7 @@ fi
 	"${VIDEO_ARGS[@]}" -sound none -skip_gameinfo \
 	-seconds_to_run "$(( RUN_SECS + 30 ))" \
 	"${RS232_ARGS[@]}" \
+	${DISK_ARGS[@]+"${DISK_ARGS[@]}"} \
 	>/dev/null 2>&1 &
 MAME_PID=$!
 
