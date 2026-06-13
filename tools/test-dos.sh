@@ -660,6 +660,7 @@ NEWLIBC_TESTS=(
 	bss_test
 	terminal_meta_test
 	fat_victor_label_test
+	block_test
 )
 
 build_newlibc_test() {

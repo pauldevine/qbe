@@ -162,6 +162,19 @@ NEWLIBC_BM_TESTS=(
 	# Small (60697B code, under the 64KB _TEXT ceiling); 9 output lines, so
 	# a 60 s budget is ample.
 	"fat_victor_label_test:60:::"
+	# §6s: the UNMODIFIED upstream block_test exercises the block-device
+	# layer DIRECTLY (one level below FAT): block_register_ramdisk +
+	# block_init + read/write/multi-sector-read, write-through cache +
+	# block_cache_invalidate, and the EINVAL/ENODEV/EROFS error paths, all
+	# over RAM-backed media (no -scsi:0).  Like fat_victor_label_test it is
+	# RAM-disk style, so it ALSO runs DOS-hosted (test-dos.sh NEWLIBC_TESTS)
+	# and its bare-metal body is line-identical to the DOS golden between
+	# the testhost preamble and result line.  This is the first
+	# deterministic golden for the block layer in isolation -- the FAT
+	# tests reach it transitively, but never assert the cache/error
+	# semantics directly.  Small in both hosts (DOS 51811B, bare-metal
+	# 60505B, under the 64KB _TEXT ceiling); 18 output lines -> 60 s ample.
+	"block_test:60:::"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 

@@ -1,0 +1,18 @@
+
+===============================================
+  Victor 9000 Phase 3 Block Device Test
+===============================================
+
+PASS: block_get_info() reports RAM media geometry.
+PASS: block_status() reports writable ready media.
+PASS: block_cache_flush() accepts write-through cache.
+PASS: block_read_sector() reads expected sector.
+PASS: cached block_read_sector() returns cached data.
+PASS: block_cache_invalidate() refreshes the next read.
+PASS: block_write_sector() updates media.
+PASS: block_read() reads multiple sectors.
+PASS: out-of-range read returns EINVAL
+PASS: invalid device returns ENODEV
+PASS: read-only write returns EROFS
+
+Block device test complete.
