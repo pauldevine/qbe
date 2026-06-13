@@ -1,0 +1,17 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+===============================================
+  Victor 9000 Phase 3 Raw Keyboard Test
+===============================================
+
+Press keys to print raw events.
+Suggested checks: Return, Shift, lower row, Backspace/Delete.
+The test exits after 16 events.
+With no key input, it exits after a 5-second idle smoke window.
+
+PASS: no raw keyboard events arrived during idle check.
+
+Raw keyboard idle test complete.
+bm_testhost: test returned 0

@@ -234,6 +234,28 @@ NEWLIBC_BM_TESTS=(
 	# (58723 B code, under the 64KB _TEXT ceiling); 17 output lines + 5 s
 	# of emulated timer delays -> 30 s budget ample.
 	"simple_interrupt_test:30:::"
+	# §6w: the UNMODIFIED upstream keyboard_raw_test, run bare-metal through
+	# bm_testhost with NO keypost so it takes its idle-exit branch.  The test
+	# polls keyboard_get_raw_event_nonblock() in a loop bounded by a 500-tick
+	# (5 s) idle window; with no key posted the raw IR6 event ring stays empty
+	# (returns < 0 every poll), so after the idle window it prints the count==0
+	# branch ("PASS: no raw keyboard events arrived during idle check.") and
+	# returns 0.  This is the FIRST gate of the RAW (uncooked) keyboard event
+	# API + its nonblock semantics — the §6e keyboard_bm test posts a key
+	# through the cooked path; this proves the raw nonblock path returns
+	# cleanly with no input.  Driving it with NO keypost sidesteps the
+	# keypost-vs-poll timing race the keyboard tests were parked on (no keys
+	# posted -> no race; the idle branch is taken deterministically), and the
+	# idle branch prints ONLY fixed text — no tick values — so the golden is
+	# fully toolchain-stable (contrast §6v simple_interrupt_test's timing-
+	# derived tick numbers).  Resolves through new bm_shim.c keyboard aliases
+	# (keyboard_get_raw_event_nonblock/keyboard_hit/keyboard_getc[_nonblock] ->
+	# bm_keyboard_*, mirroring the timer/display surfaces) — build-glue only,
+	# no compiler/qbe/emit/build-script source touched.  Bare-metal ONLY: the
+	# DOS host has no live IR6 keyboard ring nor live 8253 for the idle
+	# countdown.  Small (59223 B code, under the 64KB _TEXT ceiling); the 5 s
+	# idle window + 11 preamble lines reach the return well within 30 s.
+	"keyboard_raw_test:30:::"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 

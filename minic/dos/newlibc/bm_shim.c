@@ -37,6 +37,7 @@
 #include "bm_tty.h"
 #include "bm_timer.h"
 #include "bm_display.h"
+#include "bm_keyboard.h"
 
 /* ---- newlibc syscall layer (libgloss/syscalls.c) ---- */
 extern int _open(const char *path, int flags, int mode);
@@ -121,6 +122,33 @@ void display_clear(void)
 void display_set_cursor(uint8_t row, uint8_t col)
 {
 	bm_display_set_cursor(row, col);
+}
+
+/* ---- keyboard (drivers/keyboard.h surface) ----
+ * bm_keyboard: interrupt-driven on IR6, the §6e driver (the same ring
+ * bm_tty's cooked reader drains -- a program that calls the raw API
+ * directly bypasses the cooking).  Aliased here so an UNMODIFIED upstream
+ * keyboard test links its unprefixed names, exactly like the timer/display
+ * surfaces above. */
+
+int keyboard_get_raw_event_nonblock(void)
+{
+	return bm_keyboard_get_raw_event_nonblock();
+}
+
+int keyboard_hit(void)
+{
+	return bm_keyboard_hit();
+}
+
+int keyboard_getc_nonblock(void)
+{
+	return bm_keyboard_getc_nonblock();
+}
+
+int keyboard_getc(void)
+{
+	return bm_keyboard_getc();
 }
 
 /* ---- POSIX unprefixed aliases (newlib libc normally provides these) ---- */
