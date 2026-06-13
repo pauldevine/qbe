@@ -184,6 +184,26 @@ NEWLIBC_BM_TESTS=(
 	# semantics directly.  Small in both hosts (DOS 51811B, bare-metal
 	# 60505B, under the 64KB _TEXT ceiling); 18 output lines -> 60 s ample.
 	"block_test:60:::"
+	# §6u: the UNMODIFIED upstream driver_test — the first DRIVER-layer
+	# upstream test gated through bm_testhost (the §6p-§6t family covered
+	# the portable stdio/vfs/fat/block surface; the bm_* ports covered the
+	# drivers by hand-mirror).  It validates the Phase-1 hardware-fix story
+	# against the LIVE bm_timer/PIC: Test 1 measures a real 100 ms delay via
+	# timer_delay_ms and asserts ~10 ticks (deterministic 10 in MAME — both
+	# the driver's timer_get_ticks() and delay_ms() read the same ISR-driven
+	# counter, no tick falls between them), Test 2 asserts timer_get_frequency
+	# ()==100, Test 4 reads the live 8259 IMR via the PIC_GET_MASK() MMIO
+	# macro (0xBB, IR2 bit clear -> timer unmasked).  All five tests print
+	# fixed text + PASS, return 0.  The timer/PIC/serial driver surface
+	# resolves through bm_shim.c (timer_* -> bm_timer; PIC macros -> direct
+	# volatile-far E000 MMIO), so NO build-script or compiler change — one
+	# battery entry + one bare-metal-captured golden, like the §6q SASI
+	# probe.  Bare-metal ONLY: the DOS host has no live 8253/8259, so the
+	# measured-delay / live-IMR lines have no DOS golden to diff against.
+	# Small (59485 B code, under the 64KB _TEXT ceiling); 71 output lines at
+	# the §6f display-scroll rate (each printf mirrors to display+serial)
+	# need a 90-emulated-second budget (60 truncated mid-Test-5).
+	"driver_test:90:::"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 

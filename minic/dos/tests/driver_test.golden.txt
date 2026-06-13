@@ -1,0 +1,71 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+===============================================
+  Victor 9000 Phase 3 Driver Validation
+===============================================
+
+This test validates Phase 1 hardware fixes:
+  - Timer: Channel 2, 100 KHz clock
+  - Serial: Counter 0 for Port A
+  - PIC: Memory-mapped, IR2 for timer
+
+Test 1: Timer Channel Assignment
+=================================
+  Timer base: E000:0020
+  Channel 2 offset: +0x02 (counter_2)
+  Expected: Channel 2 for system timer
+  Measured 100ms delay: 10 ticks
+  Expected: ~10 ticks (100 Hz)
+  PASS: Timer frequency correct
+
+Test 2: Timer Clock Frequency
+==============================
+  Channel 2 clock: 100 KHz (Victor 9000 specific)
+  Divisor for 100 Hz: 1000 (100000 / 100)
+  Clock source: hardware docs and MS-DOS TOD.ASM
+  Reported frequency: 100 Hz
+  PASS: Frequency correct
+
+Test 3: Serial Counter Assignment
+==================================
+  Serial Port A: Counter 0 (1.25 MHz clock)
+  Serial Port B: Counter 1 (1.25 MHz clock)
+  System Timer:  Counter 2 (100 KHz clock)
+
+  Baud rate: 9600
+  Divisor = 1250000 / (9600 * 16) = 8
+
+  If this message appears correctly,
+  serial counter assignment is correct.
+  PASS: Serial output working
+
+Test 4: PIC Memory-Mapped Access
+=================================
+  PIC segment: E000
+  PIC command: E000:0000
+  PIC mask:    E000:0001
+
+  Current PIC mask: 0xBB
+  Bit 2 (IR2/Timer): unmasked
+  PASS: IR2 unmasked (timer enabled)
+
+Test 5: Interrupt Vector Assignment
+====================================
+  PIC base vector: 0x40
+  Timer IRQ:       IR2
+  Timer vector:    0x40 + 2 = 0x42
+  EOI command:     0x62 (specific EOI for IR2)
+
+  If timer interrupts are working,
+  vector assignment is correct.
+  PASS: Interrupts functioning
+
+===============================================
+  Validation Complete
+===============================================
+
+All Phase 1 fixes verified in Phase 3!
+
+bm_testhost: test returned 0
