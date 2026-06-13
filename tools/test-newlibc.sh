@@ -148,6 +148,20 @@ NEWLIBC_BM_TESTS=(
 	# console ECHOES the typed input; build small-model (no fat_write.c).
 	"stdin_test:35:Ahello\nz::"
 	"scanf_test:35:victor 42\nz::"
+	# §6r: the UNMODIFIED upstream Victor-label FAT mount test, run
+	# bare-metal through bm_testhost + the bm_stdio/VFS/FAT/block stack.
+	# Unlike the §6i/§6p SASI tests this is RAM-disk style (it hand-builds
+	# a Victor drive-label + volume-label + FAT12 in a media[] array via
+	# block_register_ramdisk -- no -scsi:0), so it ALSO runs DOS-hosted
+	# (the test-dos.sh NEWLIBC_TESTS gate) and its bare-metal output is
+	# line-identical to the DOS golden between the testhost preamble and
+	# result line.  It is the first deterministic golden for the Victor
+	# drive-label -> volume-label -> relative-data-start parse path
+	# (fat_mount_victor / vfs_mount_victor_fat), which was previously only
+	# covered bare-metal-only on real SASI (§6i sasi_bm, §6p sasi_fat_*).
+	# Small (60697B code, under the 64KB _TEXT ceiling); 9 output lines, so
+	# a 60 s budget is ample.
+	"fat_victor_label_test:60:::"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 

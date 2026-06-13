@@ -1,0 +1,10 @@
+
+===============================================
+  Victor 9000 Phase 3 Victor Label FAT Test
+===============================================
+
+PASS: fat_mount_victor() parses Victor volume layout.
+PASS: Victor-mounted FAT file reads through helper API.
+PASS: VFS reads a file from a Victor-labelled FAT volume.
+
+Victor label FAT test complete.

@@ -659,6 +659,7 @@ NEWLIBC_TESTS=(
 	stdio_route_test
 	bss_test
 	terminal_meta_test
+	fat_victor_label_test
 )
 
 build_newlibc_test() {
