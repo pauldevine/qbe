@@ -1,0 +1,17 @@
+
+===============================================
+  Victor 9000 Phase 3 read(0) Keyboard Test
+===============================================
+
+Test 1: read(0, &ch, 1)
+Press one printable key:
+> 
+read returned: 'A' (0x41)
+
+Test 2: read(0, line, sizeof(line)-1)
+Type a short line, use Backspace if needed, then press Return:
+> 
+read returned 6 bytes: "hello\n"
+PASS: read stopped at newline.
+
+read(0) test complete.

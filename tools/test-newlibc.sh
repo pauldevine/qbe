@@ -148,6 +148,15 @@ NEWLIBC_BM_TESTS=(
 	# console ECHOES the typed input; build small-model (no fat_write.c).
 	"stdin_test:35:Ahello\nz::"
 	"scanf_test:35:victor 42\nz::"
+	# §6t: read_test -- the raw read(0,...) layer, the third keyboard-input
+	# member after stdin_test/scanf_test.  read(0,&ch,1) reads ONE keystroke
+	# ('A'); read(0,line,39) reads a cooked line.  The keypost edits with a
+	# REAL Backspace (`vx\b9k` -> rubout x -> "v9k"), proving read(0) returns
+	# the EDITED buffer with no `\b` byte and stops at the echoed Return; the
+	# trailing `z` commits that Return into the IR6 ring (the §6o flush rule).
+	# Small-model both hosts; the cooked console echoes (unlike the §6n DOS
+	# redirect golden, whose input also omits the Backspace -- raw, no rubout).
+	"read_test:35:Avx\b9k\nz::"
 	# §6r: the UNMODIFIED upstream Victor-label FAT mount test, run
 	# bare-metal through bm_testhost + the bm_stdio/VFS/FAT/block stack.
 	# Unlike the §6i/§6p SASI tests this is RAM-disk style (it hand-builds

@@ -966,7 +966,11 @@ done
 # manifest field via stage_runtime_case's 4th arg) feeds the input
 # deterministically — no echo, unlike the cooked CON device on real
 # hardware.  Both build small-model (portable stdio, no fat_write bulk).
-for t in stdin_test scanf_test; do
+# §6t: read_test joins them — the raw read(0,&ch,1)/read(0,line,N) layer
+# DIRECTLY (vs getchar/fgets/scanf), same _read(0,...)->AH=3Fh path, same
+# small model.  Its input has no Backspace byte (the DOS redirect is raw,
+# no rubout); the bare-metal battery run exercises the cooked-console edit.
+for t in stdin_test scanf_test read_test; do
 	if prep "newlibc small ($t)" build_newlibc_test "$t"; then
 		stage_runtime_case "newlibc small ($t)" \
 			"$QBE_DIR/build/newlibc-tests/$t/$t.exe" \
