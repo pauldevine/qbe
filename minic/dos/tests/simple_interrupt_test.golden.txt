@@ -1,0 +1,17 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+Interrupt Test
+==============
+
+Start: 111 ticks
+  1 sec: 155 ticks
+  2 sec: 316 ticks
+  3 sec: 476 ticks
+  4 sec: 637 ticks
+  5 sec: 797 ticks
+
+PASS: Interrupts working!
+
+bm_testhost: test returned 0

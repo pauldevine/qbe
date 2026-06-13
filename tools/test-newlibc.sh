@@ -204,6 +204,36 @@ NEWLIBC_BM_TESTS=(
 	# the §6f display-scroll rate (each printf mirrors to display+serial)
 	# need a 90-emulated-second budget (60 truncated mid-Test-5).
 	"driver_test:90:::"
+	# §6v: the UNMODIFIED upstream simple_interrupt_test — the minimal
+	# continuous-timer-interrupt test (read start ticks, then 5x
+	# timer_delay_ms(1000) printing elapsed ticks, then unconditional
+	# "PASS: Interrupts working!").  Complements §6u driver_test (which
+	# measured a SINGLE 100ms delay): this proves 5 seconds of CONTINUOUS
+	# timer interrupts keep the ISR tick_counter incrementing monotonically
+	# under the full bm_stdio/bm_timer stack, resolving through bm_shim.c
+	# (timer_get_ticks/timer_delay_ms -> bm_timer_*) — NOTHING new to link,
+	# so like §6q/§6u just one battery entry + one bare-metal golden, zero
+	# compiler/build-script change.  Bare-metal ONLY (no live 8253 on DOS).
+	# Chosen over interrupt_test, which is unsuitable: its Test 1 reads
+	# start_ticks BEFORE four slow display-mirrored printfs, so the
+	# accumulated scroll ticks push elapsed past its [90,110] window ->
+	# it would print "FAIL", and its Test 3 embeds a raw busy-loop
+	# iteration count.  simple_interrupt_test has no pass/fail threshold
+	# and no iteration count.  NOTE on the golden's tick values (111 /
+	# 155 / 316 / 476 / 637 / 797): MAME models the Victor channel-2 input
+	# clock FASTER than 100 Hz (the upstream interrupt_test comment warns
+	# of this) and the slow display-mirrored printf between each delay
+	# accumulates ~61 extra ticks, so elapsed grows ~161/iteration rather
+	# than the nominal 100 — these are DISPLAY-SCROLL-TIMING-derived, not
+	# wall-clock.  They are perfectly RUN-STABLE (MAME is cycle-
+	# deterministic, verified byte-identical across repeated runs), so the
+	# gate passes repeatedly; but unlike §6u's threshold-robust "10 ticks"
+	# / "0xBB" they will SHIFT if a future toolchain change alters the
+	# bm_tty/printf codegen timing -> re-capture the golden then (the PASS
+	# verdict itself is unconditional and toolchain-independent).  Small
+	# (58723 B code, under the 64KB _TEXT ceiling); 17 output lines + 5 s
+	# of emulated timer delays -> 30 s budget ample.
+	"simple_interrupt_test:30:::"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 
