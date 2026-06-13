@@ -36,19 +36,25 @@ set -eu
 
 MODEL="small"
 LOAD_ADDR="0x3000"
+# Default DGROUP stack.  Mirrors build-newlibc-test.sh: tests with large
+# static data (e.g. fat_write_unit_test's hand-built RAM-volume media[]
+# arrays, on top of the full bm_stdio driver set) crowd the near-data
+# DGROUP and need a smaller stack.  Overridable per test.
+STACK_SIZE=8192
 SRC=""
 for arg in "$@"; do
 	case "$arg" in
 		--model=*) MODEL="${arg#--model=}" ;;
 		--load-addr=*) LOAD_ADDR="${arg#--load-addr=}" ;;
+		--stack-size=*) STACK_SIZE="${arg#--stack-size=}" ;;
 		-h|--help)
-			echo "usage: $0 [--model=small|medium] [--load-addr=0x3000] <name|path/to/prog.c>" >&2
+			echo "usage: $0 [--model=small|medium] [--stack-size=N] [--load-addr=0x3000] <name|path/to/prog.c>" >&2
 			exit 0 ;;
 		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
 		*) SRC="$arg" ;;
 	esac
 done
-[ -n "$SRC" ] || { echo "usage: $0 [--model=small|medium] [--load-addr=0x3000] <name|path.c>" >&2; exit 2; }
+[ -n "$SRC" ] || { echo "usage: $0 [--model=small|medium] [--stack-size=N] [--load-addr=0x3000] <name|path.c>" >&2; exit 2; }
 
 case "$MODEL" in
 	small|medium) ;;
@@ -232,7 +238,7 @@ nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR" \
 	--map "$OUT_DIR/$base.map" \
 	--raw-binary --load-addr "$LOAD_ADDR" \
 	--entry _start \
-	--stack-size 8192 \
+	--stack-size "$STACK_SIZE" \
 	--gc-sections \
 	"${OBJ_FILES[@]}" \
 	"$OUT_DIR/libstub_exe.obj" 2>>"$ERR" \

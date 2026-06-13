@@ -1,0 +1,9 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+FAT write unit test
+
+
+PASS: FAT write unit test complete.
+bm_testhost: test returned 0

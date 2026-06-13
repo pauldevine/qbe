@@ -969,6 +969,18 @@ if prep "newlibc medium (fat_write_test)" \
 		"$QBE_DIR/minic/dos/tests/newlibc_fat_write_test.golden.txt"
 fi
 
+# §6m: a second medium FAT-write gate, exercising the fat_write.c primitives
+# DIRECTLY (no vfs_mount) on hand-built RAM volumes: FAT16 entry write/read +
+# both-FAT mirroring + cluster-chain alloc/free + create/write/truncate/
+# unlink/mkdir/rename + ENOSPC, and FAT12 entries straddling a FAT sector
+# boundary (both parities).  Same small-model 64KB ceiling → medium.
+if prep "newlibc medium (fat_write_unit_test)" \
+	build_newlibc_test fat_write_unit_test --model=medium --stack-size=5120; then
+	stage_runtime_case "newlibc medium (fat_write_unit_test)" \
+		"$QBE_DIR/build/newlibc-tests/fat_write_unit_test/fat_write_unit_test.exe" \
+		"$QBE_DIR/minic/dos/tests/newlibc_fat_write_unit_test.golden.txt"
+fi
+
 # One DOSBox boot for everything staged above.
 flush_runtime_batch
 

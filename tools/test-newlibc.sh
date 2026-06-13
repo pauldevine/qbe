@@ -94,6 +94,13 @@ NEWLIBC_BM_TESTS=(
 	# the 5 MHz 8088 dominates the budget (the §6f slowness lesson): 240
 	# emulated seconds (90 truncated mid-write — slowness, not a hang).
 	"fatwrite_bm:240:::hd:medium"
+	# §6m: the FAT-write UNIT test re-run bare-metal — a second MEDIUM gate
+	# exercising fat_write.c's primitives DIRECTLY (FAT16 entry/mirror/chain
+	# + FAT12 sector-straddle, both parities) on hand-built RAM volumes, so
+	# no SASI disk.  Its media[] arrays crowd the near-data DGROUP on top of
+	# the full bm_stdio driver set, so it needs a 4096 stack (data+bss
+	# 60688; 8192 overflows 64KB).  RAM-only ops are fast; output is short.
+	"fat_write_unit_test:60::::medium:4096"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 
@@ -128,13 +135,16 @@ run_bm_test() {
 	serial_bytes="$4"
 	disk="$5"
 	model="${6:-small}"
+	stack="${7:-}"   # empty -> build script's default DGROUP stack
 
 	if [ ! -d "$NL" ]; then
 		echo "newlibc tree not found: $NL"
 		return 77
 	fi
 
-	"$QBE_DIR/tools/build-newlibc-baremetal.sh" "--model=$model" "$name" >/dev/null
+	stack_arg=""
+	[ -n "$stack" ] && stack_arg="--stack-size=$stack"
+	"$QBE_DIR/tools/build-newlibc-baremetal.sh" "--model=$model" $stack_arg "$name" >/dev/null
 
 	out_dir="$QBE_DIR/build/newlibc-baremetal/$name"
 	serial_in=""
@@ -156,13 +166,14 @@ run_bm_test() {
 
 matched=0
 for entry in "${NEWLIBC_BM_TESTS[@]}"; do
-	name="${entry%%:*}"; rest="${entry#*:}"
-	secs="${rest%%:*}"; rest="${rest#*:}"
-	keypost="${rest%%:*}"; rest="${rest#*:}"
-	serial_bytes="${rest%%:*}"; rest="${rest#*:}"
-	disk="${rest%%:*}"
-	model="${rest#*:}"
-	[ "$model" = "$disk" ] && model="small"   # no model field present
+	# <name>:<secs>:<keypost>:<serial>:<disk>:<model>:<stack> — the last
+	# two are optional (model default small, stack default per build
+	# script).  No field contains a colon, so IFS splitting is exact and
+	# preserves empty middle fields (the `::` keypost/serial gaps).
+	IFS=: read -r name secs keypost serial_bytes disk model stack <<EOF
+$entry
+EOF
+	[ -n "$model" ] || model="small"
 	if [ "${#ONLY[@]}" -gt 0 ]; then
 		want=0
 		for o in "${ONLY[@]}"; do
@@ -172,7 +183,7 @@ for entry in "${NEWLIBC_BM_TESTS[@]}"; do
 	fi
 	matched=$((matched + 1))
 	run "newlibc bare-metal ($name)" \
-		run_bm_test "$name" "$secs" "$keypost" "$serial_bytes" "$disk" "$model"
+		run_bm_test "$name" "$secs" "$keypost" "$serial_bytes" "$disk" "$model" "$stack"
 done
 
 if [ "${#ONLY[@]}" -gt 0 ] && [ "$matched" -ne "${#ONLY[@]}" ]; then
