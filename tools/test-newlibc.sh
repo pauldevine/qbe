@@ -68,6 +68,22 @@ NEWLIBC_BM_TESTS=(
 	"tty_bm:30:vx\b9k\nz::"
 	"stdio_bm:45:vx\b9k\nz::"
 	"sasi_bm:90:::hd"
+	# §6j: UNMODIFIED upstream newlibc tests re-run bare-metal through
+	# bm_testhost + the bm_stdio stack (build-newlibc-baremetal.sh
+	# test-host mode).  Output is line-identical to the DOS-hosted
+	# goldens between the testhost preamble and result line.  Budgets
+	# follow output length (display scroll ~1.5 emulated s/line, §6f);
+	# ramfs_test's 103 lines need the 300 s budget.
+	"snprintf_test:45:::"
+	"stdio_route_test:45:::"
+	"fat_bpb_test:60:::"
+	"fat_chain_test:60:::"
+	"fat_root_test:60:::"
+	"fat_dir_test:60:::"
+	"fat_file_test:60:::"
+	"fat_vfs_test:60:::"
+	"terminal_meta_test:90:::"
+	"ramfs_test:300:::"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 

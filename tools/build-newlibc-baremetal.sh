@@ -7,9 +7,14 @@
 # flat binary via omf_link.py --raw-binary for the MAME Lua loader to
 # place at 0x3000 (tools/run-victor-baremetal.sh).
 #
-# Unlike build-newlibc-test.sh there is NO -Dmain rename (bm_crt0's start()
-# calls main directly), NO DOS crt0, and NO hlt->INT 21h rewrite (on bare
-# metal the hlt idle loop is exactly right; MAME is bounded from outside).
+# Unlike build-newlibc-test.sh there is NO DOS crt0 and NO hlt->INT 21h
+# rewrite (on bare metal the hlt idle loop is exactly right; MAME is
+# bounded from outside).  A program whose source resolves into newlibc's
+# tests/ directory is an UNMODIFIED upstream test TU (§6j test-host mode):
+# it gets the same -Dmain=newlibc_test_main rename the DOS-hosted gate
+# uses, with bm_testhost.c (driver bring-up + vfs init + result line) as
+# main() and the full bm_stdio stack linked.  Everything else keeps
+# bm_crt0's start()-calls-main-directly arrangement with no rename.
 #
 # Usage: tools/build-newlibc-baremetal.sh [--load-addr=0x3000] <name|path.c>
 #        bare name resolves to minic/dos/newlibc/<name>.c, then to
@@ -52,6 +57,12 @@ if [ ! -f "$SRC" ]; then
 fi
 [ -f "$SRC" ] || { echo "$0: cannot find program source: $SRC" >&2; exit 2; }
 
+# Upstream test TU -> test-host mode (§6j).
+TESTHOST=0
+case "$SRC" in
+	"$NL"/tests/*.c) TESTHOST=1 ;;
+esac
+
 base="$(basename "$SRC" .c)"
 OUT_DIR="$QBE_DIR/build/newlibc-baremetal/$base"
 
@@ -90,11 +101,16 @@ if grep -q 'bm_tty\.h' "$SRC"; then
 	              "$NLC_DIR/bm_keyboard.c"
 	              "$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
 fi
+# Test-host mode links bm_testhost.c as main() and always needs the
+# stdio stack (the hosted upstream test prints through it).
+if [ "$TESTHOST" = 1 ]; then
+	SUPPORT_TUS+=("$NLC_DIR/bm_testhost.c")
+fi
 # bm_stdio.h pulls the whole newlibc stdio stack (§6h): printf/scanf
 # wrappers -> libgloss syscalls -> VFS /dev/console -> bm_shim -> bm_tty.
 # Same portable-subset TU set as build-newlibc-test.sh, with bm_shim.c
 # in dos_shim.c's seat.
-if grep -q 'bm_stdio\.h' "$SRC"; then
+if [ "$TESTHOST" = 1 ] || grep -q 'bm_stdio\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_shim.c"
 	              "$NLC_DIR/bm_tty.c"
 	              "$NLC_DIR/bm_display.c" "$NLC_DIR/bm_font_data.c"
@@ -162,7 +178,14 @@ compile_unit() {
 
 fail() { echo "$0: $1 (see $ERR)" >&2; tail -5 "$ERR" >&2; exit 1; }
 
-compile_unit "$SRC" "$base" || fail "compile failed: $base"
+# Test-host mode: same rename as the DOS-hosted gate, so bm_testhost's
+# main() owns bring-up and calls the test as newlibc_test_main().
+if [ "$TESTHOST" = 1 ]; then
+	compile_unit "$SRC" "$base" -Dmain=newlibc_test_main \
+		|| fail "compile failed: $base"
+else
+	compile_unit "$SRC" "$base" || fail "compile failed: $base"
+fi
 
 OBJ_FILES=("$OUT_DIR/$base.obj")
 for tu in "${SUPPORT_TUS[@]}"; do

@@ -1,0 +1,9 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+FAT VFS test
+
+
+PASS: FAT VFS test complete.
+bm_testhost: test returned 0

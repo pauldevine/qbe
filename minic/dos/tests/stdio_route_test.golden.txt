@@ -1,0 +1,12 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+===============================================
+  Victor 9000 Phase 3 stdio Routing Test
+===============================================
+
+..
+
+PASS: stdio routing test complete.
+bm_testhost: test returned 0

@@ -1,0 +1,40 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+===============================================
+  Victor 9000 Phase 3 Terminal Metadata Test
+===============================================
+
+PASS: stdin is a tty.
+PASS: fstat(stdin) reports character device.
+PASS: stat(/dev/console) reports character device.
+PASS: /dev/null is not a tty.
+PASS: fstat(/dev/null) reports character device.
+PASS: fstat(/dev/null, NULL) reports EINVAL.
+PASS: lseek(/dev/null) reports ESPIPE.
+PASS: lseek(/dev/null) rejects invalid whence.
+PASS: zero-length device read accepts null buffer.
+PASS: device read with null buffer reports EINVAL.
+PASS: zero-length device write accepts null buffer.
+PASS: device write with null buffer reports EINVAL.
+PASS: fcntl(F_GETFD/F_SETFD) works.
+PASS: fcntl(F_GETFL/F_SETFL) works.
+PASS: fcntl(valid fd, bad cmd) reports EINVAL.
+PASS: _ioctl(valid fd) reports ENOTTY.
+PASS: fstat(invalid fd) reports EBADF.
+PASS: fstat(invalid fd, NULL) reports EBADF.
+PASS: isatty(invalid fd) reports EBADF.
+PASS: read(invalid fd, NULL, 0) reports EBADF.
+PASS: write(invalid fd, NULL, 0) reports EBADF.
+PASS: lseek(invalid fd, bad whence) reports EBADF.
+PASS: fcntl(invalid fd, bad cmd) reports EBADF.
+PASS: _ioctl(invalid fd) reports EBADF.
+PASS: full open table preserves path errno precedence.
+PASS: descriptor access mode errors precede buffer/count checks.
+PASS: closed descriptor errors report EBADF.
+PASS: public reentrant syscall wrappers report expected errno.
+PASS: miscellaneous syscall stubs report expected errno.
+
+Terminal metadata test complete.
+bm_testhost: test returned 0

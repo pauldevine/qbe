@@ -1,0 +1,24 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+===============================================
+  Victor 9000 Phase 3 FAT File Test
+===============================================
+
+PASS: fat_open_root() opens root file metadata.
+PASS: fat_file_read() advances offset.
+PASS: fat_file_lseek(SEEK_SET) positions file.
+PASS: fat_file_read() clamps near EOF.
+PASS: fat_file_lseek(SEEK_END) supports negative offset.
+PASS: fat_file_read() clamps reads at EOF.
+PASS: fat_file_read() returns EOF cleanly.
+PASS: past-EOF seeks work and read EOF.
+PASS: fat_find_path() locates nested 8.3 file.
+PASS: fat_open_path() reads nested file data.
+PASS: fat_open_root() rejects directories.
+PASS: fat_open_root() reports missing file.
+PASS: fat_open_path() reports missing nested file.
+
+FAT file test complete.
+bm_testhost: test returned 0
