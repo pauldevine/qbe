@@ -256,6 +256,26 @@ NEWLIBC_BM_TESTS=(
 	# countdown.  Small (59223 B code, under the 64KB _TEXT ceiling); the 5 s
 	# idle window + 11 preamble lines reach the return well within 30 s.
 	"keyboard_raw_test:30:::"
+	# §6x: the UNMODIFIED upstream keyboard_nonblock_test, run bare-metal
+	# through bm_testhost with NO keypost so it takes its idle branches.
+	# Test 1 calls keyboard_getc_nonblock() with no key pending (returns < 0)
+	# -> "OK: no key was pending."  Test 2's wait_for_key() polls
+	# keyboard_hit() bounded by a 500-tick (5 s) idle window; with no key
+	# posted it returns 0 -> "PASS: no key arrived during bounded idle
+	# check."  This gates the keyboard_hit()/keyboard_getc_nonblock() pair
+	# (the nonblock-COOKED-byte API, one level above §6w keyboard_raw_test's
+	# raw-event API), and like §6w both branches print ONLY fixed text — no
+	# tick values — so the golden is fully toolchain-stable.  Resolves
+	# entirely through the §6w bm_shim.c keyboard aliases (keyboard_hit /
+	# keyboard_getc_nonblock -> bm_keyboard_*) + the timer aliases — nothing
+	# new to link, so like §6q/§6u/§6v/§6w the only changes are this entry +
+	# one bare-metal-captured golden.  Driving with NO keypost sidesteps the
+	# keypost-vs-poll timing race (no keys -> no race; idle branches taken
+	# deterministically).  Bare-metal ONLY: the DOS host has no live IR6
+	# keyboard ring nor live 8253 for the idle countdown.  Small (59271 B
+	# code, under the 64KB _TEXT ceiling); the two 5 s idle windows + 13
+	# preamble/body lines reach the return well within 30 s.
+	"keyboard_nonblock_test:30:::"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 
