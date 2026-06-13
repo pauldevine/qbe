@@ -48,13 +48,16 @@ for arg in "$@"; do
 done
 export V9K_SHOW="$SHOW"
 
-# Each entry: `<name>:<run-seconds>:<keypost>:<serial-in-bytes>:<disk>`.
+# Each entry: `<name>:<run-seconds>:<keypost>:<serial-in-bytes>:<disk>:<model>`.
 # The keypost field goes through `printf %b`, so \b/\n escapes type the
 # Victor Backspace/Return keys (run-victor-baremetal.sh passes any byte
 # to MAME's natural keyboard).  A `hd` disk field attaches the known
 # MAME Victor hard disk image as SASI target 0 (V9K_HARD_DISK; the
 # harness runs against a scratch copy, so WRITE(6) tests are safe).
-# Override the image with $V9K_HARD_DISK_IMAGE.
+# Override the image with $V9K_HARD_DISK_IMAGE.  The optional `model`
+# field (default small) forces the build memory model — fatwrite_bm
+# needs `medium` because fat_write.c overflows the small model's
+# single-_TEXT 64KB code ceiling on bare metal too (§6l).
 NEWLIBC_BM_TESTS=(
 	"hello_bm:15:::"
 	"timer_bm:30:::"
@@ -84,6 +87,13 @@ NEWLIBC_BM_TESTS=(
 	"fat_vfs_test:60:::"
 	"terminal_meta_test:90:::"
 	"ramfs_test:300:::"
+	# §6l: the bare-metal FAT WRITE test — the first MEDIUM-model bare-metal
+	# program (fat_write.c overflows small's 64KB _TEXT here too; measured
+	# 88KB code).  Writes to a scratch copy of the SASI disk through the §6i
+	# bm_sasi WRITE(6) path.  Phase 8's multi-cluster write over real SASI on
+	# the 5 MHz 8088 dominates the budget (the §6f slowness lesson): 240
+	# emulated seconds (90 truncated mid-write — slowness, not a hang).
+	"fatwrite_bm:240:::hd:medium"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 
@@ -117,13 +127,14 @@ run_bm_test() {
 	keypost="$(printf '%b' "$3")"
 	serial_bytes="$4"
 	disk="$5"
+	model="${6:-small}"
 
 	if [ ! -d "$NL" ]; then
 		echo "newlibc tree not found: $NL"
 		return 77
 	fi
 
-	"$QBE_DIR/tools/build-newlibc-baremetal.sh" "$name" >/dev/null
+	"$QBE_DIR/tools/build-newlibc-baremetal.sh" "--model=$model" "$name" >/dev/null
 
 	out_dir="$QBE_DIR/build/newlibc-baremetal/$name"
 	serial_in=""
@@ -148,8 +159,10 @@ for entry in "${NEWLIBC_BM_TESTS[@]}"; do
 	name="${entry%%:*}"; rest="${entry#*:}"
 	secs="${rest%%:*}"; rest="${rest#*:}"
 	keypost="${rest%%:*}"; rest="${rest#*:}"
-	serial_bytes="${rest%%:*}"
-	disk="${rest#*:}"
+	serial_bytes="${rest%%:*}"; rest="${rest#*:}"
+	disk="${rest%%:*}"
+	model="${rest#*:}"
+	[ "$model" = "$disk" ] && model="small"   # no model field present
 	if [ "${#ONLY[@]}" -gt 0 ]; then
 		want=0
 		for o in "${ONLY[@]}"; do
@@ -159,7 +172,7 @@ for entry in "${NEWLIBC_BM_TESTS[@]}"; do
 	fi
 	matched=$((matched + 1))
 	run "newlibc bare-metal ($name)" \
-		run_bm_test "$name" "$secs" "$keypost" "$serial_bytes" "$disk"
+		run_bm_test "$name" "$secs" "$keypost" "$serial_bytes" "$disk" "$model"
 done
 
 if [ "${#ONLY[@]}" -gt 0 ] && [ "$matched" -ne "${#ONLY[@]}" ]; then

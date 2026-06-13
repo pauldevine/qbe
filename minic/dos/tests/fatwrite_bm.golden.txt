@@ -1,0 +1,16 @@
+Victor 9000 bare-metal FAT WRITE test (qbe/minic)
+phase 1: PIC re-init + timer ISR (INT 0x42)
+phase 2: 8253 ch2 100 Hz + IR2 unmask
+phase 3: tty init (display + keyboard, IR6)
+phase 4: sti
+phase 5: vfs init (fds 0/1/2 -> /dev/console)
+phase 6: SASI register + controller init (writes enabled)
+phase 6: controller up
+phase 7: mount Victor volume 0 read-WRITE at /hd: ok
+phase: CONFIG.SYS intact before writes: size=220 ok
+phase 8: create+write 2000 bytes to /hd/V9KWRT.TMP: size=2000 ok
+phase 9: read back through SASI: 2000 bytes match
+phase 10: append "TAIL" + verify: ok
+phase 11: unlink /hd/V9KWRT.TMP: removed
+phase: CONFIG.SYS intact after writes: size=220 ok
+PASS: bare-metal FAT write checks completed.

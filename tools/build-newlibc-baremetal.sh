@@ -16,10 +16,21 @@
 # main() and the full bm_stdio stack linked.  Everything else keeps
 # bm_crt0's start()-calls-main-directly arrangement with no rename.
 #
-# Usage: tools/build-newlibc-baremetal.sh [--load-addr=0x3000] <name|path.c>
+# Usage: tools/build-newlibc-baremetal.sh [--model=small|medium]
+#          [--load-addr=0x3000] <name|path.c>
 #        bare name resolves to minic/dos/newlibc/<name>.c, then to
 #        ~/projects/newlibc/phase3_newlib/tests/<name>.c
 # Output: build/newlibc-baremetal/<name>/<name>.bin
+#
+# --model=medium (§6l) is the far-CODE/near-DATA port: code splits across
+# per-TU <=64KB CS segments (escaping the small model's single-_TEXT 64KB
+# ceiling that blocks fat_write.c on bare metal too — measured 81KB), while
+# data stays in one DGROUP.  The same medium changes the DOS-hosted gate
+# uses apply: minic does NOT far_stdlib-mangle under NEAR_DATA() (= medium),
+# so newlibc stdio links by real name under --no-stdio; asm_to_omf splits
+# every relocatable .long _sym into dw off + dw seg in medium (far CODE
+# pointers in static device-ops tables, §6k); the raw-binary stub far-jumps
+# to the entry symbol's CS:IP, which omf_link already resolves per-CS.
 
 set -eu
 
@@ -28,15 +39,23 @@ LOAD_ADDR="0x3000"
 SRC=""
 for arg in "$@"; do
 	case "$arg" in
+		--model=*) MODEL="${arg#--model=}" ;;
 		--load-addr=*) LOAD_ADDR="${arg#--load-addr=}" ;;
 		-h|--help)
-			echo "usage: $0 [--load-addr=0x3000] <name|path/to/prog.c>" >&2
+			echo "usage: $0 [--model=small|medium] [--load-addr=0x3000] <name|path/to/prog.c>" >&2
 			exit 0 ;;
 		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
 		*) SRC="$arg" ;;
 	esac
 done
-[ -n "$SRC" ] || { echo "usage: $0 [--load-addr=0x3000] <name|path.c>" >&2; exit 2; }
+[ -n "$SRC" ] || { echo "usage: $0 [--model=small|medium] [--load-addr=0x3000] <name|path.c>" >&2; exit 2; }
+
+case "$MODEL" in
+	small|medium) ;;
+	*) echo "$0: only --model=small|medium is supported (medium = far code," \
+	       "near data; far-DATA models need far_stdlib-aware newlibc stdio)" >&2
+	   exit 2 ;;
+esac
 
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 NL="${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}"
