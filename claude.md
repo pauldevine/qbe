@@ -3,7 +3,7 @@
 **Project:** C11/C17 + GNU-extensions C Compiler for 8086 DOS using QBE Backend
 **Standard:** C11 feature set (`_Static_assert`, `_Generic`, `_Alignof`/`_Alignas`, compound literals, designated initializers, anonymous struct/union) + GNU extensions (`__attribute__`, inline `__asm__`, `__far` pointers).  Equivalently **C17-level** since C17 added no new language features over C11.  **No C23 language features.**  C only — no C++.
 **Real target hardware:** Victor 9000 / Sirius 1 (~896 KB RAM) — NOT the IBM-PC 640 KB ceiling.  DOSBox is the fast loop for images that fit; MAME victor9k + SASI disk for the real thing.
-**Last Updated:** 2026-06-13 (§7d)
+**Last Updated:** 2026-06-13 (§7e)
 
 ---
 
@@ -28,7 +28,7 @@ Compile **`~/projects/newlibc`** — a much-progressed Victor 9000 C library + d
 ## Open tracks (pick by appetite; none urgent)
 
 1. huge `_qbe_huge_add` ≥0x8000 variable-index gap (§4i).
-2. `jmp_buf bufs[6]` cross-frame longjmp (§4v) — unreduced; reduce first.
+2. ~~`jmp_buf bufs[6]` cross-frame longjmp (§4v)~~ — CLOSED (§7e): `jmp_buf` is `int[8]`, so `jmp_buf bufs[N]` is an array-of-array-typedef; minic's flat type system has no `int (*)[8]` and the array-declarator rules ignored the typedef inner dim, so `bufs[N]` was sized `int[N]` (12 B not 96) and `bufs[i]` was a scalar-int load (stride 2) not the row address `bufs+i*16` → all setjmps aliased bufs[0], cross-frame longjmp resumed the wrong frame.  Fix = `varh.aoa_dim` flag set at the 3 decl sites (file-scope/block-local/static-local), register `IDIR(elem)` with `N*D*sizeof(elem)` size; `mkidx` desugars `bufs[i]` → bare ptr-add `bufs+i*D` (no deref) so Scale gives the int* row addr (reuses far_ptr_offset_binop, composes with `bufs[i][j]`/`setjmp(bufs[i])`).  Gated `arr_jmpbuf_probe` medium+compact+large, test-dos 306→309, MP body 731,088 identical.  Bounded gap left: brace-init/multi-decl aoa forms still ignore it (no consumer).  NOTE: the QBE `assoccon` abort (`gvn.c:210`) a row-ptr-subtraction diagnostic hit is a pre-existing UNRELATED QBE bug (repros on plain `int a[6]`).
 3. ~~minic static-init float const-expr folding~~ — CLOSED/CORRECTED (§6z): folding was never broken; the real bug was missing `CONST`/`vol_qual` `TFLOAT`/`TDOUBLE` grammar productions (`const float`/`volatile double` etc. were parse errors).  Fixed + gated (`const_float_init_probe`); also unblocks MICROPY_PY_MATH_CONSTANTS (MP parked, so not enabled).
 4. ~~Small-model setjmp/longjmp (near env)~~ — CLOSED (§7a): `NEAR_SETJMP_EXE` in `libstub_to_exe.py` (near `_setjmp`/`_longjmp`, 6-word jmp_buf, no CS word, near `ret`); gated small (`setjmp_probe` + `setjmp_clobber_probe`), test-dos 298→300, MP body 731,088 identical.
 5. ~~Multi-decl items skip block_scope_decl (loud "double definition")~~ — CLOSED (§7b): a MULTI-declarator block-scope local (`T a, b;`, the first item included) shadowing a global/function/enum/different-typed outer local died "double definition" because `emit_local_multi_decl`/`_full` (+ the `int a=1,b=2;` rule's tail loop) called `varadd` directly, bypassing the §6a/§1k rename.  Fix routes every storage declarator through `block_scope_decl`; gated `multi_decl_shadow_probe` small+medium, test-dos 300→302, MP body 731,088 identical.
