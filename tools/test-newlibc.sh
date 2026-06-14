@@ -276,6 +276,32 @@ NEWLIBC_BM_TESTS=(
 	# code, under the 64KB _TEXT ceiling); the two 5 s idle windows + 13
 	# preamble/body lines reach the return well within 30 s.
 	"keyboard_nonblock_test:30:::"
+	# §6y: the UNMODIFIED upstream pic_test, run bare-metal through
+	# bm_testhost.  First gate of the pic_enable_irq()/pic_disable_irq()
+	# IRQ-mask API: Test 1 (test_pic_mask) reads the runtime IMR (0xBB =
+	# IR2 timer + IR6 keyboard enabled, the deterministic bm_pic_init
+	# state), disables/enables IR5 (an unused expansion bit, so it never
+	# disturbs the live timer/keyboard IRQs) and asserts exact 0xBB/0x9B
+	# transitions, then restores; Test 2 (test_pic_with_timer) waits for
+	# ~100 ticks under the live timer ISR and asserts ticks advanced; the
+	# EOI test is implicit (continuous ticks => EOI works).  Resolves
+	# through four new bm_shim.c PIC aliases (pic_get_mask/pic_set_mask ->
+	# bm_pic_get_mask/set_mask, pic_enable_irq/pic_disable_irq ->
+	# bm_pic_unmask/mask) + the timer aliases — bm_pic.c is already linked
+	# into every bm_stdio build (the testhost preamble calls bm_pic_init).
+	# One new support header: minic/dos/newlibc/interrupts.h, a minic-dialect
+	# port of drivers/interrupts.h (the upstream header is a gratuitous
+	# include here — pic_test uses no symbol from it — but its `static inline
+	# get_interrupt_vector` carries ia16-gcc extended asm minic emits dead +
+	# verbatim, which nasm rejects; the port reimplements it as a plain
+	# far-pointer read and no-ops SAVE_ES/RESTORE_ES, the §6e/§6i ES-drop
+	# reasoning).  The mask-test values are fully deterministic; the timer
+	# test's 3 tick lines are timing-derived (run-stable, byte-identical
+	# across two MAME runs, but WILL shift on a bm_tty/printf codegen change
+	# -> re-capture then; the PASS verdicts are robust).  Bare-metal ONLY:
+	# the DOS host has no live 8253/8259.  Small (60121 B code, under the
+	# 64KB _TEXT ceiling); ~60 lines + a 1 s timer wait -> 90 s budget.
+	"pic_test:90:::"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 

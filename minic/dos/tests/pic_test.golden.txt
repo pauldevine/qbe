@@ -1,0 +1,68 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+
+========================================
+  Victor 9000 PIC Initialization Test
+========================================
+
+=== Victor 9000 PIC Configuration ===
+PIC Type:         Intel 8259A
+PIC Mode:         Single (no cascade)
+Access Method:    Memory-mapped (0xE000:0x0000)
+Interrupt Base:   0x40
+EOI Mode:         Normal (manual)
+
+IRQ Assignments:
+  IR0 (0x40): SYN/floppy sync
+  IR1 (0x41): Serial communications
+  IR2 (0x42): Timer (8253 Ch 2)
+  IR3 (0x43): Parallel/all VIAs
+  IR4 (0x44): Expansion
+  IR5 (0x45): Expansion
+  IR6 (0x46): Keyboard KBINT
+  IR7 (0x47): Vertical sync
+
+Current IRQ Mask: 0xBB
+IRQ Status:
+  IR0: Masked (SYN)
+  IR1: Masked (Serial)
+  IR2: Enabled (Timer)
+  IR3: Masked (Parallel/all VIAs)
+  IR4: Masked (Expansion)
+  IR5: Masked (Expansion)
+  IR6: Enabled (Keyboard)
+  IR7: Masked (VSync)
+
+=== PIC Mask Test ===
+Runtime mask before test: 0xBB
+Using IR5 expansion bit for mask read/write checks.
+
+Disabling IR5 (expansion)...
+Mask after disable: 0xBB (expect 0xBB)
+
+Enabling IR5 (expansion)...
+Mask after enable: 0x9B (expect 0x9B)
+
+Restored runtime mask: 0xBB
+
+PASS: PIC mask test successful!
+
+=== PIC Timer Interrupt Test ===
+Starting tick count: 6188
+Waiting 1 second (100 ticks at 100 Hz)...
+Final tick count: 6612
+Ticks elapsed: 424
+
+PASS: Timer interrupts working!
+
+=== PIC EOI Test ===
+EOI tested implicitly by continuous timer interrupts.
+If you see multiple timer ticks above, EOI is working!
+PASS: EOI functionality verified.
+
+========================================
+  PASS: All PIC Tests Complete!
+========================================
+
+bm_testhost: test returned 0

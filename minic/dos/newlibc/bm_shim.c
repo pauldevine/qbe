@@ -38,6 +38,7 @@
 #include "bm_timer.h"
 #include "bm_display.h"
 #include "bm_keyboard.h"
+#include "bm_pic.h"
 
 /* ---- newlibc syscall layer (libgloss/syscalls.c) ---- */
 extern int _open(const char *path, int flags, int mode);
@@ -149,6 +150,35 @@ int keyboard_getc_nonblock(void)
 int keyboard_getc(void)
 {
 	return bm_keyboard_getc();
+}
+
+/* ---- PIC (drivers/pic.h surface) ----
+ * bm_pic: the §6d 8259A driver (memory-mapped E000:0000/0001, single PIC,
+ * the Victor wiring -- keyboard=IR6, timer=IR2, serial=IR1).  bm_pic.c is
+ * already linked into every bm_stdio build (the testhost preamble calls
+ * bm_pic_init); these aliases let an UNMODIFIED upstream pic test link its
+ * unprefixed names, exactly like the timer/display/keyboard surfaces above.
+ * pic_enable_irq CLEARS the mask bit (unmask) and pic_disable_irq SETS it
+ * (mask), matching upstream drivers/pic.c. */
+
+uint8_t pic_get_mask(void)
+{
+	return bm_pic_get_mask();
+}
+
+void pic_set_mask(uint8_t mask)
+{
+	bm_pic_set_mask(mask);
+}
+
+void pic_enable_irq(uint8_t irq)
+{
+	bm_pic_unmask(irq);
+}
+
+void pic_disable_irq(uint8_t irq)
+{
+	bm_pic_mask(irq);
 }
 
 /* ---- POSIX unprefixed aliases (newlib libc normally provides these) ---- */
