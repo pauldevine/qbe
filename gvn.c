@@ -207,7 +207,13 @@ assoccon(Fn *fn, Blk *b, Ins *i1)
 	c2 = fn->con[i2->arg[1].val];
 
 	assert(KBASE(i2->cls) == 0);
-	assert(KWIDE(i2->cls) >= KWIDE(i1->cls));
+	/* Robustness: a malformed associative chain whose inner def (i2) is
+	 * narrower than the outer op (i1) -- e.g. an i8086 `l sub` consuming a
+	 * `w add` near-pointer def -- must not fold (importing the narrower
+	 * value would be wrong), and must never SIGABRT.  Well-typed IR always
+	 * satisfies this, so bailing here is a no-op for valid input. */
+	if (KWIDE(i2->cls) < KWIDE(i1->cls))
+		return;
 
 	if (i1->op == Osub && negcon(i1->cls, &c1))
 		return;

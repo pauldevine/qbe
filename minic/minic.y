@@ -2147,12 +2147,17 @@ prom(int op, Symb *l, Symb *r)
 		return ISUNSIGNED(r->ctyp) ? (LNG | UNSIGNED) : LNG;
 	}
 
-	/* Pointer subtraction yields ptrdiff_t (long): handle BEFORE the
-	 * same-kind early return so the result type is long, not pointer. */
+	/* Pointer subtraction yields ptrdiff_t: handle BEFORE the same-kind
+	 * early return so the result type is the difference, not pointer.
+	 * ptrdiff_t is 16-bit (INT/Kw) for near pointers, 32-bit (LNG/Kl) for
+	 * far -- a near char* difference typed LNG produces a class-inconsistent
+	 * `l sub` of two `w` operands, which trips QBE gvn assoccon's width
+	 * assert (gvn.c:210).  Mirror the far-aware logic at the second '-'
+	 * handler below. */
 	if (op == '-' && KIND(l->ctyp) == PTR && KIND(r->ctyp) == PTR) {
 		if (l->ctyp != r->ctyp)
 			die("non-homogeneous pointers in substraction");
-		return LNG;
+		return ISFAR(l->ctyp) ? LNG : INT;
 	}
 
 	/* Handle unsigned type promotion */

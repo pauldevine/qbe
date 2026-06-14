@@ -1,3 +1,76 @@
+# Next session (§7g — continue Phase 6 / open compiler tracks.  §7f [2026-06-14, this session] closed the carried **TOP-PRIORITY QBE bug** from §7e — the `assoccon` SIGABRT (`Assertion failed: (KWIDE(i2->cls) >= KWIDE(i1->cls)), function assoccon, file gvn.c, line 210`) that crashed the `qbe -t i8086 -m medium` step on the minimal NON-aoa repro `build/normal_ptrsub.c` (`static int a[6]; … (char*)&a[i]-(char*)&a[0]` in a loop).  **House rule honored — checked `upstream` FIRST:** `git show upstream/master:gvn.c`'s `assoccon` is BYTE-IDENTICAL to ours (in sync through `e786f06`), so this was NOT a known-fixed upstream gvn bug; the trigger was malformed i8086 IR produced by minic.  **Root cause (minic):** `prom()` (minic.y ~2150) has TWO `'-'` PTR−PTR handlers, and the FIRST one (reached before the same-kind early return at ~2159) returned **`LNG` unconditionally**, ignoring near/far — so a near `char*` difference was typed `l` (32-bit ptrdiff) even though near pointers are 16-bit.  That emitted `%t =l sub %tw1, %tw2` (a 32-bit subtract of two `w` operands); after GVN forwards the `loadw`s, the `l sub` ends up consuming a `w add` near-pointer def, and `assoccon` (`gvn.c:185-229`, which folds an associative pair `i1=(t2 op c1)`, `i2=t2->def=(x op c2)`) ASSERTS the inner def is at least as wide as the outer op → `KWIDE(w)=0 >= KWIDE(l)=1` is false → SIGABRT.  (The SECOND `'-'` handler at ~2187 already carried the correct `ISFAR(l->ctyp) ? LNG : INT`, but it is shadowed for the homogeneous PTR−PTR case by the same-kind return, which is exactly why the first handler exists — to intercept before it.)  **Two fixes landed, both gated:** (1) **minic near-ptrdiff typing** — the first handler now `return ISFAR(l->ctyp) ? LNG : INT;`, mirroring the far-aware second handler, so near ptrdiff is `INT`/Kw (16-bit) and far stays `LNG`/Kl (32-bit); the repro IR becomes a clean `%t =w sub …`.  (2) **QBE gvn `assoccon` robustness** — replaced the width `assert(KWIDE(i2->cls) >= KWIDE(i1->cls))` with `if (KWIDE(i2->cls) < KWIDE(i1->cls)) return;`: a malformed associative chain whose inner def is narrower than the outer op must NOT fold (importing the narrower value would be wrong) and a backend must NEVER SIGABRT on width-mismatched input.  **Semantics-preserving / byte-identical:** the minic change only alters the near PTR−PTR result class (was always `LNG`, now `INT` for near; far models compact/large/huge keep `LNG` since `ISFAR` is true → their codegen is unchanged), and the gvn bail fires only on width-mismatched chains that well-typed IR never produces — so the change is a no-op for all valid IR, proven by **MP compact rebuilding to a body of EXACTLY 731,088 bytes, byte-identical to the documented golden** (image 751,664, header 20,576 + body 731,088).  `make check` green; grammar conflicts UNCHANGED (the minic edit is pure C inside `prom()`, no productions).  **Gated bug-loud** with a new `minic/dos/examples/ptrdiff_probe.c` (+ `minic/dos/tests/ptrdiff_probe.golden.txt`), wired into `tools/test-dos.sh` at SMALL + MEDIUM + COMPACT + LARGE: it exercises the original crashing loop form (`(char*)&a[i]-(char*)&a[0]`), char-array byte differences, typed `int*` element-count differences, and `struct*` element + byte differences (output model-independent since `sizeof(int)==2` on every model).  **Verified bug-loud:** git-stashing BOTH fixes and rebuilding minic & qbe makes the probe build ABORT (Abort trap 6) in the `qbe -t i8086 -m medium` step — a compiler crash is the loudest possible gate; restoring the fixes gives byte-exact-vs-golden on all four models in DOSBox.  **test-dos 309/309 → 313/313** (the four new entries `[ok]`, every prior entry unchanged).  Since `gvn.c` is middle-end (not `i8086/emit.c`) and the MP byte-identical rebuild proves codegen did NOT shift, the emit-bracket audit was NOT required and NO Victor run was needed.  The TOP-PRIORITY QBE `assoccon` open track is now CLOSED, and there is **no QBE backend bug currently open** — the carried tracks below are all minic/backend feature gaps or Phase-6 harness work.  Next: pick a carried track — huge `_qbe_huge_add` ≥0x8000 variable-index gap (§4i — pure i8086 backend, needs the emit audit after); far static-DATA-ptr reloc (§1g); Kw spill-slot sharing (frame-size lever, no consumer pain); the bounded aoa init/multi-declarator gap (§7e — brace-init `jmp_buf x[2]={…}` / multi-decl `jmp_buf a[2], b[2]` still ignore `g_td_arraydim`, no realistic consumer) — OR resume Phase-6 newlibc gating: `serial_loopback_test` remains the only tractable bm_testhost candidate but needs real new harness plumbing (channel-A polled RX + an rs232a TXD→RXD MAME loopback colliding with the rs232a `null_modem` capture → move the gate's serial capture to channel B, plus RX-timing determinism on the 5 MHz 8088); `interrupt_test` stays SKIPPED per §6v.)
+
+## §7f session notes (2026-06-14)
+
+### The bug (the TOP-PRIORITY QBE track from §7e, now CLOSED)
+- QBE **SIGABRT** `Assertion failed: (KWIDE(i2->cls) >= KWIDE(i1->cls)),
+  function assoccon, file gvn.c, line 210` on the minimal NON-aoa repro
+  `build/normal_ptrsub.c` (`static int a[6]; … (char*)&a[i]-(char*)&a[0]`
+  in a loop) under `--model=medium` — Abort trap 6 in the `qbe -t i8086`
+  step.
+- **House rule honored:** checked `upstream` FIRST — `git show
+  upstream/master:gvn.c` `assoccon` is BYTE-IDENTICAL to ours, so this is
+  NOT a known-fixed upstream gvn bug; the trigger is malformed i8086 IR.
+- **Root cause (minic):** `prom()` ([[minic.y]] ~2150) has TWO `'-'`
+  PTR−PTR handlers.  The FIRST one (reached before the same-kind early
+  return) returned **`LNG` unconditionally**, ignoring near/far — so a near
+  `char*` difference was typed `l` (32-bit).  In a near-data model the
+  operands are 16-bit (`w`), giving `%t =l sub %tw1, %tw2`.  After GVN
+  forwards the `loadw`s, the `l sub` consumes a `w add` near-pointer def;
+  `assoccon` folds the associative pair and ASSERTS the inner def is at
+  least as wide as the outer op → `KWIDE(w)=0 >= KWIDE(l)=1` is false →
+  abort.  (The SECOND `'-'` handler at ~2187 already had the correct
+  `ISFAR ? LNG : INT`, but is shadowed by the same-kind return.)
+
+### The two fixes (both gated)
+1. **minic prom() near-ptrdiff typing** (root cause): the first handler now
+   `return ISFAR(l->ctyp) ? LNG : INT;` — near ptrdiff is `INT`/Kw (16-bit),
+   far stays `LNG`/Kl (32-bit).  IR for the repro becomes `%t =w sub …`.
+2. **QBE gvn `assoccon` robustness** (`gvn.c:210`): replaced the width
+   `assert` with `if (KWIDE(i2->cls) < KWIDE(i1->cls)) return;` — a
+   malformed associative chain whose inner def is narrower than the outer
+   op must NOT fold (importing the narrower value would be wrong) and must
+   NEVER SIGABRT.  Well-typed IR always satisfies the invariant, so this is
+   a no-op for valid input (proven by the MP byte-identical rebuild).
+
+### Why it's safe / byte-identical
+- minic fix only changes near PTR−PTR result class (was always LNG, now
+  INT for near); far models (compact/large/huge — ISFAR true) keep LNG, so
+  their codegen is unchanged.  Near models had been emitting class-
+  inconsistent IR that either crashed or was wrong.
+- gvn fix bails only on width-mismatched chains, which valid IR never
+  produces → MP compact body **731,088 bytes, byte-identical** to the
+  golden, confirming codegen unchanged across the whole corpus.
+- `make check` green.  Grammar conflicts UNCHANGED (no productions touched
+  — the minic change is pure C in `prom()`).
+
+### Gate (bug-loud) + toolchain checks
+- `minic/dos/examples/ptrdiff_probe.c` + golden, wired into
+  `tools/test-dos.sh` at SMALL + MEDIUM + COMPACT + LARGE.  Exercises the
+  original loop form (`(char*)&a[i]-(char*)&a[0]`), char-array byte diffs,
+  typed `int*` element-count diffs, and `struct*` element + byte diffs —
+  output model-independent (sizeof(int)==2 everywhere).
+- **Bug-loud verified:** git-stash both fixes + rebuild minic & qbe → the
+  probe build ABORTS (Abort trap 6) in the `qbe -t i8086 -m medium` step;
+  restore → byte-exact vs golden on all four models in DOSBox.  A compiler
+  crash is the loudest possible gate.
+- **test-dos 309 → 313** (four new entries `[ok]`, every prior unchanged).
+- gvn.c is middle-end, but the MP byte-identical rebuild proves codegen
+  did NOT shift → emit-bracket audit NOT required, NO Victor run.
+
+### ⇒ Next session (§7g): carried tracks (no QBE bug currently open)
+- huge `_qbe_huge_add` ≥0x8000 variable-index gap (§4i — pure i8086
+  backend, needs the emit audit after).
+- far static-DATA-ptr reloc (§1g).
+- Kw spill-slot sharing (frame-size lever, no consumer pain).
+- Bounded aoa gap (§7e): brace-init / multi-declarator array-of-array-
+  typedef still ignore `g_td_arraydim`; no realistic consumer.
+- Phase-6 newlibc `serial_loopback_test` (needs NEW harness plumbing —
+  channel-A polled RX + rs232a TXD→RXD loopback, move gate capture to
+  channel B, RX-timing determinism); `interrupt_test` stays SKIPPED (§6v).
+
+---
+
 # Next session (§7f — continue Phase 6 / open compiler tracks.  §7e [2026-06-13, this session] reduced AND fixed the carried **`jmp_buf bufs[6]` cross-frame longjmp** track (§4v, unreduced for many sessions) — the user picked it.  **Reduction (bug-loud):** `jmp_buf` is `int[8]`, so `jmp_buf bufs[N]` is an array whose ELEMENT is itself an array typedef.  A recursive probe that set `bufs[0..5]` then `longjmp(bufs[target], …)` with a runtime `target=2` resumed the WRONG frame (`caught 5`, the deepest, instead of `caught 2`); a stride probe showed `&bufs[i]-&bufs[0]==0` for every i, and the generated `data` block was sized **12 bytes for N=6, not 96**.  **Root cause:** minic's flat type system can't represent `int (*)[8]`, and EVERY array-declarator rule ignored the typedef's inner dimension (`g_td_arraydim`): `bufs[N]` was sized as `int[N]` and a subscript `bufs[i]` was lowered as a SCALAR-int access — `@(bufs + i*sizeof(int))`, i.e. stride 2 **and a value load** — instead of the row ADDRESS `bufs + i*16`.  So every `setjmp(bufs[i])` aliased `bufs[0]` (last writer = the deepest frame) and the cross-frame `longjmp` resumed it.  (minic has NO true 2-D arrays at all — `int x[6][8]` is a hard parse error — so an array-typedef element is the only door into this shape, and nothing in MP/stevie/the corpus uses it, which is why it sat latent.)  **The fix** adds a `varh.aoa_dim` flag (the inner dimension D) set at the three array-of-array-typedef declaration sites — file-scope global (`'[' expr ']' ';'`), block-local (`dcls type IDENT '[' expr ']' ';'`), and function-local static (`STATIC type IDENT '[' expr ']' ';'`) — each of which, when `g_td_arraydim > 0`, now registers the variable as `IDIR(g_td_arrayelem)` (e.g. `int*`) with the CORRECT `N*D*sizeof(elem)` byte size (and `iralign(elem)`).  Then `mkidx()` desugars a one-level subscript on an aoa variable to the **bare pointer add `bufs + (i*D)` with NO deref** (instead of the normal `@(bufs + i)`): the existing `'+'` Scale path multiplies by `sizeof(elem)`, giving byte offset `i*D*sizeof(elem)` = the `int*` row address — which reuses `far_ptr_offset_binop` for free under compact/large, and COMPOSES naturally (`bufs[i][j]` takes the ordinary `@(+ . j)` path on the resulting `int*`, and `setjmp(bufs[i])` gets the row pointer it wants).  The new `mkidx` branch only fires when `var_aoa_dim(name) > 0`, so all non-aoa code is byte-identical.  **Semantics-preserving:** the aoa path is a brand-new construct (previously miscompiled), and the non-aoa else-branches were left textually identical (the block-local rule keeps `v = $3->u.v`, no new `block_scope_decl` routing) → MP/stevie/the gate corpus generate byte-identical code.  Grammar conflicts UNCHANGED (115 s/r, 0 r/r, 10 never-reduced — only C action-body code + helpers + a `varh` field changed, no productions).  **A note for whoever revisits:** the QBE `assoccon` ABORT (`gvn.c:210`) that the row-to-row pointer-subtraction stride diagnostic hit is a **PRE-EXISTING, UNRELATED QBE bug** — it reproduces on `(char*)&a[i]-(char*)&a[0]` for a plain `int a[6]` too (nested const-mul + i8086 `l`/`w` ptrdiff class mix), and is NOT triggered by any realistic setjmp-array usage; left untouched.  **Gated bug-loud** with a new `minic/dos/examples/arr_jmpbuf_probe.c` (+ `minic/dos/tests/arr_jmpbuf_probe.golden.txt`), the array-of-jmp_buf counterpart to `setjmp_probe.c`, wired into `tools/test-dos.sh` at MEDIUM + COMPACT + LARGE (matching setjmp_probe; model-independent output): case A cross-frame `longjmp(bufs[target])` into a runtime-indexed FILE-SCOPE array (`caught 2` then unwinds 1,0); case B a BLOCK-LOCAL `jmp_buf lb[3]` runtime-indexed in-frame; case D a FUNCTION-LOCAL STATIC `static jmp_buf sb[3]` runtime-indexed; case C a composing double-subscript `dd[i][j]` write/read over a `typedef int[8]` element.  Verified bug-loud: the UNFIXED minic (git stash + rebuild) prints `caught 5` and `dd0_0=30` (the alias + stride corruption); the fixed minic is byte-exact vs the golden under ALL THREE models in DOSBox, and the pre-existing `setjmp_probe` stays byte-identical on medium/compact/large.  **test-dos 306/306 → 309/309** (the three new entries `[ok]`, every prior entry unchanged).  Since this is a `minic.y` frontend change (NOT i8086/emit.c), the emit-bracket audit is NOT required; the required toolchain check is the MP byte-compare, and **MP compact rebuilt to a body of EXACTLY 731,088 bytes — byte-identical to the documented golden** (image 751,664, header 20,576 + body 731,088), confirming codegen is unchanged → no Victor run needed (stevie's medium-.EXE size gate inside test-dos also still `[ok]`); `make check` green.  The "`jmp_buf bufs[6]` cross-frame longjmp (§4v)" open track is now CLOSED.  **One bounded gap remains** (documented, not a regression — the pre-existing status quo for those forms): array-of-array-typedef in a brace-INITIALIZED (`jmp_buf x[2] = {…}`, nonsensical for jmp_buf) or MULTI-declarator (`jmp_buf a[2], b[2]`) declaration still ignores `g_td_arraydim` and would miscompile; no realistic consumer uses them, and they'd need the same `aoa_dim` treatment if one ever appears.  **⇒ TOP PRIORITY NEXT SESSION — a REAL QBE BUG surfaced this session (this is the whole point of the project: minic/MP/newlibc exist to surface QBE backend bugs; finding one is the win, not a footnote).**  QBE **SIGABRTs** (`Assertion failed: (KWIDE(i2->cls) >= KWIDE(i1->cls)), function assoccon, file gvn.c, line 210`) on a MINIMAL, NON-aoa input: `static int a[6]; … (char*)&a[i] - (char*)&a[0]` in a loop under `--model=medium` (saved as `build/normal_ptrsub.c`).  Two angles, both worth fixing: (1) **QBE robustness** — `assoccon` (`gvn.c:185-229`) folds an associative pair `i1=(t2 op c1)`, `i2=t2->def=(x op c2)` and ASSERTS the inner class is at least as wide as the outer; on i8086 a `w`/`l` mix in the chain violates that and crashes instead of bailing.  A backend should NEVER SIGABRT on well-formed-looking input.  (2) **minic medium-model ptrdiff typing** — the SSA shows `%t25 =l sub %t27, %t29` where BOTH operands are `=w loadw` (16-bit NEAR pointers): minic types a near-pointer subtraction as `l` (32-bit LNG ptrdiff) in the medium model — class-inconsistent IR (`l` result, `w` operands) — when near ptrdiff should be `w`/INT (`prom()` returns `ISFAR(l->ctyp)?LNG:INT`, so something is marking these near `char*` as FAR, or the `(char*)`-cast/global-`&a[i]` address path sets it).  House rule: **check `upstream` (c9x.me/qbe) FIRST** for the assoccon assert before touching it — it may be a known generic gvn bug.  Plan: reduce both sides; decide whether the IR is valid (→ QBE assoccon must handle the width mismatch, not assert) or invalid (→ fix minic's medium near-ptrdiff class to `w`, AND QBE still shouldn't crash); GATE bug-loud with a probe doing array-element pointer subtraction that currently CRASHES the compiler (a compiler crash is the loudest possible gate); after any QBE change run `make check`, the i8086 emit audit if `emit.c`/middle-end codegen shifts, and the MP compact byte-compare.  THEN, only if that's closed, the other carried tracks: huge `_qbe_huge_add` ≥0x8000 (§4i — pure i8086 backend, needs emit audit); far static-DATA-ptr reloc (§1g); Kw spill-slot sharing; the bounded aoa init/multi-decl gap above; OR Phase-6 newlibc `serial_loopback_test` (needs harness work — channel-A polled RX + rs232a TXD→RXD loopback, move gate capture to channel B, RX-timing determinism; `interrupt_test` stays SKIPPED per §6v).)
 
 ## §7e session notes (2026-06-13)
@@ -103,79 +176,4 @@ shifts, and the MP compact byte-compare.
 
 ---
 
-# Next session (§7e — continue Phase 6 / open compiler tracks.  §7d [2026-06-13, this session] closed the carried minic front-end track **"param/static-local shadowing a global"** — a function PARAMETER or a function-local `static` whose name collided with a file-scope binding (a global variable, a declared function, an enum constant, or a different-typed outer local) died with `double definition`, even though an ordinary block local (§6a) and a multi-declarator block local (§7b/§7c) with the same collision already alpha-renamed cleanly.  **Root cause:** the §6a/§7b alpha-rename lives in `block_scope_decl()` (mint `name$N`, register a lexer rename so subsequent uses resolve to it), and every block-local rule routes through it before `varadd` — but `param()` (the ANSI parameter builder, line ~5312) and `emit_static_local()` (the function-local-static lowering, line ~1826) called `varadd()` **directly**, so a colliding param/static name hit `varadd`'s `die("double definition")` instead of shadowing.  Reduced bug-loud first: `int count; int addone(int count){return count+1;}` → `error:25: double definition`; `int count; int f(void){static int count;…}` → `double definition`; while the plain-local `int count; int f(void){int count;…}` form already compiled and renamed.  **The fix factors `block_scope_decl` into a char-buffer core `block_scope_rename(char *v, ctyp, isarray)`** (the same collision test + rename-registration + in-place buffer mutation, just operating on a name buffer instead of a `Node`; `block_scope_decl` becomes a one-line wrapper passing `node->u.v`, so all 20-odd existing callers are untouched), then routes both new sites through it: (1) `param()` reordered to `strcpy(n->u.v, v)` → `block_scope_decl(n, ctyp, 0)` → `varadd(n->u.v, ...)`, so the param-chain node carries the mangled name and the later `varget`/`bind_param` in `ansi_func_proto` resolve the renamed slot, and the registered rename makes body uses of the source name resolve to the param; (2) `emit_static_local()` computes the internal storage symbol (`_<fn>_<name>`) from the ORIGINAL source name FIRST (so the emitted global stays `$`-free for nasm), then `block_scope_rename`s a copy of the source name and registers the symtab entry + `isstaticlocal` flag under the (possibly mangled) name — uses of the source name resolve via the lexer rename to that entry, whose `glo` points at the unchanged storage symbol.  **Param-rename lifetime is correct:** params parse at `brace_depth==0` (before the body `{`), so the rename records depth 0 and is never popped by `rename_pop_closed` (`depth>brace_depth` never true) but IS cleared by the next function's `init_ansi`→`varclr()` (`renamestksp=0`) — exactly a whole-function shadow; proto-only `'(' init_ansi par0 ')'` then `varclr()` likewise clears it immediately.  Static locals sit at `brace_depth>=1` (inside the body / nested blocks) and pop at their enclosing block's close like any §6a local.  **Semantics-preserving:** `block_scope_rename` mutates/renames ONLY on a real collision — the no-collision path returns the name unchanged, so MP/stevie/the gate corpus (which contain no param-or-static-vs-global collisions) generate byte-identical code.  Grammar conflicts UNCHANGED (115 s/r, 0 r/r).  **Gated bug-loud** with a new `minic/dos/examples/param_static_shadow_probe.c` (+ `minic/dos/tests/param_static_shadow_probe.golden.txt`), the param/static counterpart to `local_shadow_probe.c`/`multi_decl_shadow_probe.c`, wired into `tools/test-dos.sh` at SMALL + MEDIUM (frontend-only / model-agnostic): (a) a param shadows a same-typed global (`addone(int count)`; global intact in `main`); (b) params shadow a different-typed global, a function name, and an enum constant simultaneously (`mix(int tag, int helper, int LIMIT)`); (c) a pointer param shadows a global, mutating the arg across a deref (`viaptr(int *count)`); (d) a `static int count` shadows the global and persists across two calls independently of it; (e) a param shadow with an inner-block re-shadow of the same name, proving rename depth/pop (`nested(int count)` → inner block uses its own slot, the param is visible again after the block).  Verified bug-loud: the UNFIXED minic (git stash + rebuild) errors `error:25: double definition` on the first `addone(int count)` param.  **test-dos 304/304 → 306/306** (the two new SMALL+MEDIUM entries `[ok]`, every prior entry unchanged; byte-exact under both models in DOSBox).  Since this is a `minic.y` frontend change (NOT i8086/emit.c), the emit-bracket audit is NOT required; the required toolchain check is the MP byte-compare, and **MP compact rebuilt to a body of EXACTLY 731,088 bytes — byte-identical to the documented golden** (image 751,664, header 20,576 + body 731,088), confirming codegen is unchanged → no Victor run needed (stevie's medium-.EXE size gate inside test-dos also still `[ok]`).  The "param/static-local shadowing a global" open track is now CLOSED.  Next: pick another carried compiler track (huge `_qbe_huge_add` ≥0x8000 §4i; far static-DATA-ptr reloc §1g; Kw spill-slot sharing; `jmp_buf bufs[6]` cross-frame longjmp §4v — unreduced, reduce first) OR resume Phase-6 newlibc gating — `serial_loopback_test` remains the only tractable bm_testhost candidate but needs real new harness plumbing (channel-A polled RX in bm_console + an rs232a TXD→RXD MAME loopback colliding with the rs232a `null_modem` capture → move the gate's serial capture to channel B, plus RX-timing determinism on the 5 MHz 8088); `interrupt_test` stays SKIPPED per §6v.)
-
-## §7d session notes (2026-06-13)
-
-### The bug: params and static locals bypass block_scope_decl
-- The §6a/§7b alpha-rename (mint `name$N`, register a lexer rename) lives
-  in `block_scope_decl()`; every block-local rule routes through it before
-  `varadd`.  But `param()` (~5312) and `emit_static_local()` (~1826) called
-  `varadd()` DIRECTLY, so a param/static name colliding with a global /
-  function / enum / different-typed outer local hit `die("double
-  definition")` instead of shadowing.
-- Bug-loud reductions: `int count; int addone(int count){...}` →
-  `error:25: double definition`; `int count; static int count;` in a fn →
-  `double definition`.  Plain-local `int count;` in a fn already worked.
-
-### The fix: a char-buffer rename core, routed from both sites
-- Factored `block_scope_decl(Node*)` into a core
-  `block_scope_rename(char *v, ctyp, isarray)` (same collision test +
-  rename registration + in-place buffer mutation); `block_scope_decl` is
-  now a one-line wrapper → all existing callers untouched.
-- `param()`: `strcpy(n->u.v, v)` → `block_scope_decl(n, ctyp, 0)` →
-  `varadd(n->u.v, ...)`.  The chain node carries the mangled name so
-  `ansi_func_proto`'s `varget`/`bind_param` hit the renamed slot, and the
-  registered rename resolves body uses.
-- `emit_static_local()`: build the storage symbol `_<fn>_<name>` from the
-  ORIGINAL name first (keeps the emitted global `$`-free for nasm), then
-  `block_scope_rename` a copy of the source name and register the symtab
-  entry + `isstaticlocal` under it; uses resolve via the lexer rename, and
-  the entry's `glo` points at the unchanged storage symbol.
-
-### Why the lifetimes are correct
-- Params parse at `brace_depth==0` (before the body `{`) → rename recorded
-  at depth 0, never popped by `rename_pop_closed`, but cleared by the next
-  function's `init_ansi`→`varclr()` (`renamestksp=0`): a whole-function
-  shadow.  Proto-only `'(' init_ansi par0 ')'`+`varclr()` clears it at once.
-- Static locals sit at `brace_depth>=1` and pop at their enclosing block's
-  close, like any §6a local.
-
-### Why it's semantics-preserving
-- `block_scope_rename` renames ONLY on a real collision; the no-collision
-  path returns the name unchanged → MP/stevie/gate corpus byte-identical.
-- Grammar conflicts UNCHANGED (115 s/r, 0 r/r).
-
-### Gate (bug-loud) + toolchain checks
-- `minic/dos/examples/param_static_shadow_probe.c` + golden — SMALL +
-  MEDIUM (frontend-only).  Cases: (a) param shadows same-typed global;
-  (b) params shadow diff-typed global / function / enum at once; (c)
-  pointer param shadows a global across a deref; (d) `static int count`
-  shadows + persists independently of the global; (e) param shadow + inner
-  re-shadow (rename depth/pop).
-- Bug-loud verified: unfixed minic → `error:25: double definition` on the
-  first `addone(int count)`.
-- **test-dos 304 → 306** (both new entries [ok]; byte-exact small + medium).
-- minic.y/frontend change (NOT emit.c) → NO emit audit required.
-- MP compact rebuilt: body EXACTLY **731,088 bytes**, byte-identical to the
-  golden → codegen unchanged, NO Victor run.  stevie medium-.EXE size gate
-  still [ok].
-
-### Closed track + carried tracks
-- CLOSED: "param/static-local shadowing a global" (block_scope_decl family
-  §6a/§7b/§7c/§7d now complete: plain, multi-decl, array-first, param,
-  static).
-- Carried compiler: huge `_qbe_huge_add` >=0x8000 (§4i); far static-DATA-ptr
-  reloc (§1g); Kw spill-slot sharing; `jmp_buf bufs[6]` cross-frame longjmp
-  (§4v, unreduced — reduce first).
-- Phase-6 newlibc: `serial_loopback_test` (only tractable bm_testhost
-  candidate left, but real harness work — channel-A polled RX in bm_console
-  + rs232a TXD→RXD MAME loopback colliding with the rs232a null_modem
-  capture → move gate capture to channel B + RX-timing determinism);
-  `interrupt_test` stays SKIPPED; display-only/`hlt`-loop tests already
-  covered by hand-mirrored `bm_*` ports; newlibc-under-far-DATA-models
-  (compact/large) stdio when a far-DATA consumer appears.
-
----
-
-Older session headers (§7c and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).
+Older session headers (§7d and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).

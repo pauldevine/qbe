@@ -1,0 +1,11 @@
+byte 0 0
+byte 1 2
+byte 2 4
+byte 3 6
+byte 4 8
+byte 5 10
+char 5
+elem 4
+struct 3
+structbytes 12
+done
