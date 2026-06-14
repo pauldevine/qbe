@@ -8736,6 +8736,20 @@ stmt: ';'                            { $$ = 0; }
         fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), SIZE($1) * n);
         $$ = mkstmt(Expr, chain, 0, 0);
     }
+    | type IDENT '[' expr ']' ',' ext_decllist ';' {
+        /* Block-scoped multi-declarator whose FIRST declarator is a sized
+         * array: `int arr[3], *counter;`.  Mirrors the dcls-context
+         * array-first rule (kr_array_node builds a 'B' node for the array,
+         * emit_local_multi_decl_full handles every declarator including
+         * the array and the shadow rename), but DEFERS the initializer
+         * chain as an Expr stmt so it runs in control-flow order — the
+         * stmt-context multi-decl convention (see the plain rule below). */
+        Node *first = kr_array_node($2->u.v, const_eval($4));
+        Node *ch;
+        first->r = $7;
+        ch = emit_local_multi_decl_full($1, first);
+        $$ = ch ? mkstmt(Expr, ch, 0, 0) : 0;
+    }
     | type IDENT ',' ext_decllist ';' {
         /* Block-scoped multi-variable decl with full per-declarator
          * decoration support (`*`, `[]`, `[N]`, `()`).  Reuses the

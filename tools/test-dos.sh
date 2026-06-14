@@ -205,6 +205,13 @@ RUNTIME_TESTS=(
 	# too — the emit_local_multi_decl* helpers bypassed block_scope_decl.
 	"minic/dos/examples/multi_decl_shadow_probe.c:minic/dos/tests/multi_decl_shadow_probe.golden.txt:small"
 	"minic/dos/examples/multi_decl_shadow_probe.c:minic/dos/tests/multi_decl_shadow_probe.golden.txt:medium"
+	# §7c: stmt-context multi-declarator whose FIRST declarator is a sized
+	# array (`int arr[3], *p;` MID-BLOCK) — the dcls-context form already
+	# parsed, but the stmt-context multi-decl rule only matched a bare
+	# leading IDENT, so an array-first decl after a statement was a parse
+	# error.  New stmt production mirrors the dcls array-first rule.
+	"minic/dos/examples/arrayfirst_multidecl_probe.c:minic/dos/tests/arrayfirst_multidecl_probe.golden.txt:small"
+	"minic/dos/examples/arrayfirst_multidecl_probe.c:minic/dos/tests/arrayfirst_multidecl_probe.golden.txt:medium"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:compact"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:large"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:huge"
