@@ -6536,11 +6536,18 @@ emit_local_multi_decl_full(unsigned base, Node *list)
 			int count = n->l->u.n;
 			unsigned elem = (KIND(base) == PTR) ? DREF(base) : base;
 			int total = count * SIZE(elem);
+			/* Inner-block shadow rename (see emit_local_multi_decl). */
+			v = block_scope_decl(n, IDIR(elem), 1);
 			varadd(v, 0, IDIR(elem), 1);
 			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(elem), total);
 			continue;
 		}
 		t = (n->op == 'P' || n->op == 'A') ? IDIR(base) : base;
+		/* Route through block_scope_decl so a multi-declarator local that
+		 * shadows a global/extern/function/enum or a different-typed
+		 * outer local is alpha-renamed instead of dying "double
+		 * definition" in varadd (single-decl already does this). */
+		v = block_scope_decl(n, t, n->op == 'A' ? 1 : 0);
 		varadd(v, 0, t, n->op == 'A' ? 1 : 0);
 		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
 		if ((KIND(t) == STRUCT_T || KIND(t) == UNION_T) && struct_has_bitfield(DREF(t)))
@@ -6560,7 +6567,7 @@ emit_local_multi_decl_full(unsigned base, Node *list)
  * it immediately (entry == lexical order there), the stmt-context
  * caller wraps it in mkstmt(Expr,…) so it runs in control-flow order. */
 Node *
-emit_local_multi_decl(unsigned base, char *first, Node *rest)
+emit_local_multi_decl(unsigned base, Node *firstnode, Node *rest)
 {
 	int s;
 	Node *n, *chain;
@@ -6571,7 +6578,10 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 		die("invalid void declaration");
 	chain = 0;
 	s = SIZE(base);
-	v = first;
+	/* Route the first declarator through block_scope_decl too, so a
+	 * multi-declarator local shadowing a global/different-typed outer
+	 * local is alpha-renamed rather than dying "double definition". */
+	v = block_scope_decl(firstnode, base, 0);
 	varadd(v, 0, base, 0);
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(base), s);
 	if ((KIND(base) == STRUCT_T || KIND(base) == UNION_T) && struct_has_bitfield(DREF(base)))
@@ -6597,12 +6607,14 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 		if (n->op == 'B') {
 			int count = n->l->u.n;
 			int total = count * SIZE(ebase);
+			v = block_scope_decl(n, IDIR(ebase), 1);
 			varadd(v, 0, IDIR(ebase), 1);
 			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(ebase), total);
 			continue;
 		}
 		if (n->op == 'P') {
 			t = IDIR(ebase);
+			v = block_scope_decl(n, t, 0);
 			varadd(v, 0, t, 0);
 			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
 			if (n->l)
@@ -6613,6 +6625,7 @@ emit_local_multi_decl(unsigned base, char *first, Node *rest)
 		 * so `char *p, c;` makes c a `char` (standard C semantics).
 		 * `[N]` similarly lands at element-of-base. */
 		t = (n->op == 'A') ? IDIR(ebase) : ebase;
+		v = block_scope_decl(n, t, n->op == 'A' ? 1 : 0);
 		varadd(v, 0, t, n->op == 'A' ? 1 : 0);
 		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
 		if ((KIND(t) == STRUCT_T || KIND(t) == UNION_T) && struct_has_bitfield(DREF(t)))
@@ -8012,7 +8025,7 @@ dcls:
 {
 	/* dcls context: parse-time emit IS the entry block, which is also
 	 * the lexical position of the declaration — emit the chain now. */
-	Node *ch = emit_local_multi_decl($2, $3->u.v, $5);
+	Node *ch = emit_local_multi_decl($2, $3, $5);
 	if (ch)
 		expr(ch);
 }
@@ -8731,7 +8744,7 @@ stmt: ';'                            { $$ = 0; }
          * control-flow order — `T k, nf = 0;` in a loop body must
          * re-init nf each iteration, not once at function entry. */
         Node *ch;
-        ch = emit_local_multi_decl($1, $2->u.v, $4);
+        ch = emit_local_multi_decl($1, $2, $4);
         $$ = ch ? mkstmt(Expr, ch, 0, 0) : 0;
     }
     | type IDENT '=' expr ',' init_decllist ';' {
@@ -8748,11 +8761,12 @@ stmt: ';'                            { $$ = 0; }
         emit_local_alloc(v, ALLOC_T(), iralign($1), SIZE($1));
         chain = mknode('=', $2, $4);
         for (n = $6; n; n = n->r) {
-            varadd(n->u.v, 0, $1, 0);
-            emit_local_alloc(n->u.v, ALLOC_T(), iralign($1), SIZE($1));
+            char *nv = block_scope_decl(n, $1, 0);
+            varadd(nv, 0, $1, 0);
+            emit_local_alloc(nv, ALLOC_T(), iralign($1), SIZE($1));
             if (n->l)
                 chain = mknode(',', chain,
-                    multi_decl_chain_init(0, n->u.v, n->l));
+                    multi_decl_chain_init(0, nv, n->l));
         }
         $$ = mkstmt(Expr, chain, 0, 0);
     }

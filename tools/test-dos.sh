@@ -199,6 +199,12 @@ RUNTIME_TESTS=(
 	# enum constant) via the extended block_scope_decl alpha-rename.
 	"minic/dos/examples/local_shadow_probe.c:minic/dos/tests/local_shadow_probe.golden.txt:small"
 	"minic/dos/examples/local_shadow_probe.c:minic/dos/tests/local_shadow_probe.golden.txt:medium"
+	# §7b: a MULTI-declarator block-scope local (`T a, b;`, incl. the first
+	# item and the `int a=1,b=2;` first-has-init form) shadowing a
+	# global/function/enum/different-typed outer local is now alpha-renamed
+	# too — the emit_local_multi_decl* helpers bypassed block_scope_decl.
+	"minic/dos/examples/multi_decl_shadow_probe.c:minic/dos/tests/multi_decl_shadow_probe.golden.txt:small"
+	"minic/dos/examples/multi_decl_shadow_probe.c:minic/dos/tests/multi_decl_shadow_probe.golden.txt:medium"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:compact"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:large"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:huge"
