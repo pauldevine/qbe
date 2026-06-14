@@ -334,6 +334,32 @@ NEWLIBC_BM_TESTS=(
 	# diffs.  Bare-metal ONLY (the DOS host has no Victor font RAM).  Small
 	# (59563 B code, under the 64KB _TEXT ceiling); 30 s budget.
 	"font_ram_test:30:::"
+	# font_test (§7m): the verbose sibling of font_ram_test -- the full
+	# font-loading test program.  It does the same display_init() ->
+	# display_load_fonts() copy + 8192-byte byte-compare against victor_font[]
+	# (Test 6, the §7l coverage), but ALSO snapshots font RAM before/after the
+	# load (Tests 3/5), reports the font geometry (Tests 1/2), and dumps the
+	# glyph bit patterns for space/A/0 (Test 7).  Its UNIQUE codegen over
+	# font_ram_test is the glyph render loop -- `for (bit=9; bit>=0; bit--)
+	# putchar((word & (1U<<bit)) ? '#' : '.')` -- a VARIABLE left-shift by a
+	# loop counter (the §4r variable-shift-count area) reading uint16 far-
+	# pointer glyph rows, exercised bug-loud against the deterministic native
+	# font shapes.  Resolves through the SAME display_init -> bm_display_init
+	# alias §7l added (nothing new to link).  Fully deterministic (the "before
+	# load" snapshot reads font RAM at 0x0C00, which the bm_testhost preamble
+	# never touches -- bm_tty/bm_stdio init only -- so it is the MAME-reset
+	# state, byte-stable 00 00 00 00), so the golden is toolchain-stable and
+	# bug-loud: a broken load prints "FAIL"/mismatch counts, a corrupted glyph
+	# render diffs the bit patterns.  Bare-metal ONLY (no Victor font RAM on
+	# the DOS host).  Small (60299 B code, under the 64KB _TEXT ceiling); 95
+	# output lines at the §6f display-scroll rate (each printf mirrors to
+	# display+serial) need a 150-emulated-second budget.  font_layout_test
+	# (the CRTC glyph-pointer / 32-byte word-spacing sibling) is DECLINED: its
+	# only truly-unique codegen is the `1<<bit` render loop (shared with this
+	# test) plus trivial constant integer arithmetic (c+0x60, c*32) already
+	# exercised corpus-wide, and its ~230 output lines need a ~360 s budget --
+	# a poor trade for a standing gate.
+	"font_test:150:::"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 
