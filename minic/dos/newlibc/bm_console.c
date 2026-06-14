@@ -39,6 +39,89 @@ static void serial_write_control(uint8_t reg, uint8_t val) {
     nec_ctl_write(val);   /* write it */
 }
 
+/* --- newlibc raw-serial console API on channel A (console_putc/getc/...).
+ * bm_console_init enables channel-A RX (WR3=0xC1) already; these complete
+ * the polled RX path the upstream drivers/console.c exposes.  bm_shim.c
+ * aliases them to the unprefixed console_* names for serial_loopback_test,
+ * which drives them through a hardware TXD->RXD loopback on channel A.
+ * (Unreferenced -- so stripped by --gc-sections -- in every other build.) */
+void bm_console_putc(char c) {
+    uint16_t timeout;
+
+    if (c == '\n')
+        bm_console_putc('\r');      /* match upstream console_putc CRLF */
+    timeout = BM_TX_TIMEOUT;
+    while ((nec_status() & NEC7201_TX_BUF_EMPTY) == 0 && timeout != 0)
+        timeout--;
+    if (timeout != 0)
+        HW_WRITE_BYTE(INTEL_DEV_SEGMENT, NEC7201_DATA_A, (uint8_t)c);
+}
+
+int bm_console_rx_ready(void) {
+    return (nec_status() & NEC7201_RX_CHAR_AVAIL) != 0;
+}
+
+int bm_console_getc_nonblock(void) {
+    if ((nec_status() & NEC7201_RX_CHAR_AVAIL) == 0)
+        return -1;
+    return (int)HW_READ_BYTE(INTEL_DEV_SEGMENT, NEC7201_DATA_A);
+}
+
+int bm_console_getc(void) {
+    while ((nec_status() & NEC7201_RX_CHAR_AVAIL) == 0)
+        ;
+    return (int)HW_READ_BYTE(INTEL_DEV_SEGMENT, NEC7201_DATA_A);
+}
+
+#ifdef BM_SERIAL_LOOPBACK
+/* --- serial_loopback_test only: the test commandeers channel A as its
+ * TXD->RXD loopback data path (console_putc above), so the captured harness
+ * debug console (bm_putc, below) moves to channel B -- the same channel-B
+ * program bm_serial.c uses for RX, but polled TX (WR1=0, no interrupt). --- */
+static void nec_ctl_write_b(uint8_t val) {
+    HW_WRITE_BYTE(INTEL_DEV_SEGMENT, NEC7201_CTL_B, val);
+}
+
+static uint8_t nec_status_b(void) {
+    return HW_READ_BYTE(INTEL_DEV_SEGMENT, NEC7201_CTL_B);  /* RR0 */
+}
+
+static void serial_write_control_b(uint8_t reg, uint8_t val) {
+    nec_ctl_write_b(reg);
+    nec_ctl_write_b(val);
+}
+
+static void bm_console_b_init(void) {
+    uint8_t porta;
+    uint16_t divisor;
+    volatile int i;
+
+    /* Serial B clock source = internal (VIA2 port A bit 1 low). */
+    porta = HW_READ_BYTE(PHASE2_DEV_SEGMENT, VIA2_OFFSET + 1);
+    HW_WRITE_BYTE(PHASE2_DEV_SEGMENT, VIA2_OFFSET + 1,
+                  porta & (uint8_t)~VIA2_INT_EXT_B);
+
+    /* 8253 counter 1 = Serial B baud (mode 2, LSB+MSB). */
+    divisor = (uint16_t)(TIMER_CHANNEL_01_CLOCK
+                         / ((uint32_t)BM_BAUD_RATE * 16));
+    if (divisor < 1)
+        divisor = 1;
+    intel_write(TIMER_CONTROL, 0x74);   /* channel 1, LSB+MSB, mode 2 */
+    intel_write(TIMER_COUNTER_1, (uint8_t)(divisor & 0xFF));
+    intel_write(TIMER_COUNTER_1, (uint8_t)(divisor >> 8));
+
+    /* 7201 channel B: reset + the validated WR sequence, polled. */
+    nec_ctl_write_b(NEC7201_CMD_CHANNEL_RESET);
+    for (i = 0; i < 100; i++)
+        ;
+    serial_write_control_b(0, 0x00);
+    serial_write_control_b(4, 0x44);    /* x16 clock, 1 stop bit, no parity */
+    serial_write_control_b(3, 0xC1);    /* RX enable, 8 bits/char */
+    serial_write_control_b(5, 0xEA);    /* TX enable, 8 bits, RTS, DTR */
+    serial_write_control_b(1, 0x00);    /* polled: no interrupts */
+}
+#endif
+
 void bm_console_init(void) {
     uint8_t porta;
     uint16_t divisor;
@@ -68,6 +151,10 @@ void bm_console_init(void) {
     serial_write_control(3, 0xC1);      /* RX enable, 8 bits/char */
     serial_write_control(5, 0xEA);      /* TX enable, 8 bits, RTS, DTR */
     serial_write_control(1, 0x00);      /* polled: no interrupts */
+
+#ifdef BM_SERIAL_LOOPBACK
+    bm_console_b_init();                /* harness console moves to channel B */
+#endif
 }
 
 void bm_board_init(void) {
@@ -81,10 +168,18 @@ void bm_putc(char c) {
         bm_putc('\r');
 
     timeout = BM_TX_TIMEOUT;
+#ifdef BM_SERIAL_LOOPBACK
+    /* channel B: channel A is the test's TXD->RXD loopback (uncaptured). */
+    while ((nec_status_b() & NEC7201_TX_BUF_EMPTY) == 0 && timeout != 0)
+        timeout--;
+    if (timeout != 0)
+        HW_WRITE_BYTE(INTEL_DEV_SEGMENT, NEC7201_DATA_B, (uint8_t)c);
+#else
     while ((nec_status() & NEC7201_TX_BUF_EMPTY) == 0 && timeout != 0)
         timeout--;
     if (timeout != 0)
         HW_WRITE_BYTE(INTEL_DEV_SEGMENT, NEC7201_DATA_A, (uint8_t)c);
+#endif
 }
 
 void bm_puts(const char *s) {

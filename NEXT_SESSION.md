@@ -1,3 +1,65 @@
+# Next session (§7j — continue Phase 6 / open compiler tracks.  §7i [2026-06-14, this session] gated the UNMODIFIED upstream `serial_loopback_test` bare-metal through bm_testhost — the user picked the Phase-6 newlibc track.  **battery 38/38 → 39/39, test-dos UNCHANGED (bare-metal-only gate, like §6q/§6u–§6y), ZERO compiler/qbe/emit/minic changes.**  This is the **first gate of the newlibc raw-serial console API**: Test 1 drives `console_putc`/`console_getc_nonblock`/`console_rx_ready` on 7201 channel A; Test 2 drives `/dev/tty` write/read — both over a hardware TXD→RXD loopback, and both writing their PASS/FAIL to the DISPLAY (VRAM, uncaptured).  **Two NEW capabilities, both newlibc-support-glue only (NOT compiler):** (1) **channel-A polled RX** in `bm_console.c` — `bm_console_putc`/`bm_console_getc`/`_getc_nonblock`/`_rx_ready` (channel-A RX was already enabled by `bm_console_init`'s WR3=0xC1; this completes the polled path the upstream `drivers/console.c` exposes), aliased to the unprefixed `console_*` names in `bm_shim.c`, AND `tty_dev_*` re-routed there to MATCH UPSTREAM — upstream `/dev/tty` IS the raw serial debug console (`tty_dev_read=console_getc`, `tty_dev_write=console_putc`), DISTINCT from `/dev/console`'s cooked keyboard (`console_dev_*`); our default bare-metal port had lazily folded the two onto the cooked `bm_tty` (the bare machine's only interactive console), and serial_loopback_test is the first test to need them separated.  (2) **a MAME loopback harness mode** — channel A becomes `-rs232a loopback` (the test's TXD→RXD data path; the `loopback` device is NOT a bitbanger, so it cannot also capture), so the captured testhost debug console MOVES to channel B (`-rs232b null_modem -bitbanger`), and `bm_console.c` under `-DBM_SERIAL_LOOPBACK` routes `bm_putc` (the harness output: testhost preamble + the `printf` result line via bm_tty) to a polled channel-B TX it programs (counter-1 baud + the WR sequence `bm_serial.c` uses, polled WR1=0).  **All new behavior is `#ifdef BM_SERIAL_LOOPBACK`-gated** (defined ONLY for serial_loopback_test, via a per-test `EXTRA_CFLAGS` applied to every TU in `build-newlibc-baremetal.sh`) **plus additive** (the `bm_console_*` RX fns + a new `display_putc` alias are `--gc-sections`-stripped when unreferenced), so every other bm build is behavior-identical — re-verified `snprintf_test`/`stdin_test`/`stdio_bm`/`serial_bm` → all `[ok]`.  The golden is the testhost result line, so **`test returned 0` proves both subtests round-tripped all 8 bytes (5 in Test 1 + 3 in Test 2) through the channel-A loopback**.  **Bug-loud:** `return 0` requires the real loopback (a timeout → `failures++` → `returned 1`), and any non-loopback channel-A device both breaks the loopback AND — because two `null_modem`s collide on MAME's bitbanger numbering — loses the channel-B capture, so the gate fails LOUDLY (empty/wrong capture, never a spurious `returned 0`); without the channel-A RX code the build won't even link (`console_*` undefined).  **Plumbing:** `run-victor-baremetal.sh` `$V9K_SERIAL_LOOPBACK=1` (rs232a loopback + channel-B capture), `test-newlibc.sh` an optional 8th `:<loopback>` entry field (`lb`), golden `minic/dos/tests/serial_loopback_test.golden.txt`.  **SMALL** (61,171 B `_TEXT`, under the 64 KB ceiling; DGROUP _DATA+_BSS+STACK = 54,810 B); FIRST-RUN PASS on MAME, byte-identical across two runs, 30-s budget.  Newlibc bare-metal support glue (NOT compiler/qbe/emit/minic; MP does not link `bm_console.c`/`bm_shim.c`) → **no emit audit, no MP byte-compare**.  With the keyboard family (§6w/§6x/§6n/§6o/§6t), the PIC mask API (§6y), and now the serial loopback / raw-serial console (§7i) all gated, the only remaining ungated phase-3 test is `interrupt_test` (stays SKIPPED — §6v's `[90,110]` FAIL-window + raw iteration-count brittleness); the display-only/`hlt`-loop tests (memory/segment/simple_screen/font/font_ram/font_layout/minimal_irq) are NOT bm_testhost-shaped and already covered by hand-mirrored `bm_*` ports.  Next: the newlibc-under-far-DATA-models (compact/large) stdio story when a far-DATA consumer appears; OR pick from the carried compiler tracks — **Kw spill-slot sharing** (frame-size lever, no consumer pain); the **bounded aoa init/multi-declarator gap (§7e)** — brace-init `jmp_buf x[2]={…}` / multi-decl `jmp_buf a[2], b[2]` still ignore `g_td_arraydim`, no realistic consumer.  There is NO QBE backend bug currently open.)
+
+## §7i session notes (2026-06-14)
+
+### The test (first newlibc raw-serial console gate)
+- UNMODIFIED upstream `phase3_newlib/tests/serial_loopback_test.c`.  Test 1
+  (`console_putc`/`console_getc_nonblock`/`console_rx_ready`, pattern "Rx09!")
+  and Test 2 (`/dev/tty` `write`/`read`, pattern "vfs"), both over a HARDWARE
+  TXD→RXD loopback on 7201 channel A.  Its own PASS/FAIL text goes to the
+  DISPLAY (`display_puts`/`display_putc` → VRAM, uncaptured); `main` returns 1
+  on any failure, 0 only when both subtests round-trip every byte.
+
+### Why this needed real new plumbing (three obstacles)
+- **Channel-A RX did not exist.**  `bm_console.c` was polled-TX-only; there
+  were no `console_*` aliases.  Added `bm_console_getc`/`_getc_nonblock`/
+  `_rx_ready` + `bm_console_putc` (RX was already enabled by WR3=0xC1).
+- **`/dev/tty` was mis-routed.**  Upstream `/dev/tty` (`tty_dev_*`) is the RAW
+  serial debug console (`console_getc`/`console_putc`); `/dev/console`
+  (`console_dev_*`) is the cooked keyboard.  Our `bm_shim.c` had lazily aliased
+  `tty_dev_*` → `console_dev_*` (the cooked `bm_tty` keyboard).  Under
+  `-DBM_SERIAL_LOOPBACK`, `tty_dev_*` now routes to the raw channel-A path,
+  matching upstream — Test 2's reason for existing.
+- **Capture collided with the loopback.**  The harness captures channel A
+  (`-rs232a null_modem -bitbanger`).  The loopback needs `-rs232a loopback`
+  (TXD→RXD, NOT a bitbanger → cannot capture), so the testhost preamble +
+  result line had to MOVE to channel B.  `bm_console.c` under the flag programs
+  channel B for polled TX and routes `bm_putc` there; the harness captures
+  `-rs232b null_modem -bitbanger`.  Channel A then carries ONLY the test's
+  loopback bytes (display output is VRAM, never serial — no pollution).
+
+### The fix (all `#ifdef BM_SERIAL_LOOPBACK`-gated + additive)
+- `bm_console.c`: channel-A `console_*` RX/TX (always compiled, gc-stripped
+  when unreferenced); under the flag, `bm_putc` → channel B + `bm_console_b_init`.
+  Non-loopback `bm_putc` branch left textually identical.
+- `bm_shim.c`: under the flag, raw-serial `tty_dev_*` + the `console_*` aliases;
+  unconditional `display_putc` alias; `#include "bm_console.h"`.
+- `build-newlibc-baremetal.sh`: per-test `EXTRA_CFLAGS` (only
+  serial_loopback_test → `-DBM_SERIAL_LOOPBACK`), threaded into every
+  `compile_unit` with the script's `set -u`-safe array idiom.
+- `run-victor-baremetal.sh`: `$V9K_SERIAL_LOOPBACK=1` → `-rs232a loopback
+  -rs232b null_modem -bitbanger CAP` (single bitbanger ⇒ binds to channel B).
+- `test-newlibc.sh`: 8th `:<loopback>` field (`lb`) → `V9K_SERIAL_LOOPBACK=1`.
+
+### Gate (bug-loud) + checks
+- New entry `serial_loopback_test:30::::::lb`; golden = the 4 testhost lines
+  ending `bm_testhost: test returned 0`.  FIRST-RUN PASS, deterministic across
+  two runs; `tools/test-newlibc.sh serial_loopback_test` → `[ok]`.
+- Bug-loud confirmed: with channel A as a plain `null_modem` (no echo) the test
+  cannot reach `returned 0` and the channel-B capture is lost (loud failure).
+- SMALL: `_TEXT` 61,171 B (< 64 KB), DGROUP 54,810 B.  Battery **38 → 39**.
+- Newlibc support glue (NOT compiler) → NO emit audit, NO MP byte-compare;
+  bare-metal-only → test-dos UNCHANGED.  `make check` unaffected (no QBE change).
+
+### ⇒ Next session (§7j): carried tracks (no QBE bug currently open)
+- Kw spill-slot sharing (frame-size lever, no consumer pain).
+- Bounded aoa gap (§7e): brace-init / multi-declarator array-of-array-typedef
+  still ignore `g_td_arraydim`; no realistic consumer.
+- newlibc-under-far-DATA-models (compact/large) stdio when a far-DATA consumer
+  appears; `interrupt_test` stays SKIPPED (§6v).
+
+---
+
 # Next session (§7i — continue Phase 6 / open compiler tracks.  §7h [2026-06-14, this session] closed the carried **far static-DATA-ptr relocation gap (§1g)** — the user picked it.  **The gap:** under a far-data model (compact/large/huge) a static/file-scope data initializer holding a symbol address — `int *pcell = &cell;`, `int *mid = &arr[2];`, `char **env_like = words;` (the §6a `cival_eval`/`emit_global_sym_init` scalar-symbol-address path) — is a **4-byte far pointer** (seg:off), but `tools/asm_to_omf.py` emitted it as `dd _sym` (a single 32-bit OMF loc-9 OFFSET fixup) so the SEGMENT word was left 0 → a wrong-segment far deref at runtime.  The `.long _sym` → `dw _sym / dw seg _sym` split that fixes this (FIX 3, far-pointer DATA reloc) was gated behind `split_sym_long = far_data or model == 'medium'`, and `far_data` itself is `far_static_data and model in (compact/large/huge)` — i.e. it only fired when the build opted into `--far-static-data` (MicroPython's `MP_SPLIT_STACK` layout, which routes statics into their own far `<BASE>_DATA` segment).  A **default** compact/large/huge build (statics in DGROUP, `build-example.sh` without `QBE_FAR_STATIC_DATA=1` — which is how the gate builds every probe) got `far_data=False` → `split_sym_long=False` → the buggy offset-only `dd _sym`.  **Root insight:** the `.long _sym` split is about whether DATA POINTERS ARE FAR, which is true for every far-data model regardless of where the statics physically live — it is INDEPENDENT of the `--far-static-data` section/class ROUTING that `far_data` controls.  With `--far-static-data` the far pointer's `seg _sym` resolves into `<BASE>_DATA`; without it, into DGROUP; either way the segment word must be emitted and relocated.  **The fix (one line, `tools/asm_to_omf.py`):** `split_sym_long = model in ('compact', 'large', 'huge', 'medium')` — fires for ALL far-data models plus medium (medium stays for its far-CODE function-pointer initializers, the §6k case).  `far_data` (still `far_static_data and …`) is left untouched, since it ALSO drives the `data_seg`/`bss_seg`/`*_cls` section routing further down.  **Byte-identical for the MP corpus BY CONSTRUCTION:** MP compact uses `--far-static-data` → `far_data=True` → `split_sym_long` was ALREADY `True` there, so the widening only newly affects DEFAULT (non-`--far-static-data`) compact/large/huge builds — confirmed by **MP compact rebuilding to a body of EXACTLY 731,088 bytes, byte-identical to the documented golden** (image 751,664, header 20,576 + body 731,088).  **Verified bug-loud:** the `static_sym_init_probe` under default compact PRE-fix printed raw offsets `4194 / 4192` plus an `Illegal byte sequence` from the `%s` deref of the wrong-segment `env_like[0]` (a near-perfect "loud" failure — corrupted output AND a garbled string read); POST-fix the `.omf.asm` emits `dw _words+0 / dw seg _words`, `dw _cell+0 / dw seg _cell`, `dw _arr+4 / dw seg _arr`, and the probe prints byte-exact `7 / 9 / w0` on compact, large, AND huge in DOSBox, identical to the existing model-independent golden (`sizeof(int)==2` everywhere).  **Gated** by adding `:compact`, `:large`, `:huge` to the existing `static_sym_init_probe` entry in `tools/test-dos.sh` (it was small+medium only — the near-data models, which need no segment word and are unaffected); the gate comment was rewritten from "the §1g gap is REAL" to record the fix.  **test-dos 314/314 → 317/317** (the three new far-data entries pass; the batched DOS pipeline reports `317/317 ok`, zero FAIL, every prior entry unchanged; small+medium re-verified `[ok]`).  Toolchain checks: `make check` green; **MP compact body 731,088 bytes byte-identical** → codegen unchanged → no Victor run; and since `asm_to_omf.py` is a TOOLCHAIN script (NOT `i8086/emit.c` or middle-end), the emit-bracket audit was NOT required.  The "far static-DATA-ptr reloc (§1g)" open track is now CLOSED — and it removes the last "medium-only" caveat from probes that take a static address: scalar symbol-address initializers now relocate correctly in every model, which newlibc-style tables-of-pointers will want under far-data.  Next: pick a carried track — **Kw spill-slot sharing** (frame-size lever, no consumer pain); the **bounded aoa init/multi-declarator gap (§7e)** — brace-init `jmp_buf x[2]={…}` / multi-decl `jmp_buf a[2], b[2]` still ignore `g_td_arraydim`, no realistic consumer; OR resume **Phase-6 newlibc gating**: `serial_loopback_test` remains the only tractable bm_testhost candidate but needs real new harness plumbing (channel-A polled RX + an rs232a TXD→RXD MAME loopback colliding with the rs232a `null_modem` capture → move the gate's serial capture to channel B, plus RX-timing determinism on the 5 MHz 8088); `interrupt_test` stays SKIPPED per §6v.  There is NO QBE backend bug currently open — the carried tracks are all minic/backend feature gaps or Phase-6 harness work.)
 
 ## §7h session notes (2026-06-14)
@@ -57,60 +119,4 @@
 
 ---
 
-# Next session (§7h — continue Phase 6 / open compiler tracks.  §7g [2026-06-14, this session] closed the carried **huge `_qbe_huge_add` ≥0x8000 variable-index gap (§4i)** — the user picked it.  **The surprise: the libstub helper `_qbe_huge_add` was CORRECT all along; the bug was the CALLER.**  minic's Scale path (`prom()`, minic.y ~2209, the shared pointer-arithmetic index-scaling code) UNCONDITIONALLY `sext`s a sub-`long` index before the `=l mul <sz>` that scales it by the element size — `sext()` always emits `extsw` regardless of source signedness (its signedness-aware sibling is `widen_int_to_long()`, which picks `extuw`/`extsw`).  So an UNSIGNED `size_t` byte offset whose 16-bit value is ≥0x8000 (the canonical case: MicroPython `gc_alloc`'s `pool_start + start_block*BYTES_PER_BLOCK` on a heap >32 KB, where `start_block≥2048` → offset ≥32768) was sign-extended to a NEGATIVE 32-bit value, then handed to `_qbe_huge_add(ptr, offset)` which faithfully added it to the 20-bit linear address — landing BELOW the object.  **Why compact/large never saw this (and why §4i's fix didn't reach it):** under compact/large `far_ptr ± idx` routes through the dedicated offset-only `addfo`/`subfo` ops, which read ONLY arg1's low 16 bits, where `extsw` and `extuw` agree bit-for-bit — so the sign-extension is harmless there and §4i deliberately left the Scale path's `sext` untouched to keep MP byte-identical.  Under HUGE, objects can exceed 64 KB so a genuine segment carry is required: minic routes the SAME indexing through `huge_ptr_binop` → `_qbe_huge_add`, which uses the FULL 32-bit scaled value — so the sign now matters, and the gap that §4i flagged as "pre-existing, in the helper" was actually in the index typing one level up.  **The fix (one site, minic.y Scale path):** under `memmodel == MHuge` the non-`Con` index is widened with `widen_int_to_long(r)` (source-signedness: `extuw` for unsigned, `extsw` for signed) instead of the unconditional `sext(r)`; compact/large/near keep the uniform `sext` (the `else` branch), so the change is gated to huge and the MP-compact corpus is byte-identical BY CONSTRUCTION.  **Verified:** the unfixed huge build printed `direct=0` for b≥2048 + `FAIL`; the SSA showed `%t157 =l extsw %t156` (off = an unsigned `size_t` `loadw`) feeding `=l mul 1, …` then `$qbe_huge_add`.  Post-fix that line is `%t157 =l extuw %t156` (the signed `int i` blocks-index correctly STAYS `extsw`), and the huge build prints `direct=0x41+i` for every block + `ALL OK`, byte-exact vs the existing `gc_bigheap_probe.golden.txt` (the probe output is model-independent, `sizeof(int)==2` everywhere).  **Gated bug-loud** by adding the `:huge` model to the existing `gc_bigheap_probe` entry in `tools/test-dos.sh` (it was compact+large only; the probe header + the test-dos comment block were updated to record the huge gate and that the helper was correct).  **test-dos 313/313 → 314/314** (the new `huge runtime (gc_bigheap_probe)` entry `[ok]`, every prior entry unchanged; compact+large re-verified byte-exact vs golden).  Toolchain checks: `make check` green; grammar conflicts UNCHANGED (pure C inside `prom()`, no productions); **MP compact rebuilt to a body of EXACTLY 731,088 bytes — byte-identical to the documented golden** (image 751,664, header 20,576 + body 731,088), confirming compact codegen did not shift → no Victor run; and since this is a `minic.y` frontend change (NOT i8086/emit.c) the emit-bracket audit was NOT required.  The "huge `_qbe_huge_add` ≥0x8000 variable-index gap (§4i)" open track is now CLOSED.  Next: pick a carried track — far static-DATA-ptr reloc (§1g); Kw spill-slot sharing (frame-size lever, no consumer pain); the bounded aoa init/multi-declarator gap (§7e — brace-init `jmp_buf x[2]={…}` / multi-decl `jmp_buf a[2], b[2]` still ignore `g_td_arraydim`, no realistic consumer) — OR resume Phase-6 newlibc gating: `serial_loopback_test` remains the only tractable bm_testhost candidate but needs real new harness plumbing (channel-A polled RX + an rs232a TXD→RXD MAME loopback colliding with the rs232a `null_modem` capture → move the gate's serial capture to channel B, plus RX-timing determinism on the 5 MHz 8088); `interrupt_test` stays SKIPPED per §6v.  There is NO QBE backend bug currently open — the carried tracks are all minic/backend feature gaps or Phase-6 harness work.)
-
-## §7g session notes (2026-06-14)
-
-### The bug (carried open track 1, §4i — the huge half of the far-ptr unsigned-index family)
-- Under `--model=huge`, `gc_bigheap_probe` printed `direct=0` for every block
-  with byte offset ≥0x8000 (b≥2048) + `FAIL`, while `rt` (ptr−ptr DIFFERENCE,
-  via `_qbe_huge_cmp`) and `vp` (ptr COMPARE) round-tripped correctly.  So the
-  failure was isolated to the `pool[off]` indexing path → `huge_ptr_binop` →
-  `_qbe_huge_add`.
-- **The helper was NOT the bug.**  `_qbe_huge_add` (libstub.asm) correctly
-  computes `linear = seg<<4 + off + offset`, renormalises, returns seg:off.
-  The bug was the OFFSET it was handed.
-- **Root cause (minic.y Scale path, `prom()` ~2209):** scaling a non-`Con`
-  index for a far (`l`) pointer called `sext(r)` UNCONDITIONALLY before
-  `=l mul <sz>`.  `sext()` always emits `extsw` (its doc even contrasts the
-  signedness-aware `widen_int_to_long()`).  An unsigned `size_t` offset ≥0x8000
-  → sign-extended NEGATIVE 32-bit → `_qbe_huge_add(ptr, <negative>)` →
-  addresses below the object.  Smoking-gun SSA: `%t157 =l extsw %t156` where
-  `%t156 =w loadw %off` and `off` is `size_t`.
-
-### Why compact/large were immune (and §4i never reached this)
-- compact/large lower `far_ptr ± idx` to the offset-only `addfo`/`subfo` ops,
-  which read ONLY arg1's low 16 bits — and `extsw`/`extuw` agree on the low 16
-  bits.  So §4i deliberately left the Scale `sext` alone to keep MP
-  byte-identical; the sign only matters under huge, where the FULL 32-bit
-  scaled value is added to the 20-bit linear address via `_qbe_huge_add`.
-
-### The fix (one site, gated to huge)
-- In the Scale path, when `memmodel == MHuge`, widen the index with
-  `widen_int_to_long(r)` (source-signedness: `extuw` unsigned, `extsw` signed)
-  instead of `sext(r)`.  compact/large/near keep the `else sext(r)` branch.
-- Gated to huge ⇒ compact (MP's model) is the unchanged branch ⇒ MP-compact
-  byte-identical by construction.
-
-### Gate (bug-loud) + toolchain checks
-- Added `:huge` to the existing `gc_bigheap_probe` entry in `tools/test-dos.sh`
-  (was compact+large).  Bug-loud verified: pre-fix huge → `direct=0`/`FAIL`;
-  post-fix → `direct=0x41+i` + `ALL OK`, byte-exact vs the (model-independent)
-  golden on huge, AND compact+large re-verified byte-exact.
-- **test-dos 313 → 314.**  `make check` green.  Grammar conflicts UNCHANGED
-  (pure C in `prom()`, no productions).
-- minic.y frontend (NOT emit.c) → NO emit audit.  MP compact body EXACTLY
-  **731,088 bytes**, byte-identical → codegen unchanged, NO Victor run.
-
-### ⇒ Next session (§7h): carried tracks (no QBE bug currently open)
-- far static-DATA-ptr reloc (§1g).
-- Kw spill-slot sharing (frame-size lever, no consumer pain).
-- Bounded aoa gap (§7e): brace-init / multi-declarator array-of-array-typedef
-  still ignore `g_td_arraydim`; no realistic consumer.
-- Phase-6 newlibc `serial_loopback_test` (needs NEW harness plumbing —
-  channel-A polled RX + rs232a TXD→RXD loopback, move gate capture to channel
-  B, RX-timing determinism); `interrupt_test` stays SKIPPED (§6v).
-
----
-
-Older session headers (§7g and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).
+Older session headers (§7h and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).

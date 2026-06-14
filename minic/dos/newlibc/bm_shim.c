@@ -39,6 +39,7 @@
 #include "bm_display.h"
 #include "bm_keyboard.h"
 #include "bm_pic.h"
+#include "bm_console.h"
 
 /* ---- newlibc syscall layer (libgloss/syscalls.c) ---- */
 extern int _open(const char *path, int flags, int mode);
@@ -80,6 +81,53 @@ ssize_t console_dev_read(void *buf, size_t count)
 	return (ssize_t)bm_tty_read((char *)buf, (unsigned int)count);
 }
 
+/* /dev/tty is the upstream "serial debug console" (drivers/console.c:
+ * tty_dev_write=console_putc, tty_dev_read=console_getc on 7201 channel A),
+ * DISTINCT from /dev/console's cooked keyboard.  Our default bare-metal port
+ * folds the two onto the cooked bm_tty (the bare machine's only interactive
+ * console); serial_loopback_test is the first test to need them separated, so
+ * under -DBM_SERIAL_LOOPBACK route /dev/tty to the raw channel-A serial path
+ * (looped TXD->RXD) exactly as upstream does. */
+#ifdef BM_SERIAL_LOOPBACK
+ssize_t tty_dev_write(const void *buf, size_t count)
+{
+	const char *cbuf = (const char *)buf;
+	size_t i;
+
+	if (!buf)
+		return 0;
+	for (i = 0; i < count; i++)
+		bm_console_putc(cbuf[i]);
+	return (ssize_t)count;
+}
+
+ssize_t tty_dev_read(void *buf, size_t count)
+{
+	char *cbuf = (char *)buf;
+	size_t i;
+
+	if (!buf || count == 0)
+		return 0;
+	for (i = 0; i < count; i++) {
+		int c = bm_console_getc();
+		if (c < 0)
+			break;
+		cbuf[i] = (char)c;
+		if (c == '\n') {
+			i++;
+			break;
+		}
+	}
+	return (ssize_t)i;
+}
+
+/* The unprefixed newlibc raw-serial console API serial_loopback_test calls
+ * directly (channel A, the loopback data path). */
+void console_putc(char c)         { bm_console_putc(c); }
+int  console_getc(void)           { return bm_console_getc(); }
+int  console_getc_nonblock(void)  { return bm_console_getc_nonblock(); }
+int  console_rx_ready(void)       { return bm_console_rx_ready(); }
+#else
 ssize_t tty_dev_write(const void *buf, size_t count)
 {
 	return console_dev_write(buf, count);
@@ -89,6 +137,7 @@ ssize_t tty_dev_read(void *buf, size_t count)
 {
 	return console_dev_read(buf, count);
 }
+#endif
 
 /* ---- timer (drivers/timer.h surface) ----
  * bm_timer: 8253 channel 2 at 100 Hz through the compiler-emitted ISR. */
@@ -113,6 +162,11 @@ void timer_delay_ms(uint32_t ms)
 void display_puts(const char *str)
 {
 	bm_display_puts(str);
+}
+
+void display_putc(char c)
+{
+	bm_display_putc(c);
 }
 
 void display_clear(void)

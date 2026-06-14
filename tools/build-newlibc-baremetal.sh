@@ -91,6 +91,19 @@ esac
 base="$(basename "$SRC" .c)"
 OUT_DIR="$QBE_DIR/build/newlibc-baremetal/$base"
 
+# Per-test extra preprocessor defines, applied to EVERY TU.  Only the bare-
+# metal support TUs react (via #ifdef); the program and the newlibc TUs ignore
+# them.  serial_loopback_test (§7i) commandeers 7201 channel A as a hardware
+# TXD->RXD loopback for the newlibc console_* API it exercises, so bm_console.c
+# moves the captured harness debug console (bm_putc) to channel B and bm_shim.c
+# routes /dev/tty + the unprefixed console_* names to the raw channel-A serial
+# path; tools/run-victor-baremetal.sh's V9K_SERIAL_LOOPBACK mode supplies the
+# matching MAME wiring (-rs232a loopback + channel-B capture).
+EXTRA_CFLAGS=()
+case "$base" in
+	serial_loopback_test) EXTRA_CFLAGS+=(-DBM_SERIAL_LOOPBACK) ;;
+esac
+
 # The bare-metal support TUs linked into every program.
 SUPPORT_TUS=(
 	"$NLC_DIR/bm_crt0.c"
@@ -217,15 +230,18 @@ fail() { echo "$0: $1 (see $ERR)" >&2; tail -5 "$ERR" >&2; exit 1; }
 # main() owns bring-up and calls the test as newlibc_test_main().
 if [ "$TESTHOST" = 1 ]; then
 	compile_unit "$SRC" "$base" -Dmain=newlibc_test_main \
+		${EXTRA_CFLAGS[@]+"${EXTRA_CFLAGS[@]}"} \
 		|| fail "compile failed: $base"
 else
-	compile_unit "$SRC" "$base" || fail "compile failed: $base"
+	compile_unit "$SRC" "$base" ${EXTRA_CFLAGS[@]+"${EXTRA_CFLAGS[@]}"} \
+		|| fail "compile failed: $base"
 fi
 
 OBJ_FILES=("$OUT_DIR/$base.obj")
 for tu in "${SUPPORT_TUS[@]}"; do
 	tu_base="$(basename "$tu" .c)"
-	compile_unit "$tu" "$tu_base" || fail "compile failed: $tu_base"
+	compile_unit "$tu" "$tu_base" ${EXTRA_CFLAGS[@]+"${EXTRA_CFLAGS[@]}"} \
+		|| fail "compile failed: $tu_base"
 	OBJ_FILES+=("$OUT_DIR/$tu_base.obj")
 done
 

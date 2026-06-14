@@ -51,11 +51,19 @@ LOAD_ADDR="${VICTOR_LOAD_ADDR:-0x3000}"
 #                       file first, run-victor-sasi.sh-style, so the
 #                       base image never mutates (WRITE(6) tests are
 #                       safe).  Skips (exit 77) if the image is missing.
+#   $V9K_SERIAL_LOOPBACK=1  put a hardware TXD->RXD loopback on 7201 serial
+#                       port A (-rs232a loopback) for serial_loopback_test,
+#                       and capture the program's debug console on port B
+#                       instead (-rs232b null_modem -bitbanger).  The
+#                       loopback build (build-newlibc-baremetal.sh
+#                       -DBM_SERIAL_LOOPBACK) routes bm_putc to channel B to
+#                       match.  Mutually exclusive with V9K_SERIAL_IN.
 KEYPOST="${V9K_KEYPOST:-}"
 KEYPOST_DELAY="${V9K_KEYPOST_DELAY:-3}"
 SERIAL_IN="${V9K_SERIAL_IN:-}"
 SERIAL_IN_DELAY="${V9K_SERIAL_IN_DELAY:-3}"
 HARD_DISK="${V9K_HARD_DISK:-}"
+SERIAL_LOOPBACK="${V9K_SERIAL_LOOPBACK:-0}"
 SHOW="${V9K_SHOW:-0}"
 
 if [ -z "$BIN" ] || [ ! -f "$BIN" ]; then
@@ -227,7 +235,13 @@ EOF
 # binds to -bitbanger1; port B starts detached and Lua attaches the input
 # file at +serial_in_delay.
 RS232_ARGS=(-rs232a null_modem -bitbanger "$CAP")
-if [ -n "$SERIAL_IN_ABS" ]; then
+if [ "$SERIAL_LOOPBACK" = "1" ]; then
+	# Port A is a hardware TXD->RXD loopback (serial_loopback_test's newlibc
+	# console_* data path -- looped on-chip-equivalent, NOT captured).  The
+	# program's debug console moves to port B (-DBM_SERIAL_LOOPBACK), so the
+	# only bitbanger image is rs232b's: it binds to plain -bitbanger.
+	RS232_ARGS=(-rs232a loopback -rs232b null_modem -bitbanger "$CAP")
+elif [ -n "$SERIAL_IN_ABS" ]; then
 	RS232_ARGS=(-rs232a null_modem -rs232b null_modem -bitbanger1 "$CAP")
 fi
 DISK_ARGS=()

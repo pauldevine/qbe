@@ -302,6 +302,17 @@ NEWLIBC_BM_TESTS=(
 	# the DOS host has no live 8253/8259.  Small (60121 B code, under the
 	# 64KB _TEXT ceiling); ~60 lines + a 1 s timer wait -> 90 s budget.
 	"pic_test:90:::"
+	# serial_loopback_test (§7i): the newlibc raw-serial console API
+	# (console_putc/getc on 7201 channel A) and /dev/tty (the upstream
+	# "serial debug console" = tty_dev_*) over a hardware TXD->RXD loopback.
+	# The 8th field "lb" makes run-victor-baremetal.sh wire -rs232a loopback
+	# and capture the program's debug console on port B (the build defines
+	# BM_SERIAL_LOOPBACK, moving bm_putc to channel B).  The test writes its
+	# own PASS/FAIL to the display (VRAM, uncaptured); the golden is the
+	# testhost result line, so `test returned 0` proves both subtests passed.
+	# Bare-metal ONLY (no serial loopback on the DOS host).  Small; the
+	# loopback exchange is a few bytes at 9600 baud -> 30 s budget.
+	"serial_loopback_test:30::::::lb"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 
@@ -337,6 +348,7 @@ run_bm_test() {
 	disk="$5"
 	model="${6:-small}"
 	stack="${7:-}"   # empty -> build script's default DGROUP stack
+	loopback="${8:-}"   # "lb" -> serial-A TXD->RXD loopback (§7i)
 
 	if [ ! -d "$NL" ]; then
 		echo "newlibc tree not found: $NL"
@@ -357,9 +369,11 @@ run_bm_test() {
 	if [ "$disk" = "hd" ]; then
 		hard_disk="$HARD_DISK_IMAGE"
 	fi
+	loopback_flag=""
+	[ "$loopback" = "lb" ] && loopback_flag=1
 
 	out="$(V9K_KEYPOST="$keypost" V9K_SERIAL_IN="$serial_in" \
-		V9K_HARD_DISK="$hard_disk" \
+		V9K_HARD_DISK="$hard_disk" V9K_SERIAL_LOOPBACK="$loopback_flag" \
 		"$QBE_DIR/tools/run-victor-baremetal.sh" \
 		"$out_dir/$name.bin" "$secs")" || return $?
 	echo "$out" | diff -u "$QBE_DIR/minic/dos/tests/$name.golden.txt" - >&2
@@ -367,11 +381,13 @@ run_bm_test() {
 
 matched=0
 for entry in "${NEWLIBC_BM_TESTS[@]}"; do
-	# <name>:<secs>:<keypost>:<serial>:<disk>:<model>:<stack> — the last
-	# two are optional (model default small, stack default per build
-	# script).  No field contains a colon, so IFS splitting is exact and
-	# preserves empty middle fields (the `::` keypost/serial gaps).
-	IFS=: read -r name secs keypost serial_bytes disk model stack <<EOF
+	# <name>:<secs>:<keypost>:<serial>:<disk>:<model>:<stack>:<loopback> —
+	# the trailing fields are optional (model default small, stack default
+	# per build script, loopback off).  "lb" in the 8th field puts a
+	# serial-A TXD->RXD loopback on port A (§7i serial_loopback_test).  No
+	# field contains a colon, so IFS splitting is exact and preserves empty
+	# middle fields (the `::` keypost/serial gaps).
+	IFS=: read -r name secs keypost serial_bytes disk model stack loopback <<EOF
 $entry
 EOF
 	[ -n "$model" ] || model="small"
@@ -384,7 +400,7 @@ EOF
 	fi
 	matched=$((matched + 1))
 	run "newlibc bare-metal ($name)" \
-		run_bm_test "$name" "$secs" "$keypost" "$serial_bytes" "$disk" "$model" "$stack"
+		run_bm_test "$name" "$secs" "$keypost" "$serial_bytes" "$disk" "$model" "$stack" "$loopback"
 done
 
 if [ "${#ONLY[@]}" -gt 0 ] && [ "$matched" -ne "${#ONLY[@]}" ]; then
