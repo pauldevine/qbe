@@ -2359,6 +2359,72 @@ _far_longjmp:
 """
 
 
+# Near-code (tiny/small) setjmp/longjmp.  The medium SETJMP_EXE above is
+# structurally FAR (it saves the 4-byte CS:IP return address and longjmp
+# exits via retf), and it CANNOT be produced by unfar_epilogue(): that
+# transform drops 2 from every `[bp+N>=6]`, which would silently corrupt the
+# jmp_buf INTERNAL offsets ([bx+10]/[bx+12]) along with the frame offsets.
+# So a near setjmp is hand-written here, mirroring SETJMP_EXE with the CS
+# word removed.
+#
+# Near-call frame at setjmp entry (after `push bp; mov bp,sp`):
+#   [bp+0] saved BP   [bp+2] ret IP   [bp+4] env
+# A near `call` pushes only a 2-byte return IP, so env (the first arg, in a
+# caller-reserved slot the ABI never cleans) sits at [bp+4] — one word lower
+# than the far form's [bp+6].  The caller's resume SP after a near `ret` is
+# therefore `lea [bp+4]`.
+#
+# jmp_buf layout (6 words; the C jmp_buf is int[8] = 16 B, so [12]/[14] spare):
+#   [0] caller BP   [2] resume SP (=bp+4)   [4] SI   [6] DI
+#   [8] caller BX   [10] ret IP
+# No CS word — a near return restores IP only.  Near-data (DS==SS) reaches a
+# stack-allocated env via DS:BX, so no ES is involved.
+NEAR_SETJMP_EXE = """
+
+segment _TEXT
+
+global _setjmp
+_setjmp:
+    push bp
+    mov bp, sp
+    mov dx, bx                   ; dx = caller's BX (scratch-save before clobber)
+    mov bx, [bp+4]               ; bx = env (near ptr)
+    mov ax, [bp+0]               ; caller BP
+    mov [bx+0], ax
+    lea ax, [bp+4]               ; resume SP (caller SP after the near ret)
+    mov [bx+2], ax
+    mov [bx+4], si
+    mov [bx+6], di
+    mov [bx+8], dx               ; caller BX
+    mov ax, [bp+2]               ; ret IP
+    mov [bx+10], ax
+    xor ax, ax                   ; setjmp returns 0 on the direct call
+    mov bx, dx                   ; restore caller's BX (callee-saved; we
+                                 ; clobbered it as the env pointer above)
+    pop bp
+    ret
+
+global _longjmp
+_longjmp:
+    push bp
+    mov bp, sp
+    mov bx, [bp+4]               ; bx = env (kept live until the final ret)
+    mov ax, [bp+6]               ; val
+    test ax, ax
+    jnz .nz
+    mov ax, 1                    ; longjmp(env,0) must surface as 1
+.nz:
+    mov si, [bx+4]               ; restore SI
+    mov di, [bx+6]               ; restore DI
+    mov dx, [bx+10]              ; ret IP
+    mov sp, [bx+2]               ; restore caller SP (SS==DS; offset only)
+    push dx                      ; IP pushed below restored SP, reclaimed by ret
+    mov bp, [bx+0]               ; restore caller BP
+    mov bx, [bx+8]               ; restore caller BX (final use of env ptr)
+    ret                          ; near-jump to ret IP with AX = val
+"""
+
+
 def far_data_model(model):
     """Compact/large/huge models use 4-byte data pointers; medium does not."""
     return model in ('compact', 'large', 'huge')
@@ -2434,12 +2500,14 @@ def build_epilogue(model, no_stdio=False):
         # call it (unreachable under near-code — minic's far_stdlib
         # mangling is off — but nasm needs the symbol defined).
         # FAR_DOSIO/FAR_STDIO/FAR_SETJMP are likewise unreachable and
-        # standalone, so they are dropped.  SETJMP_EXE is dropped too:
-        # its jmp_buf layout is structurally far (saves the 4-byte CS:IP
-        # return, longjmp exits via retf) — a near setjmp needs its own
-        # implementation; no small-model consumer today.
+        # standalone, so they are dropped.  SETJMP_EXE is dropped too: its
+        # jmp_buf layout is structurally far (saves the 4-byte CS:IP return,
+        # longjmp exits via retf) and unfar_epilogue() would corrupt its
+        # jmp_buf internal [bx+N] offsets — the near form is the hand-written
+        # NEAR_SETJMP_EXE (already authored in near ABI / segment _TEXT, so
+        # appended raw, NOT through unfar_epilogue).
         return ''.join(unfar_epilogue(p) for p in
-                       [MALLOC_EXE, FILEIO_EXE, FAR_SPRINTF_EXE])
+                       [MALLOC_EXE, FILEIO_EXE, FAR_SPRINTF_EXE]) + NEAR_SETJMP_EXE
     parts = [MALLOC_EXE, FILEIO_EXE, FAR_SPRINTF_EXE, FAR_DOSIO_EXE, SETJMP_EXE]
     if far_data_model(model):
         parts.append(FAR_STDIO_EXE)

@@ -3,7 +3,7 @@
 **Project:** C11/C17 + GNU-extensions C Compiler for 8086 DOS using QBE Backend
 **Standard:** C11 feature set (`_Static_assert`, `_Generic`, `_Alignof`/`_Alignas`, compound literals, designated initializers, anonymous struct/union) + GNU extensions (`__attribute__`, inline `__asm__`, `__far` pointers).  Equivalently **C17-level** since C17 added no new language features over C11.  **No C23 language features.**  C only — no C++.
 **Real target hardware:** Victor 9000 / Sirius 1 (~896 KB RAM) — NOT the IBM-PC 640 KB ceiling.  DOSBox is the fast loop for images that fit; MAME victor9k + SASI disk for the real thing.
-**Last Updated:** 2026-06-13 (§6z)
+**Last Updated:** 2026-06-13 (§7a)
 
 ---
 
@@ -30,7 +30,7 @@ Compile **`~/projects/newlibc`** — a much-progressed Victor 9000 C library + d
 1. huge `_qbe_huge_add` ≥0x8000 variable-index gap (§4i).
 2. `jmp_buf bufs[6]` cross-frame longjmp (§4v) — unreduced; reduce first.
 3. ~~minic static-init float const-expr folding~~ — CLOSED/CORRECTED (§6z): folding was never broken; the real bug was missing `CONST`/`vol_qual` `TFLOAT`/`TDOUBLE` grammar productions (`const float`/`volatile double` etc. were parse errors).  Fixed + gated (`const_float_init_probe`); also unblocks MICROPY_PY_MATH_CONSTANTS (MP parked, so not enabled).
-4. Small-model setjmp/longjmp (near env) — only if a small-model consumer needs it (newlibc may).
+4. ~~Small-model setjmp/longjmp (near env)~~ — CLOSED (§7a): `NEAR_SETJMP_EXE` in `libstub_to_exe.py` (near `_setjmp`/`_longjmp`, 6-word jmp_buf, no CS word, near `ret`); gated small (`setjmp_probe` + `setjmp_clobber_probe`), test-dos 298→300, MP body 731,088 identical.
 5. Multi-decl items after the first skip block_scope_decl (loud "double definition").
 6. Kw spill-slot sharing — frame-size lever, no consumer pain.
 
