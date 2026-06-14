@@ -706,10 +706,12 @@ rename_pop_closed(void)
  * resolve to it, and return the mangled name; otherwise return the name
  * unchanged.  Mutates node->u.v in place so an initializer assignment
  * built from the same node targets the renamed slot. */
+/* Core renamer: operate on a name buffer `v` (NString-sized, mutated in
+ * place when a rename fires) rather than a Node, so callers that hold only
+ * a char* (e.g. the static-local path) can shadow too. */
 char *
-block_scope_decl(Node *node, unsigned ctyp, int isarray)
+block_scope_rename(char *v, unsigned ctyp, int isarray)
 {
-	char *v = node->u.v;
 	unsigned h0, h;
 
 	h0 = hash(v);
@@ -736,16 +738,21 @@ block_scope_decl(Node *node, unsigned ctyp, int isarray)
 					"%s$%d", v, ++rename_serial);
 				strcpy(renamestk[renamestksp].canon, v);
 				renamestk[renamestksp].depth = brace_depth;
-				strcpy(node->u.v,
-					renamestk[renamestksp].mangled);
+				strcpy(v, renamestk[renamestksp].mangled);
 				renamestksp++;
-				return node->u.v;
+				return v;
 			}
 			break;
 		}
 		h = (h+1) % NVar;
 	} while (h != h0);
 	return v;
+}
+
+char *
+block_scope_decl(Node *node, unsigned ctyp, int isarray)
+{
+	return block_scope_rename(node->u.v, ctyp, isarray);
 }
 
 void
@@ -1826,11 +1833,15 @@ static void
 emit_static_local(char *name, unsigned sym_ctyp, int isarray, char *init_buf)
 {
 	char mangled[NString];
+	char srcname[NString];
 	unsigned h0, h;
 	int n;
 
 	if (cur_fn_name[0] == 0)
 		die("static local outside function context");
+	/* The internal storage symbol is mangled from the ORIGINAL source name
+	 * (`_<fn>_<name>`); compute it before any shadow-rename so the emitted
+	 * global symbol stays `$`-free for the assembler. */
 	n = snprintf(mangled, sizeof mangled, "_%s_%s", cur_fn_name, name);
 	if (n < 0 || n >= (int)sizeof mangled)
 		die("static-local mangled name too long");
@@ -1840,11 +1851,18 @@ emit_static_local(char *name, unsigned sym_ctyp, int isarray, char *init_buf)
 	strcpy(ini[nglo], init_buf);
 	strcpy(gloname[nglo], mangled);
 	glostatic[nglo] = 1;  /* function-local static: internal linkage (§6b) */
-	varadd(name, nglo, sym_ctyp, isarray);
-	h0 = hash(name);
+	/* A static local shadows any file-scope binding of the same name: route
+	 * the SOURCE name through the block-scope renamer (§7d) so body uses
+	 * resolve to this slot and varadd doesn't die "double definition".  The
+	 * storage symbol (above) is unaffected; only the symtab key + lexer
+	 * rename change.  No-collision case leaves srcname unchanged. */
+	strcpy(srcname, name);
+	block_scope_rename(srcname, sym_ctyp, isarray);
+	varadd(srcname, nglo, sym_ctyp, isarray);
+	h0 = hash(srcname);
 	h = h0;
 	do {
-		if (strcmp(varh[h].v, name) == 0) {
+		if (strcmp(varh[h].v, srcname) == 0) {
 			varh[h].isstaticlocal = 1;
 			break;
 		}
@@ -5316,8 +5334,16 @@ param(char *v, unsigned ctyp, Node *pl)
 	if (ctyp == NIL)
 		die("invalid void declaration");
 	n = mknode(0, 0, pl);
-	varadd(v, 0, ctyp, 0);
 	strcpy(n->u.v, v);
+	/* A parameter shadows any file-scope binding of the same name (and a
+	 * different-typed prior local); route through block_scope_decl so it is
+	 * alpha-renamed rather than dying "double definition" in varadd (the
+	 * §6a/§7b/§7d block-scope-shadow family).  Mutates n->u.v to the mangled
+	 * name so the later varget/bind_param in ansi_func_proto resolve the
+	 * renamed slot, and registers the rename so body uses of the source name
+	 * resolve here too.  No-collision case returns the name unchanged. */
+	block_scope_decl(n, ctyp, 0);
+	varadd(n->u.v, 0, ctyp, 0);
 	return n;
 }
 

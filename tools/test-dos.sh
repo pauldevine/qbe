@@ -212,6 +212,12 @@ RUNTIME_TESTS=(
 	# error.  New stmt production mirrors the dcls array-first rule.
 	"minic/dos/examples/arrayfirst_multidecl_probe.c:minic/dos/tests/arrayfirst_multidecl_probe.golden.txt:small"
 	"minic/dos/examples/arrayfirst_multidecl_probe.c:minic/dos/tests/arrayfirst_multidecl_probe.golden.txt:medium"
+	# §7d: function PARAMETERS and STATIC LOCALS shadowing a file-scope
+	# binding (global var / function / enum / different-typed) now alpha-
+	# rename too — param() and emit_static_local() called varadd directly,
+	# bypassing the block_scope_decl rename (died "double definition").
+	"minic/dos/examples/param_static_shadow_probe.c:minic/dos/tests/param_static_shadow_probe.golden.txt:small"
+	"minic/dos/examples/param_static_shadow_probe.c:minic/dos/tests/param_static_shadow_probe.golden.txt:medium"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:compact"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:large"
 	"minic/dos/examples/float_fardata_probe.c:minic/dos/tests/float_fardata_probe.golden.txt:huge"
