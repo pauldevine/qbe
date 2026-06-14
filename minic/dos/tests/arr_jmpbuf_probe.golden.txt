@@ -1,0 +1,13 @@
+set 0
+set 1
+set 2
+set 3
+set 4
+set 5
+caught 2 r=52 mylevel=2
+unwound 1 (mylevel=1)
+unwound 0 (mylevel=0)
+blocal0=1 blocal2=3
+slocal0=10 slocal2=12
+dd0_0=0 dd3_7=37 sum=148
+done

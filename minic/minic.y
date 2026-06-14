@@ -389,6 +389,13 @@ struct {
 	int arraybytes;    /* total byte size of an array declarator (isarray==1);
 	                    * 0 when unknown.  Lets sizeof(arrayvar) return the real
 	                    * array size instead of the pointer-to-element size. */
+	int aoa_dim;       /* >0 => this is an array whose ELEMENT is itself an
+	                    * array typedef (`jmp_buf bufs[N]`, jmp_buf==int[8]).
+	                    * Holds the inner dimension D; the value type is
+	                    * IDIR(arrayelem) (e.g. int*) and a one-level subscript
+	                    * bufs[i] yields the row ADDRESS bufs + i*D (no load) —
+	                    * minic's flat type system can't carry array-of-array
+	                    * stride, so mkidx() multiplies the index by D.  See §7e. */
 	int istentative;   /* 1 if this global is an uninitialized (tentative) file-
 	                    * scope definition: `static const T x;` with no init.  A
 	                    * later initialized definition of the same name reuses the
@@ -635,6 +642,7 @@ varadd(char *v, int glo, unsigned ctyp, int isarray)
 			varh[h].isextern = 0;
 			varh[h].isstaticlocal = 0;
 			varh[h].arraybytes = 0;
+			varh[h].aoa_dim = 0;
 			varh[h].istentative = 0;
 			varh[h].fpid = -1;
 			varh[h].isvolatile = vol;
@@ -1321,6 +1329,44 @@ var_arraybytes(char *v)
 			return 0;
 		if (strcmp(varh[h].v, v) == 0)
 			return varh[h].isarray ? varh[h].arraybytes : 0;
+		h = (h+1) % NVar;
+	} while (h != h0);
+	return 0;
+}
+
+/* Flag a variable as an array-of-array-typedef element (`jmp_buf bufs[N]`),
+ * recording the inner dimension D.  See varh[].aoa_dim / mkidx. */
+void
+var_set_aoa_dim(char *v, int dim)
+{
+	unsigned h0, h;
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (varh[h].v[0] == 0)
+			return;
+		if (strcmp(varh[h].v, v) == 0) {
+			varh[h].aoa_dim = dim;
+			return;
+		}
+		h = (h+1) % NVar;
+	} while (h != h0);
+}
+
+/* Inner array dimension D of an array-of-array variable, or 0 if `v` is not
+ * one.  Looked up the same way var_isarray does (plain probe by node name),
+ * so a block-scope-renamed local resolves identically. */
+int
+var_aoa_dim(char *v)
+{
+	unsigned h0, h;
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (varh[h].v[0] == 0)
+			return 0;
+		if (strcmp(varh[h].v, v) == 0)
+			return varh[h].aoa_dim;
 		h = (h+1) % NVar;
 	} while (h != h0);
 	return 0;
@@ -5235,6 +5281,23 @@ Node *
 mkidx(Node *a, Node *i)
 {
 	Node *n;
+	int d;
+
+	/* Array-of-array-typedef subscript (`jmp_buf bufs[i]`): minic's flat
+	 * type system can't represent `int (*)[8]`, so bufs is registered as a
+	 * plain int* array (value type IDIR(arrayelem)).  A one-level subscript
+	 * must yield the ROW ADDRESS bufs + i*D (D = inner dim), NOT load a
+	 * scalar.  Multiply the index by D and emit a bare pointer add (no
+	 * deref): the '+' Scale path then scales by sizeof(arrayelem), giving the
+	 * byte offset i*D*sizeof(elem), and the result is the int* row pointer.
+	 * This composes — bufs[i][j] takes the normal `@(+ . j)` path below on
+	 * that int*, and setjmp(bufs[i]) gets the row address it wants.  Only
+	 * fires for aoa variables (flag-gated), so all other code is unchanged. */
+	if (a->op == 'V' && (d = var_aoa_dim(a->u.v)) > 0) {
+		Node *dim = mknode('N', 0, 0);
+		dim->u.n = d;
+		return mknode('+', a, mknode('*', i, dim));
+	}
 
 	n = mknode('+', a, i);
 	n = mknode('@', n, 0);
@@ -7502,20 +7565,35 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	 * rule). */
 	char buf[64];
 	int elemsz, total;
+	unsigned elemtyp;
+	int aoa;
 	if (parsed_type == NIL)
 		die("invalid void array");
 	if (nglo == NGlo)
 		die("too many globals");
-	elemsz = SIZE(parsed_type);
+	/* Array-of-array-typedef global (`jmp_buf bufs[N]`): element is the
+	 * inner array, so its byte size is D*sizeof(elem); register IDIR(elem)
+	 * and flag aoa so bufs[i] becomes a row address (see mkidx). */
+	if (g_td_arraydim > 0) {
+		aoa = g_td_arraydim;
+		elemtyp = g_td_arrayelem;
+		elemsz = SIZE(elemtyp) * aoa;
+	} else {
+		aoa = 0;
+		elemtyp = parsed_type;
+		elemsz = SIZE(parsed_type);
+	}
 	total = elemsz * const_eval($2);
-	sprintf(buf, "align %d { z %d }", iralign(parsed_type), total);
+	sprintf(buf, "align %d { z %d }", iralign(elemtyp), total);
 	ini[nglo] = alloc(strlen(buf) + 1);
 	strcpy(ini[nglo], buf);
 	strcpy(gloname[nglo], parsed_ident);
 	maybe_mark_huge_global(nglo, parsed_ident, total);
 	/* Register as pointer to element type with array flag set. */
-	varadd(parsed_ident, nglo++, IDIR(parsed_type), 1);
+	varadd(parsed_ident, nglo++, IDIR(elemtyp), 1);
 	var_set_arraybytes(parsed_ident, total);
+	if (aoa > 0)
+		var_set_aoa_dim(parsed_ident, aoa);
 }
                | '=' STR ';'
 {
@@ -8239,13 +8317,28 @@ dcls:
 
 	if ($2 == NIL)
 		die("invalid void array");
-	v = $3->u.v;
 	n = const_eval($5);  /* array size */
+	if (g_td_arraydim > 0) {
+		/* Array whose element is an array typedef (`jmp_buf bufs[N]`):
+		 * size = N * D * sizeof(elem); register as IDIR(elem) and flag
+		 * array-of-array so bufs[i] yields a row address (see mkidx). */
+		unsigned elem = g_td_arrayelem;
+		int dim = g_td_arraydim;
+		v = $3->u.v;
+		total = SIZE(elem) * dim * n;
+		varadd(v, 0, IDIR(elem), 1);
+		var_set_arraybytes(v, total);
+		var_set_aoa_dim(v, dim);
+		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(),
+			iralign(elem), total);
+	} else {
+	v = $3->u.v;
 	s = SIZE($2);  /* element size */
 	total = s * n;
 	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
 	var_set_arraybytes(v, total);
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), total);
+	}
 }
     | dcls type IDENT '[' expr ']' '=' '{' initlist '}' ';'
 {
@@ -8874,12 +8967,23 @@ stmt: ';'                            { $$ = 0; }
         /* Statement-scope uninitialized sized static array. */
         char buf[64];
         int total;
+        unsigned elemtyp = $2;
+        int aoa = 0;
         if ($2 == NIL)
             die("invalid void array");
-        total = SIZE($2) * const_eval($5);
-        sprintf(buf, "align %d { z %d }", iralign($2), total);
-        emit_static_local($3->u.v, IDIR($2), 1, buf);
+        /* Array-of-array-typedef static local (`static jmp_buf bufs[N]`):
+         * element byte size is D*sizeof(elem); register IDIR(elem) and flag
+         * aoa so bufs[i] is a row address (see mkidx). */
+        if (g_td_arraydim > 0) {
+            aoa = g_td_arraydim;
+            elemtyp = g_td_arrayelem;
+        }
+        total = (aoa > 0 ? SIZE(elemtyp) * aoa : SIZE($2)) * const_eval($5);
+        sprintf(buf, "align %d { z %d }", iralign(elemtyp), total);
+        emit_static_local($3->u.v, IDIR(elemtyp), 1, buf);
         var_set_arraybytes($3->u.v, total);
+        if (aoa > 0)
+            var_set_aoa_dim($3->u.v, aoa);
         maybe_mark_huge_global(nglo - 1, gloname[nglo - 1], total);
         $$ = 0;
     }
