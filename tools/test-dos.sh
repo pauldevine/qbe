@@ -167,6 +167,12 @@ RUNTIME_TESTS=(
 	# collides with FAR (24->26 move) + fnproto.rett direct-call decode.
 	"minic/dos/examples/float_dblptr_probe.c:minic/dos/tests/float_dblptr_probe.golden.txt:medium"
 	"minic/dos/examples/float_dblptr_probe.c:minic/dos/tests/float_dblptr_probe.golden.txt:compact"
+	# §6z const/volatile-qualified FLOATING-point file-scope decls: the
+	# minic `type` grammar lacked CONST/vol_qual TFLOAT|TDOUBLE productions,
+	# so `const float`/`const double`/`volatile float`/`const volatile
+	# double` were hard PARSE ERRORS (also blocked MICROPY_PY_MATH_CONSTANTS).
+	"minic/dos/examples/const_float_init_probe.c:minic/dos/tests/const_float_init_probe.golden.txt:medium"
+	"minic/dos/examples/const_float_init_probe.c:minic/dos/tests/const_float_init_probe.golden.txt:compact"
 	# §6a extern pointer-returning ANSI prototype (extern char *f(int);)
 	# — newlibc hits it via errno.h extern int *__errno(void).
 	"minic/dos/examples/extern_ptrret_probe.c:minic/dos/tests/extern_ptrret_probe.golden.txt:small"
@@ -631,7 +637,7 @@ build_runtime_probe() {
 	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe|gc_bigheap_probe|gc_churn_probe) farstatic=1 ;; esac
 	# Soft-float probes link the single-precision soft-float helper library.
 	sfflag=""
-	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe|float_arg_coerce_probe|float_cmp_cx_probe|mathfns_probe|float_dblptr_probe) sfflag="--softfloat" ;; esac
+	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe|float_arg_coerce_probe|float_cmp_cx_probe|mathfns_probe|float_dblptr_probe|const_float_init_probe) sfflag="--softfloat" ;; esac
 	# Split-stack probe builds with SS in its own segment (qbe -s +
 	# omf_link --separate-stack); its ok8 asserts stack seg != DGROUP seg.
 	ssflag=""

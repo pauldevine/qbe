@@ -8487,6 +8487,8 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
     | CONST TINT         { $$ = INT; }
     | CONST TLNG         { $$ = LNG; }
     | CONST TLNGLNG      { $$ = LNG; }
+    | CONST TFLOAT       { $$ = INT | FLOAT; }
+    | CONST TDOUBLE      { $$ = INT | FLOAT; /* double aliases to single (Ks), as bare TDOUBLE */ }
     | CONST TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
     | CONST TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }
     | CONST TUNSIGNED TINT     { $$ = INT | UNSIGNED; }
@@ -8499,6 +8501,8 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
     | vol_qual TINT         { $$ = INT | QVOLATILE; g_decl_volatile = 1; }
     | vol_qual TLNG         { $$ = LNG | QVOLATILE; g_decl_volatile = 1; }
     | vol_qual TLNGLNG      { $$ = LNG | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TFLOAT       { $$ = INT | FLOAT | QVOLATILE; g_decl_volatile = 1; }
+    | vol_qual TDOUBLE      { $$ = INT | FLOAT | QVOLATILE; g_decl_volatile = 1; }
     | vol_qual TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
     | vol_qual TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
     | vol_qual TUNSIGNED TINT     { $$ = INT | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
