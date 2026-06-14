@@ -2206,8 +2206,25 @@ Scale:
 		r->u.n *= sz;
 	else {
 		char pt = irtyp(l->ctyp);  /* 'w' near, 'l' far */
-		if (pt == 'l' && irtyp(r->ctyp) != 'l')
-			sext(r);
+		if (pt == 'l' && irtyp(r->ctyp) != 'l') {
+			/* Under huge, the FULL 32-bit scaled index reaches
+			 * _qbe_huge_add and is added to the 20-bit linear
+			 * address, so an UNSIGNED index whose 16-bit value is
+			 * >= 0x8000 (e.g. a size_t byte offset into a >32 KB
+			 * object) must ZERO-extend: a sign-extend makes it
+			 * negative and mis-addresses BELOW the object — the §4i
+			 * gap that the compact/large addfo/subfo fix never
+			 * reached.  widen_int_to_long picks extuw/extsw by the
+			 * source signedness.  Under compact/large the offset-only
+			 * addfo/subfo ops read only the low 16 bits, where extsw
+			 * and extuw agree, so the uniform sext stays harmless
+			 * there — keep it to preserve the byte-identical
+			 * MP-compact corpus.  See [[project-far-ptr-unsigned-index-bug]]. */
+			if (memmodel == MHuge)
+				widen_int_to_long(r);
+			else
+				sext(r);
+		}
 		fprintf(of, "\t%%t%d =%c mul %d, ", tmp, pt, sz);
 		psymb(*r);
 		fprintf(of, "\n");

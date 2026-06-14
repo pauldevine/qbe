@@ -416,12 +416,16 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/struct_align_probe.c:minic/dos/tests/struct_align_probe.golden.txt:huge"
 	# §4i far-pointer offset arithmetic: `far_ptr + idx` for an in-segment
 	# offset >= 0x8000 (addfo/subfo, segment-preserving 16-bit wraparound).
-	# compact/large only — under huge `far_ptr +/- idx` routes through
-	# huge_ptr_binop/_qbe_huge_add (a different, segment-normalising path that
-	# this fix does not touch), and that path has its own pre-existing >=0x8000
-	# gap; see the probe header.  See [[project-far-ptr-unsigned-index-bug]].
+	# compact/large use the addfo/subfo path; huge routes the SAME indexing
+	# through huge_ptr_binop/_qbe_huge_add (segment-normalising).  §7g closed
+	# the huge >=0x8000 gap: the Scale path sign-extended an UNSIGNED index, so
+	# a size_t byte offset >= 0x8000 reached _qbe_huge_add negative and
+	# mis-addressed below the object — fixed by zero-extending unsigned indices
+	# under huge (widen_int_to_long).  Bug-loud: pre-fix huge prints
+	# `direct=0` for b>=2048 + FAIL.  See [[project-far-ptr-unsigned-index-bug]].
 	"minic/dos/examples/gc_bigheap_probe.c:minic/dos/tests/gc_bigheap_probe.golden.txt:compact"
 	"minic/dos/examples/gc_bigheap_probe.c:minic/dos/tests/gc_bigheap_probe.golden.txt:large"
+	"minic/dos/examples/gc_bigheap_probe.c:minic/dos/tests/gc_bigheap_probe.golden.txt:huge"
 	# §4l self-contained faithful repro of MicroPython's conservative mark/sweep
 	# GC on a 49 KB far-data heap (forces ~18 collections under churn).  Guards the
 	# §4i far-ptr fix + GC-core far-data correctness (multi-level marking, far-array

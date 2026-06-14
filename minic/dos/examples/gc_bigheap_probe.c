@@ -30,12 +30,17 @@
  *   `direct` (= pool[off], i.e. far_ptr + unsigned index) is now also correct
  *   for off >= 0x8000 (b >= 2048).
  *
- * HUGE is NOT gated here: under --model=huge, `far_ptr ± idx` does NOT use
+ * HUGE (gated since §7g): under --model=huge, `far_ptr ± idx` does NOT use
  *   addfo/subfo — objects can exceed 64 KB so a genuine segment carry is
  *   needed, and minic routes it through huge_ptr_binop -> _qbe_huge_add
- *   (a normalising libstub helper).  This probe still FAILS under huge because
- *   that helper has its own pre-existing >= 0x8000 gap (orthogonal to §4i, which
- *   does not touch the huge path; huge codegen is byte-identical before/after).
+ *   (a normalising libstub helper).  Until §7g this probe FAILED under huge:
+ *   the Scale path (minic.y prom()) UNCONDITIONALLY sign-extended a sub-long
+ *   index before scaling, so an UNSIGNED size_t byte offset >= 0x8000 reached
+ *   _qbe_huge_add as a NEGATIVE 32-bit value and was added below the object
+ *   (b>=2048 lines showed `direct=0`).  §7g fixes it by zero-extending unsigned
+ *   indices under huge (widen_int_to_long instead of sext); compact/large stay
+ *   on the uniform sext (their addfo/subfo read only the low 16 bits, where
+ *   extsw==extuw), so the MP-compact corpus is byte-identical.
  *
  * Build:  QBE_FAR_STATIC_DATA=1 tools/build-example.sh --model=compact \
  *             minic/dos/examples/gc_bigheap_probe.c
