@@ -159,6 +159,11 @@ void timer_delay_ms(uint32_t ms)
 
 /* ---- display (drivers/display.h surface) ---- */
 
+void display_init(void)
+{
+	bm_display_init();
+}
+
 void display_puts(const char *str)
 {
 	bm_display_puts(str);

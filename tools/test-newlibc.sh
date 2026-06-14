@@ -313,6 +313,27 @@ NEWLIBC_BM_TESTS=(
 	# Bare-metal ONLY (no serial loopback on the DOS host).  Small; the
 	# loopback exchange is a few bytes at 9600 baud -> 30 s budget.
 	"serial_loopback_test:30::::::lb"
+	# font_ram_test (§7l): the first gate of the REAL font-loading path --
+	# display_init() -> display_load_fonts() copies all 8192 bytes of the
+	# native victor_font[] table to font RAM at 0000:0C00, then
+	# verify_font_ram() reads it back and byte-compares against victor_font[]
+	# (3429 non-zero bytes), printing PASS/FAIL via printf (serial-capturable
+	# through bm_stdio).  Unique coverage: the hand-mirrored memory_bm only
+	# does arbitrary-pattern write-readback of font RAM, never the real
+	# display_load_fonts() copy-vs-table correctness.  Resolves through one
+	# new bm_shim.c alias (display_init -> bm_display_init, joining the
+	# existing display_puts/putc/clear surface); bm_display.c + bm_font_data.c
+	# are already linked into every bm_stdio build.  The §7i scoping note
+	# lumped this with the "display-only/hlt-loop" tests, but it is in fact
+	# bm_testhost-shaped: its result goes to printf (serial), and although it
+	# ends in `while(1) hlt` (never returns, so no `test returned`/__V9END__
+	# line), run-victor-baremetal.sh captures __V9BEGIN__->end-of-budget and
+	# exits 0 on a present __V9BEGIN__ -- the golden ends at the PASS line.
+	# Fully deterministic (no timer values), so the golden is toolchain-stable
+	# and bug-loud: broken font loading prints "FAIL: font RAM mismatch" and
+	# diffs.  Bare-metal ONLY (the DOS host has no Victor font RAM).  Small
+	# (59563 B code, under the 64KB _TEXT ceiling); 30 s budget.
+	"font_ram_test:30:::"
 )
 HARD_DISK_IMAGE="${V9K_HARD_DISK_IMAGE:-$HOME/projects/mame/victor_30mb.img}"
 

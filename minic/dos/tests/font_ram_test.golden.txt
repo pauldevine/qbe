@@ -1,0 +1,7 @@
+bm_testhost: pic+timer
+bm_testhost: tty+sti
+bm_testhost: vfs
+Victor 9000 Font RAM Test
+Checking 8192 bytes at 0x0C00
+Non-zero bytes: 3429
+PASS: font RAM matches native Victor table.

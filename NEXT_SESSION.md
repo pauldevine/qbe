@@ -1,3 +1,62 @@
+# Next session (§7m — continue Phase 6 / open compiler tracks.  §7l [2026-06-14, this session] gated the UNMODIFIED upstream `font_ram_test` bare-metal through bm_testhost — the user resumed the Phase-6 newlibc track.  **battery 39/39 → 40/40, test-dos UNCHANGED (bare-metal-only gate, like §6q/§6u–§6y/§7i), ZERO compiler/qbe/emit/minic changes — one build-glue alias in `bm_shim.c`.**  This is the **first gate of the REAL font-loading path**: `display_init()` → `display_load_fonts()` copies all 8192 bytes of the native `victor_font[]` table to font RAM at `0000:0C00`, then `verify_font_ram()` reads it back and byte-compares against `victor_font[]` (3429 non-zero bytes), printing PASS/FAIL via `printf` (serial-capturable through bm_stdio).  **Unique coverage:** the hand-mirrored `memory_bm` (§6f) only does arbitrary-pattern write-readback of font RAM — it NEVER exercises the real `display_load_fonts()` copy-vs-table correctness, the path every text-mode program on the character-ROM-less Victor depends on.  **Re-examined and overturned a §7i scoping call:** §7i had lumped `font_ram_test` (with memory/segment/simple_screen/font/font_layout/minimal_irq) as "display-only/`hlt`-loop … NOT bm_testhost-shaped," but that was over-conservative for THIS test — `font_ram_test` reports through `printf` (→ serial), and although it ends in `while(1) hlt` (never returns, so bm_testhost's `test returned`/`__V9END__` trailer never prints), `run-victor-baremetal.sh` captures `__V9BEGIN__`→end-of-budget and **exits 0 whenever `__V9BEGIN__` is present** (MAME always runs the full budget — `emu.wait(run_seconds)` then `machine:exit()`, no early-exit on `__V9END__`), so the golden simply ends at the test's own PASS line.  (The truly display-only siblings — segment/memory/simple_screen — use `display_puts` not `printf`, so they stay non-bm_testhost-shaped and covered by the hand-mirrors; `font_test`/`font_layout_test` DO use printf but emit verbose glyph dumps, candidates for a later session if their unique coverage is wanted.)  **The one change (build-glue only):** `bm_shim.c` gained a `display_init` → `bm_display_init` alias (joining its existing `display_puts`/`putc`/`clear`/`set_cursor` surface; `bm_display.c` + `bm_font_data.c` — the latter DEFINES `victor_font` — are already linked into every bm_stdio build, so nothing NEW links, only the wrapper symbol, `--gc-sections`-stripped when unreferenced).  Without the alias the build won't even link (`_display_init` undefined — that WAS the first build error, fixed by the alias, the §6u/§6w/§6y aliasing pattern).  **Bug-loud + toolchain-stable:** the output carries no timer values (pure font-RAM byte-compare), so the golden is run-stable AND a regression is LOUD — broken font loading prints `FAIL: font RAM mismatch count N` and diffs, a missing `display_init` fails the link.  **Gate:** entry `font_ram_test:30:::` in `test-newlibc.sh`, golden `minic/dos/tests/font_ram_test.golden.txt` (7 lines: bm_testhost preamble + the 4 test lines ending `PASS: font RAM matches native Victor table.`).  SMALL (59,563 B `_TEXT`, under the 64 KB ceiling); bare-metal ONLY (the DOS host has no Victor font RAM); 30-s budget; FIRST-RUN PASS on MAME (verified `tools/test-newlibc.sh font_ram_test` → [ok]); additive alias confirmed non-disturbing by re-running `stdio_bm`/`driver_test`/`snprintf_test` → all [ok].  Newlibc bare-metal support glue (NOT compiler/qbe/emit/minic; MP does not link `bm_shim.c`) → **no emit audit, no MP byte-compare**; test-dos provably unaffected (DOS gate links `dos_shim.c`, not `bm_shim.c`).  Next: with the keyboard family (§6w/§6x/§6n/§6o/§6t), PIC mask API (§6y), serial loopback (§7i), and now font loading (§7l) all gated, the remaining ungated phase-3 tests are `interrupt_test` (stays SKIPPED — §6v's `[90,110]` FAIL-window + raw iteration count) and the printf-verbose `font_test`/`font_layout_test` (glyph-dump goldens — gateable like §7l if their coverage is wanted, but very verbose).  Other open frontiers unchanged: the newlibc-under-far-DATA-models (compact/large) stdio story when a far-DATA consumer appears; the carried aoa sub-gaps (file-scope/static multi-decl array-first — a grammar parse-error gap; plain `jmp_buf a, b;` multi-decl) if a consumer appears.  There is NO QBE backend bug currently open and the easy frame-size levers are spent (§7k).)
+
+## §7l session notes (2026-06-14)
+
+### The pick (resumed Phase-6 newlibc gating)
+- §7k closed the last carried frame-size lever (Kw spill-slot, measured spent).
+  Per §7k's handoff: NO QBE bug open, easy levers exhausted → prefer a NEW
+  capability, most live = scout newlibc for any remaining `bm_testhost`-shaped
+  upstream test.
+- Scouted `~/projects/newlibc/phase3_newlib/tests/` (HEAD a65d15c).  Cross-
+  referenced the 35-entry battery against the phase-3 tree.  §7i's note claimed
+  the only ungated test was `interrupt_test` (SKIPPED) + a "display-only/hlt"
+  group.  Re-examined that group: `font_test`/`font_ram_test`/`font_layout_test`
+  use `printf` (serial-capturable), unlike the `display_puts`-only
+  segment/memory/simple_screen.
+
+### Why font_ram_test is in fact gateable (overturning the §7i call)
+- It prints PASS/FAIL via `printf` → bm_stdio → serial.  It ends in
+  `while(1) hlt` (never returns), so bm_testhost's `test returned`/`__V9END__`
+  trailer never prints — BUT `run-victor-baremetal.sh` captures
+  `__V9BEGIN__`→end-of-budget (awk `/__V9BEGIN__/{f=1} /__V9END__/{f=0} f`) and
+  exits 0 on a present `__V9BEGIN__`.  MAME always runs the full budget
+  (`emu.wait(run_seconds)` then `machine:exit()` — no early-exit on `__V9END__`),
+  so a hlt-ending test runs its budget and captures cleanly.  Golden ends at the
+  PASS line.
+- UNIQUE coverage: the real `display_load_fonts()` copy of all 8192 B of
+  `victor_font[]` to font RAM @ 0000:0C00, then byte-compare.  `memory_bm` only
+  does arbitrary-pattern write-readback — never the real table-vs-RAM path.
+
+### The fix (build-glue only, the §6u/§6w/§6y aliasing pattern)
+- First build error: `_display_init` undefined.  bm_display.c exports
+  `bm_display_init`; upstream `drivers/display.h` declares `void display_init(void)`.
+- Added one alias to `bm_shim.c` display block: `display_init()` →
+  `bm_display_init()` (joins display_puts/putc/clear/set_cursor).  bm_display.c +
+  bm_font_data.c (defines `victor_font`) already link in every bm_stdio build →
+  nothing NEW links, `--gc-sections`-stripped when unreferenced.
+
+### Gate (bug-loud, toolchain-stable) + checks
+- Entry `font_ram_test:30:::` in `test-newlibc.sh`; golden
+  `minic/dos/tests/font_ram_test.golden.txt` (7 lines, ends
+  `PASS: font RAM matches native Victor table.`).
+- No timer values → golden run-stable; bug-loud (broken load → `FAIL: font RAM
+  mismatch`, missing `display_init` → link failure).  SMALL 59,563 B; bare-metal
+  ONLY; 30-s budget; FIRST-RUN PASS.
+- Battery **39 → 40**.  Additive alias non-disturbing (re-ran
+  stdio_bm/driver_test/snprintf_test → all [ok]).
+- Newlibc support glue (bm_shim.c) → NO emit audit, NO MP byte-compare; test-dos
+  UNCHANGED (DOS gate links dos_shim.c, not bm_shim.c).
+
+### ⇒ Next session (§7m): no QBE bug open; pick a NEW capability
+- Phase-6 newlibc: `interrupt_test` stays SKIPPED (§6v); `font_test`/
+  `font_layout_test` gateable like §7l (printf, hlt-ending) but emit verbose
+  glyph dumps — do them if their coverage is wanted.
+- Carried, await a consumer: far-DATA-model (compact/large) newlibc stdio;
+  aoa sub-gaps (file-scope/static multi-decl array-first = grammar parse-error
+  gap; plain `jmp_buf a, b;` multi-decl).
+
+---
+
 # Next session (§7l — continue Phase 6 / open compiler tracks.  §7k [2026-06-14, this session] **MEASURED the carried "Kw spill-slot sharing" track and declined it as spent — NO code change, working tree clean, nothing committed.**  The user picked Kw spill-slot sharing (the frame-size lever left open by §4w `colorklslots`, whose note read "Kw spill slots still never share (minor lever, open)"), and the right engineering per the house rule *"easy size levers now spent, MEASURE before sub-KB Victor cycles"* was to quantify the payoff BEFORE building a target-general `spill.c` change that would break MP byte-identity.  **Method:** temporary `QBE_KWSLOT_DBG` instrumentation in `spill.c` — counters in `slot()` for narrow (Kw, 1-word = 2 B on i8086) vs wide (Kl/Ks, 2-word) slots carved during spilling, plus a `peak_kw_live(fn)` helper computing peak simultaneous live Kw temps at spill entry (real liveness, the coloring LOWER bound on narrow slots), reported per-function and run over the **full 108-TU MicroPython corpus** (`build/mp-link/*.ssa`, `qbe -t i8086 -m medium`).  **Findings (decisive):** (1) **ZERO wide slots reach `slot()` corpus-wide** — §4w's `colorklslots()` already interference-colors ALL Kl/Ks (the bulk of every frame) before the spill loop, so there is nothing left on the wide path to optimize.  (2) The ONLY recursively-multiplied frame is `mp_execute_bytecode` (per-generator-level via resume recursion — the very reason §4w mattered): its narrow Kw slots are **34 B of a 472 B frame (7 %)**; the other 438 B is colored Kl + alloca fast-locals, which this lever does NOT touch.  Best-case coloring saving ≤ **14 B/level** (nkw=17 vs peaklive=10), and realistically less since the 17 spilled temps don't all overlap the 10-wide peak window.  (3) Every OTHER function's narrow frame is ONE-SHOT, not multiplied — worst `mp_setup_code_state_helper` 41 slots = 82 B (save ≤ 48 B), `mp_format_float` 33 = 66 B, then a long tail averaging ~8 B/fn across 178 functions; shrinking a depth-bounded one-shot stack frame affects neither heap nor code size.  **Cost side:** `slot()` is TARGET-GENERAL, so a Kw-sharing pass risks all four backends (amd64/arm64/rv64/i8086) AND guarantees MP byte-divergence → a mandatory full, slow Victor re-verification.  Returning ≤ 14 B/generator-level + a few hundred bytes of one-shot non-recursive frame for that is a poor trade — confirming both the §4w "minor lever" parenthetical and the house-rule instinct.  **The track is CLOSED as quantifiably spent.**  Instrumentation reverted (`git checkout spill.c`; `make qbe` rebuilt clean; `git diff --stat` empty).  No gate change, no `make check` run needed (no QBE source change persisted), no emit audit, no MP byte-compare.  The measurement is recorded in memory ([[project-7k-kwslot-measured-spent]]) so it is not re-litigated.  **Next: there is NO QBE backend bug currently open and the easy frame-size levers are now exhausted — prefer a NEW capability.**  Candidates: resume **Phase-6 newlibc gating** (the most live frontier — `interrupt_test` stays SKIPPED per §6v; the newlibc-under-far-DATA-models compact/large stdio story waits for a far-DATA consumer; scout newlibc's tree for any remaining `bm_testhost`-shaped upstream test); OR the REMAINING aoa sub-gaps IF a consumer appears (file-scope/static multi-decl array-first `static jmp_buf fa[2], fb[2];` — a grammar PARSE-ERROR gap, not aoa sizing; plain `jmp_buf a, b;` array-typedef-instance multi-decl).)
 
 ## §7k session notes (2026-06-14)
@@ -35,71 +94,6 @@
 - Remaining aoa sub-gaps IF a consumer appears: file-scope/static multi-decl
   array-first (grammar parse-error gap); plain `jmp_buf a, b;` multi-decl.
 
----
-
-# Next session (§7k — continue Phase 6 / open compiler tracks.  §7j [2026-06-14, this session] closed the carried **bounded array-of-array-typedef gap (§7e)** — the brace-init and multi-declarator aoa forms the §7e single-declarator fix had left open — the user picked it and chose to do BOTH forms.  **Background:** §7e made `jmp_buf bufs[N];` (single-declarator, uninitialised; file-scope / block-local / static-local) work by registering an array-of-array-typedef as `IDIR(elem)` with a `var_aoa_dim`=D flag and desugaring a one-level subscript `bufs[i]` to the bare pointer-add `bufs + i*D` (the row address, no deref) via `mkidx` (minic.y ~5318); but two declarator SHAPES still ignored the typedef's inner dimension `g_td_arraydim` entirely.  **(1) MULTI-DECLARATOR aoa** (`jmp_buf a[2], b[2];`, block-local): each declarator reached the multi-decl sized-array (`'B'`) branch of `emit_local_multi_decl_full` (minic.y ~6646), which sized the slot `count*sizeof(elem)` (4 B) instead of `count*D*sizeof(elem)` (32 B) and never set the aoa flag — so `b[i]` was lowered as a SCALAR `loadw` (value-as-pointer) rather than the row address, and `setjmp(b[i])` ran through a garbage pointer (the unfixed probe `alloc4 4` + `%t = loadw (b + i*2)` confirmed it).  **(2) BRACE-INIT 2-D table** (`row3_t t[2] = {{1,2,3},{4,5,6}};` where `typedef int row3_t[3]`): minic has NO true `int[N][3]` (`int x[2][3]` is a hard parse error), so a typedef element is the ONLY way to write a 2-D constant table — and the four local array brace-init rules (dcls sized/unsized + stmt sized/unsized) sized the element as `sizeof(elem)` and stored each top-level item with a single scalar `expr()`, so a nested `{…}` row aborted the compiler (Abort trap 6).  **The fix (all in minic.y, frontend only):** (a) the `emit_local_multi_decl_full` `'B'` branch now reads `aoa = g_td_arraydim` and, when >0, sizes `count*D*sizeof(elem)` + calls `var_set_aoa_dim` (gated `aoa>0` → non-aoa multi-decls byte-identical); (b) a new `static Node *mk_aoa_array_init(v, initlist, dim, zerofill, rows, *out_rows)` helper flattens each `{…}` row into per-element stores `*(v + (r*dim + c))` — built as RAW `'@'(+ V off)` nodes that BYPASS `mkidx` (so the linear index is NOT re-multiplied by D; the bare `'+'` Scale scales by `sizeof(elem)` since `v` decays to `IDIR(elem)`), with row-aligned braced rows + a linear-fill fallback for brace elision + an optional `N*dim` zero-fill; (c) all four brace-init rules (dcls sized ~8461, dcls unsized ~8547, stmt sized ~8980, stmt unsized ~8999) gained an `aoa>0` branch that sizes `N*D*sizeof(elem)`, registers `IDIR(elem)`, calls `var_set_aoa_dim`, and inits via `mk_aoa_array_init` (dcls context `expr()`s the chain at parse time; stmt context defers it as an `Expr` stmt for control-flow order) — every `aoa==0` path left textually unchanged.  **Scope deliberately bounded:** only the BLOCK-LOCAL multi-decl form (the user's named `jmp_buf a[2], b[2]` target, which reaches `emit_local_multi_decl_full` via the §7c array-first stmt/dcls rule) was fixed AND gated; the FILE-SCOPE / function-local-STATIC multi-decl array-first forms (`static jmp_buf fa[2], fb[2];`) are a SEPARATE, PRE-EXISTING **parse-error** gap (no such grammar production — confirmed `parse error` on the unfixed AND fixed compiler), NOT an aoa sizing bug, so `emit_local_multi_decl`'s `'B'` branch and the file-scope `ext_decllist` `'B'` branch were left untouched (no parseable consumer to gate them bug-loud, per the "only fix what you gate" house rule); the plain `jmp_buf a, b;` (array-typedef instance, not array-OF) multi-decl also stays a bounded gap.  **Gated bug-loud:** new `minic/dos/examples/aoa_extended_probe.c` (block-local multi-decl `jmp_buf a[2],b[2]` cross-frame longjmp through BOTH declarators → `md=10,11,20,21`; dcls-context sized 2-D table `t1`; stmt-context sized `t2` + unsized `t3`; write-back-through-indexed-rows `t1x2sum=42`) + golden `minic/dos/tests/aoa_extended_probe.golden.txt`, wired `:medium :compact :large` (matching `arr_jmpbuf_probe`).  Bug-loud confirmed: the unfixed compiler **aborts** on this probe (multi-decl scalar-load + nested-brace abort); the three model builds produce byte-identical correct output.  **test-dos 317/317 → 320/320** (`320/320 ok`, every prior entry unchanged).  Toolchain checks: `make check` green; grammar conflicts UNCHANGED at **115 shift/reduce, 0 reduce/reduce** (no new productions — the nested `{…}` already parses as an `inititem`; only actions changed); **MP compact body EXACTLY 731,088 bytes, byte-identical** to the documented golden (image 751,664 = header 20,576 + body 731,088) → codegen unchanged → no Victor run; and since this is a `minic.y` FRONTEND change (NOT `i8086/emit.c` or middle-end) the emit-bracket audit was NOT required.  The "bounded aoa init/multi-declarator gap (§7e)" open track is now CLOSED for the parseable forms.  Next: pick a carried track — **Kw spill-slot sharing** (frame-size lever, no consumer pain); the REMAINING aoa sub-gaps (file-scope/static multi-decl array-first — a grammar parse-error gap; plain `jmp_buf a, b;` multi-decl — array-typedef-instance decay) if a consumer appears; OR resume **Phase-6 newlibc gating** — `interrupt_test` stays SKIPPED (§6v), the newlibc-under-far-DATA-models (compact/large) stdio story waits for a far-DATA consumer.  There is NO QBE backend bug currently open.)
-
-## §7j session notes (2026-06-14)
-
-### The gap (carried open track — §7e bounded aoa forms)
-- §7e closed single-declarator uninitialised aoa (`jmp_buf bufs[N];`) via
-  `var_aoa_dim` + `mkidx` (row-address desugar).  Two declarator SHAPES still
-  ignored the typedef inner dim `g_td_arraydim`:
-  - **multi-declarator** `jmp_buf a[2], b[2];` — each `'B'` declarator sized
-    `count*sizeof(elem)` (4 B) not `count*D*sizeof(elem)` (32 B), no aoa flag →
-    `b[i]` was a scalar `loadw` (value-as-pointer); `setjmp(b[i])` ran through
-    garbage.
-  - **brace-init 2-D table** `row3_t t[2] = {{1,2,3},{4,5,6}};` — minic has no
-    real `int[N][3]` (hard parse error), so a typedef element is the ONLY 2-D
-    table; the four local brace-init rules sized `sizeof(elem)` and stored each
-    item with one scalar `expr()` → a nested `{…}` row Abort-trap-6'd the
-    compiler.
-
-### The fix (minic.y, frontend only — all `aoa>0`-gated + additive)
-- `emit_local_multi_decl_full` `'B'` branch (~6646): `aoa = g_td_arraydim`;
-  size `count*SIZE(elem)*(aoa?aoa:1)`; `var_set_aoa_dim(v, aoa)` when aoa>0.
-- New `mk_aoa_array_init(v, initlist, dim, zerofill, rows, *out_rows)`
-  (~after `mk_local_array_init`): flattens braced rows into RAW `'@'(+ V off)`
-  stores (BYPASSES `mkidx` so the linear index is NOT ×D again; the bare `'+'`
-  Scale scales by `sizeof(elem)` via `v`'s `IDIR(elem)` decay), row-aligned
-  rows + linear-fill fallback + optional `N*dim` zero-fill.
-- All four brace-init rules — dcls sized (~8461), dcls unsized (~8547), stmt
-  sized (~8980), stmt unsized (~8999) — gained an `aoa>0` branch: size
-  `N*D*sizeof(elem)`, register `IDIR(elem)`, `var_set_aoa_dim`, init via
-  `mk_aoa_array_init` (dcls `expr()`s at parse time; stmt defers as `Expr`).
-  Every `aoa==0` path left textually unchanged → non-aoa byte-identical.
-
-### Scope (deliberately bounded — "only fix what you gate")
-- FIXED + GATED: block-local multi-decl `jmp_buf a[2], b[2]` (reaches
-  `emit_local_multi_decl_full` via the §7c array-first rule) + block-local
-  brace-init 2-D tables (dcls + stmt, sized + unsized).
-- LEFT (separate gaps, no parseable/realistic consumer): file-scope /
-  static multi-decl array-first (`static jmp_buf fa[2], fb[2];`) is a
-  PRE-EXISTING grammar **parse-error** gap (verified `parse error` unfixed AND
-  fixed), not aoa sizing — so `emit_local_multi_decl`'s `'B'` branch and the
-  file-scope `ext_decllist` `'B'` branch were NOT touched; plain
-  `jmp_buf a, b;` (array-typedef instance) multi-decl also stays bounded.
-
-### Gate (bug-loud) + checks
-- `minic/dos/examples/aoa_extended_probe.c` + golden
-  `minic/dos/tests/aoa_extended_probe.golden.txt`, wired `:medium :compact
-  :large` (matching `arr_jmpbuf_probe`).  Output: `md=10,11,20,21` /
-  `t1=1,2,3,4,5,6` / `t2=10,20,30,40,50,60` / `t3=7,8,9,11,12,13` /
-  `t1x2sum=42` / `done`.
-- Bug-loud confirmed: unfixed compiler ABORTS (scalar-load multi-decl +
-  nested-brace abort); all three model builds byte-identical.
-- **test-dos 317 → 320**.  `make check` green.  Conflicts UNCHANGED
-  (115 s/r, 0 r/r — no new productions, only actions).
-- `minic.y` FRONTEND change → NO emit audit.  **MP compact body 731,088 B
-  byte-identical** → no Victor run.
-
-### ⇒ Next session (§7k): carried tracks (no QBE bug currently open)
-- Kw spill-slot sharing (frame-size lever, no consumer pain).
-- Remaining aoa sub-gaps IF a consumer appears: file-scope/static multi-decl
-  array-first (grammar parse-error gap); plain `jmp_buf a, b;` multi-decl
-  (array-typedef-instance decay).
-- Phase-6 newlibc: `interrupt_test` stays SKIPPED (§6v); far-DATA-model
-  (compact/large) newlibc stdio waits for a far-DATA consumer.
 
 ---
 
