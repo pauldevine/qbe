@@ -5386,6 +5386,92 @@ mk_local_array_init(char *v, Node *initlist, int zerofill, int known_n, int *out
 	return chain;
 }
 
+/* Build a deferred initializer for a block-scoped local 2-D table
+ * `ELEM v[N] = {{…},{…}}` whose element ELEM is an array typedef of inner
+ * dimension `dim` (`typedef int row3_t[3]`).  minic has no true `int[N][3]`,
+ * so `v` is registered as a plain IDIR(elem) array with aoa_dim=dim (§7e) and
+ * a one-level subscript `v[r]` yields the ROW address.  Brace-init therefore
+ * cannot reuse mkidx (it would re-multiply the index by dim); instead each
+ * `{…}` row is flattened into per-element scalar stores `*(v + (r*dim + c))`.
+ * The bare `'+'` Scale path scales the linear index by sizeof(elem) (v decays
+ * to IDIR(elem)), so the store lands at byte offset (r*dim+c)*sizeof(elem).
+ * Returns the comma-chain (or 0); `rows` is the declared row count N (0 =>
+ * infer), `*out_rows` receives the row count used, and `zerofill` zeroes all
+ * N*dim elements first (sized partial-init semantics).  Brace-elided flat
+ * scalars fill linearly as a fallback (the canonical form is fully braced). */
+static Node *
+mk_aoa_array_init(char *v, Node *initlist, int dim, int zerofill,
+                  int rows, int *out_rows)
+{
+	Node *chain = 0, *it;
+	int lin = 0, nrows = 0;
+
+	for (it = initlist; it; it = it->r) {
+		Node *item = it->l, *av, *off, *lhs, *asgn;
+		if (item && item->op == '{') {
+			/* a braced row: store its scalars at r*dim + col */
+			Node *in;
+			int c = 0;
+			lin = nrows * dim;
+			for (in = item->l; in; in = in->r) {
+				Node *e = in->l, *val;
+				int col;
+				if (e && e->op == 'd') {        /* [col] = val */
+					col = e->r->u.n;
+					val = e->l;
+				} else {
+					col = c;
+					val = e;
+				}
+				av = mknode('V', 0, 0);
+				strcpy(av->u.v, v);
+				off = mknode('N', 0, 0);
+				off->u.n = nrows * dim + col;
+				lhs = mknode('@', mknode('+', av, off), 0);
+				asgn = mknode('=', lhs, val);
+				chain = chain ? mknode(',', chain, asgn) : asgn;
+				c = col + 1;
+			}
+			nrows++;
+			lin = nrows * dim;
+		} else {
+			/* brace-elided flat scalar: store at the next linear slot */
+			av = mknode('V', 0, 0);
+			strcpy(av->u.v, v);
+			off = mknode('N', 0, 0);
+			off->u.n = lin;
+			lhs = mknode('@', mknode('+', av, off), 0);
+			asgn = mknode('=', lhs, item);
+			chain = chain ? mknode(',', chain, asgn) : asgn;
+			lin++;
+			if (lin > nrows * dim)
+				nrows = (lin + dim - 1) / dim;
+		}
+	}
+	if (rows > nrows)
+		nrows = rows;
+	*out_rows = nrows;
+
+	if (zerofill) {
+		Node *zhead = 0;
+		int k, tot = nrows * dim;
+		for (k = 0; k < tot; k++) {
+			Node *av = mknode('V', 0, 0), *off = mknode('N', 0, 0);
+			Node *lhs, *zero, *zasgn;
+			strcpy(av->u.v, v);
+			off->u.n = k;
+			lhs = mknode('@', mknode('+', av, off), 0);
+			zero = mknode('N', 0, 0);
+			zero->u.n = 0;
+			zasgn = mknode('=', lhs, zero);
+			zhead = zhead ? mknode(',', zhead, zasgn) : zasgn;
+		}
+		if (zhead)
+			chain = chain ? mknode(',', zhead, chain) : zhead;
+	}
+	return chain;
+}
+
 Node *
 mkneg(Node *n)
 {
@@ -6646,11 +6732,21 @@ emit_local_multi_decl_full(unsigned base, Node *list)
 		if (n->op == 'B') {
 			int count = n->l->u.n;
 			unsigned elem = (KIND(base) == PTR) ? DREF(base) : base;
-			int total = count * SIZE(elem);
+			/* Array-of-array-typedef declarator in a multi-decl
+			 * (`jmp_buf a[2], b[2];`): when the shared base is an array
+			 * typedef (g_td_arraydim = inner dim D > 0), the element is
+			 * itself a D-wide array, so this declarator's slot is
+			 * count*D*sizeof(elem) and the var carries aoa_dim=D so a
+			 * one-level subscript yields a row address (§7e mkidx).  For a
+			 * plain element (D==0) this is byte-identical to the old path. */
+			int aoa = g_td_arraydim;
+			int total = count * SIZE(elem) * (aoa > 0 ? aoa : 1);
 			/* Inner-block shadow rename (see emit_local_multi_decl). */
 			v = block_scope_decl(n, IDIR(elem), 1);
 			varadd(v, 0, IDIR(elem), 1);
 			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(elem), total);
+			if (aoa > 0)
+				var_set_aoa_dim(v, aoa);
 			continue;
 		}
 		t = (n->op == 'P' || n->op == 'A') ? IDIR(base) : base;
@@ -8368,11 +8464,30 @@ dcls:
 	 * constant-expression (const_eval folds sizeof / arithmetic). */
 	int s, n, total;
 	char *v;
+	int aoa = g_td_arraydim;   /* >0: element is itself an array typedef */
 
 	if ($2 == NIL)
 		die("invalid void array");
 	v = $3->u.v;
-	n = const_eval($5);  /* array size */
+	n = const_eval($5);  /* array size (row count) */
+	if (aoa > 0) {
+		/* 2-D table `row3_t t[N] = {{…},{…}}`: element is a dim-wide
+		 * array typedef, so size = N*dim*sizeof(elem), flag aoa (so a
+		 * one-level subscript yields a row address, §7e mkidx), and
+		 * flatten the braced rows into per-element stores.  The dcls
+		 * context emits at parse time (entry block == lexical order). */
+		unsigned elem = g_td_arrayelem;
+		int rr;
+		Node *ch;
+		total = SIZE(elem) * aoa * n;
+		varadd(v, 0, IDIR(elem), 1);
+		var_set_arraybytes(v, total);
+		var_set_aoa_dim(v, aoa);
+		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(elem), total);
+		ch = mk_aoa_array_init(v, $9, aoa, 1, n, &rr);
+		if (ch)
+			expr(ch);
+	} else {
 	s = SIZE($2);  /* element size */
 	total = s * n;
 	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
@@ -8427,6 +8542,7 @@ dcls:
 				i = idx + 1;
 		}
 	}
+	}
 }
     | dcls type IDENT '[' ']' '=' '{' initlist '}' ';'
 {
@@ -8438,10 +8554,27 @@ dcls:
 	int s, n, i;
 	char *v;
 	Node *it;
+	int aoa = g_td_arraydim;   /* >0: element is itself an array typedef */
 
 	if ($2 == NIL)
 		die("invalid void array");
 	v = $3->u.v;
+	if (aoa > 0) {
+		/* Unsized 2-D table `row3_t t[] = {{…},{…}}`: row count inferred
+		 * from the braced rows; size rows*dim*sizeof(elem), flag aoa,
+		 * flatten (no zero-fill — exactly as long as the list). */
+		unsigned elem = g_td_arrayelem;
+		int rr;
+		Node *ch;
+		ch = mk_aoa_array_init(v, $8, aoa, 0, 0, &rr);
+		varadd(v, 0, IDIR(elem), 1);
+		var_set_arraybytes(v, SIZE(elem) * aoa * rr);
+		var_set_aoa_dim(v, aoa);
+		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(),
+			iralign(elem), SIZE(elem) * aoa * rr);
+		if (ch)
+			expr(ch);
+	} else {
 	s = SIZE($2);
 
 	/* First pass: determine element count. */
@@ -8487,6 +8620,7 @@ dcls:
 			tmp++;
 			init = init->r;
 		}
+	}
 	}
 }
     | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
@@ -8851,15 +8985,25 @@ stmt: ';'                            { $$ = 0; }
         int n, total;
         char *v;
         Node *chain;
+        int aoa = g_td_arraydim;   /* >0: element is an array typedef */
+        unsigned elem = aoa > 0 ? g_td_arrayelem : $1;
         if ($1 == NIL)
             die("invalid void array");
-        v = block_scope_decl($2, IDIR($1), 1);
+        v = block_scope_decl($2, IDIR(elem), 1);
         n = const_eval($4);
-        total = SIZE($1) * n;
-        varadd(v, 0, IDIR($1), 1);
+        total = SIZE(elem) * n * (aoa > 0 ? aoa : 1);
+        varadd(v, 0, IDIR(elem), 1);
         var_set_arraybytes(v, total);
-        fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), total);
-        chain = mk_local_array_init(v, $8, 1, n, &n);
+        fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(elem), total);
+        if (aoa > 0) {
+            /* 2-D table `row3_t t[N] = {{…},{…}}` mid-block: flatten braced
+             * rows (deferred Expr stmt → control-flow order, §7e mkidx). */
+            int rr;
+            var_set_aoa_dim(v, aoa);
+            chain = mk_aoa_array_init(v, $8, aoa, 1, n, &rr);
+        } else {
+            chain = mk_local_array_init(v, $8, 1, n, &n);
+        }
         $$ = mkstmt(Expr, chain, 0, 0);
     }
     | type IDENT '[' ']' '=' '{' initlist '}' ';' {
@@ -8868,13 +9012,27 @@ stmt: ';'                            { $$ = 0; }
         int n;
         char *v;
         Node *chain;
+        int aoa = g_td_arraydim;   /* >0: element is an array typedef */
+        unsigned elem = aoa > 0 ? g_td_arrayelem : $1;
         if ($1 == NIL)
             die("invalid void array");
-        v = block_scope_decl($2, IDIR($1), 1);
-        chain = mk_local_array_init(v, $7, 0, 0, &n);
-        varadd(v, 0, IDIR($1), 1);
-        var_set_arraybytes(v, SIZE($1) * n);
-        fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), SIZE($1) * n);
+        v = block_scope_decl($2, IDIR(elem), 1);
+        if (aoa > 0) {
+            /* Unsized 2-D table `row3_t t[] = {{…},{…}}` mid-block: rows
+             * inferred from the braced list. */
+            int rr;
+            chain = mk_aoa_array_init(v, $7, aoa, 0, 0, &rr);
+            varadd(v, 0, IDIR(elem), 1);
+            var_set_arraybytes(v, SIZE(elem) * aoa * rr);
+            var_set_aoa_dim(v, aoa);
+            fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(),
+                iralign(elem), SIZE(elem) * aoa * rr);
+        } else {
+            chain = mk_local_array_init(v, $7, 0, 0, &n);
+            varadd(v, 0, IDIR($1), 1);
+            var_set_arraybytes(v, SIZE($1) * n);
+            fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), SIZE($1) * n);
+        }
         $$ = mkstmt(Expr, chain, 0, 0);
     }
     | type IDENT '[' expr ']' ',' ext_decllist ';' {
