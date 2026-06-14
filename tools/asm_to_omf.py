@@ -319,15 +319,20 @@ def main():
     # line loop below for transform_line's `.long _sym` → dw/dw-seg split.
     far_data = far_static_data and model in ('compact', 'large', 'huge')
     # Whether a relocatable `.long _sym` initializer must be split into
-    # offset+segment words.  True for far-DATA models (already), and for
-    # medium: medium is near-DATA but FAR-CODE (NEAR_CODE() is tiny/small
-    # only), so its only `.long _sym` initializers are 4-byte far CODE
-    # pointers (function pointers in static tables) — those need seg:off or
-    # an indirect far CALL through them jumps to segment 0.  Scoped to
-    # medium here (not the whole far-code set) so the compact/large/huge
-    # corpus path stays byte-identical; their code pointers ride the
-    # existing far_data split when --far-static-data is in play.
-    split_sym_long = far_data or model == 'medium'
+    # offset+segment words.  True for ALL far-DATA models (compact/large/
+    # huge): a static data pointer is a 4-byte far pointer that needs its
+    # segment REGARDLESS of where the statics live (§1g) — with
+    # --far-static-data the target sits in <BASE>_DATA, without it in
+    # DGROUP, but either way `dd _sym` leaves the segment word 0 → a
+    # wrong-segment far deref.  (Note `far_data` above is gated on
+    # --far-static-data because it ALSO routes the section/class names; the
+    # `.long _sym` split is independent of that routing and applies whenever
+    # data pointers are far.)  Also true for medium: medium is near-DATA but
+    # FAR-CODE (NEAR_CODE() is tiny/small only), so its only `.long _sym`
+    # initializers are 4-byte far CODE pointers (function pointers in static
+    # tables) — those need seg:off or an indirect far CALL through them
+    # jumps to segment 0.
+    split_sym_long = model in ('compact', 'large', 'huge', 'medium')
 
     sections = {'text': [], 'data': [], 'bss': []}
     # `huge_sections` is OrderedDict-like: maps `_HUGE_<sym>` → list of

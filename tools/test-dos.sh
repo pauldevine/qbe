@@ -190,11 +190,19 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/isr_far_attr_probe.c:minic/dos/tests/isr_far_attr_probe.golden.txt:small"
 	"minic/dos/examples/isr_far_attr_probe.c:minic/dos/tests/isr_far_attr_probe.golden.txt:medium"
 	# §6a scalar global `T *p = &x;` / `char **e = arr;` symbol-address
-	# init (cival_eval path).  NOT gated under far-data models: the §1g
-	# far static-DATA-ptr reloc gap is REAL at runtime (this probe under
-	# compact prints raw offsets 4194/4192 — segment missing).
+	# init (cival_eval path).  §7h CLOSED the §1g far static-DATA-ptr
+	# reloc gap: under far-data models a static data pointer is a 4-byte
+	# far pointer, but asm_to_omf emitted `dd _sym` (offset-only, segment
+	# word 0) unless --far-static-data was set, so the far deref read the
+	# wrong segment (this probe under compact printed raw offsets
+	# 4194/4192).  Fix split_sym_long now fires for all far-data models →
+	# `dw _sym / dw seg _sym`.  Now gated compact+large+huge too (bug-loud:
+	# unfixed prints 4194/4192 + an Illegal-byte-sequence %s deref).
 	"minic/dos/examples/static_sym_init_probe.c:minic/dos/tests/static_sym_init_probe.golden.txt:small"
 	"minic/dos/examples/static_sym_init_probe.c:minic/dos/tests/static_sym_init_probe.golden.txt:medium"
+	"minic/dos/examples/static_sym_init_probe.c:minic/dos/tests/static_sym_init_probe.golden.txt:compact"
+	"minic/dos/examples/static_sym_init_probe.c:minic/dos/tests/static_sym_init_probe.golden.txt:large"
+	"minic/dos/examples/static_sym_init_probe.c:minic/dos/tests/static_sym_init_probe.golden.txt:huge"
 	# §6a locals shadow file-scope bindings (global var / function /
 	# enum constant) via the extended block_scope_decl alpha-rename.
 	"minic/dos/examples/local_shadow_probe.c:minic/dos/tests/local_shadow_probe.golden.txt:small"

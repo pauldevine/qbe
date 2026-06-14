@@ -3,7 +3,7 @@
 **Project:** C11/C17 + GNU-extensions C Compiler for 8086 DOS using QBE Backend
 **Standard:** C11 feature set (`_Static_assert`, `_Generic`, `_Alignof`/`_Alignas`, compound literals, designated initializers, anonymous struct/union) + GNU extensions (`__attribute__`, inline `__asm__`, `__far` pointers).  Equivalently **C17-level** since C17 added no new language features over C11.  **No C23 language features.**  C only — no C++.
 **Real target hardware:** Victor 9000 / Sirius 1 (~896 KB RAM) — NOT the IBM-PC 640 KB ceiling.  DOSBox is the fast loop for images that fit; MAME victor9k + SASI disk for the real thing.
-**Last Updated:** 2026-06-14 (§7g)
+**Last Updated:** 2026-06-14 (§7h)
 
 ---
 
@@ -35,6 +35,7 @@ Compile **`~/projects/newlibc`** — a much-progressed Victor 9000 C library + d
 5. ~~Multi-decl items skip block_scope_decl (loud "double definition")~~ — CLOSED (§7b): a MULTI-declarator block-scope local (`T a, b;`, the first item included) shadowing a global/function/enum/different-typed outer local died "double definition" because `emit_local_multi_decl`/`_full` (+ the `int a=1,b=2;` rule's tail loop) called `varadd` directly, bypassing the §6a/§1k rename.  Fix routes every storage declarator through `block_scope_decl`; gated `multi_decl_shadow_probe` small+medium, test-dos 300→302, MP body 731,088 identical.
 6. Kw spill-slot sharing — frame-size lever, no consumer pain.
 7. ~~Stmt-context array-first multi-decl `int arr[3], *counter;` does not parse~~ — CLOSED (§7c): the stmt-context multi-decl production was only `type IDENT ',' ext_decllist` (bare leading IDENT); an array-decorated first declarator MID-BLOCK had no production (the dcls/function-top form already parsed).  Fix adds `type IDENT '[' expr ']' ',' ext_decllist ';'` mirroring the dcls array-first rule (kr_array_node + emit_local_multi_decl_full), deferring the init chain as an Expr stmt; conflicts unchanged.  Gated `arrayfirst_multidecl_probe` small+medium, test-dos 302→304, MP body 731,088 identical.
+8. ~~far static-DATA-ptr reloc (§1g)~~ — CLOSED (§7h): under a far-data model a static initializer holding `&global` (`int *p=&g;`, `int *mid=&arr[2];`, `char **e=words;`) is a 4-byte far pointer, but `asm_to_omf.py` emitted `dd _sym` (offset-only, segment word 0) → wrong-segment far deref.  The `.long _sym`→`dw _sym / dw seg _sym` split (FIX 3) was gated `split_sym_long = far_data or model=='medium'` and `far_data` requires `--far-static-data` (only MP's `MP_SPLIT_STACK` layout sets it) — so a DEFAULT compact/large/huge build (how the gate builds probes) skipped the split.  The split is about whether DATA POINTERS ARE FAR (every far-data model), independent of the `--far-static-data` section ROUTING `far_data` controls.  Fix: `split_sym_long = model in ('compact','large','huge','medium')` (`far_data` untouched — it still drives section/class routing).  Gated `static_sym_init_probe` +:compact+large+huge (was small+medium; bug-loud: unfixed compact prints `4194/4192` + Illegal-byte-sequence `%s` deref), test-dos 314→317, MP body 731,088 byte-identical (MP uses `--far-static-data` → split already fired), `make check` green.  Toolchain script (not emit.c) → no emit audit.
 
 ## House rules (process invariants that cost real time to relearn)
 
