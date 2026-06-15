@@ -697,18 +697,26 @@ build_runtime_probe() {
 	# print output that depends on libstub's PYTHON printf engine and would
 	# diverge from their libstub-captured golden under newlibc's tiny_vformat
 	# (printf_wrappers.c): it formats %p as a "0x"-prefixed, 16-bit-truncated
-	# hex and does NOT implement %o (it echoes the literal "%o").  A second set
-	# call setjmp/longjmp, which the libstub-free runtime does NOT yet provide
-	# (they need a far jmp_buf + register save/restore in asm — deferred; see
-	# far_stdlib_bridge.asm).  Both sets pin --libstub (the equivalence anchor);
-	# everything else takes the libstub-free default.  See the §7w divergence
-	# sweep in NEXT_SESSION.md.
+	# hex and does NOT implement %o (it echoes the literal "%o").  Those pin
+	# --libstub (the equivalence anchor); everything else takes the libstub-free
+	# default.  See the §7w divergence sweep in NEXT_SESSION.md.
+	#
+	# §7x: setjmp/longjmp now HAVE a libstub-free impl (minic/dos/setjmp_rt.asm,
+	# all three ABI forms), so setjmp_probe / setjmp_clobber_probe /
+	# arr_jmpbuf_probe / aoa_extended_probe are UNPINNED and run libstub-free.
+	# split_stack_probe STAYS pinned, but for an UNRELATED reason: its ok7
+	# asserts malloc memory lands in the SAME segment as a global (heapseg ==
+	# dgroupseg), which holds for libstub's single-base DGROUP heap but not for
+	# the libstub-free BSS heap (heap.asm's _BSS gets its own DGROUP paragraph
+	# under far-data + --split-stack, so a heap pointer's far segment differs
+	# from a global's — a layout difference, not a correctness bug; setjmp
+	# itself, ok6, passes libstub-free here).
 	libstubflag=""
 	case "$base" in
 		# printf %p / %o divergence
 		cstrprobe|compactprobe_extra|huge_norm_probe|mediumprobe) libstubflag="--libstub" ;;
-		# setjmp/longjmp (no libstub-free impl yet)
-		setjmp_probe|setjmp_clobber_probe|arr_jmpbuf_probe|aoa_extended_probe|split_stack_probe) libstubflag="--libstub" ;;
+		# malloc-segment-in-DGROUP layout (NOT setjmp — that now works libstub-free)
+		split_stack_probe) libstubflag="--libstub" ;;
 	esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag $ssflag $libstubflag "$QBE_DIR/$src" >/dev/null

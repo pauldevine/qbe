@@ -346,10 +346,18 @@ if [ "$NO_LIBSTUB" = 1 ]; then
 	# (ret->retf, [bp+N]->[bp+N+2], unique far-code segment).  heap.asm is
 	# the BSS heap dos_libc.c's malloc carves from via newlibc's _sbrk;
 	# --gc-sections drops it from a program that never reaches malloc.
+	# §7x: setjmp_rt.asm supplies setjmp/longjmp the libstub-free runtime
+	# previously lacked.  It is NOT routed through near_to_far_rt.py (that
+	# would corrupt the jmp_buf internal [bx+N] offsets); each ABI form is
+	# selected by a nasm -d flag: (none)=near (small), SJ_FAR_CODE=medium
+	# (far code / near data, _setjmp), SJ_FAR_DATA=compact/large/huge
+	# (far code+data, _far_setjmp).  --gc-sections drops it when unused.
 	if [ "$MODEL" = small ]; then
 		nasm -f obj "$DOS_DIR/qbe_rt.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$ERR"
 		nasm -f obj "$DOS_DIR/dos_syscall.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR"
-		RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
+		nasm -f obj "$DOS_DIR/setjmp_rt.asm" -o "$OUT_DIR/setjmp_rt.obj" 2>>"$ERR"
+		RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" \
+			"$OUT_DIR/setjmp_rt.obj" "$OUT_DIR/heap.obj")
 	elif [ "$MODEL" = medium ]; then
 		# medium: far code, NEAR data — qbe_rt/dos_syscall are far-called
 		# (near_to_far_rt.py) but still take near-pointer args; no far_stdlib
@@ -360,7 +368,9 @@ if [ "$NO_LIBSTUB" = 1 ]; then
 		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=DOS_SYSCALL_TEXT \
 			"$DOS_DIR/dos_syscall.asm" "$OUT_DIR/dos_syscall_far.asm" 2>>"$ERR"
 		nasm -f obj "$OUT_DIR/dos_syscall_far.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR"
-		RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
+		nasm -dSJ_FAR_CODE -f obj "$DOS_DIR/setjmp_rt.asm" -o "$OUT_DIR/setjmp_rt.obj" 2>>"$ERR"
+		RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" \
+			"$OUT_DIR/setjmp_rt.obj" "$OUT_DIR/heap.obj")
 	else
 		# §7t far-DATA models (compact/large/huge): far code AND far data.
 		# qbe_rt is still far-code (near_to_far_rt.py).  But the INT 21h
@@ -377,8 +387,9 @@ if [ "$NO_LIBSTUB" = 1 ]; then
 			-o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR"
 		nasm -f obj "$DOS_DIR/far_stdlib_bridge.asm" \
 			-o "$OUT_DIR/far_stdlib_bridge.obj" 2>>"$ERR"
+		nasm -dSJ_FAR_DATA -f obj "$DOS_DIR/setjmp_rt.asm" -o "$OUT_DIR/setjmp_rt.obj" 2>>"$ERR"
 		RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" \
-			"$OUT_DIR/far_stdlib_bridge.obj" "$OUT_DIR/heap.obj")
+			"$OUT_DIR/far_stdlib_bridge.obj" "$OUT_DIR/setjmp_rt.obj" "$OUT_DIR/heap.obj")
 	fi
 	nasm -f obj "$DOS_DIR/heap.asm" -o "$OUT_DIR/heap.obj" 2>>"$ERR"
 else

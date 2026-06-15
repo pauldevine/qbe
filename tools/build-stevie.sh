@@ -436,10 +436,18 @@ if [ $EXE -eq 1 ]; then
 		#                far_stdlib_bridge.asm tail-calls the plain _printf/_str*
 		#                under their mangled _far_ names.  --gc-sections drops the
 		#                bridges/heap stevie never reaches.  See §7n/§7o/§7p/§7t.
+		# §7x: setjmp_rt.asm (setjmp/longjmp) is linked for runtime parity with
+		# build-example.sh.  stevie itself calls neither, so --gc-sections drops
+		# it and the image is byte-identical to before this addition; it is here
+		# only so a future stevie TU that uses setjmp links cleanly.  The nasm
+		# -d flag picks the ABI form ((none)=near, SJ_FAR_CODE=medium far code /
+		# near data, SJ_FAR_DATA=compact/large/huge far code+data).
 		if [ "$MODEL" = small ]; then
 			nasm -f obj "$DOS_DIR/qbe_rt.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$OUT_DIR/link.err"
 			nasm -f obj "$DOS_DIR/dos_syscall.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$OUT_DIR/link.err"
-			RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
+			nasm -f obj "$DOS_DIR/setjmp_rt.asm" -o "$OUT_DIR/setjmp_rt.obj" 2>>"$OUT_DIR/link.err"
+			RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" \
+				"$OUT_DIR/setjmp_rt.obj" "$OUT_DIR/heap.obj")
 		elif [ "$MODEL" = medium ]; then
 			"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=QBE_RT_TEXT \
 				"$DOS_DIR/qbe_rt.asm" "$OUT_DIR/qbe_rt_far.asm" 2>>"$OUT_DIR/link.err"
@@ -447,7 +455,9 @@ if [ $EXE -eq 1 ]; then
 			"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=DOS_SYSCALL_TEXT \
 				"$DOS_DIR/dos_syscall.asm" "$OUT_DIR/dos_syscall_far.asm" 2>>"$OUT_DIR/link.err"
 			nasm -f obj "$OUT_DIR/dos_syscall_far.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$OUT_DIR/link.err"
-			RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
+			nasm -dSJ_FAR_CODE -f obj "$DOS_DIR/setjmp_rt.asm" -o "$OUT_DIR/setjmp_rt.obj" 2>>"$OUT_DIR/link.err"
+			RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" \
+				"$OUT_DIR/setjmp_rt.obj" "$OUT_DIR/heap.obj")
 		else
 			"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=QBE_RT_TEXT \
 				"$DOS_DIR/qbe_rt.asm" "$OUT_DIR/qbe_rt_far.asm" 2>>"$OUT_DIR/link.err"
@@ -456,8 +466,9 @@ if [ $EXE -eq 1 ]; then
 				-o "$OUT_DIR/dos_syscall.obj" 2>>"$OUT_DIR/link.err"
 			nasm -f obj "$DOS_DIR/far_stdlib_bridge.asm" \
 				-o "$OUT_DIR/far_stdlib_bridge.obj" 2>>"$OUT_DIR/link.err"
+			nasm -dSJ_FAR_DATA -f obj "$DOS_DIR/setjmp_rt.asm" -o "$OUT_DIR/setjmp_rt.obj" 2>>"$OUT_DIR/link.err"
 			RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" \
-				"$OUT_DIR/far_stdlib_bridge.obj" "$OUT_DIR/heap.obj")
+				"$OUT_DIR/far_stdlib_bridge.obj" "$OUT_DIR/setjmp_rt.obj" "$OUT_DIR/heap.obj")
 		fi
 		nasm "-DHEAP_SIZE=$STEVIE_HEAP_SIZE" -f obj "$DOS_DIR/heap.asm" \
 			-o "$OUT_DIR/heap.obj" 2>>"$OUT_DIR/link.err" || {
