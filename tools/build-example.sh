@@ -39,8 +39,21 @@ done
 # far-call ABI by tools/near_to_far_rt.py — the compiler far-calls them under
 # medium).  Far-DATA models (compact/large/huge) would need far_stdlib-aware
 # newlibc stdio + a far-pointer libc fill — a later step (§7q handoff).
-if [ "$NO_LIBSTUB" = 1 ] && [ "$MODEL" != small ] && [ "$MODEL" != medium ]; then
-	echo "$0: --no-libstub currently requires --model=small|medium" >&2; exit 2
+# §7t widened the libstub-free far-DATA path to compact + large (far code +
+# far data; the int86/intdos/segread family mangles to _far_* and reads its
+# register structs through far pointers — dos_syscall_far_data.asm — and the
+# stdio/str/mem stdlib calls mangle to _far_X, bridged by far tail-calls into
+# newlibc/dos_libc's plain symbols — far_stdlib_bridge.asm).  huge is NOT yet
+# supported libstub-free: printf and the far bridges work, but malloc fails —
+# newlibc's _sbrk brackets the heap with `next_heap > __heap_end`, a huge-model
+# pointer compare against the UNNORMALIZED __heap_end symbol address, which the
+# huge-pointer path mis-evaluates (the §7g/§4s huge-normalization family).  The
+# huge *libstub* build is unaffected (libstub's own malloc).  tiny is .COM-only.
+if [ "$NO_LIBSTUB" = 1 ]; then
+	case "$MODEL" in
+		tiny)  echo "$0: --no-libstub does not support --model=tiny" >&2; exit 2 ;;
+		huge)  echo "$0: --no-libstub does not yet support --model=huge (malloc/_sbrk huge-pointer heap-compare; printf path works, see §7t)" >&2; exit 2 ;;
+	esac
 fi
 
 # --split-stack: SS gets its own segment (SS != DS).  Far-data models only:
@@ -306,16 +319,38 @@ if [ "$NO_LIBSTUB" = 1 ]; then
 	if [ "$MODEL" = small ]; then
 		nasm -f obj "$DOS_DIR/qbe_rt.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$ERR"
 		nasm -f obj "$DOS_DIR/dos_syscall.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR"
-	else
+		RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
+	elif [ "$MODEL" = medium ]; then
+		# medium: far code, NEAR data — qbe_rt/dos_syscall are far-called
+		# (near_to_far_rt.py) but still take near-pointer args; no far_stdlib
+		# mangling (NEAR_DATA), so the example calls newlibc's plain _printf.
 		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=QBE_RT_TEXT \
 			"$DOS_DIR/qbe_rt.asm" "$OUT_DIR/qbe_rt_far.asm" 2>>"$ERR"
 		nasm -f obj "$OUT_DIR/qbe_rt_far.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$ERR"
 		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=DOS_SYSCALL_TEXT \
 			"$DOS_DIR/dos_syscall.asm" "$OUT_DIR/dos_syscall_far.asm" 2>>"$ERR"
 		nasm -f obj "$OUT_DIR/dos_syscall_far.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR"
+		RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
+	else
+		# §7t far-DATA models (compact/large/huge): far code AND far data.
+		# qbe_rt is still far-code (near_to_far_rt.py).  But the INT 21h
+		# primitives need the far-POINTER ABI — int86/intdos/segread mangle to
+		# _far_int86/... (far_stdlib), so link dos_syscall_far_data.asm (the
+		# ES:BX-far-pointer wrappers) instead of dos_syscall.asm's near forms.
+		# far_stdlib_bridge.asm tail-calls newlibc/dos_libc's plain _printf/
+		# _strcpy/... under their mangled _far_ names; --gc-sections drops the
+		# bridges the program doesn't call.
+		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=QBE_RT_TEXT \
+			"$DOS_DIR/qbe_rt.asm" "$OUT_DIR/qbe_rt_far.asm" 2>>"$ERR"
+		nasm -f obj "$OUT_DIR/qbe_rt_far.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$ERR"
+		nasm -f obj "$DOS_DIR/dos_syscall_far_data.asm" \
+			-o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR"
+		nasm -f obj "$DOS_DIR/far_stdlib_bridge.asm" \
+			-o "$OUT_DIR/far_stdlib_bridge.obj" 2>>"$ERR"
+		RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" \
+			"$OUT_DIR/far_stdlib_bridge.obj" "$OUT_DIR/heap.obj")
 	fi
 	nasm -f obj "$DOS_DIR/heap.asm" -o "$OUT_DIR/heap.obj" 2>>"$ERR"
-	RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
 else
 	"$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" \
 		"$DOS_DIR/libstub.asm" "$OUT_DIR/libstub_exe.asm" 2>>"$ERR"
