@@ -1009,6 +1009,23 @@ for t in "${NEWLIBC_TESTS[@]}"; do
 	fi
 done
 
+# §7n (Phase-6 libstub retirement, first increment): the SAME snprintf_test,
+# built libstub-free.  build-newlibc-test.sh --no-libstub links NO libstub at
+# all — the str/mem libc fill comes from minic-compiled minic/dos/newlibc/
+# dos_libc.c, the int86 DOS primitives from minic/dos/dos_syscall.asm, and the
+# _qbe_* compiler runtime from minic/dos/qbe_rt.asm (standalone verbatim copies;
+# libstub.asm is untouched).  This exercises printf -> _write -> INT 21h with no
+# libstub anywhere; diffing against the SAME golden as the libstub build proves
+# the libstub-free runtime is output-equivalent.  Bug-loud: a missing runtime
+# symbol fails the link; a wrong _qbe_* decimal conversion diffs the golden.
+# (Runs after the libstub snprintf_test above, overwriting the same .exe path.)
+if prep "newlibc libstub-free (snprintf_test)" \
+	build_newlibc_test snprintf_test --no-libstub; then
+	stage_runtime_case "newlibc libstub-free (snprintf_test)" \
+		"$QBE_DIR/build/newlibc-tests/snprintf_test/snprintf_test.exe" \
+		"$QBE_DIR/minic/dos/tests/newlibc_snprintf_test.golden.txt"
+fi
+
 # §6n: the keyboard-input tests — getchar/fgets (stdin_test) and scanf
 # (scanf_test) read DOS handle 0 via INT 21h AH=3Fh through newlibc's
 # /dev/console.  A DOS stdin redirect (`< IN.TXT`, the run-dos-batch.sh 3rd

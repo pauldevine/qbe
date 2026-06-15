@@ -21,19 +21,32 @@ MODEL="small"
 # need a smaller stack; fat_write.c keeps its sector scratch static, so
 # the write path's own stack need stays low.  Overridable per test.
 STACK_SIZE=8192
+# --no-libstub (§7n, Phase-6 libstub retirement): link NO libstub at all.
+# Instead of the --no-stdio libstub body (which still supplied str/mem/ctype
+# + the int86 family + the _qbe_* compiler helpers), link three standalone
+# objects: qbe_rt.asm (compiler runtime), dos_syscall.asm (INT 21h primitives),
+# and the minic-compiled dos_libc.c (the libc fill newlibc itself lacks).
+NO_LIBSTUB=0
 SRC=""
 for arg in "$@"; do
 	case "$arg" in
 		--model=*) MODEL="${arg#--model=}" ;;
 		--stack-size=*) STACK_SIZE="${arg#--stack-size=}" ;;
+		--no-libstub) NO_LIBSTUB=1 ;;
 		-h|--help)
-			echo "usage: $0 [--model=small] [--stack-size=N] <test-name|path/to/test.c>" >&2
+			echo "usage: $0 [--model=small] [--stack-size=N] [--no-libstub] <test-name|path/to/test.c>" >&2
 			exit 0 ;;
 		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
 		*) SRC="$arg" ;;
 	esac
 done
-[ -n "$SRC" ] || { echo "usage: $0 [--model=small] [--stack-size=N] <test-name|path.c>" >&2; exit 2; }
+[ -n "$SRC" ] || { echo "usage: $0 [--model=small] [--stack-size=N] [--no-libstub] <test-name|path.c>" >&2; exit 2; }
+# The libstub-free path is small-model-only for now (the qbe_rt/dos_syscall
+# copies are near form; the libc fill is minimal).  Medium/far widening is a
+# later increment.
+if [ "$NO_LIBSTUB" = 1 ] && [ "$MODEL" != small ]; then
+	echo "$0: --no-libstub currently requires --model=small" >&2; exit 2
+fi
 
 case "$MODEL" in
 	small) ;;
@@ -87,6 +100,11 @@ if grep -q 'fat_write\.h' "$SRC"; then
 	              "$NL/libgloss/mkdir.c"
 	              "$NL/libgloss/rmdir.c"
 	              "$NL/libgloss/rename.c")
+fi
+
+# --no-libstub: the minic-compiled libc fill replaces libstub's str/mem family.
+if [ "$NO_LIBSTUB" = 1 ]; then
+	SUPPORT_TUS+=("$DOS_DIR/newlibc/dos_libc.c")
 fi
 
 mkdir -p "$OUT_DIR"
@@ -148,11 +166,27 @@ CRT0_FLAGS=""
 [ "$MODEL" = small ] && CRT0_FLAGS="-DNEAR_CODE=1"
 nasm $CRT0_FLAGS -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" 2>>"$ERR" \
 	|| fail "crt0 assemble failed"
-"$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" --no-stdio \
-	"$DOS_DIR/libstub.asm" "$OUT_DIR/libstub_exe.asm" 2>>"$ERR" \
-	|| fail "libstub_to_exe failed"
-nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR" \
-	|| fail "libstub assemble failed"
+
+RUNTIME_OBJS=()
+if [ "$NO_LIBSTUB" = 1 ]; then
+	# §7n: NO libstub.  The compiler runtime (_qbe_*) and the DOS INT 21h
+	# primitives (int86 family) come from two standalone near-code TUs
+	# (verbatim copies of the libstub.asm routines; libstub.asm itself is
+	# left untouched so MP/stevie/existing gates can't regress).  dos_libc.c
+	# (compiled above into OBJ_FILES) supplies the libc str/mem fill.
+	nasm -f obj "$DOS_DIR/qbe_rt.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$ERR" \
+		|| fail "qbe_rt assemble failed"
+	nasm -f obj "$DOS_DIR/dos_syscall.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR" \
+		|| fail "dos_syscall assemble failed"
+	RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj")
+else
+	"$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" --no-stdio \
+		"$DOS_DIR/libstub.asm" "$OUT_DIR/libstub_exe.asm" 2>>"$ERR" \
+		|| fail "libstub_to_exe failed"
+	nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR" \
+		|| fail "libstub assemble failed"
+	RUNTIME_OBJS=("$OUT_DIR/libstub_exe.obj")
+fi
 
 "$QBE_DIR/tools/omf_link.py" \
 	-o "$OUT_DIR/$base.exe" \
@@ -162,7 +196,7 @@ nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR" \
 	--gc-sections \
 	"$OUT_DIR/crt0_exe.obj" \
 	"${OBJ_FILES[@]}" \
-	"$OUT_DIR/libstub_exe.obj" 2>>"$ERR" \
+	"${RUNTIME_OBJS[@]}" 2>>"$ERR" \
 	|| fail "link failed: $base"
 
 echo "  OK: $OUT_DIR/$base.exe ($(wc -c <"$OUT_DIR/$base.exe") bytes)"
