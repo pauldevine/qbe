@@ -1,0 +1,6 @@
+printf_nolibstub_probe start
+dec=12345 neg=-678 uns=60000
+hex=beef char=V pct=%
+sum1..100=5050
+str=victor 9000 len=11
+printf_nolibstub_probe done

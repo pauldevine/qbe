@@ -1107,6 +1107,38 @@ for t in fat_write_test fat_write_unit_test; do
 	fi
 done
 
+# §7q (Phase-6 libstub retirement, the ordinary build-example path): a NORMAL
+# (non-newlibc) minic program — its own main(), compiled in the build-example
+# regime against minic/include/ headers, the path stevie and plain examples
+# take — built libstub-free.  §7n/§7o/§7p retired libstub for the newlibc test
+# tree (built by build-newlibc-test.sh against newlibc's own shiminc headers);
+# this proves a normally-built program links the same way: printf/puts/malloc
+# resolve to newlibc's portable stdio (printf -> _write -> VFS -> dos_shim
+# INT 21h) + the minic-compiled dos_libc.c fill + the qbe_rt/dos_syscall/heap
+# runtime, NOT libstub_to_exe.py's python printf engine.  build-example.sh
+# --no-libstub renames the program's main (so dos_shim's main runs vfs_init()
+# first) and links the newlibc stack instead of libstub.  Each model is gated
+# BOTH ways: the libstub build (libstub's python printf) is the equivalence
+# anchor, the libstub-free build diffs the SAME golden — bug-loud, a divergent
+# _qbe_*/printf conversion reds only the libstub-free entry, an unresolved libc
+# symbol fails its link.  small (near runtime) + medium (near_to_far_rt.py far
+# ABI for qbe_rt/dos_syscall, same as §7p).
+nl_probe="$QBE_DIR/minic/dos/examples/printf_nolibstub_probe.c"
+nl_probe_exe="$QBE_DIR/build/examples/printf_nolibstub_probe/printf_nolibstub_probe.exe"
+nl_probe_golden="$QBE_DIR/minic/dos/tests/printf_nolibstub_probe.golden.txt"
+for model in small medium; do
+	if prep "$model runtime (printf_nolibstub_probe)" \
+		"$QBE_DIR/tools/build-example.sh" --model="$model" "$nl_probe"; then
+		stage_runtime_case "$model runtime (printf_nolibstub_probe)" \
+			"$nl_probe_exe" "$nl_probe_golden"
+	fi
+	if prep "$model libstub-free (printf_nolibstub_probe)" \
+		"$QBE_DIR/tools/build-example.sh" --model="$model" --no-libstub "$nl_probe"; then
+		stage_runtime_case "$model libstub-free (printf_nolibstub_probe)" \
+			"$nl_probe_exe" "$nl_probe_golden"
+	fi
+done
+
 # One DOSBox boot for everything staged above.
 flush_runtime_batch
 

@@ -10,19 +10,38 @@ set -eu
 MODEL="medium"
 SOFTFLOAT=0
 SPLITSTACK=0
+# --no-libstub (§7q, Phase-6 libstub retirement): build a NORMAL (non-newlibc)
+# minic program libstub-free.  Where build-newlibc-test.sh --no-libstub does
+# this for the newlibc test tree, this does it for a program compiled in the
+# ordinary build-example regime (its own main, minic/include headers) — the
+# path stevie and plain examples take.  The program's printf/str/mem/malloc
+# resolve to newlibc's portable stdio (printf -> _write -> VFS -> dos_shim
+# INT 21h) + the minic-compiled dos_libc.c fill + the qbe_rt/dos_syscall/heap
+# runtime, NOT libstub's python printf engine.  See §7n/§7o/§7p.
+NO_LIBSTUB=0
 SOURCES=()
 for arg in "$@"; do
 	case "$arg" in
 		--model=*) MODEL="${arg#--model=}" ;;
 		--softfloat) SOFTFLOAT=1 ;;
 		--split-stack) SPLITSTACK=1 ;;
+		--no-libstub) NO_LIBSTUB=1 ;;
 		-h|--help)
-			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] [--softfloat] [--split-stack] <source.c> [extra.c ...]" >&2
+			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] [--softfloat] [--split-stack] [--no-libstub] <source.c> [extra.c ...]" >&2
 			exit 0 ;;
 		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
 		*) SOURCES+=("$arg") ;;
 	esac
 done
+
+# The libstub-free path supports small (qbe_rt/dos_syscall assembled raw in
+# near form) and medium (the two pure-code runtime TUs rewritten to the
+# far-call ABI by tools/near_to_far_rt.py — the compiler far-calls them under
+# medium).  Far-DATA models (compact/large/huge) would need far_stdlib-aware
+# newlibc stdio + a far-pointer libc fill — a later step (§7q handoff).
+if [ "$NO_LIBSTUB" = 1 ] && [ "$MODEL" != small ] && [ "$MODEL" != medium ]; then
+	echo "$0: --no-libstub currently requires --model=small|medium" >&2; exit 2
+fi
 
 # --split-stack: SS gets its own segment (SS != DS).  Far-data models only:
 # qbe -s adds ss: overrides on register-indirect near derefs and omf_link
@@ -92,9 +111,12 @@ compile_unit() {
 	local unit_src="$1" unit_base="$2"
 	local pp asm_clean prefix
 
-# Stage 1: C → preprocessed → SSA
+# Stage 1: C → preprocessed → SSA.  EXAMPLE_DEFS is empty for an ordinary
+# build; under --no-libstub it carries -Dmain=newlibc_test_main so the
+# program's main() is renamed and dos_shim.c's main() (which runs vfs_init()
+# before tail-calling it) sequences the VFS/console bring-up first.
 pp="$OUT_DIR/$unit_base.pp.c"
-cpp -P -nostdinc -isysroot/var/empty -DDOS -D__TURBOC__ \
+cpp -P -nostdinc -isysroot/var/empty -DDOS -D__TURBOC__ ${EXAMPLE_DEFS:-} \
 	"-I$INC_DIR" "-I$(dirname "$unit_src")" \
 	"$unit_src" 2>>"$ERR" | tr -d '\r\032' | sed "$NORMALIZE_TYPES" > "$pp"
 "$MINIC" -m "$MODEL" < "$pp" > "$OUT_DIR/$unit_base.ssa" 2>>"$ERR"
@@ -183,6 +205,13 @@ nasm -w-label-redef-late -f obj "$OUT_DIR/$unit_base.omf.asm" \
 	-o "$OUT_DIR/$unit_base.obj" 2>>"$ERR"
 }
 
+# --no-libstub: the program's main() is renamed so dos_shim.c's main() runs
+# vfs_init() before tail-calling it (printf can't reach the console until the
+# VFS device table is up).  EXAMPLE_DEFS is threaded into every example TU's
+# cpp (harmless on TUs without a main); empty for an ordinary libstub build.
+EXAMPLE_DEFS=""
+[ "$NO_LIBSTUB" = 1 ] && EXAMPLE_DEFS="-Dmain=newlibc_test_main"
+
 # Compile the requested translation units.  The first source controls the
 # output directory and executable basename; every source contributes one .obj.
 OBJ_FILES=()
@@ -200,7 +229,62 @@ if [ "$SOFTFLOAT" = "1" ]; then
 	LINK_OBJS+=("$OUT_DIR/softfloat.obj")
 fi
 
-# Stage 5: crt0_exe.obj and libstub_exe.obj
+# --no-libstub: compile newlibc's portable stdio stack (printf -> _write ->
+# VFS -> dos_shim INT 21h) + the dos_libc.c libc fill, and append them to the
+# link.  These TUs are compiled in newlibc's own regime (shiminc + newlibc
+# headers, -D__ia16__, clang -E) — distinct from the example's ordinary
+# build-example regime above; the two meet only at the linker (via _printf,
+# _write, _vfs_*, _newlibc_test_main).  Mirrors build-newlibc-test.sh's
+# compile_unit + SUPPORT_TUS; --gc-sections drops the FAT/block code the
+# example never reaches.
+if [ "$NO_LIBSTUB" = 1 ]; then
+	NL="${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}"
+	# Exit 77 (not 2) when the newlibc tree is absent: the portable stdio
+	# stack lives there, so the gate's prep() treats this as [skip], the same
+	# graceful degradation as the build-newlibc-test.sh entries.
+	[ -d "$NL" ] || { echo "newlibc tree not found: $NL" >&2; exit 77; }
+	SHIM="$DOS_DIR/newlibc/shiminc"
+	NL_NORMALIZE='s/\bunsigned short int\b/unsigned short/g;s/\bunsigned long int\b/unsigned long/g;s/\bsigned short int\b/short/g;s/\bsigned long int\b/long/g;s/\blong long int\b/long long/g;s/\blong int\b/long/g;s/\bshort int\b/short/g;s/\bsigned char\b/char/g;s/\bsigned long long\b/long long/g;s/\bsigned long\b/long/g;s/\bsigned int\b/int/g'
+	NL_HALT2DOS='s/__asm__[[:space:]]*volatile[[:space:]]*([[:space:]]*"hlt"[[:space:]]*)/{ __asm__ volatile ("mov ax, 0x4c00"); __asm__ volatile ("int 0x21"); }/g'
+	# compile_newlibc_unit <source.c> <obj-base>
+	compile_newlibc_unit() {
+		local unit_src="$1" unit_base="$2"
+		clang -E -P -nostdinc -DDOS -D__ia16__ -DNO_LIBSTUB \
+			"-I$SHIM" "-I$INC_DIR" \
+			"-I$NL/include" "-I$NL/drivers" "-I$NL/libgloss" "-I$NL/vfs" \
+			"$unit_src" 2>>"$ERR" \
+			| tr -d '\r\032' | sed "$NL_NORMALIZE" | sed "$NL_HALT2DOS" \
+			> "$OUT_DIR/$unit_base.pp.c"
+		"$MINIC" -m "$MODEL" < "$OUT_DIR/$unit_base.pp.c" \
+			> "$OUT_DIR/$unit_base.ssa" 2>>"$ERR"
+		"$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$unit_base.ssa" \
+			> "$OUT_DIR/$unit_base.asm" 2>>"$ERR"
+		"$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" "$unit_base" \
+			"$OUT_DIR/$unit_base.asm" "$OUT_DIR/$unit_base.omf.asm" 2>>"$ERR"
+		nasm -w-label-redef-late -f obj "$OUT_DIR/$unit_base.omf.asm" \
+			-o "$OUT_DIR/$unit_base.obj" 2>>"$ERR"
+	}
+	NL_SUPPORT=(
+		"$NL/libgloss/printf_wrappers.c"
+		"$NL/libgloss/scanf_wrappers.c"
+		"$NL/libgloss/syscalls.c"
+		"$NL/libgloss/reent_stubs.c"
+		"$NL/libgloss/dirent.c"
+		"$NL/libgloss/unlink.c"
+		"$NL/vfs/vfs.c"
+		"$NL/vfs/fat.c"
+		"$NL/drivers/block.c"
+		"$DOS_DIR/newlibc/dos_shim.c"
+		"$DOS_DIR/newlibc/dos_libc.c"
+	)
+	for tu in "${NL_SUPPORT[@]}"; do
+		tu_base="$(basename "$tu" .c)"
+		compile_newlibc_unit "$tu" "$tu_base"
+		LINK_OBJS+=("$OUT_DIR/$tu_base.obj")
+	done
+fi
+
+# Stage 5: crt0_exe.obj + the runtime.
 # Far-data models need crt0_exe to build argv as 4-byte far ptrs to
 # match main()'s `char *argv[]` parameter ABI.
 CRT0_FLAGS=""
@@ -209,9 +293,41 @@ case "$MODEL" in
 	small|tiny) CRT0_FLAGS="-DNEAR_CODE=1" ;;
 esac
 nasm $CRT0_FLAGS -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" 2>>"$ERR"
-"$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" \
-	"$DOS_DIR/libstub.asm" "$OUT_DIR/libstub_exe.asm" 2>>"$ERR"
-nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR"
+
+RUNTIME_OBJS=()
+if [ "$NO_LIBSTUB" = 1 ]; then
+	# §7q: NO libstub.  The _qbe_* compiler runtime (qbe_rt.asm) and the
+	# INT 21h primitives (dos_syscall.asm) come from standalone pure-code
+	# TUs (verbatim copies of the libstub.asm routines; libstub.asm itself
+	# is untouched).  small: near form, assembled raw.  medium: the compiler
+	# far-calls them, so near_to_far_rt.py rewrites each to the far ABI
+	# (ret->retf, [bp+N]->[bp+N+2], unique far-code segment).  heap.asm is
+	# the BSS heap dos_libc.c's malloc carves from via newlibc's _sbrk;
+	# --gc-sections drops it from a program that never reaches malloc.
+	if [ "$MODEL" = small ]; then
+		nasm -f obj "$DOS_DIR/qbe_rt.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$ERR"
+		nasm -f obj "$DOS_DIR/dos_syscall.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR"
+	else
+		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=QBE_RT_TEXT \
+			"$DOS_DIR/qbe_rt.asm" "$OUT_DIR/qbe_rt_far.asm" 2>>"$ERR"
+		nasm -f obj "$OUT_DIR/qbe_rt_far.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$ERR"
+		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=DOS_SYSCALL_TEXT \
+			"$DOS_DIR/dos_syscall.asm" "$OUT_DIR/dos_syscall_far.asm" 2>>"$ERR"
+		nasm -f obj "$OUT_DIR/dos_syscall_far.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR"
+	fi
+	nasm -f obj "$DOS_DIR/heap.asm" -o "$OUT_DIR/heap.obj" 2>>"$ERR"
+	RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
+else
+	"$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" \
+		"$DOS_DIR/libstub.asm" "$OUT_DIR/libstub_exe.asm" 2>>"$ERR"
+	nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR"
+	RUNTIME_OBJS=("$OUT_DIR/libstub_exe.obj")
+fi
+
+# --no-libstub adds --gc-sections so the FAT/block stdio code the program
+# never reaches (and the heap, if it never mallocs) is stripped.
+GC_FLAG=""
+[ "$NO_LIBSTUB" = 1 ] && GC_FLAG="--gc-sections"
 
 # Stage 6: Link
 "$QBE_DIR/tools/omf_link.py" \
@@ -219,9 +335,10 @@ nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$ERR"
 	--map "$OUT_DIR/$base.map" \
 	--entry _start \
 	--stack-size 8192 \
+	$GC_FLAG \
 	$LINK_SPLIT_FLAG \
 	"$OUT_DIR/crt0_exe.obj" \
 	"${LINK_OBJS[@]}" \
-	"$OUT_DIR/libstub_exe.obj" 2>>"$ERR"
+	"${RUNTIME_OBJS[@]}" 2>>"$ERR"
 
 echo "  OK: $OUT_DIR/$base.exe ($(wc -c <"$OUT_DIR/$base.exe") bytes)"
