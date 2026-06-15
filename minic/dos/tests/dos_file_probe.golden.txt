@@ -1,0 +1,8 @@
+dos_file_probe start
+read 12 bytes
+content:line one
+ab
+:end
+remove 0
+reopen gone
+dos_file_probe done

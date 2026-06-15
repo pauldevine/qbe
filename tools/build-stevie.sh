@@ -382,9 +382,7 @@ if [ $EXE -eq 1 ]; then
 			"$NL/libgloss/dirent.c"
 			"$NL/libgloss/unlink.c"
 			"$NL/libgloss/rename.c"
-			"$NL/vfs/vfs.c"
-			"$NL/vfs/fat.c"
-			"$NL/drivers/block.c"
+			"$DOS_DIR/newlibc/dos_vfs.c"
 			"$DOS_DIR/newlibc/dos_shim.c"
 			"$DOS_DIR/newlibc/dos_libc.c"
 		)

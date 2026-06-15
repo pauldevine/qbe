@@ -1167,6 +1167,34 @@ for model in small medium; do
 	fi
 done
 
+# §7s (Phase-6 libstub retirement, real DOS file I/O): a normal minic program's
+# fopen/getc/fputs route through newlibc stdio -> _read/_write -> vfs_*, and the
+# bare-metal vfs.c (FAT-on-disk) has no backend for a plain DOS path — so
+# libstub-free stevie could not load/save files (§7r left this; the user hit
+# "New File" on load and "Can't open file for writing!" on save).  dos_vfs.c
+# replaces vfs.c on the --no-libstub build-example/build-stevie path with a DOS
+# INT 21h file backend (fd = DOS handle; 0/1/2 are CON, files get >=5).  This
+# probe round-trips a real DOS file (fopen w + fputs/fputc, fclose, fopen r +
+# getc to EOF, remove, reopen).  Same 4-way gate: small + medium x {libstub
+# anchor (libstub's own INT 21h fopen/getc), libstub-free (dos_vfs.c)} against
+# ONE golden — both do real INT 21h file I/O so the bytes match; bug-loud, a
+# broken open/read/write diffs the golden, an unresolved vfs_* fails the link.
+df_probe="$QBE_DIR/minic/dos/examples/dos_file_probe.c"
+df_probe_exe="$QBE_DIR/build/examples/dos_file_probe/dos_file_probe.exe"
+df_probe_golden="$QBE_DIR/minic/dos/tests/dos_file_probe.golden.txt"
+for model in small medium; do
+	if prep "$model runtime (dos_file_probe)" \
+		"$QBE_DIR/tools/build-example.sh" --model="$model" "$df_probe"; then
+		stage_runtime_case "$model runtime (dos_file_probe)" \
+			"$df_probe_exe" "$df_probe_golden"
+	fi
+	if prep "$model libstub-free (dos_file_probe)" \
+		"$QBE_DIR/tools/build-example.sh" --model="$model" --no-libstub "$df_probe"; then
+		stage_runtime_case "$model libstub-free (dos_file_probe)" \
+			"$df_probe_exe" "$df_probe_golden"
+	fi
+done
+
 # One DOSBox boot for everything staged above.
 flush_runtime_batch
 

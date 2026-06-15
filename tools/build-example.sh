@@ -271,9 +271,8 @@ if [ "$NO_LIBSTUB" = 1 ]; then
 		"$NL/libgloss/reent_stubs.c"
 		"$NL/libgloss/dirent.c"
 		"$NL/libgloss/unlink.c"
-		"$NL/vfs/vfs.c"
-		"$NL/vfs/fat.c"
-		"$NL/drivers/block.c"
+		"$NL/libgloss/rename.c"
+		"$DOS_DIR/newlibc/dos_vfs.c"
 		"$DOS_DIR/newlibc/dos_shim.c"
 		"$DOS_DIR/newlibc/dos_libc.c"
 	)
