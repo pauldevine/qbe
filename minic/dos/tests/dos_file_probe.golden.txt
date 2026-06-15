@@ -3,6 +3,7 @@ read 12 bytes
 content:line one
 ab
 :end
+statname:DFPROBE.TXT
 remove 0
 reopen gone
 dos_file_probe done

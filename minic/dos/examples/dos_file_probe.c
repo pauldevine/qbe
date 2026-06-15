@@ -21,8 +21,26 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 extern int remove();
+
+/* Mirror stevie's writeit frame: a `char *fname` parameter alongside a stack
+ * `struct stat`, then stat() on an EXISTING file.  newlibc's struct stat
+ * (~30 B) is far larger than minic/include's (~8 B); if vfs_stat zeroes/fills
+ * sizeof(its struct) into this caller's smaller stack buffer it overflows and
+ * clobbers `fname` — the bug that NULLed stevie's filename on save (load
+ * worked; save to an existing file did not).  Returning fname lets the caller
+ * check it survived: intact = fix in place, NULL/garbage = the overflow is
+ * back.  (Both libstub's _stat and the fixed vfs_stat write nothing, so this
+ * is identical across the 4-way gate.) */
+static char *stat_keeps_fname(char *fname)
+{
+	struct stat statbuf;
+
+	stat(fname, &statbuf);		/* existing file -> the overflow path */
+	return fname;
+}
 
 int main(void)
 {
@@ -58,6 +76,14 @@ int main(void)
 
 	printf("read %d bytes\n", i);
 	printf("content:%s:end\n", buf);
+
+	/* stat() on the existing file must not overflow the caller's struct
+	 * stat and clobber fname (the stevie save bug). */
+	{
+		char *kept = stat_keeps_fname("DFPROBE.TXT");
+		printf("statname:%s\n", (kept != NULL) ? kept : "CLOBBERED");
+	}
+
 	printf("remove %d\n", remove("DFPROBE.TXT"));
 
 	/* Confirm it's gone (re-open should fail). */

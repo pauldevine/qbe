@@ -164,31 +164,38 @@ int vfs_isatty(int fd)
 	return (r.x.dx & 0x0080) ? 1 : 0;
 }
 
+/* stat/fstat: DELIBERATELY write NOTHING to *st — only return success/failure.
+ *
+ * `struct stat` has DIFFERENT sizes in the two compile regimes that meet here:
+ * a DOS program (stevie) declares its statbuf with minic/include/sys/stat.h
+ * ({int st_mode; int st_size; time_t st_mtime} ~ 6-8 B) and passes &statbuf
+ * across the linker to these functions, which see the newlibc shiminc struct
+ * (~30+ B, 11 fields).  Zeroing/filling sizeof(*st) (the shiminc size) would
+ * overflow the caller's smaller stack buffer and clobber its locals — exactly
+ * the bug that broke stevie's save (writeit's fname got corrupted to NULL when
+ * stat succeeded on an existing file, while a new file's failed stat returned
+ * early and saved fine).  Even a single field write lands at the shiminc
+ * offset, not the caller's, so it cannot help the caller anyway.  libstub's
+ * _stat/_fstat are likewise -1/no-write stubs.  stevie only uses the result to
+ * gate a (no-op) chmod, so returning status without touching *st is correct
+ * and overflow-proof.  A real cross-regime stat would need one shared ABI. */
+
 int vfs_fstat(int fd, struct stat *st)
 {
-	int i;
-	char *p = (char *)st;
-
-	for (i = 0; i < (int)sizeof(*st); i++)
-		p[i] = 0;
-	st->st_mode = vfs_isatty(fd) ? S_IFCHR : S_IFREG;
-	return 0;
+	(void)st;
+	return (fd >= 0) ? 0 : -EBADF;
 }
 
 int vfs_stat(const char *path, struct stat *st)
 {
 	int fd;
-	int i;
-	char *p = (char *)st;
 
+	(void)st;
 	fd = vfs_open(path, O_RDONLY);
 	if (fd < 0)
 		return -ENOENT;
-	for (i = 0; i < (int)sizeof(*st); i++)
-		p[i] = 0;
-	st->st_mode = S_IFREG;
 	vfs_close(fd);
-	return 0;
+	return 0;		/* file exists; *st left untouched (see note above) */
 }
 
 int vfs_unlink(const char *path)
