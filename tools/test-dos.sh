@@ -1090,6 +1090,23 @@ if prep "newlibc medium (fat_write_unit_test)" \
 		"$QBE_DIR/minic/dos/tests/newlibc_fat_write_unit_test.golden.txt"
 fi
 
+# §7p (Phase-6 libstub retirement, MEDIUM widening): the two MEDIUM FAT-write
+# tests, built libstub-free.  The small --no-libstub path (§7n/§7o) assembles
+# qbe_rt.asm/dos_syscall.asm raw in near form; medium far-calls them, so
+# tools/near_to_far_rt.py rewrites both to the far-call ABI (ret->retf,
+# [bp+N]->[bp+N+2], unique far-code segment) before nasm.  Each diffs the SAME
+# golden as its libstub build — proving the libstub-free runtime works under
+# far code.  Run AFTER the libstub builds (overwrites the same .exe path; safe
+# because stage_runtime_case cp's the exe at stage time).
+for t in fat_write_test fat_write_unit_test; do
+	if prep "newlibc medium libstub-free ($t)" \
+		build_newlibc_test "$t" --model=medium --stack-size=5120 --no-libstub; then
+		stage_runtime_case "newlibc medium libstub-free ($t)" \
+			"$QBE_DIR/build/newlibc-tests/$t/$t.exe" \
+			"$QBE_DIR/minic/dos/tests/newlibc_$t.golden.txt"
+	fi
+done
+
 # One DOSBox boot for everything staged above.
 flush_runtime_batch
 

@@ -41,11 +41,13 @@ for arg in "$@"; do
 	esac
 done
 [ -n "$SRC" ] || { echo "usage: $0 [--model=small] [--stack-size=N] [--no-libstub] <test-name|path.c>" >&2; exit 2; }
-# The libstub-free path is small-model-only for now (the qbe_rt/dos_syscall
-# copies are near form; the libc fill is minimal).  Medium/far widening is a
-# later increment.
-if [ "$NO_LIBSTUB" = 1 ] && [ "$MODEL" != small ]; then
-	echo "$0: --no-libstub currently requires --model=small" >&2; exit 2
+# The libstub-free path supports small (qbe_rt/dos_syscall assembled raw in
+# near form) and medium (§7p: the two pure-code runtime TUs are rewritten to
+# the far-call ABI by tools/near_to_far_rt.py — the compiler emits `call far`
+# to them under medium).  Far-DATA models (compact/large/huge) would need
+# far_stdlib-aware newlibc stdio and the far-pointer libc fill — a later step.
+if [ "$NO_LIBSTUB" = 1 ] && [ "$MODEL" != small ] && [ "$MODEL" != medium ]; then
+	echo "$0: --no-libstub currently requires --model=small|medium" >&2; exit 2
 fi
 
 case "$MODEL" in
@@ -181,14 +183,32 @@ nasm $CRT0_FLAGS -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" 2>>"$
 RUNTIME_OBJS=()
 if [ "$NO_LIBSTUB" = 1 ]; then
 	# §7n: NO libstub.  The compiler runtime (_qbe_*) and the DOS INT 21h
-	# primitives (int86 family) come from two standalone near-code TUs
+	# primitives (int86 family) come from two standalone pure-code TUs
 	# (verbatim copies of the libstub.asm routines; libstub.asm itself is
 	# left untouched so MP/stevie/existing gates can't regress).  dos_libc.c
 	# (compiled above into OBJ_FILES) supplies the libc str/mem fill.
-	nasm -f obj "$DOS_DIR/qbe_rt.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$ERR" \
-		|| fail "qbe_rt assemble failed"
-	nasm -f obj "$DOS_DIR/dos_syscall.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR" \
-		|| fail "dos_syscall assemble failed"
+	#
+	# small: the TUs are near form (plain `ret`, args at [bp+4]); assemble
+	# raw into the shared _TEXT frame.  medium (§7p): the compiler far-calls
+	# them, so near_to_far_rt.py rewrites each to the far ABI (ret->retf,
+	# [bp+N]->[bp+N+2]) and a unique far-code segment before nasm.
+	if [ "$MODEL" = small ]; then
+		nasm -f obj "$DOS_DIR/qbe_rt.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$ERR" \
+			|| fail "qbe_rt assemble failed"
+		nasm -f obj "$DOS_DIR/dos_syscall.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR" \
+			|| fail "dos_syscall assemble failed"
+	else
+		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=QBE_RT_TEXT \
+			"$DOS_DIR/qbe_rt.asm" "$OUT_DIR/qbe_rt_far.asm" 2>>"$ERR" \
+			|| fail "qbe_rt far rewrite failed"
+		nasm -f obj "$OUT_DIR/qbe_rt_far.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$ERR" \
+			|| fail "qbe_rt assemble failed"
+		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=DOS_SYSCALL_TEXT \
+			"$DOS_DIR/dos_syscall.asm" "$OUT_DIR/dos_syscall_far.asm" 2>>"$ERR" \
+			|| fail "dos_syscall far rewrite failed"
+		nasm -f obj "$OUT_DIR/dos_syscall_far.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR" \
+			|| fail "dos_syscall assemble failed"
+	fi
 	# heap.asm: the BSS heap newlibc's _sbrk carves from (§7o).  Linked
 	# unconditionally; --gc-sections drops it from any test that never
 	# reaches malloc (no _sbrk reference -> no heap reference).
