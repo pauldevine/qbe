@@ -53,13 +53,16 @@ esac
 # dos_shim INT 21h) + the minic-compiled dos_libc.c libc fill + the
 # qbe_rt/dos_syscall/heap runtime INSTEAD of libstub — the same path
 # build-example.sh --no-libstub uses, applied to the full stevie editor.  It is
-# an .EXE-only path (omf_link with the qbe_rt far-call runtime) and currently
-# supports small + medium (far-DATA models would need far_stdlib stdio + a
-# far-pointer libc fill, a later step).
+# an .EXE-only path (omf_link with the qbe_rt far-call runtime).  §7r covered
+# small + medium; §7v widened it to the far-DATA models compact/large/huge,
+# mirroring build-example.sh's far-DATA runtime branch (qbe_rt far rewrite +
+# dos_syscall_far_data.asm + far_stdlib_bridge.asm) — the stevie far-data file
+# path (fopen/fputs/getc/remove/stat incl. int86x rename + the §7s vfs_stat
+# no-write) is PROVEN by dos_file_probe compact/large/huge.  tiny is .COM-only.
 if [ "$NO_LIBSTUB" = 1 ]; then
 	EXE=1
-	if [ "$MODEL" != small ] && [ "$MODEL" != medium ]; then
-		echo "$0: --no-libstub currently requires --model=small|medium" >&2
+	if [ "$MODEL" = tiny ]; then
+		echo "$0: --no-libstub does not support --model=tiny" >&2
 		exit 2
 	fi
 fi
@@ -392,25 +395,44 @@ if [ $EXE -eq 1 ]; then
 			SUPPORT_OBJS+=("$OUT_DIR/$tu_base.obj")
 		done
 		# qbe_rt (the _qbe_* compiler helpers) + dos_syscall (INT 21h
-		# primitives): assembled raw for small (near form); rewritten to the
-		# far-call ABI by near_to_far_rt.py for medium (the compiler far-calls
-		# them under medium).  heap.asm is the BSS heap dos_libc malloc carves
-		# from via newlibc _sbrk.  See §7n/§7o/§7p.
+		# primitives) + heap.asm (the BSS heap dos_libc malloc carves from via
+		# newlibc _sbrk).  Three runtime shapes, mirroring build-example.sh:
+		#   small      — near form, assembled raw.
+		#   medium     — far code, NEAR data: qbe_rt/dos_syscall far-called
+		#                (near_to_far_rt.py) but still near-pointer args.
+		#   compact/   — §7v far code AND far data: qbe_rt is still far-code,
+		#   large/huge   but the INT 21h primitives need the far-POINTER ABI
+		#                (int86/intdos/segread mangle to _far_*), so link
+		#                dos_syscall_far_data.asm instead of the near dos_syscall;
+		#                far_stdlib_bridge.asm tail-calls the plain _printf/_str*
+		#                under their mangled _far_ names.  --gc-sections drops the
+		#                bridges/heap stevie never reaches.  See §7n/§7o/§7p/§7t.
 		if [ "$MODEL" = small ]; then
 			nasm -f obj "$DOS_DIR/qbe_rt.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$OUT_DIR/link.err"
 			nasm -f obj "$DOS_DIR/dos_syscall.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$OUT_DIR/link.err"
-		else
+			RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
+		elif [ "$MODEL" = medium ]; then
 			"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=QBE_RT_TEXT \
 				"$DOS_DIR/qbe_rt.asm" "$OUT_DIR/qbe_rt_far.asm" 2>>"$OUT_DIR/link.err"
 			nasm -f obj "$OUT_DIR/qbe_rt_far.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$OUT_DIR/link.err"
 			"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=DOS_SYSCALL_TEXT \
 				"$DOS_DIR/dos_syscall.asm" "$OUT_DIR/dos_syscall_far.asm" 2>>"$OUT_DIR/link.err"
 			nasm -f obj "$OUT_DIR/dos_syscall_far.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$OUT_DIR/link.err"
+			RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
+		else
+			"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=QBE_RT_TEXT \
+				"$DOS_DIR/qbe_rt.asm" "$OUT_DIR/qbe_rt_far.asm" 2>>"$OUT_DIR/link.err"
+			nasm -f obj "$OUT_DIR/qbe_rt_far.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$OUT_DIR/link.err"
+			nasm -f obj "$DOS_DIR/dos_syscall_far_data.asm" \
+				-o "$OUT_DIR/dos_syscall.obj" 2>>"$OUT_DIR/link.err"
+			nasm -f obj "$DOS_DIR/far_stdlib_bridge.asm" \
+				-o "$OUT_DIR/far_stdlib_bridge.obj" 2>>"$OUT_DIR/link.err"
+			RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" \
+				"$OUT_DIR/far_stdlib_bridge.obj" "$OUT_DIR/heap.obj")
 		fi
 		nasm "-DHEAP_SIZE=$STEVIE_HEAP_SIZE" -f obj "$DOS_DIR/heap.asm" \
 			-o "$OUT_DIR/heap.obj" 2>>"$OUT_DIR/link.err" || {
 			echo "  FAIL nasm-obj: heap"; cat "$OUT_DIR/link.err"; exit 1; }
-		RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
 		GC_FLAG="--gc-sections"
 	else
 		# libstub_exe.obj (auto-converted from libstub.asm).  Thread
