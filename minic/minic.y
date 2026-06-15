@@ -4509,6 +4509,39 @@ expr(Node *n)
 			break;
 		}
 
+		/* Under MHuge, a pointer RELATIONAL compare (p < q, p <= q; the
+		 * parser lowers p > q / p >= q to swapped-operand < / <=) must be
+		 * decided on the LINEAR addresses, exactly like the ptr-ptr
+		 * subtraction above.  The flat `cultl` further down assumes BOTH
+		 * operands are NORMALISED huge pointers, so the seg:off word is
+		 * monotonic in linear address — but a bare symbol address ($sym,
+		 * e.g. _sbrk's __heap_end) is UNNORMALISED (raw DGROUP:offset, the
+		 * offset can exceed 0xF), so comparing it flat against a normalised
+		 * pointer (one that went through _qbe_huge_add) gives the wrong
+		 * order.  Route through _qbe_huge_cmp(p,q) = signed linear(p)-linear(q)
+		 * and test its sign: p<q ⟺ cmp<0, p<=q ⟺ cmp<=0.  huge_cmp recomputes
+		 * seg*16+off from the raw words, so it is normalisation-invariant and
+		 * correct for both forms.  MHuge-gated, so the compact/large/near
+		 * corpora — including the MP byte-compare — are untouched.  Found in
+		 * §7u: malloc returned NULL because _sbrk's `next > __heap_end`
+		 * mis-ordered the unnormalised __heap_end.  See [[huge-mode-plan]]. */
+		if (memmodel == MHuge && (o == '<' || o == 'l')
+		&& KIND(s0.ctyp) == PTR && KIND(s1.ctyp) == PTR
+		&& KIND(DREF(s0.ctyp)) != FUN) {
+			int ct = tmp++;
+			fprintf(of, "\t%%t%d =l call $qbe_huge_cmp(l ", ct);
+			psymb(s0);
+			fprintf(of, ", l ");
+			psymb(s1);
+			fprintf(of, ")\n");
+			sr.ctyp = INT;
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =%c %s %%t%d, 0\n", irtyp_ret(sr.ctyp),
+				o == '<' ? "csltl" : "cslel", ct);
+			break;
+		}
+
 		/* Compact/large (or explicit __far): `far_ptr ± idx` must use the
 		 * offset-only addfo/subfo ops (segment preserved, 16-bit offset
 		 * wraparound) — a flat `=l add` of the Scale path's sign-extended

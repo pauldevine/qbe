@@ -1129,8 +1129,10 @@ nl_probe_golden="$QBE_DIR/minic/dos/tests/printf_nolibstub_probe.golden.txt"
 # §7t widened the libstub-free path to the far-DATA models compact + large
 # (far code + far data: _far_int86/intdos/segread far-pointer wrappers
 # dos_syscall_far_data.asm + the _far_X stdlib name bridges far_stdlib_bridge.asm).
-# huge stays out (malloc/_sbrk huge-pointer heap-compare — see build-example.sh).
-for model in small medium compact large; do
+# §7u added huge (the MHuge _sbrk pointer relational compare now routes through
+# _qbe_huge_cmp — see minic.y / build-example.sh), so the malloc round-trip in
+# this probe works libstub-free under huge too.
+for model in small medium compact large huge; do
 	if prep "$model runtime (printf_nolibstub_probe)" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" "$nl_probe"; then
 		stage_runtime_case "$model runtime (printf_nolibstub_probe)" \
@@ -1158,7 +1160,7 @@ done
 lc_probe="$QBE_DIR/minic/dos/examples/dos_libc_probe.c"
 lc_probe_exe="$QBE_DIR/build/examples/dos_libc_probe/dos_libc_probe.exe"
 lc_probe_golden="$QBE_DIR/minic/dos/tests/dos_libc_probe.golden.txt"
-for model in small medium compact large; do  # §7t: + far-DATA compact/large
+for model in small medium compact large huge; do  # 7t: far-DATA; 7u: +huge
 	if prep "$model runtime (dos_libc_probe)" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" "$lc_probe"; then
 		stage_runtime_case "$model runtime (dos_libc_probe)" \
@@ -1186,7 +1188,7 @@ done
 df_probe="$QBE_DIR/minic/dos/examples/dos_file_probe.c"
 df_probe_exe="$QBE_DIR/build/examples/dos_file_probe/dos_file_probe.exe"
 df_probe_golden="$QBE_DIR/minic/dos/tests/dos_file_probe.golden.txt"
-for model in small medium compact large; do  # §7t: + far-DATA compact/large
+for model in small medium compact large huge; do  # 7t: far-DATA; 7u: +huge
 	if prep "$model runtime (dos_file_probe)" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" "$df_probe"; then
 		stage_runtime_case "$model runtime (dos_file_probe)" \

@@ -45,14 +45,16 @@ done
 # stdio/str/mem stdlib calls mangle to _far_X, bridged by far tail-calls into
 # newlibc/dos_libc's plain symbols — far_stdlib_bridge.asm).  huge is NOT yet
 # supported libstub-free: printf and the far bridges work, but malloc fails —
-# newlibc's _sbrk brackets the heap with `next_heap > __heap_end`, a huge-model
-# pointer compare against the UNNORMALIZED __heap_end symbol address, which the
-# huge-pointer path mis-evaluates (the §7g/§4s huge-normalization family).  The
-# huge *libstub* build is unaffected (libstub's own malloc).  tiny is .COM-only.
+# §7u completed huge: newlibc's _sbrk brackets the heap with
+# `next_heap > __heap_end`, an MHuge pointer relational compare against the
+# UNNORMALISED __heap_end symbol address.  minic now routes MHuge pointer
+# relational compares through _qbe_huge_cmp (linear-address, normalisation-
+# invariant) instead of a flat seg:off `cultl`, so malloc/_sbrk works under
+# huge libstub-free too (the §7g/§4s huge-normalization family).  tiny is
+# .COM-only.
 if [ "$NO_LIBSTUB" = 1 ]; then
 	case "$MODEL" in
 		tiny)  echo "$0: --no-libstub does not support --model=tiny" >&2; exit 2 ;;
-		huge)  echo "$0: --no-libstub does not yet support --model=huge (malloc/_sbrk huge-pointer heap-compare; printf path works, see §7t)" >&2; exit 2 ;;
 	esac
 fi
 
