@@ -16,14 +16,23 @@ set -u
 KEEP_GOING=0
 MODEL=""             # empty until explicitly set; defaulted below based on EXE
 EXE=0                # 1 → produce a .EXE via OMF objs + omf_link.py.
-NO_LIBSTUB=0         # 1 → §7r: link newlibc stdio + dos_libc.c fill, NOT libstub.
+# §7r linked newlibc stdio + the dos_libc.c fill (NOT libstub) behind
+# --no-libstub.  §7w made libstub-free the DEFAULT (the retirement end-state):
+# NO_LIBSTUB starts 1.  --libstub is the opt-out anchor (libstub's python
+# printf), kept reachable for the equivalence cross-check; --no-libstub stays
+# accepted (re-asserts the default).  libstub-free is .EXE-only and needs the
+# newlibc tree, so the .COM path (tiny / small-without---exe) and an absent
+# tree fall back to libstub automatically (resolution block below).
+NO_LIBSTUB=1
+LIBSTUB_EXPLICIT=0   # 1 once --libstub / --no-libstub forces a choice
 for arg in "$@"; do
 	case "$arg" in
 		--keep-going) KEEP_GOING=1 ;;
 		--model=*) MODEL="${arg#--model=}" ;;
 		--exe) EXE=1 ;;
 		--com) EXE=0 ;;
-		--no-libstub) NO_LIBSTUB=1 ;;
+		--libstub) NO_LIBSTUB=0; LIBSTUB_EXPLICIT=1 ;;
+		--no-libstub) NO_LIBSTUB=1; LIBSTUB_EXPLICIT=1 ;;
 		*) echo "unknown arg '$arg'" >&2; exit 1 ;;
 	esac
 done
@@ -59,11 +68,31 @@ esac
 # dos_syscall_far_data.asm + far_stdlib_bridge.asm) — the stevie far-data file
 # path (fopen/fputs/getc/remove/stat incl. int86x rename + the §7s vfs_stat
 # no-write) is PROVEN by dos_file_probe compact/large/huge.  tiny is .COM-only.
+#
+# §7w default-resolution: libstub-free is the default but is .EXE-only and
+# needs the newlibc tree.  An EXPLICIT request (--no-libstub) promotes to the
+# .EXE pipeline and errors on tiny; an absent tree exits 77 (the gate skip
+# convention).  When libstub-free is merely the implicit default and we are on
+# the .COM path (tiny, or small without --exe) or the tree is absent, silently
+# fall back to libstub so a plain `build-stevie.sh` still produces a .COM and
+# an ordinary .EXE build works without the tree.
+NL_TREE="${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}"
 if [ "$NO_LIBSTUB" = 1 ]; then
-	EXE=1
-	if [ "$MODEL" = tiny ]; then
-		echo "$0: --no-libstub does not support --model=tiny" >&2
-		exit 2
+	if [ "$LIBSTUB_EXPLICIT" = 1 ]; then
+		if [ "$MODEL" = tiny ]; then
+			echo "$0: --no-libstub does not support --model=tiny" >&2
+			exit 2
+		fi
+		EXE=1
+	fi
+	if [ "$EXE" = 0 ] || [ "$MODEL" = tiny ]; then
+		NO_LIBSTUB=0   # .COM/tiny path: libstub-free has no flat-binary form
+	elif [ ! -d "$NL_TREE" ]; then
+		if [ "$LIBSTUB_EXPLICIT" = 1 ]; then
+			echo "  newlibc tree not found: $NL_TREE" >&2; exit 77
+		fi
+		echo "$0: newlibc tree absent ($NL_TREE); falling back to libstub" >&2
+		NO_LIBSTUB=0
 	fi
 fi
 

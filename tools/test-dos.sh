@@ -651,10 +651,17 @@ flush_runtime_batch() {
 # Build stevie.exe via tools/build-stevie.sh --exe and fail if the
 # resulting binary exceeds the size budget.  Captures the build log
 # in /tmp/test-dos.out via the run() wrapper.
+#
+# §7w pins --libstub here: this gate is a LIBSTUB size-regression detector
+# (libstub bugs first surfaced as a stevie size jump), and the budget is
+# calibrated for the libstub image.  build-stevie.sh now defaults libstub-free,
+# whose image is a different size and depends on the external newlibc tree, so
+# the size anchor stays explicitly on libstub.  The libstub-free stevie is
+# verified separately by a startup-screen byte-compare (the §7r/§7v pattern).
 run_stevie_size() {
 	limit="$1"
 	exe="$QBE_DIR/build/stevie-orig/stevie.exe"
-	"$QBE_DIR/tools/build-stevie.sh" --exe >/dev/null
+	"$QBE_DIR/tools/build-stevie.sh" --exe --libstub >/dev/null
 	if [ ! -f "$exe" ]; then
 		echo "stevie.exe not produced by build-stevie.sh --exe" >&2
 		return 1
@@ -685,8 +692,26 @@ build_runtime_probe() {
 	# omf_link --separate-stack); its ok8 asserts stack seg != DGROUP seg.
 	ssflag=""
 	case "$base" in split_stack_probe) ssflag="--split-stack" ;; esac
+	# §7w: libstub-free is now build-example.sh's default, so every codegen
+	# probe builds through newlibc's portable stdio unless pinned.  A handful
+	# print output that depends on libstub's PYTHON printf engine and would
+	# diverge from their libstub-captured golden under newlibc's tiny_vformat
+	# (printf_wrappers.c): it formats %p as a "0x"-prefixed, 16-bit-truncated
+	# hex and does NOT implement %o (it echoes the literal "%o").  A second set
+	# call setjmp/longjmp, which the libstub-free runtime does NOT yet provide
+	# (they need a far jmp_buf + register save/restore in asm — deferred; see
+	# far_stdlib_bridge.asm).  Both sets pin --libstub (the equivalence anchor);
+	# everything else takes the libstub-free default.  See the §7w divergence
+	# sweep in NEXT_SESSION.md.
+	libstubflag=""
+	case "$base" in
+		# printf %p / %o divergence
+		cstrprobe|compactprobe_extra|huge_norm_probe|mediumprobe) libstubflag="--libstub" ;;
+		# setjmp/longjmp (no libstub-free impl yet)
+		setjmp_probe|setjmp_clobber_probe|arr_jmpbuf_probe|aoa_extended_probe|split_stack_probe) libstubflag="--libstub" ;;
+	esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
-		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag $ssflag "$QBE_DIR/$src" >/dev/null
+		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag $ssflag $libstubflag "$QBE_DIR/$src" >/dev/null
 }
 
 # §6b newlibc DOS-hosted tests (Phase-6 step 2).  Each builds a newlibc
@@ -1132,14 +1157,18 @@ nl_probe_golden="$QBE_DIR/minic/dos/tests/printf_nolibstub_probe.golden.txt"
 # §7u added huge (the MHuge _sbrk pointer relational compare now routes through
 # _qbe_huge_cmp — see minic.y / build-example.sh), so the malloc round-trip in
 # this probe works libstub-free under huge too.
+# §7w made libstub-free build-example.sh's DEFAULT, so the unflagged build IS
+# the libstub-free path; --libstub is the explicit equivalence anchor (libstub's
+# python printf), kept reachable to cross-check the shared golden during the
+# transition.  Both diff the SAME golden — bug-loud either way.
 for model in small medium compact large huge; do
-	if prep "$model runtime (printf_nolibstub_probe)" \
-		"$QBE_DIR/tools/build-example.sh" --model="$model" "$nl_probe"; then
-		stage_runtime_case "$model runtime (printf_nolibstub_probe)" \
+	if prep "$model libstub anchor (printf_nolibstub_probe)" \
+		"$QBE_DIR/tools/build-example.sh" --model="$model" --libstub "$nl_probe"; then
+		stage_runtime_case "$model libstub anchor (printf_nolibstub_probe)" \
 			"$nl_probe_exe" "$nl_probe_golden"
 	fi
 	if prep "$model libstub-free (printf_nolibstub_probe)" \
-		"$QBE_DIR/tools/build-example.sh" --model="$model" --no-libstub "$nl_probe"; then
+		"$QBE_DIR/tools/build-example.sh" --model="$model" "$nl_probe"; then
 		stage_runtime_case "$model libstub-free (printf_nolibstub_probe)" \
 			"$nl_probe_exe" "$nl_probe_golden"
 	fi
@@ -1160,14 +1189,14 @@ done
 lc_probe="$QBE_DIR/minic/dos/examples/dos_libc_probe.c"
 lc_probe_exe="$QBE_DIR/build/examples/dos_libc_probe/dos_libc_probe.exe"
 lc_probe_golden="$QBE_DIR/minic/dos/tests/dos_libc_probe.golden.txt"
-for model in small medium compact large huge; do  # 7t: far-DATA; 7u: +huge
-	if prep "$model runtime (dos_libc_probe)" \
-		"$QBE_DIR/tools/build-example.sh" --model="$model" "$lc_probe"; then
-		stage_runtime_case "$model runtime (dos_libc_probe)" \
+for model in small medium compact large huge; do  # 7t: far-DATA; 7u: +huge; 7w: --libstub anchor
+	if prep "$model libstub anchor (dos_libc_probe)" \
+		"$QBE_DIR/tools/build-example.sh" --model="$model" --libstub "$lc_probe"; then
+		stage_runtime_case "$model libstub anchor (dos_libc_probe)" \
 			"$lc_probe_exe" "$lc_probe_golden"
 	fi
 	if prep "$model libstub-free (dos_libc_probe)" \
-		"$QBE_DIR/tools/build-example.sh" --model="$model" --no-libstub "$lc_probe"; then
+		"$QBE_DIR/tools/build-example.sh" --model="$model" "$lc_probe"; then
 		stage_runtime_case "$model libstub-free (dos_libc_probe)" \
 			"$lc_probe_exe" "$lc_probe_golden"
 	fi
@@ -1188,14 +1217,14 @@ done
 df_probe="$QBE_DIR/minic/dos/examples/dos_file_probe.c"
 df_probe_exe="$QBE_DIR/build/examples/dos_file_probe/dos_file_probe.exe"
 df_probe_golden="$QBE_DIR/minic/dos/tests/dos_file_probe.golden.txt"
-for model in small medium compact large huge; do  # 7t: far-DATA; 7u: +huge
-	if prep "$model runtime (dos_file_probe)" \
-		"$QBE_DIR/tools/build-example.sh" --model="$model" "$df_probe"; then
-		stage_runtime_case "$model runtime (dos_file_probe)" \
+for model in small medium compact large huge; do  # 7t: far-DATA; 7u: +huge; 7w: --libstub anchor
+	if prep "$model libstub anchor (dos_file_probe)" \
+		"$QBE_DIR/tools/build-example.sh" --model="$model" --libstub "$df_probe"; then
+		stage_runtime_case "$model libstub anchor (dos_file_probe)" \
 			"$df_probe_exe" "$df_probe_golden"
 	fi
 	if prep "$model libstub-free (dos_file_probe)" \
-		"$QBE_DIR/tools/build-example.sh" --model="$model" --no-libstub "$df_probe"; then
+		"$QBE_DIR/tools/build-example.sh" --model="$model" "$df_probe"; then
 		stage_runtime_case "$model libstub-free (dos_file_probe)" \
 			"$df_probe_exe" "$df_probe_golden"
 	fi

@@ -96,6 +96,29 @@ int memcmp(const void *a, const void *b, size_t n)
 	return 0;
 }
 
+/* memmove: like memcpy but copies correctly when src/dest overlap.  §7w added
+ * it for the libstub-free default (mp_str_int_probe; far-DATA models mangle
+ * the call to _far_memmove, bridged in far_stdlib_bridge.asm to this plain
+ * _memmove). */
+void *memmove(void *dest, const void *src, size_t n)
+{
+	unsigned char *d = (unsigned char *)dest;
+	const unsigned char *s = (const unsigned char *)src;
+
+	if (d == s || n == 0)
+		return dest;
+	if (d < s) {
+		while (n--)
+			*d++ = *s++;
+	} else {
+		d += n;
+		s += n;
+		while (n--)
+			*--d = *--s;
+	}
+	return dest;
+}
+
 /* malloc / free (§7o, Phase-6 libstub retirement).
  *
  * newlibc's portable subset has NO allocator of its own — phase-3 links
@@ -283,6 +306,28 @@ char *strncpy(char *dest, const char *src, size_t n)
 	return dest;
 }
 
+/* strstr: first occurrence of needle in haystack (NULL if absent).  §7w added
+ * it for the libstub-free default — cstrprobe/mediumprobe call it (under a
+ * far-DATA model the call mangles to _far_strstr, bridged in
+ * far_stdlib_bridge.asm to this plain _strstr).  Matches libstub semantics:
+ * an empty needle returns haystack. */
+char *strstr(const char *haystack, const char *needle)
+{
+	if (*needle == 0)
+		return (char *)haystack;
+	for (; *haystack; haystack++) {
+		const char *h = haystack;
+		const char *n = needle;
+		while (*h && *n && *h == *n) {
+			h++;
+			n++;
+		}
+		if (*n == 0)
+			return (char *)haystack;
+	}
+	return NULL;
+}
+
 /* ---- ctype (libstub.asm _isalpha/_isdigit/_isspace/_islower/_isupper/
  * _toupper/_tolower); ranges copied byte-for-byte from libstub. ---- */
 
@@ -356,6 +401,28 @@ extern int fgetc(FILE *fp);
 int getc(FILE *fp)
 {
 	return fgetc(fp);
+}
+
+/* fflush: a no-op returning 0 — newlibc's _write goes straight to INT 21h
+ * (unbuffered), so there is nothing to flush.  Matches libstub's _fflush
+ * (xor ax,ax / ret).  §7w added it for the libstub-free default
+ * (stdio_far_probe checks `fflush(f) == 0`; far-DATA mangles the call to
+ * _far_fflush, bridged in far_stdlib_bridge.asm). */
+int fflush(FILE *fp)
+{
+	(void)fp;
+	return 0;
+}
+
+/* ftell: returns 0L.  Matches libstub's _ftell stub (xor ax,ax / xor dx,dx /
+ * ret) — the EXE anchor and ftell_null_probe both expect a full 32-bit zero
+ * (both DX:AX halves cleared; the probe dirties DX via _qbe_huge_add first).
+ * ftell is NOT in minic's far_stdlib[], so its name stays plain _ftell in
+ * every model (no far bridge needed).  §7w. */
+long ftell(FILE *fp)
+{
+	(void)fp;
+	return 0;
 }
 
 char *getenv(const char *name)
@@ -432,4 +499,30 @@ int sleep(int secs)
 {
 	(void)secs;
 	return 0;
+}
+
+/* bdos(func, dx, al) — Microsoft/Turbo C INT 21h helper: AH=func, AL=al,
+ * DX=dx, INT 21h, return AX.  §7w added it for the libstub-free default
+ * (dosapi_probe small/medium/large/huge).  Implemented in C over int86 so a
+ * single definition gets the right ABI in every model — under medium it
+ * far-calls _int86, under a far-DATA model the call mangles to _far_int86 and
+ * its &r far pointer is read ES:BX (dos_syscall_far_data.asm); bdos itself is
+ * NOT in minic's far_stdlib[] so its name stays plain _bdos in all models.
+ * Matches libstub's _bdos observably (AH/AL/DX set, BX = the al-arg word). */
+#include <dos.h>
+
+int bdos(int func, int dx, int al)
+{
+	union REGS r;
+
+	r.x.ax = 0;
+	r.x.bx = 0;
+	r.x.cx = 0;
+	r.x.dx = 0;
+	r.h.ah = (unsigned char)func;
+	r.h.al = (unsigned char)al;
+	r.x.bx = (unsigned short)al;	/* libstub leaves BX = the al-arg word */
+	r.x.dx = (unsigned short)dx;
+	int86(0x21, &r, &r);
+	return r.x.ax;
 }

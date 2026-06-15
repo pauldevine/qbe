@@ -26,9 +26,11 @@
 ; Only names with a guaranteed plain definition in the always-linked support
 ; set are bridged: printf_wrappers.c (printf/fprintf/sprintf/puts/fputs/fputc/
 ; fgets), dos_shim.c (fopen/fclose/fread/fwrite), dos_libc.c (the str*/mem*
-; family).  far_stdlib's fflush/strstr/memmove have no plain impl yet and are
-; omitted (a referencing program fails the link loudly -> add the impl + thunk
-; then); setjmp/longjmp need a far jmp_buf and are deferred.
+; family).  §7w added strstr/memmove/fflush (dos_libc.c now defines _strstr/
+; _memmove/_fflush; cstrprobe/mp_str_int_probe/stdio_far_probe call them).
+; far_stdlib's setjmp/longjmp still have no libstub-free impl (they need a far
+; jmp_buf + register save/restore in asm) and are deferred — probes that call
+; them pin --libstub in test-dos.sh (build_runtime_probe).
 
 bits 16
 cpu 8086
@@ -64,6 +66,11 @@ FAR_BRIDGE strchr
 FAR_BRIDGE strcat
 FAR_BRIDGE strcspn
 FAR_BRIDGE strrchr
+FAR_BRIDGE strstr
 FAR_BRIDGE memcpy
 FAR_BRIDGE memcmp
 FAR_BRIDGE memset
+FAR_BRIDGE memmove
+
+; --- stdio no-op (dos_libc.c) ---
+FAR_BRIDGE fflush

@@ -10,24 +10,34 @@ set -eu
 MODEL="medium"
 SOFTFLOAT=0
 SPLITSTACK=0
-# --no-libstub (§7q, Phase-6 libstub retirement): build a NORMAL (non-newlibc)
-# minic program libstub-free.  Where build-newlibc-test.sh --no-libstub does
-# this for the newlibc test tree, this does it for a program compiled in the
-# ordinary build-example regime (its own main, minic/include headers) — the
-# path stevie and plain examples take.  The program's printf/str/mem/malloc
-# resolve to newlibc's portable stdio (printf -> _write -> VFS -> dos_shim
-# INT 21h) + the minic-compiled dos_libc.c fill + the qbe_rt/dos_syscall/heap
-# runtime, NOT libstub's python printf engine.  See §7n/§7o/§7p.
-NO_LIBSTUB=0
+# Phase-6 libstub retirement: a NORMAL (non-newlibc) minic program built
+# libstub-free.  Where build-newlibc-test.sh does this for the newlibc test
+# tree, this does it for a program compiled in the ordinary build-example
+# regime (its own main, minic/include headers) — the path stevie and plain
+# examples take.  The program's printf/str/mem/malloc resolve to newlibc's
+# portable stdio (printf -> _write -> VFS -> dos_shim INT 21h) + the
+# minic-compiled dos_libc.c fill + the qbe_rt/dos_syscall/heap runtime, NOT
+# libstub's python printf engine.  See §7n/§7o/§7p/§7t/§7u.
+#
+# §7w made libstub-free the DEFAULT (the end-state of the retirement campaign):
+# NO_LIBSTUB starts 1.  --libstub is the opt-out that links libstub's python
+# printf engine instead — kept reachable as the equivalence anchor for the
+# goldens during the transition.  --no-libstub is still accepted (now a no-op
+# that just re-asserts the default) for backward compatibility.  tiny is
+# .COM-only (no libstub-free path) and an absent newlibc tree both fall back to
+# libstub automatically (see the resolution block below).
+NO_LIBSTUB=1
+LIBSTUB_EXPLICIT=0   # 1 once --libstub / --no-libstub forces a choice
 SOURCES=()
 for arg in "$@"; do
 	case "$arg" in
 		--model=*) MODEL="${arg#--model=}" ;;
 		--softfloat) SOFTFLOAT=1 ;;
 		--split-stack) SPLITSTACK=1 ;;
-		--no-libstub) NO_LIBSTUB=1 ;;
+		--libstub) NO_LIBSTUB=0; LIBSTUB_EXPLICIT=1 ;;
+		--no-libstub) NO_LIBSTUB=1; LIBSTUB_EXPLICIT=1 ;;
 		-h|--help)
-			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] [--softfloat] [--split-stack] [--no-libstub] <source.c> [extra.c ...]" >&2
+			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] [--softfloat] [--split-stack] [--libstub|--no-libstub] <source.c> [extra.c ...]" >&2
 			exit 0 ;;
 		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
 		*) SOURCES+=("$arg") ;;
@@ -52,10 +62,28 @@ done
 # invariant) instead of a flat seg:off `cultl`, so malloc/_sbrk works under
 # huge libstub-free too (the §7g/§4s huge-normalization family).  tiny is
 # .COM-only.
+#
+# §7w default-resolution: libstub-free is the default, but it cannot build tiny
+# (a .COM-only model) and it needs the newlibc tree.  When libstub-free was NOT
+# explicitly requested (the common default-path case, e.g. every RUNTIME_TESTS
+# codegen probe), silently fall back to libstub in those two cases so an
+# ordinary build still works.  When the user EXPLICITLY asked for libstub-free
+# (--no-libstub), keep the old strict behavior: error on tiny, exit 77 (the
+# gate's skip convention) when the tree is absent.
+NL_TREE="${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}"
 if [ "$NO_LIBSTUB" = 1 ]; then
-	case "$MODEL" in
-		tiny)  echo "$0: --no-libstub does not support --model=tiny" >&2; exit 2 ;;
-	esac
+	if [ "$MODEL" = tiny ]; then
+		if [ "$LIBSTUB_EXPLICIT" = 1 ]; then
+			echo "$0: --no-libstub does not support --model=tiny" >&2; exit 2
+		fi
+		NO_LIBSTUB=0   # fall back: tiny is .COM-only
+	elif [ ! -d "$NL_TREE" ]; then
+		if [ "$LIBSTUB_EXPLICIT" = 1 ]; then
+			echo "newlibc tree not found: $NL_TREE" >&2; exit 77
+		fi
+		echo "$0: newlibc tree absent ($NL_TREE); falling back to libstub" >&2
+		NO_LIBSTUB=0
+	fi
 fi
 
 # --split-stack: SS gets its own segment (SS != DS).  Far-data models only:
