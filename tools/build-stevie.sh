@@ -16,12 +16,14 @@ set -u
 KEEP_GOING=0
 MODEL=""             # empty until explicitly set; defaulted below based on EXE
 EXE=0                # 1 → produce a .EXE via OMF objs + omf_link.py.
+NO_LIBSTUB=0         # 1 → §7r: link newlibc stdio + dos_libc.c fill, NOT libstub.
 for arg in "$@"; do
 	case "$arg" in
 		--keep-going) KEEP_GOING=1 ;;
 		--model=*) MODEL="${arg#--model=}" ;;
 		--exe) EXE=1 ;;
 		--com) EXE=0 ;;
+		--no-libstub) NO_LIBSTUB=1 ;;
 		*) echo "unknown arg '$arg'" >&2; exit 1 ;;
 	esac
 done
@@ -47,6 +49,21 @@ case "$MODEL" in
 	medium|compact|large|huge) EXE=1 ;;
 esac
 
+# §7r: --no-libstub links newlibc's portable stdio (printf -> _write -> VFS ->
+# dos_shim INT 21h) + the minic-compiled dos_libc.c libc fill + the
+# qbe_rt/dos_syscall/heap runtime INSTEAD of libstub — the same path
+# build-example.sh --no-libstub uses, applied to the full stevie editor.  It is
+# an .EXE-only path (omf_link with the qbe_rt far-call runtime) and currently
+# supports small + medium (far-DATA models would need far_stdlib stdio + a
+# far-pointer libc fill, a later step).
+if [ "$NO_LIBSTUB" = 1 ]; then
+	EXE=1
+	if [ "$MODEL" != small ] && [ "$MODEL" != medium ]; then
+		echo "$0: --no-libstub currently requires --model=small|medium" >&2
+		exit 2
+	fi
+fi
+
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_DIR="$QBE_DIR/stevie-orig"
 OUT_DIR="$QBE_DIR/build/stevie-orig"
@@ -55,11 +72,23 @@ INC_DIR="$QBE_DIR/minic/include"
 QBE="$QBE_DIR/qbe"
 DOS_DIR="$QBE_DIR/minic/dos"
 STEVIE_STACK_SIZE="${STEVIE_STACK_SIZE:-4096}"
+# §7r: heap for the libstub-free build (dos_libc malloc carves from heap.asm's
+# BSS heap via newlibc _sbrk).  Shares the 64KB DGROUP with statics + stack, so
+# it is bounded; stevie keeps edited files in malloc'd lines, so it wants more
+# than the malloc_probe's 8KB default.  Sized after the DGROUP budget is known.
+STEVIE_HEAP_SIZE="${STEVIE_HEAP_SIZE:-32768}"
 STEVIE_CPPFLAGS="${STEVIE_CPPFLAGS:-}"
 EXTRA_CPPFLAGS=()
 if [ -n "$STEVIE_CPPFLAGS" ]; then
 	read -r -a EXTRA_CPPFLAGS <<< "$STEVIE_CPPFLAGS"
 fi
+
+# §7r: under --no-libstub, rename stevie's main() so dos_shim.c's main() runs
+# vfs_init() before tail-calling it (printf can't reach the console until the
+# VFS device table is up — the build-example.sh EXAMPLE_DEFS pattern).  Threaded
+# into every stevie TU's cpp (harmless on TUs without a main); empty otherwise.
+STEVIE_DEFS=""
+[ "$NO_LIBSTUB" = 1 ] && STEVIE_DEFS="-Dmain=newlibc_test_main"
 
 # Type/decl normalization sed scripts shared with minic_cpp_v2.
 NORMALIZE_TYPES='
@@ -132,7 +161,7 @@ for src in "${SOURCES[@]}"; do
 	# DOS-style 0x1a (Ctrl-Z, SUB) end-of-file marker.  cpp passes
 	# both through; minic's lexer treats 0x1a as a stray byte and
 	# silently bails.  Strip both before handing off.
-	if ! cpp -P -nostdinc -isysroot/var/empty -DDOS -D__TURBOC__ \
+	if ! cpp -P -nostdinc -isysroot/var/empty -DDOS -D__TURBOC__ $STEVIE_DEFS \
 			${EXTRA_CPPFLAGS[@]+"${EXTRA_CPPFLAGS[@]}"} \
 			"-I$INC_DIR" "-I$SRC_DIR" \
 			"$SRC_DIR/$src" 2>"$err" \
@@ -299,24 +328,105 @@ if [ $EXE -eq 1 ]; then
 	done
 	# 2. crt0_exe.obj — far-data models need crt0_exe to build argv as
 	#    4-byte far ptrs (offset+segment) to match main()'s
-	#    `char *argv[]` ABI.
+	#    `char *argv[]` ABI; the small model reaches _main near (NEAR_CODE).
 	CRT0_FLAGS=""
 	case "$MODEL" in
 		compact|large|huge) CRT0_FLAGS="-DFAR_DATA=1" ;;
+		small|tiny)         CRT0_FLAGS="-DNEAR_CODE=1" ;;
 	esac
 	nasm $CRT0_FLAGS -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" \
 		2>>"$OUT_DIR/link.err" || {
 		echo "  FAIL nasm-obj: crt0_exe"; cat "$OUT_DIR/link.err"; exit 1; }
-	# 3. libstub_exe.obj (auto-converted from libstub.asm).  Thread
-	#    the model so far-data builds (compact/large/huge) get the
-	#    FAR_STDIO_EXE epilogue with _far_fopen/_far_fclose/_far_fgets/etc.
-	"$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" \
-		"$DOS_DIR/libstub.asm" \
-		"$OUT_DIR/libstub_exe.asm" 2>>"$OUT_DIR/link.err" || {
-		echo "  FAIL libstub-conv"; exit 1; }
-	nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" \
-		2>>"$OUT_DIR/link.err" || {
-		echo "  FAIL nasm-obj: libstub_exe"; cat "$OUT_DIR/link.err"; exit 1; }
+
+	# 3. The runtime: libstub (default) OR the §7r libstub-free stack.
+	GC_FLAG=""
+	RUNTIME_OBJS=()
+	SUPPORT_OBJS=()
+	if [ "$NO_LIBSTUB" = 1 ]; then
+		# §7r libstub-free: newlibc's portable stdio (printf -> _write ->
+		# VFS -> dos_shim INT 21h) + the dos_libc.c libc fill, compiled in
+		# newlibc's own regime (shiminc + newlibc headers, clang -E,
+		# -D__ia16__) — distinct from the stevie build-example regime above;
+		# the two meet only at the linker (_printf, _write, _vfs_*,
+		# _newlibc_test_main, and the dos_libc str/ctype fill).  Mirrors
+		# build-example.sh --no-libstub.  --gc-sections drops the FAT/block
+		# stdio code stevie never reaches.
+		NL="${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}"
+		[ -d "$NL" ] || { echo "  newlibc tree not found: $NL"; exit 77; }
+		SHIM="$DOS_DIR/newlibc/shiminc"
+		NL_NORMALIZE='s/\bunsigned short int\b/unsigned short/g;s/\bunsigned long int\b/unsigned long/g;s/\bsigned short int\b/short/g;s/\bsigned long int\b/long/g;s/\blong long int\b/long long/g;s/\blong int\b/long/g;s/\bshort int\b/short/g;s/\bsigned char\b/char/g;s/\bsigned long long\b/long long/g;s/\bsigned long\b/long/g;s/\bsigned int\b/int/g'
+		NL_HALT2DOS='s/__asm__[[:space:]]*volatile[[:space:]]*([[:space:]]*"hlt"[[:space:]]*)/{ __asm__ volatile ("mov ax, 0x4c00"); __asm__ volatile ("int 0x21"); }/g'
+		compile_newlibc_unit() {
+			local unit_src="$1" unit_base="$2"
+			clang -E -P -nostdinc -DDOS -D__ia16__ -DNO_LIBSTUB \
+				"-I$SHIM" "-I$INC_DIR" \
+				"-I$NL/include" "-I$NL/drivers" "-I$NL/libgloss" "-I$NL/vfs" \
+				"$unit_src" 2>>"$OUT_DIR/link.err" \
+				| tr -d '\r\032' | sed "$NL_NORMALIZE" | sed "$NL_HALT2DOS" \
+				> "$OUT_DIR/$unit_base.pp.c"
+			"$MINIC" -m "$MODEL" < "$OUT_DIR/$unit_base.pp.c" \
+				> "$OUT_DIR/$unit_base.ssa" 2>>"$OUT_DIR/link.err"
+			"$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$unit_base.ssa" \
+				> "$OUT_DIR/$unit_base.asm" 2>>"$OUT_DIR/link.err"
+			"$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" "$unit_base" \
+				"$OUT_DIR/$unit_base.asm" "$OUT_DIR/$unit_base.omf.asm" 2>>"$OUT_DIR/link.err"
+			nasm -w-label-redef-late -f obj "$OUT_DIR/$unit_base.omf.asm" \
+				-o "$OUT_DIR/$unit_base.obj" 2>>"$OUT_DIR/link.err" || {
+				echo "  FAIL nasm-obj: $unit_base"; cat "$OUT_DIR/link.err"; exit 1; }
+		}
+		NL_SUPPORT=(
+			"$NL/libgloss/printf_wrappers.c"
+			"$NL/libgloss/scanf_wrappers.c"
+			"$NL/libgloss/syscalls.c"
+			"$NL/libgloss/reent_stubs.c"
+			"$NL/libgloss/dirent.c"
+			"$NL/libgloss/unlink.c"
+			"$NL/libgloss/rename.c"
+			"$NL/vfs/vfs.c"
+			"$NL/vfs/fat.c"
+			"$NL/drivers/block.c"
+			"$DOS_DIR/newlibc/dos_shim.c"
+			"$DOS_DIR/newlibc/dos_libc.c"
+		)
+		for tu in "${NL_SUPPORT[@]}"; do
+			tu_base="$(basename "$tu" .c)"
+			compile_newlibc_unit "$tu" "$tu_base"
+			SUPPORT_OBJS+=("$OUT_DIR/$tu_base.obj")
+		done
+		# qbe_rt (the _qbe_* compiler helpers) + dos_syscall (INT 21h
+		# primitives): assembled raw for small (near form); rewritten to the
+		# far-call ABI by near_to_far_rt.py for medium (the compiler far-calls
+		# them under medium).  heap.asm is the BSS heap dos_libc malloc carves
+		# from via newlibc _sbrk.  See §7n/§7o/§7p.
+		if [ "$MODEL" = small ]; then
+			nasm -f obj "$DOS_DIR/qbe_rt.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$OUT_DIR/link.err"
+			nasm -f obj "$DOS_DIR/dos_syscall.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$OUT_DIR/link.err"
+		else
+			"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=QBE_RT_TEXT \
+				"$DOS_DIR/qbe_rt.asm" "$OUT_DIR/qbe_rt_far.asm" 2>>"$OUT_DIR/link.err"
+			nasm -f obj "$OUT_DIR/qbe_rt_far.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$OUT_DIR/link.err"
+			"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=DOS_SYSCALL_TEXT \
+				"$DOS_DIR/dos_syscall.asm" "$OUT_DIR/dos_syscall_far.asm" 2>>"$OUT_DIR/link.err"
+			nasm -f obj "$OUT_DIR/dos_syscall_far.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$OUT_DIR/link.err"
+		fi
+		nasm "-DHEAP_SIZE=$STEVIE_HEAP_SIZE" -f obj "$DOS_DIR/heap.asm" \
+			-o "$OUT_DIR/heap.obj" 2>>"$OUT_DIR/link.err" || {
+			echo "  FAIL nasm-obj: heap"; cat "$OUT_DIR/link.err"; exit 1; }
+		RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
+		GC_FLAG="--gc-sections"
+	else
+		# libstub_exe.obj (auto-converted from libstub.asm).  Thread
+		# the model so far-data builds (compact/large/huge) get the
+		# FAR_STDIO_EXE epilogue with _far_fopen/_far_fclose/_far_fgets/etc.
+		"$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" \
+			"$DOS_DIR/libstub.asm" \
+			"$OUT_DIR/libstub_exe.asm" 2>>"$OUT_DIR/link.err" || {
+			echo "  FAIL libstub-conv"; exit 1; }
+		nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" \
+			2>>"$OUT_DIR/link.err" || {
+			echo "  FAIL nasm-obj: libstub_exe"; cat "$OUT_DIR/link.err"; exit 1; }
+		RUNTIME_OBJS=("$OUT_DIR/libstub_exe.obj")
+	fi
 
 	# 4. Link.  crt0 must come first so its _TEXT ends up at CS:IP=0:0
 	#    (the linker places code segments in input order).
@@ -324,13 +434,15 @@ if [ $EXE -eq 1 ]; then
 	for src in "${stage_pass[@]}"; do
 		OBJS+=("$OUT_DIR/${src%.c}.obj")
 	done
-	OBJS+=("$OUT_DIR/libstub_exe.obj")
+	OBJS+=(${SUPPORT_OBJS[@]+"${SUPPORT_OBJS[@]}"})
+	OBJS+=("${RUNTIME_OBJS[@]}")
 
 	if "$QBE_DIR/tools/omf_link.py" \
 		-o "$OUT_DIR/stevie.exe" \
 		--map "$OUT_DIR/stevie.map" \
 		--entry _start \
 		--stack-size "$STEVIE_STACK_SIZE" \
+		$GC_FLAG \
 		"${OBJS[@]}" 2>>"$OUT_DIR/link.err"; then
 		echo "  OK: $OUT_DIR/stevie.exe ($(wc -c <"$OUT_DIR/stevie.exe") bytes)"
 	else

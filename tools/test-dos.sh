@@ -1139,6 +1139,34 @@ for model in small medium; do
 	fi
 done
 
+# §7r (Phase-6 libstub retirement, the stevie libc surface): the wider
+# str/ctype/stdlib fill a normal minic program (stevie) needs beyond §7q's
+# printf/malloc — strncmp/strchr/strrchr/strcat/strncpy, the ctype family,
+# and atoi/getenv/system/signal/exit.  dos_libc.c implements the real ones and
+# matches libstub's stubs (atoi->0, getenv->NULL, system->0, signal->NULL) so
+# the libstub-free build stays behavior-identical to the interactively-verified
+# libstub stevie.  Same 4-way gate as the printf probe: small + medium ×
+# {libstub anchor (libstub's own str/ctype/atoi/...), libstub-free (dos_libc.c
+# fill)}, all diffing ONE golden — bug-loud: a wrong range, a non-matching
+# stub, or a missing libc symbol (fails the link) all diff the golden.  getc
+# is deliberately NOT probed (the .EXE libstub gives it a real blocking stdin
+# read; dos_libc.c matches by delegating to fgetc, gated by the FAT/VFS tests).
+lc_probe="$QBE_DIR/minic/dos/examples/dos_libc_probe.c"
+lc_probe_exe="$QBE_DIR/build/examples/dos_libc_probe/dos_libc_probe.exe"
+lc_probe_golden="$QBE_DIR/minic/dos/tests/dos_libc_probe.golden.txt"
+for model in small medium; do
+	if prep "$model runtime (dos_libc_probe)" \
+		"$QBE_DIR/tools/build-example.sh" --model="$model" "$lc_probe"; then
+		stage_runtime_case "$model runtime (dos_libc_probe)" \
+			"$lc_probe_exe" "$lc_probe_golden"
+	fi
+	if prep "$model libstub-free (dos_libc_probe)" \
+		"$QBE_DIR/tools/build-example.sh" --model="$model" --no-libstub "$lc_probe"; then
+		stage_runtime_case "$model libstub-free (dos_libc_probe)" \
+			"$lc_probe_exe" "$lc_probe_golden"
+	fi
+done
+
 # One DOSBox boot for everything staged above.
 flush_runtime_batch
 

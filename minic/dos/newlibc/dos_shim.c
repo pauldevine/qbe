@@ -336,8 +336,13 @@ int fgetc(FILE *fp)
 
 extern int newlibc_test_main();
 
-int main()
+/* crt0_exe.asm tokenizes the PSP command line and calls main(argc, argv);
+ * forward both to the renamed program entry.  The newlibc tests are
+ * `int main(void)` and ignore the extra cdecl args (harmless); §7r's
+ * libstub-free stevie is `main(argc, argv)` and needs the real arguments
+ * (it switches on argv[1][0] when argc > 1). */
+int main(int argc, char **argv)
 {
 	vfs_init();
-	return newlibc_test_main();
+	return newlibc_test_main(argc, argv);
 }

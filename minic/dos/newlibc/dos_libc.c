@@ -197,3 +197,239 @@ void free(void *ap)
 
 	freep = p;
 }
+
+/* ===========================================================================
+ * §7r (Phase-6 libstub retirement, stevie): the wider libc surface a normal
+ * minic program (stevie) calls that the §7n/§7o fill did not yet cover.
+ *
+ * STRATEGY = match libstub.asm EXACTLY (the equivalence anchor): the
+ * libstub-free build must be behavior-identical to the interactively-verified
+ * libstub stevie, and the gate diffs one golden across both runtimes.  So the
+ * functions libstub implements for real (the str/ctype family, exit) are
+ * implemented for real here, and the ones libstub STUBS (atoi -> 0, getc ->
+ * -1, getenv -> NULL, system -> 0, signal -> NULL) are stubbed identically.
+ * Real atoi/getc/getenv/system would be an IMPROVEMENT over the verified
+ * baseline, hence a behavior change the libstub anchor can't validate — a
+ * separate future step, NOT this one.  --gc-sections drops any of these a
+ * given program never references (the newlibc tests pull none of them).
+ * =========================================================================== */
+
+/* ---- string (libstub.asm _strncmp/_strchr/_strrchr/_strcat/_strncpy) ---- */
+
+int strncmp(const char *a, const char *b, size_t n)
+{
+	while (n) {
+		unsigned char ca = (unsigned char)*a;
+		unsigned char cb = (unsigned char)*b;
+		if (ca != cb)
+			return (int)ca - (int)cb;
+		if (ca == 0)
+			return 0;
+		a++;
+		b++;
+		n--;
+	}
+	return 0;
+}
+
+char *strchr(const char *s, int c)
+{
+	char ch = (char)c;
+
+	for (;; s++) {
+		if (*s == ch)
+			return (char *)s;
+		if (*s == 0)
+			return NULL;
+	}
+}
+
+char *strrchr(const char *s, int c)
+{
+	char ch = (char)c;
+	const char *last = NULL;
+
+	for (;; s++) {
+		if (*s == ch)
+			last = s;
+		if (*s == 0)
+			return (char *)last;
+	}
+}
+
+char *strcat(char *dest, const char *src)
+{
+	char *d = dest;
+
+	while (*d)
+		d++;
+	while ((*d++ = *src++) != 0)
+		;
+	return dest;
+}
+
+char *strncpy(char *dest, const char *src, size_t n)
+{
+	char *d = dest;
+
+	while (n && *src) {
+		*d++ = *src++;
+		n--;
+	}
+	while (n) {		/* pad the remainder with NUL */
+		*d++ = 0;
+		n--;
+	}
+	return dest;
+}
+
+/* ---- ctype (libstub.asm _isalpha/_isdigit/_isspace/_islower/_isupper/
+ * _toupper/_tolower); ranges copied byte-for-byte from libstub. ---- */
+
+int isalpha(int c)
+{
+	return ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) ? 1 : 0;
+}
+
+int isdigit(int c)
+{
+	return (c >= '0' && c <= '9') ? 1 : 0;
+}
+
+int isspace(int c)
+{
+	/* libstub: space, or 9..13 (TAB, LF, VT, FF, CR). */
+	return (c == ' ' || (c >= 9 && c <= 13)) ? 1 : 0;
+}
+
+int islower(int c)
+{
+	return (c >= 'a' && c <= 'z') ? 1 : 0;
+}
+
+int isupper(int c)
+{
+	return (c >= 'A' && c <= 'Z') ? 1 : 0;
+}
+
+int toupper(int c)
+{
+	return (c >= 'a' && c <= 'z') ? c - 0x20 : c;
+}
+
+int tolower(int c)
+{
+	return (c >= 'A' && c <= 'Z') ? c + 0x20 : c;
+}
+
+/* ---- termination (libstub.asm _exit: INT 21h AH=4Ch, AL=status) ----
+ * Route through newlibc's _exit (libgloss/syscalls.c); the build's
+ * NL_HALT2DOS rewrite turns its `hlt` into `INT 21h` AX=0x4C00, so the
+ * process exits cleanly to DOS.  (newlibc _exit ignores the status, so the
+ * DOS errorlevel is always 0 rather than libstub's `status`; invisible on
+ * stdout, so the golden is unaffected, and stevie never inspects its own
+ * errorlevel.) */
+
+extern void _exit(int status);
+
+void exit(int status)
+{
+	_exit(status);
+	for (;;)		/* _exit does not return; satisfy the compiler */
+		;
+}
+
+/* ---- stubs matching libstub EXACTLY (see strategy note above) ---- */
+
+int atoi(const char *s)
+{
+	(void)s;
+	return 0;		/* libstub _atoi: mov ax,0 / ret */
+}
+
+/* getc: the EXE libstub (libstub_to_exe.py) overrides libstub.asm's .COM-path
+ * `mov ax,-1` stub with a REAL buffered read, so the .EXE anchor — and stevie's
+ * fileio.c getc(f) file-read loop — expect a working getc.  Delegate to
+ * newlibc's fgetc (read via fp->_file), which the FAT/VFS tests already gate. */
+extern int fgetc(FILE *fp);
+
+int getc(FILE *fp)
+{
+	return fgetc(fp);
+}
+
+char *getenv(const char *name)
+{
+	(void)name;
+	return NULL;		/* libstub _getenv: xor ax,ax / xor dx,dx */
+}
+
+int system(const char *cmd)
+{
+	(void)cmd;
+	return 0;		/* libstub _system: mov ax,0 / ret */
+}
+
+/* signal(int signum, void (*handler)(int)) returns the previous handler;
+ * libstub returns NULL.  The in-tree <signal.h> declares `int signal()`. */
+int signal(int signum, int handler)
+{
+	(void)signum;
+	(void)handler;
+	return 0;		/* libstub _signal: xor ax,ax / xor dx,dx */
+}
+
+/* ---- stevie-only surface (referenced by the editor, not the gate probe's
+ * core, beyond strcspn).  Real strcspn; the rest match libstub's stubs. ---- */
+
+size_t strcspn(const char *s, const char *reject)
+{
+	size_t n = 0;
+	const char *r;
+
+	for (; *s; s++, n++) {
+		for (r = reject; *r; r++)
+			if (*s == *r)
+				return n;
+	}
+	return n;
+}
+
+int chmod(const char *path, int mode)
+{
+	(void)path;
+	(void)mode;
+	return 0;		/* libstub _chmod: mov ax,0 / ret */
+}
+
+/* remove: the EXE libstub (libstub_to_exe.py) overrides libstub.asm's .COM
+ * `mov ax,0` stub with a REAL unlink (returns -1 on a missing file), so match
+ * by delegating to newlibc's unlink (libgloss/unlink.c, in the support set). */
+extern int unlink(const char *path);
+
+int remove(const char *path)
+{
+	return unlink(path);
+}
+
+/* rename is NOT defined here: newlibc's libgloss/rename.c already provides it
+ * (and the medium fat_write tests link rename.c — a dos_libc.c copy would be a
+ * duplicate public symbol).  Consumers that need it (stevie) link rename.c. */
+
+char *mktemp(char *template)
+{
+	return template;	/* libstub _mktemp: returns the template unchanged */
+}
+
+/* delay/sleep: libstub stubs them to a bare `ret` (no-op).  stevie calls them
+ * for screen pacing / shell-out waits; a no-op is fine on DOSBox/Victor. */
+void delay(int ms)
+{
+	(void)ms;
+}
+
+int sleep(int secs)
+{
+	(void)secs;
+	return 0;
+}

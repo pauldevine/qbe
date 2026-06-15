@@ -1,0 +1,19 @@
+dos_libc_probe start
+strncmp lt eq gt
+strncmp-n eq
+strchr t
+strchr-end null
+strrchr .c
+strcat abcd
+strncpy xy pad=ok
+ctype a=1 5=1 sp=1 lo=1 up=1
+ctype-neg a=0 5=0 sp=0
+case VV kk
+atoi 0
+getenv null
+system 0
+signal 0
+strcspn 3 3
+chmod 0 remove -1
+mktemp self
+dos_libc_probe done
