@@ -64,7 +64,14 @@ esac
 QBE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 NL="${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}"
 if [ ! -f "$SRC" ]; then
-	SRC="$NL/tests/$(basename "$SRC" .c).c"
+	name="$(basename "$SRC" .c)"
+	# Upstream newlibc test by name, else a qbe-local probe (e.g. the §7o
+	# malloc_probe lives in minic/dos/newlibc/, not the newlibc tree).
+	if [ -f "$NL/tests/$name.c" ]; then
+		SRC="$NL/tests/$name.c"
+	else
+		SRC="$QBE_DIR/minic/dos/newlibc/$name.c"
+	fi
 fi
 [ -f "$SRC" ] || { echo "$0: cannot find test source: $SRC" >&2; exit 2; }
 
@@ -103,8 +110,12 @@ if grep -q 'fat_write\.h' "$SRC"; then
 fi
 
 # --no-libstub: the minic-compiled libc fill replaces libstub's str/mem family.
+# NL_DEFS is passed to every compile_unit so dos_shim.c omits its placeholder
+# heap (the real heap comes from heap.asm); harmless for the other TUs.
+NL_DEFS=""
 if [ "$NO_LIBSTUB" = 1 ]; then
 	SUPPORT_TUS+=("$DOS_DIR/newlibc/dos_libc.c")
+	NL_DEFS="-DNO_LIBSTUB"
 fi
 
 mkdir -p "$OUT_DIR"
@@ -149,13 +160,13 @@ compile_unit() {
 fail() { echo "$0: $1 (see $ERR)" >&2; tail -5 "$ERR" >&2; exit 1; }
 
 # Test TU: rename its main so the shim's main can run vfs_init() first.
-compile_unit "$SRC" "$base" -Dmain=newlibc_test_main \
+compile_unit "$SRC" "$base" -Dmain=newlibc_test_main $NL_DEFS \
 	|| fail "compile failed: $base"
 
 OBJ_FILES=("$OUT_DIR/$base.obj")
 for tu in "${SUPPORT_TUS[@]}"; do
 	tu_base="$(echo "${tu#$NL/}" | sed 's,.*/,,;s/\.c$//')"
-	compile_unit "$tu" "$tu_base" || fail "compile failed: $tu_base"
+	compile_unit "$tu" "$tu_base" $NL_DEFS || fail "compile failed: $tu_base"
 	OBJ_FILES+=("$OUT_DIR/$tu_base.obj")
 done
 
@@ -178,7 +189,12 @@ if [ "$NO_LIBSTUB" = 1 ]; then
 		|| fail "qbe_rt assemble failed"
 	nasm -f obj "$DOS_DIR/dos_syscall.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$ERR" \
 		|| fail "dos_syscall assemble failed"
-	RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj")
+	# heap.asm: the BSS heap newlibc's _sbrk carves from (§7o).  Linked
+	# unconditionally; --gc-sections drops it from any test that never
+	# reaches malloc (no _sbrk reference -> no heap reference).
+	nasm -f obj "$DOS_DIR/heap.asm" -o "$OUT_DIR/heap.obj" 2>>"$ERR" \
+		|| fail "heap assemble failed"
+	RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/heap.obj")
 else
 	"$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" --no-stdio \
 		"$DOS_DIR/libstub.asm" "$OUT_DIR/libstub_exe.asm" 2>>"$ERR" \

@@ -1,0 +1,5 @@
+noclobber ok
+liveintact ok
+exhaust ok
+string victor 9000
+malloc_probe done

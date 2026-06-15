@@ -59,13 +59,19 @@ extern int _link(const char *o, const char *n);
 extern void vfs_init(void);
 
 /* ---- link satisfaction for syscalls.c ----
- * _sbrk()'s heap: nothing in the DOS-hosted test set calls newlib
- * malloc (the tests' malloc/free are libstub's, self-contained), so
- * these only need to EXIST.  They are separate arrays, so the
- * start/end ordering is whatever the linker chose -- documentedly NOT
- * a usable heap. */
+ * _sbrk()'s heap: in a libstub build nothing reaches newlib malloc (the
+ * tests' malloc/free are libstub's, self-contained), so these only need
+ * to EXIST.  They are separate arrays, so the start/end ordering is
+ * whatever the linker chose -- documentedly NOT a usable heap.
+ *
+ * §7o: the --no-libstub build (NO_LIBSTUB) DOES carve from this heap via
+ * dos_libc.c's malloc, so it links a REAL heap from minic/dos/heap.asm
+ * (where controlled symbol placement makes __heap_end's address exactly
+ * end-of-heap).  Omit the placeholders there to avoid a duplicate symbol. */
+#ifndef NO_LIBSTUB
 char __heap_start[2];
 char __heap_end[2];
+#endif
 
 struct _reent shim_reent;
 struct _reent *_impure_ptr = &shim_reent;

@@ -1009,21 +1009,41 @@ for t in "${NEWLIBC_TESTS[@]}"; do
 	fi
 done
 
-# §7n (Phase-6 libstub retirement, first increment): the SAME snprintf_test,
-# built libstub-free.  build-newlibc-test.sh --no-libstub links NO libstub at
-# all — the str/mem libc fill comes from minic-compiled minic/dos/newlibc/
-# dos_libc.c, the int86 DOS primitives from minic/dos/dos_syscall.asm, and the
-# _qbe_* compiler runtime from minic/dos/qbe_rt.asm (standalone verbatim copies;
-# libstub.asm is untouched).  This exercises printf -> _write -> INT 21h with no
-# libstub anywhere; diffing against the SAME golden as the libstub build proves
-# the libstub-free runtime is output-equivalent.  Bug-loud: a missing runtime
-# symbol fails the link; a wrong _qbe_* decimal conversion diffs the golden.
-# (Runs after the libstub snprintf_test above, overwriting the same .exe path.)
-if prep "newlibc libstub-free (snprintf_test)" \
-	build_newlibc_test snprintf_test --no-libstub; then
-	stage_runtime_case "newlibc libstub-free (snprintf_test)" \
-		"$QBE_DIR/build/newlibc-tests/snprintf_test/snprintf_test.exe" \
-		"$QBE_DIR/minic/dos/tests/newlibc_snprintf_test.golden.txt"
+# §7n/§7o (Phase-6 libstub retirement): the SAME small NEWLIBC_TESTS, built
+# libstub-free.  build-newlibc-test.sh --no-libstub links NO libstub at all —
+# the str/mem/malloc libc fill comes from minic-compiled minic/dos/newlibc/
+# dos_libc.c, the int86 DOS primitives from minic/dos/dos_syscall.asm, the
+# _qbe_* compiler runtime from minic/dos/qbe_rt.asm, and (when malloc is
+# reached) the BSS heap from minic/dos/heap.asm (standalone verbatim copies +
+# our own libc; libstub.asm is untouched).  §7n proved the architecture on
+# snprintf_test; §7o widened it to the full FAT/VFS/ramfs/stdio/block set,
+# proving the 6-function dos_libc covers the whole portable subset.  Diffing
+# each against the SAME golden as its libstub build proves the libstub-free
+# runtime is output-equivalent.  Bug-loud: a missing runtime symbol fails the
+# link; a wrong _qbe_* conversion or libc fn diffs the golden.  (Runs after the
+# libstub loop above, overwriting the same .exe paths — stage_runtime_case
+# copies each exe at stage time, so the overwrite is safe.)
+for t in "${NEWLIBC_TESTS[@]}"; do
+	if prep "newlibc libstub-free ($t)" build_newlibc_test "$t" --no-libstub; then
+		stage_runtime_case "newlibc libstub-free ($t)" \
+			"$QBE_DIR/build/newlibc-tests/$t/$t.exe" \
+			"$QBE_DIR/minic/dos/tests/newlibc_$t.golden.txt"
+	fi
+done
+
+# §7o: malloc / free + a real BSS heap, the capability newlibc itself lacks
+# (phase-3 links newlib's libc.a for it).  malloc_probe (minic/dos/newlibc/,
+# a qbe-local probe, not an upstream newlibc test) exercises the whole heap
+# chain libstub-free: dos_libc.c malloc/free -> newlibc's _sbrk
+# (libgloss/syscalls.c) -> the __heap_start/__heap_end BSS heap in
+# minic/dos/heap.asm.  Bug-loud (no-clobber overlap, free-list reuse keeps
+# live blocks intact, heap exhaustion returns NULL via _sbrk's __heap_end
+# bound).  No libstub-linked counterpart — this is a new capability.
+if prep "newlibc libstub-free (malloc_probe)" \
+	build_newlibc_test malloc_probe --no-libstub; then
+	stage_runtime_case "newlibc libstub-free (malloc_probe)" \
+		"$QBE_DIR/build/newlibc-tests/malloc_probe/malloc_probe.exe" \
+		"$QBE_DIR/minic/dos/tests/malloc_probe.golden.txt"
 fi
 
 # §6n: the keyboard-input tests — getchar/fgets (stdin_test) and scanf
