@@ -7014,8 +7014,10 @@ emit_global_sized_array(char *name, long count)
  * emit_static_local, sharing the base type with its siblings (so g_td_arraydim,
  * the inner dim of an array-typedef base such as jmp_buf, still applies).  All
  * are g_td_arraydim-gated so a non-array-typedef base emits byte-identically to
- * the existing single-declarator rules.  Uninitialized declarators only — a
- * per-item initializer is rejected (see emit_static_local_rest_item). */
+ * the existing single-declarator rules.  A scalar/pointer declarator may carry
+ * an initializer (`static int x = 1, y = 2;` / `static char *p = a, *q = b;`),
+ * folded into its own data block via emit_static_local_init exactly like the
+ * single `static T v = init;` form (see emit_static_local_rest_item). */
 
 /* Plain scalar or array-typedef INSTANCE first declarator (`static int x` /
  * `static jmp_buf a`).  Mirrors the `dcls STATIC type IDENT ';'` rule body. */
@@ -7110,9 +7112,19 @@ emit_static_local_rest_item(unsigned base, Node *n)
 		var_set_arraybytes(v, total);
 		return;
 	}
-	if (n->l)
-		die("initializer in static multi-declarator not supported");
 	t = (n->op == 'P') ? IDIR(ebase) : ebase;
+	if (n->l) {
+		/* A scalar/pointer rest item WITH an initializer
+		 * (`static int x = 1, y = 2;`, `static char *p = a, *q = b;`):
+		 * fold the constant into its own mangled data block exactly like
+		 * the single `static T v = init;` form (emit_static_local_init). */
+		Node id;
+		id.op = 'V';
+		id.l = id.r = 0;
+		strcpy(id.u.v, v);
+		emit_static_local_init(t, &id, n->l);
+		return;
+	}
 	emit_zero_init(buf, t);
 	emit_static_local(v, t, 0, buf);
 }
@@ -8730,6 +8742,18 @@ dcls:
 	for (n = $9; n; n = n->r)
 		emit_static_local_rest_item($3, n);
 }
+    | dcls STATIC type IDENT '=' expr ',' ext_decllist ';'
+{
+	/* Function-local static MULTI-declarator, initialized-first form:
+	 * `static int x = 1, y = 2;` / `static char *p = a, *q = b;`.
+	 * The first declarator's init folds via emit_static_local_init (the
+	 * single `static T v = init;` rule); each rest item (which may itself
+	 * carry an initializer captured by ext_decl) via the helper. */
+	Node *n;
+	emit_static_local_init($3, $4, $6);
+	for (n = $8; n; n = n->r)
+		emit_static_local_rest_item($3, n);
+}
     | dcls EXTERN type IDENT ';'
 {
 	/* extern declaration inside a function body: declares an external
@@ -9520,6 +9544,15 @@ stmt: ';'                            { $$ = 0; }
         Node *n;
         emit_static_local_sized_array($2, $3->u.v, const_eval($5));
         for (n = $8; n; n = n->r)
+            emit_static_local_rest_item($2, n);
+        $$ = 0;
+    }
+    | STATIC type IDENT '=' expr ',' ext_decllist ';' {
+        /* Statement-scope static MULTI-declarator, initialized-first form:
+         * `static int x = 1, y = 2;`.  Mirrors the dcls-scope rule. */
+        Node *n;
+        emit_static_local_init($2, $3, $5);
+        for (n = $7; n; n = n->r)
             emit_static_local_rest_item($2, n);
         $$ = 0;
     }

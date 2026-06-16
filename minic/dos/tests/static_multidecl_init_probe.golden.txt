@@ -1,0 +1,7 @@
+twoinit=5,7,9
+initfirst=106,112,118
+uninitfirst=10,15,20
+twoptrs=175
+twolong=200002,300003,400004
+initarr=56,63
+stmtscope=17,19
