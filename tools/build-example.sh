@@ -309,7 +309,10 @@ if [ "$NO_LIBSTUB" = 1 ]; then
 			-o "$outd/$unit_base.obj" 2>>"$ERR"
 	}
 	NL_SUPPORT=(
-		"$NL/libgloss/printf_wrappers.c"
+		# §8b: dos_printf.c shadows newlibc's printf_wrappers.c (libstub-
+		# compatible %p/%o), exactly as dos_vfs.c shadows vfs.c — newlibc
+		# stays pristine.  build-newlibc-test.sh + bare-metal keep newlibc's.
+		"$DOS_DIR/newlibc/dos_printf.c"
 		"$NL/libgloss/scanf_wrappers.c"
 		"$NL/libgloss/syscalls.c"
 		"$NL/libgloss/reent_stubs.c"

@@ -692,33 +692,25 @@ build_runtime_probe() {
 	# omf_link --separate-stack); its ok8 asserts stack seg != DGROUP seg.
 	ssflag=""
 	case "$base" in split_stack_probe) ssflag="--split-stack" ;; esac
-	# §7w: libstub-free is now build-example.sh's default, so every codegen
-	# probe builds through newlibc's portable stdio unless pinned.  A handful
-	# print output that depends on libstub's PYTHON printf engine and would
-	# diverge from their libstub-captured golden under newlibc's tiny_vformat
-	# (printf_wrappers.c): it formats %p as a "0x"-prefixed, 16-bit-truncated
-	# hex and does NOT implement %o (it echoes the literal "%o").  Those pin
-	# --libstub (the equivalence anchor); everything else takes the libstub-free
-	# default.  See the §7w divergence sweep in NEXT_SESSION.md.
-	#
-	# §7x: setjmp/longjmp now HAVE a libstub-free impl (minic/dos/setjmp_rt.asm,
-	# all three ABI forms), so setjmp_probe / setjmp_clobber_probe /
-	# arr_jmpbuf_probe / aoa_extended_probe are UNPINNED and run libstub-free.
-	# §8a: split_stack_probe is ALSO unpinned now.  Its ok7 asserts malloc
-	# memory lands in the SAME far segment as a global (heapseg == dgroupseg);
-	# that held for libstub's single-base DGROUP heap but not for the
-	# libstub-free BSS heap, because omf_link resolved a far reference to a
-	# DGROUP member against that member's OWN paragraph base (heap.asm's _BSS
-	# sits above _DATA under far-data + --split-stack) instead of the canonical
-	# DGROUP group frame.  omf_link now group-frames every far reference (offset
-	# AND selector AND far ptr) to a DGROUP member (the lowest member, _DATA, was
-	# always the group base, so a global's selector was already canonical), so a
-	# heap pointer's segment matches a global's and the probe runs libstub-free.
+	# §7w: libstub-free is build-example.sh's default, so every codegen probe
+	# builds through newlibc's portable stdio.  The libstub-retirement campaign
+	# is now complete — NO probe pins --libstub anymore:
+	#   §7x — setjmp/longjmp got a libstub-free impl (minic/dos/setjmp_rt.asm),
+	#         unpinning setjmp_probe / setjmp_clobber_probe / arr_jmpbuf_probe /
+	#         aoa_extended_probe.
+	#   §8a — omf_link group-frames every far reference (offset AND selector AND
+	#         far ptr) to a DGROUP member, so the libstub-free BSS heap pointer's
+	#         segment matches a global's, unpinning split_stack_probe.
+	#   §8b — dos_printf.c (minic/dos/newlibc/, shadowing newlibc's
+	#         printf_wrappers.c on the build-example.sh / build-stevie.sh path,
+	#         the dos_vfs.c pattern) gives the libstub-free path a
+	#         libstub-compatible %p (raw, no "0x", lowercase, zero-padded to
+	#         2*sizeof(void*) hex) + %o, unpinning cstrprobe / compactprobe_extra
+	#         / huge_norm_probe / mediumprobe.  newlibc stays pristine; the
+	#         bare-metal (bm_stdio) and build-newlibc-test.sh paths keep
+	#         newlibc's printf_wrappers.c, so their goldens are untouched.
+	# To re-pin a probe to the libstub equivalence anchor, set libstubflag here.
 	libstubflag=""
-	case "$base" in
-		# printf %p / %o divergence
-		cstrprobe|compactprobe_extra|huge_norm_probe|mediumprobe) libstubflag="--libstub" ;;
-	esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag $ssflag $libstubflag "$QBE_DIR/$src" >/dev/null
 }

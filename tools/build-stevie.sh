@@ -407,7 +407,9 @@ if [ $EXE -eq 1 ]; then
 				echo "  FAIL nasm-obj: $unit_base"; cat "$OUT_DIR/link.err"; exit 1; }
 		}
 		NL_SUPPORT=(
-			"$NL/libgloss/printf_wrappers.c"
+			# §8b: dos_printf.c shadows newlibc's printf_wrappers.c
+			# (libstub-compatible %p/%o); newlibc stays pristine.
+			"$DOS_DIR/newlibc/dos_printf.c"
 			"$NL/libgloss/scanf_wrappers.c"
 			"$NL/libgloss/syscalls.c"
 			"$NL/libgloss/reent_stubs.c"
