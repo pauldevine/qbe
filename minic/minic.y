@@ -6815,6 +6815,20 @@ emit_local_multi_decl_full(unsigned base, Node *list)
 				var_set_aoa_dim(v, aoa);
 			continue;
 		}
+		if (n->op == 0 && g_td_arraydim > 0) {
+			/* Array-typedef INSTANCE in a multi-decl (`jmp_buf a, b;`):
+			 * the shared base was reduced to the element type, so this
+			 * plain declarator is the whole D-wide array — size it
+			 * D*sizeof(elem) and register IDIR(elem) array so it decays
+			 * to its address (not a scalar element load).  No aoa_dim:
+			 * it is a plain array typedef instance, not an aoa. */
+			unsigned elem = g_td_arrayelem;
+			int total = SIZE(elem) * g_td_arraydim;
+			v = block_scope_decl(n, IDIR(elem), 1);
+			varadd(v, 0, IDIR(elem), 1);
+			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(elem), total);
+			continue;
+		}
 		t = (n->op == 'P' || n->op == 'A') ? IDIR(base) : base;
 		/* Route through block_scope_decl so a multi-declarator local that
 		 * shadows a global/extern/function/enum or a different-typed
@@ -6851,6 +6865,19 @@ emit_local_multi_decl(unsigned base, Node *firstnode, Node *rest)
 		die("invalid void declaration");
 	chain = 0;
 	s = SIZE(base);
+	/* First declarator is an array-typedef INSTANCE (`jmp_buf a, b;`):
+	 * size the whole D-wide array and register IDIR(elem) array so it
+	 * decays (see emit_global_arr_instance / emit_local_multi_decl_full).
+	 * firstnode is always the bare leading IDENT here (a decorated first
+	 * declarator routes to emit_local_multi_decl_full), so no op check. */
+	if (g_td_arraydim > 0) {
+		unsigned elem = g_td_arrayelem;
+		int total = SIZE(elem) * g_td_arraydim;
+		v = block_scope_decl(firstnode, IDIR(elem), 1);
+		varadd(v, 0, IDIR(elem), 1);
+		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(elem), total);
+		goto rest_items;
+	}
 	/* Route the first declarator through block_scope_decl too, so a
 	 * multi-declarator local shadowing a global/different-typed outer
 	 * local is alpha-renamed rather than dying "double definition". */
@@ -6859,6 +6886,7 @@ emit_local_multi_decl(unsigned base, Node *firstnode, Node *rest)
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(base), s);
 	if ((KIND(base) == STRUCT_T || KIND(base) == UNION_T) && struct_has_bitfield(DREF(base)))
 		emit_zero_local(v, s);
+rest_items:
 	for (n = rest; n; n = n->r) {
 		/* When the leading declarator's `*` was absorbed by greedy
 		 * type matching, the base already carries that pointer
@@ -6894,6 +6922,15 @@ emit_local_multi_decl(unsigned base, Node *firstnode, Node *rest)
 				chain = multi_decl_chain_init(chain, v, n->l);
 			continue;
 		}
+		if (n->op == 0 && g_td_arraydim > 0) {
+			/* Array-typedef INSTANCE item (`jmp_buf a, b;` — b here). */
+			unsigned elem = g_td_arrayelem;
+			int total = SIZE(elem) * g_td_arraydim;
+			v = block_scope_decl(n, IDIR(elem), 1);
+			varadd(v, 0, IDIR(elem), 1);
+			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(elem), total);
+			continue;
+		}
 		/* Plain or [N] declarator: peel one * off the absorbed base
 		 * so `char *p, c;` makes c a `char` (standard C semantics).
 		 * `[N]` similarly lands at element-of-base. */
@@ -6907,6 +6944,65 @@ emit_local_multi_decl(unsigned base, Node *firstnode, Node *rest)
 			chain = multi_decl_chain_init(chain, v, n->l);
 	}
 	return chain;
+}
+
+/* Emit a file-scope array-typedef INSTANCE (`jmp_buf env;` at file or
+ * static-local scope, where g_td_arraydim = D > 0 records the typedef's
+ * inner dimension): a zero-filled data block of D*sizeof(elem) bytes,
+ * registered as IDIR(elem) with the array flag so the name decays to its
+ * address on use instead of being loaded as a scalar element.  This is a
+ * plain array typedef instance, NOT an array-of-array-typedef, so no
+ * aoa_dim is set.  Used by the bare-`;` and multi-declarator file-scope
+ * rules.  Advances nglo. */
+void
+emit_global_arr_instance(char *name, unsigned elem, int dim)
+{
+	char buf[64];
+	int total = SIZE(elem) * dim;
+	if (nglo == NGlo)
+		die("too many globals");
+	sprintf(buf, "align %d { z %d }", iralign(elem), total);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], name);
+	varadd(name, nglo++, IDIR(elem), 1);
+	var_set_arraybytes(name, total);
+}
+
+/* Emit a file-scope SIZED array global `name[count]`, aoa-aware.  When the
+ * shared base is an array typedef (g_td_arraydim = D > 0) the element is the
+ * D-wide inner array (byte size D*sizeof(elem), aoa flag set so name[i] is a
+ * row address — see mkidx); otherwise a plain array of parsed_type.  Factored
+ * from the `[expr] ';'` rule so the array-first multi-decl rule
+ * (`jmp_buf fa[2], fb[2];`) reuses identical emission.  Advances nglo. */
+void
+emit_global_sized_array(char *name, long count)
+{
+	char buf[64];
+	int elemsz, total;
+	unsigned elemtyp;
+	int aoa;
+	if (nglo == NGlo)
+		die("too many globals");
+	if (g_td_arraydim > 0) {
+		aoa = g_td_arraydim;
+		elemtyp = g_td_arrayelem;
+		elemsz = SIZE(elemtyp) * aoa;
+	} else {
+		aoa = 0;
+		elemtyp = parsed_type;
+		elemsz = SIZE(parsed_type);
+	}
+	total = elemsz * count;
+	sprintf(buf, "align %d { z %d }", iralign(elemtyp), total);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], name);
+	maybe_mark_huge_global(nglo, name, total);
+	varadd(name, nglo++, IDIR(elemtyp), 1);
+	var_set_arraybytes(name, total);
+	if (aoa > 0)
+		var_set_aoa_dim(name, aoa);
 }
 
 /* Emit a K&R-style function header.  Called from the prot_knr action
@@ -7688,6 +7784,12 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	char buf[64];
 	if (parsed_type == NIL)
 		die("invalid void declaration");
+	if (g_td_arraydim > 0) {
+		/* File-scope array-typedef INSTANCE (`static jmp_buf env;`):
+		 * a D-wide array, not a scalar element (see
+		 * emit_global_arr_instance). */
+		emit_global_arr_instance(parsed_ident, g_td_arrayelem, g_td_arraydim);
+	} else {
 	if (nglo == NGlo)
 		die("too many string literals");
 	emit_zero_init(buf, parsed_type);
@@ -7698,6 +7800,7 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	/* Uninitialized file-scope definition: a later initialized definition
 	 * of the same name may supersede this (C tentative definition). */
 	mark_tentative(parsed_ident);
+	}
 }
                | '=' NUM ';'
 {
@@ -7746,38 +7849,57 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	 * QBE syntax: `data $name = align N { z TOTAL_BYTES }`.  Dimension
 	 * is a constant-expression (uses expr, not a bare NUM, so it does
 	 * not shift/reduce-conflict with the sized `[expr] = {…}` init
-	 * rule). */
-	char buf[64];
-	int elemsz, total;
-	unsigned elemtyp;
-	int aoa;
+	 * rule).  emit_global_sized_array is aoa-aware (`jmp_buf bufs[N]`). */
 	if (parsed_type == NIL)
 		die("invalid void array");
-	if (nglo == NGlo)
-		die("too many globals");
-	/* Array-of-array-typedef global (`jmp_buf bufs[N]`): element is the
-	 * inner array, so its byte size is D*sizeof(elem); register IDIR(elem)
-	 * and flag aoa so bufs[i] becomes a row address (see mkidx). */
-	if (g_td_arraydim > 0) {
-		aoa = g_td_arraydim;
-		elemtyp = g_td_arrayelem;
-		elemsz = SIZE(elemtyp) * aoa;
-	} else {
-		aoa = 0;
-		elemtyp = parsed_type;
-		elemsz = SIZE(parsed_type);
+	emit_global_sized_array(parsed_ident, const_eval($2));
+}
+               | '[' expr ']' ',' ext_decllist ';'
+{
+	/* Array-FIRST multi-name top-level declaration:
+	 *   int counts[3], total;          (plain)
+	 *   static jmp_buf fa[2], fb[2];   (array-of-array-typedef, §8g GAP1)
+	 * The leading declarator's `[expr]` had no multi-decl production
+	 * (only `[expr] ';'` / `[expr] = {…} ';'` existed), so this form was a
+	 * parse error.  Emit the first as a sized array (aoa-aware), then walk
+	 * ext_decllist for the rest — mirroring the plain-first
+	 * `, ext_decllist ';'` rule's item handling. */
+	Node *n;
+	unsigned t;
+	char buf[64];
+	int aoa = g_td_arraydim;
+	unsigned aelem = g_td_arrayelem;
+	if (parsed_type == NIL)
+		die("invalid void array");
+	emit_global_sized_array(parsed_ident, const_eval($2));
+	for (n = $5; n; n = n->r) {
+		if (n->op == 'B') {
+			/* sized array item — `fb[2]` (aoa-aware via the helper). */
+			emit_global_sized_array(n->u.v, n->l->u.n);
+		} else if (n->op == 0 && aoa > 0) {
+			/* array-typedef INSTANCE item (`jmp_buf fa[2], fb;`). */
+			emit_global_arr_instance(n->u.v, aelem, aoa);
+		} else if (n->op == 'F') {
+			varadd(n->u.v, 1, FUNC(parsed_type), 0);
+		} else if (n->op == 'A') {
+			t = IDIR(parsed_type);
+			if (nglo == NGlo)
+				die("too many globals");
+			sprintf(buf, "align %d { z 0 }", iralign(parsed_type));
+			ini[nglo] = alloc(strlen(buf) + 1);
+			strcpy(ini[nglo], buf);
+			strcpy(gloname[nglo], n->u.v);
+			varadd(n->u.v, nglo++, t, 1);
+		} else {
+			if (nglo == NGlo)
+				die("too many globals");
+			emit_zero_init(buf, parsed_type);
+			ini[nglo] = alloc(strlen(buf) + 1);
+			strcpy(ini[nglo], buf);
+			strcpy(gloname[nglo], n->u.v);
+			varadd(n->u.v, nglo++, parsed_type, 0);
+		}
 	}
-	total = elemsz * const_eval($2);
-	sprintf(buf, "align %d { z %d }", iralign(elemtyp), total);
-	ini[nglo] = alloc(strlen(buf) + 1);
-	strcpy(ini[nglo], buf);
-	strcpy(gloname[nglo], parsed_ident);
-	maybe_mark_huge_global(nglo, parsed_ident, total);
-	/* Register as pointer to element type with array flag set. */
-	varadd(parsed_ident, nglo++, IDIR(elemtyp), 1);
-	var_set_arraybytes(parsed_ident, total);
-	if (aoa > 0)
-		var_set_aoa_dim(parsed_ident, aoa);
 }
                | '=' STR ';'
 {
@@ -7808,9 +7930,15 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	Node *n;
 	unsigned t;
 	char buf[64];
+	int aoa = g_td_arraydim;   /* >0: shared base is an array typedef */
+	unsigned aelem = g_td_arrayelem;
 	if (parsed_type == NIL)
 		die("invalid void declaration");
-	/* First name: emit as plain global. */
+	/* First name: emit as plain global (or D-wide array instance when the
+	 * shared base is an array typedef, `static jmp_buf a, b;`). */
+	if (aoa > 0) {
+		emit_global_arr_instance(parsed_ident, aelem, aoa);
+	} else {
 	if (nglo == NGlo)
 		die("too many globals");
 	emit_zero_init(buf, parsed_type);
@@ -7818,7 +7946,13 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	strcpy(ini[nglo], buf);
 	strcpy(gloname[nglo], parsed_ident);
 	varadd(parsed_ident, nglo++, parsed_type, 0);
+	}
 	for (n = $2; n; n = n->r) {
+		if (n->op == 0 && aoa > 0) {
+			/* array-typedef INSTANCE item (`jmp_buf a, b;` — b here). */
+			emit_global_arr_instance(n->u.v, aelem, aoa);
+			continue;
+		}
 		if (n->op == 'F') {
 			t = FUNC(parsed_type);
 			varadd(n->u.v, 1, t, 0);
@@ -8416,8 +8550,17 @@ dcls:
 	char buf[64];
 	if ($3 == NIL)
 		die("invalid void declaration");
+	if (g_td_arraydim > 0) {
+		/* static array-typedef INSTANCE (`static jmp_buf env;` in a fn):
+		 * a D-wide array, registered IDIR(elem) so it decays. */
+		int total = SIZE(g_td_arrayelem) * g_td_arraydim;
+		sprintf(buf, "align %d { z %d }", iralign(g_td_arrayelem), total);
+		emit_static_local($4->u.v, IDIR(g_td_arrayelem), 1, buf);
+		var_set_arraybytes($4->u.v, total);
+	} else {
 	emit_zero_init(buf, $3);
 	emit_static_local($4->u.v, $3, 0, buf);
+	}
 }
     | dcls STATIC type IDENT '=' expr ';' { emit_static_local_init($3, $4, $6); }
     | dcls STATIC type IDENT '[' ']' '=' gaggr ';'

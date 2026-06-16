@@ -1,4 +1,57 @@
-# Next session (carried compiler tracks — only the aoa sub-gaps remain; the §8c-surfaced "minic trailing-main quirk" was DISPROVED as a NON-BUG this session.  §8f [2026-06-16, this session] **INVESTIGATED the carried "minic file-scope-statics-need-a-trailing-`main`" quirk (the §8c handoff's latent compiler track) and DISPROVED it — it is a NON-BUG; doc-only close, no compiler/qbe/emit/minic/toolchain source touched, gate UNCHANGED at 367/367, MP unaffected, `make check` not needed (no source change).**  §8c reported that compiling `dos_shim.c` without its trailing `main()` (the abandoned `-DNO_SHIM_MAIN` experiment) dropped ALL file-scope statics (`_impure_ptr`/`shim_reent`/`shim_files`/`shim_file_used`), ".ssa 0-vs-4 defs", and hypothesised "trailing `main()` gates static-data emission"; the `-Dmain=newlibc_test_main` rename sidestepped it and shipped, and it was carried as a latent track through §8d/§8e.  **THREE INDEPENDENT PROOFS it does NOT reproduce:** (1) MECHANISM — `minic.y:10531-10548` emits file-scope data via an UNCONDITIONAL loop over `gloname[1..nglo)` that runs AFTER `yyparse()`; `main` is never consulted, so the ONLY path to zero data output is `yyparse() != 0 → die("parse error")` → empty stdout ⇒ "0 defs" ⟺ parse error ⟺ MALFORMED input, never "main gated emission".  (2) EXACT §8c RECONSTRUCTION — wrapped `dos_shim.c`'s `main` in `#ifndef NO_SHIM_MAIN`, ran the real cpp (`clang -E -P -nostdinc -DDOS -D__ia16__ -DNO_LIBSTUB`) + minic (compact AND medium) both with and without `-DNO_SHIM_MAIN`: BOTH emit all 4 data defs, exit 0.  (3) TRUNCATION SWEEP — truncated the no-`main` TU at all 40 top-level `^}` boundaries: every one parses OK, data-def count rises monotonically 0→2→4 tracking declared statics; no parse error and no dropped statics anywhere.  **CONCLUSION:** the §8c 0-vs-4 was a MEASUREMENT ARTIFACT — the `-DNO_SHIM_MAIN` wrap fed minic malformed C (an eaten brace / dangling token), parse-error → empty `.ssa`, misdiagnosed as "main gates emission".  The `-Dmain=newlibc_test_main` rename remains the right choice — it solves the REAL `_main` symbol collision, not a phantom bug.  No regression gate added: a meaningful one needs multi-TU link plumbing (`build-example.sh` is single-source) — disproportionate for a confirmed non-bug (user chose the doc-only close).  Records corrected: `MEMORY.md`, `project_8c_mp_libstub_free.md`, `project_8e_huge_ptr_equality.md`, new `project_8f_trailing_main_nonbug.md`.  **⇒ Next session: ONE carried COMPILER track remains (awaits a real consumer — synthetic-but-bug-loud gating): the aoa sub-gaps** — the file-scope/static multi-decl array-first form (`static jmp_buf fa[2], fb[2];`, a grammar PARSE-ERROR gap, distinct from §7e/§7j aoa sizing) and the plain `jmp_buf a, b;` array-typedef-instance multi-decl.  The huge pointer-arith family is CLOSED (relational §7u + equality §8e).  Bare-metal phase-3 bm_testhost tests EXHAUSTED.  Libstub-retirement campaign COMPLETE.  NO QBE backend bug open; easy frame-size levers spent (§7k).)
+# Next session (the aoa array-typedef-INSTANCE gaps are now CLOSED for every reachable declaration site; ONE bounded grammar gap remains — function-local-`static` MULTI-declarators, which is a GENERAL grammar hole, not aoa-specific.  §8g [2026-06-16, this session] **CLOSED the array-typedef-INSTANCE declaration gaps — `jmp_buf env`-style plain instances (jmp_buf is `int[8]`) are now sized + decayed correctly at every file-scope / static-local / multi-declarator site, and the file-scope array-FIRST multi-decl (`static jmp_buf fa[2], fb[2];`) now PARSES; `tools/test-dos.sh` 367 → 370, the fix is a frontend `minic.y` change (g_td_arraydim-gated + one new grammar production) → no emit audit, MP compact body 689,760 BYTE-IDENTICAL → no Victor run, `make check` green, grammar conflicts UNCHANGED at 115.**  The carried "aoa sub-gaps" track turned out BROADER than the §8e handoff named: a survey of all `jmp_buf` declaration shapes found that ONLY block-local single-decl (`jmp_buf env;`, §7e) and block-local bracketed multi (`jmp_buf a[2], b[2];`, §7j) were correct — SIX shapes were broken: (1) file-scope single instance `static jmp_buf g;` (mis-sized 2 B + scalar `loadw` instead of 16 B array decay), (2) file-scope multi instance `static jmp_buf a, b;`, (3) file-scope array-FIRST aoa `static jmp_buf fa[2], fb[2];` (a hard PARSE ERROR — the named GAP1), (4) block-local multi instance `jmp_buf a, b;` (the named GAP2), (5) static-local single instance `static jmp_buf s;` (in a fn).  Root cause for (1)/(2)/(4)/(5): every plain-instance / multi-declarator emission site treated an array-typedef instance as a single scalar of the ELEMENT type (`int`, 2 B, value-loaded) instead of the whole D-wide array, because only the block-local single-decl rule (`dcls type IDENT ';'`, minic.y ~8236) had the `g_td_arraydim > 0` branch.  **FIX (frontend minic.y, all g_td_arraydim-gated so non-array-typedef codegen is byte-identical):** (A — action-only, no grammar change, lowest risk) two new helpers `emit_global_arr_instance` (file-scope/static-local zero-block of D*sizeof(elem), registered IDIR(elem) array so it decays to its address, NO aoa_dim — a plain array typedef instance is NOT an array-of-array) and `emit_global_sized_array` (aoa-aware sized array, factored verbatim out of the existing `[expr] ';'` rule so that rule's output stays byte-identical), wired into: the file-scope bare-`;` rule, the file-scope `, ext_decllist ';'` multi rule (first name + each plain item), `emit_local_multi_decl` (first declarator — drop the op check since the leading IDENT is always a bare token there — + plain loop item), `emit_local_multi_decl_full` (plain op==0 loop item), and the static-local `dcls STATIC type IDENT ';'` rule (via `emit_static_local` isarray=1); (B — ONE new grammar production) `typed_decl_rest: '[' expr ']' ',' ext_decllist ';'` for the file-scope array-FIRST multi-decl (GAP1) — emits the first declarator via `emit_global_sized_array` then walks ext_decllist ('B' sized-array items via the same helper, plain instance items via `emit_global_arr_instance`, plus the existing 'A'/'F'/scalar arms) — mirroring the block-local `dcls type IDENT '[' expr ']' ',' ext_decllist ';'` rule §7c added; this also fixes plain-int `int counts[3], total;` at file scope, which was the same parse-error hole.  Gated by the all-new `aoa_instance_probe` (`minic/dos/examples/aoa_instance_probe.c`, medium+compact+large, model-independent program output) — bug-loud: on the UNFIXED compiler shape (3) is a hard parse error (the probe won't even build) and (1)/(2)/(4)/(5) pass `setjmp()` a garbage pointer loaded from a 2-byte slot (crash / wrong value); each case round-trips a distinct value through setjmp/longjmp IN-FRAME (file/static buffers persist but the longjmp fires while the setjmp frame is live → no cross-frame UB).  Golden `file_single=11 / file_multi=21,22 / file_aoa=30,31,40,41 / block_multi=51,52 / static_single=61`, byte-identical across all three models.  Existing aoa/setjmp probes (arr_jmpbuf, aoa_extended, setjmp) all still [ok]; plain global arrays (`int arr[3];`) emit byte-identical (the helper is a literal copy); MP compact body 689,760 byte-identical (MP has no array-typedef instance multi-decls in the changed forms, and the gated branches never fire for its non-aoa decls).  STRATEGY: frontend-only, additive + g_td_arraydim-gated; the COPY/ADD-NEVER-MUTATE libstub-free toolchain is untouched → MP/stevie/every gate provably can't regress.  **⇒ Next session: ONE bounded grammar gap remains (and it is NOT aoa-specific — synthetic-but-bug-loud gating if pursued): function-local `static` MULTI-declarators** — `static int x, y;` / `static int a[3], b;` / `static jmp_buf a, b;` INSIDE a function body are ALL a parse error, because the `dcls STATIC type IDENT …` rules have NO `, ext_decllist` (plain-first) or `[expr] , ext_decllist` (array-first) production at all (the gap predates aoa and affects plain `int` too — it is a general static-local-multi-decl grammar hole, distinct from the aoa sizing the §8g fix closed).  The §8c "minic trailing-main quirk" was DISPROVED as a NON-BUG in §8f.  The huge pointer-arith family is CLOSED (relational §7u + equality §8e).  Bare-metal phase-3 bm_testhost tests EXHAUSTED.  Libstub-retirement campaign COMPLETE.  NO QBE backend bug open; easy frame-size levers spent (§7k).)
+
+## §8g session notes (2026-06-16)
+
+### The pick
+- §8f handoff left ONE carried compiler track: the aoa sub-gaps.  Continued
+  directly (no AskUserQuestion — it was the sole remaining track).
+
+### The survey — the gap was wider than named
+- Tested every `jmp_buf` declaration shape (jmp_buf = `int[8]`).  Correct only:
+  block-local single-decl (§7e) and block-local bracketed multi (§7j).
+- BROKEN: file-scope single `static jmp_buf g;` (2-byte scalar + loadw),
+  file-scope multi `static jmp_buf a, b;`, file-scope array-first
+  `static jmp_buf fa[2], fb[2];` (PARSE ERROR = named GAP1), block-local multi
+  `jmp_buf a, b;` (named GAP2), static-local single `static jmp_buf s;`.
+- Root cause for the mis-sized ones: only the block-local single-decl rule
+  (`dcls type IDENT ';'`) had the `g_td_arraydim > 0` array-typedef-instance
+  branch; every other plain-instance/multi-decl site sized the ELEMENT type.
+
+### The fix (frontend minic.y, all g_td_arraydim-gated)
+- Helper `emit_global_arr_instance(name, elem, dim)`: file-scope/static-local
+  zero-block of dim*sizeof(elem), registered IDIR(elem) array (decays), NO
+  aoa_dim (plain instance, not array-of-array).
+- Helper `emit_global_sized_array(name, count)`: aoa-aware sized array, factored
+  VERBATIM out of the existing `[expr] ';'` rule (that rule's output unchanged).
+- Wired into: file-scope bare-`;`, file-scope `, ext_decllist ';'` (first +
+  plain items), emit_local_multi_decl (first decl — no op check, leading IDENT
+  is always a bare token — + plain item), emit_local_multi_decl_full (plain
+  item), static-local `dcls STATIC type IDENT ';'` (emit_static_local isarray=1).
+- ONE new grammar production: `typed_decl_rest: '[' expr ']' ',' ext_decllist
+  ';'` (file-scope array-first multi-decl, GAP1) — also fixes plain-int
+  `int counts[3], total;` at file scope.  Conflicts UNCHANGED at 115.
+
+### Gate + verification
+- NEW minic/dos/examples/aoa_instance_probe.c (medium+compact+large), golden
+  aoa_instance_probe.golden.txt.  Bug-loud: GAP1 won't build unfixed; the
+  mis-sized ones crash/wrong-value through a garbage setjmp env pointer.
+- test-dos 367→370 (3 new entries); make check green; conflicts 115.
+- arr_jmpbuf/aoa_extended/setjmp probes still [ok] all models; plain global
+  arrays byte-identical (helper is a literal copy of the old inline code).
+- MP compact rebuilt: image 710,352 / body 689,760 BYTE-IDENTICAL → no Victor.
+- minic.y frontend change (not emit.c) → no emit audit.
+
+### ⇒ Next session
+- ONE bounded grammar gap remains, NOT aoa-specific: function-local `static`
+  MULTI-declarators (`static int x, y;` / `static int a[3], b;` /
+  `static jmp_buf a, b;` inside a fn) are ALL parse errors — the `dcls STATIC
+  type IDENT …` rules have no multi-decl production at all (predates aoa,
+  affects plain int).  Synthetic-but-bug-loud gating if pursued.
+- §8c trailing-main quirk DISPROVED (§8f).  Huge ptr-arith CLOSED (§7u+§8e).
+- NO QBE backend bug open.
+---
+
+# Next session (carried compiler tracks — only the aoa sub-gaps remain; the §8c-surfaced "minic trailing-main quirk" was DISPROVED as a NON-BUG this session.  §8f [2026-06-16] **INVESTIGATED the carried "minic file-scope-statics-need-a-trailing-`main`" quirk (the §8c handoff's latent compiler track) and DISPROVED it — it is a NON-BUG; doc-only close, no compiler/qbe/emit/minic/toolchain source touched, gate UNCHANGED at 367/367, MP unaffected, `make check` not needed (no source change).**  §8c reported that compiling `dos_shim.c` without its trailing `main()` (the abandoned `-DNO_SHIM_MAIN` experiment) dropped ALL file-scope statics, ".ssa 0-vs-4 defs", hypothesising "trailing `main()` gates static-data emission".  **THREE INDEPENDENT PROOFS it does NOT reproduce:** (1) MECHANISM — `minic.y:10531-10548` emits file-scope data via an UNCONDITIONAL loop over `gloname[1..nglo)` AFTER `yyparse()`; `main` is never consulted, so the ONLY path to zero data output is `yyparse() != 0 → die("parse error")` ⇒ "0 defs" ⟺ MALFORMED input.  (2) EXACT §8c RECONSTRUCTION — `#ifndef NO_SHIM_MAIN` wrap, real cpp (`-D__ia16__ -DNO_LIBSTUB`), minic compact AND medium, both with/without `-DNO_SHIM_MAIN`: BOTH emit all 4 data defs, exit 0.  (3) TRUNCATION SWEEP — truncated the no-`main` TU at all 40 top-level `^}` boundaries: every one parses OK, defs rise monotonically 0→2→4.  **CONCLUSION:** the §8c 0-vs-4 was a MEASUREMENT ARTIFACT — the `-DNO_SHIM_MAIN` wrap fed minic malformed C (an eaten brace), parse-error → empty `.ssa`.  The `-Dmain=newlibc_test_main` rename remains right (solves the REAL `_main` collision, not a phantom bug).  No regression gate added (a meaningful one needs multi-TU link plumbing — disproportionate for a confirmed non-bug; user chose doc-only close).  Records corrected: `MEMORY.md`, `project_8c_mp_libstub_free.md`, `project_8e_huge_ptr_equality.md`, new `project_8f_trailing_main_nonbug.md`.)
 
 ## §8f session notes (2026-06-16)
 
@@ -10,76 +63,22 @@
 - §8c claimed: dropping `dos_shim.c`'s trailing `main()` (via `-DNO_SHIM_MAIN`)
   drops ALL file-scope statics; ".ssa 0-vs-4 defs"; "trailing main() gates
   static-data emission".
-- DISPROVED by three independent proofs:
-  1. MECHANISM — minic.y:10531-10548 emits file-scope data via an
-     UNCONDITIONAL post-`yyparse()` loop over `gloname[]`; `main` is never
-     consulted.  Zero output ⟺ `yyparse()!=0 → die("parse error")` ⟺
-     MALFORMED input.
-  2. EXACT §8c RECONSTRUCTION — `#ifndef NO_SHIM_MAIN` wrap, real cpp
-     (`-D__ia16__ -DNO_LIBSTUB`), minic compact+medium, both with/without
-     `-DNO_SHIM_MAIN` → all 4 data defs, exit 0.
-  3. TRUNCATION SWEEP — truncate the no-`main` TU at all 40 top-level `^}`:
-     every one parses OK, defs rise 0→2→4 with declared statics.
-- The §8c 0-vs-4 was a MEASUREMENT ARTIFACT (the `-DNO_SHIM_MAIN` wrap produced
-  malformed C — an eaten brace/dangling token, the same class of mistake I hit
-  once mid-investigation — → parse error → empty `.ssa`).
+- DISPROVED by three independent proofs (mechanism / exact reconstruction /
+  truncation sweep — see the header above).  The 0-vs-4 was a measurement
+  artifact (the `-DNO_SHIM_MAIN` wrap produced malformed C → parse error →
+  empty `.ssa`).
 
 ### Outcome (doc-only close, user's choice)
 - No code change.  test-dos UNCHANGED 367/367 (not re-run — nothing touched).
-- The `-Dmain=newlibc_test_main` rename is still correct (solves the real
-  `_main` link collision, never masked a real defect).
-- No regression gate: a meaningful one needs multi-TU link plumbing
-  (build-example.sh is single-source) — disproportionate for a non-bug.
+- The `-Dmain=newlibc_test_main` rename is still correct.
+- No regression gate (multi-TU link plumbing — disproportionate for a non-bug).
 - Records corrected: MEMORY.md, project_8c, project_8e, new project_8f.
 
 ### ⇒ Next session
-- ONE carried compiler track remains (awaits a consumer): the aoa sub-gaps —
-  file-scope/static multi-decl array-first (`static jmp_buf fa[2], fb[2];`, a
-  grammar parse-error gap) + plain `jmp_buf a, b;` multi-decl.
+- ONE carried compiler track remained at §8f close: the aoa sub-gaps (CLOSED in
+  §8g above for every reachable site; function-local-static multi-decl left).
 - Huge pointer-arith family CLOSED (§7u + §8e).  Libstub-retirement COMPLETE.
 - NO QBE backend bug open.
 ---
 
-# Next session (carried compiler tracks — the §7u huge-normalisation family is now COMPLETE (relational §7u + equality §8e).  §8e [2026-06-16, this session] **CLOSED the huge-pointer EQUALITY flat-compare — the latent sibling of the §7u relational fix; `==`/`!=` of two huge pointers that denote the SAME linear byte through DIFFERENT seg:off normalisations now compare correctly; `tools/test-dos.sh` 366 → 367, the fix is an MHuge-gated `minic.y` frontend change → no emit audit, MP compact body 689,760 BYTE-IDENTICAL → no Victor run, `make check` green.**  §7u routed huge RELATIONAL compares (`p < q`, `p <= q`) through `_qbe_huge_cmp` because the flat 32-bit `cultl`/`csltl` of two seg:off words is only monotonic-in-linear-address when BOTH operands are NORMALISED, and it explicitly LEFT the equality case unfixed (the sole live consumer `_sbrk` only does `== NULL` = 0:0 = linear 0, fine flat).  The equality gap is the SAME defect: the flat `ceql`/`cnel` compares the raw 32-bit (seg<<16)|off words bit-for-bit, so an UNNORMALISED operand (a bare symbol address whose offset can exceed 0xF) wrongly compares UNEQUAL to the NORMALISED pointer `_qbe_huge_add` returns for the same byte — a pure FALSE-NEGATIVE (a genuinely different address can never alias).  **FIX (minic.y `Binop` default arm, ~25 lines, mirrors the §7u relational block):** under `memmodel == MHuge` an equality compare (`o == 'e' || o == 'n'`) with BOTH operands non-function pointers routes through `_qbe_huge_cmp(p,q)` (= signed `linear(p)−linear(q)`, the SAME helper §7u uses) and tests its sign — `p == q ⟺ ceql cmp,0`, `p != q ⟺ cnel cmp,0`.  Linear equality is exactly C11 6.5.9 pointer equality on the flat 8086 huge model, and stays correct for NULL (`0:0` → linear 0).  MHuge-gated → compact/large/near (incl. the MP byte-compare) keep flat `ceql`/`cnel`, untouched.  Gated by the all-new `huge_ptreq_probe` (`minic/dos/examples/huge_ptreq_probe.c`, :huge) — bug-loud: it builds two pointers to the same linear byte through different normalisations (`(char *)constant` raw/unnormalised vs the normalised result of `+ 0` through `_qbe_huge_add`) and asserts `==`/`!=`; the UNFIXED compiler prints `eqconst=FAIL`/`neconst=FAIL`/`eqarith=FAIL`/`nearith=FAIL` (verified by reverting), while the address-distinct and NULL cases stay correct.  Every existing huge probe (huge_norm, hugeprobe, gc_bigheap, caddr family) still passes — their `p==q`/`p!=NULL` now goes through `huge_cmp` but yields the SAME answer.  STRATEGY: only the MHuge-gated minic.y arm + the new probe/golden + one gate entry changed; the COPY/ADD-NEVER-MUTATE libstub-free toolchain is untouched → MP/stevie/every gate provably can't regress.  **⇒ Next session: pick a remaining carried COMPILER track (each awaits a real consumer — synthetic-but-bug-loud gating):** (1) the aoa sub-gaps (file-scope/static multi-decl array-first = a grammar parse-error gap; plain `jmp_buf a, b;` multi-decl); (2) the minic file-scope-statics-need-a-trailing-`main` emission quirk surfaced in §8c (removing the last `main()` drops a TU's file-scope `static` data defs — confirmed via `.ssa` diff; no consumer, the `-Dmain` rename avoids it).  The huge pointer-arith family (relational §7u + equality §8e) is now CLOSED.  Bare-metal phase-3 bm_testhost tests EXHAUSTED.  Libstub-retirement campaign COMPLETE (gate probes + stevie + MicroPython all libstub-free by default; `libstub_to_exe.py` survives only as the `--libstub` anchor + probe scripts + tiny/.COM fallbacks).  NO QBE backend bug open; easy frame-size levers spent (§7k).)
-
-## §8e session notes (2026-06-16)
-
-### The pick
-- §8d handoff offered three carried compiler tracks (huge ptr equality / aoa
-  sub-gaps / minic trailing-main quirk).  User (AskUserQuestion) chose the huge
-  pointer EQUALITY flat-compare — the most concrete, a direct follow-on to §7u.
-
-### The bug + fix
-- §7u fixed huge RELATIONAL compares (p<q, p<=q) via _qbe_huge_cmp but LEFT
-  equality unfixed (only consumer _sbrk does ==NULL = linear 0, fine flat).
-- Same defect for ==/!=: flat ceql/cnel compares raw seg:off words, so two
-  pointers to the SAME linear byte with DIFFERENT normalisations (unnormalised
-  symbol addr off>0xF vs the normalised _qbe_huge_add result) wrongly compare
-  UNEQUAL (false-negative only; a different address never aliases).
-- FIX (minic.y Binop default arm, ~25 lines, mirrors §7u relational block):
-  MHuge + (o=='e'||o=='n') + both operands non-FUN PTR → route through
-  _qbe_huge_cmp(p,q) and test ceql/cnel cmp,0.  Correct for NULL too (0:0→0).
-  MHuge-gated → compact/large/near (incl. MP) keep flat ceql/cnel, untouched.
-
-### Gate + verification
-- NEW minic/dos/examples/huge_ptreq_probe.c (:huge), golden
-  minic/dos/tests/huge_ptreq_probe.golden.txt.  Bug-loud: (char*)0x10000010UL
-  (unnorm, linear 0x10010) vs (char*)0x10010000UL (norm, same linear) AND vs
-  unnorm+0 (huge_add normalises) — UNFIXED prints eqconst/neconst/eqarith/
-  nearith=FAIL (verified by git-stashing the fix); address-distinct + NULL OK.
-- test-dos 366→367; make check green; 8 qbe_huge_cmp calls in the probe .ssa.
-- All existing huge probes still pass (their p==q/p!=NULL now via huge_cmp,
-  same answer).
-- MP compact rebuilt: image 710,352 / body 689,760 BYTE-IDENTICAL to §8d
-  baseline (MHuge-gated → compact provably untouched) → no Victor run.
-- minic.y frontend change (not emit.c) → no emit audit.
-
-### ⇒ Next session
-- Remaining carried compiler tracks (await a consumer): aoa sub-gaps
-  (file-scope/static multi-decl array-first parse-error gap; plain jmp_buf a,b
-  multi-decl); the minic trailing-main file-scope-statics quirk (§8c).
-- Huge pointer-arith family CLOSED (relational §7u + equality §8e).
-- NO QBE backend bug open.
----
-
-Older session headers (§7w and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).
+Older session headers (§8e and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).
