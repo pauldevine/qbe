@@ -135,10 +135,13 @@ NORMALIZE='s/\bunsigned short int\b/unsigned short/g;s/\bunsigned long int\b/uns
 # idle halt into a DOS process terminate (INT 21h AH=4Ch).
 HALT2DOS='s/__asm__[[:space:]]*volatile[[:space:]]*([[:space:]]*"hlt"[[:space:]]*)/{ __asm__ volatile ("mov ax, 0x4c00"); __asm__ volatile ("int 0x21"); }/g'
 
-# compile_unit <source.c> <obj-base> <extra-cpp-flags...>
+# compile_unit <source.c> <obj-base> <out-dir> <extra-cpp-flags...>
+# §7z: the explicit <out-dir> (was hardcoded $OUT_DIR) lets the same function
+# write either the per-test OUT_DIR (the test TU, and the NL_CACHE=0 path) or
+# the shared per-model support cache (the NL_CACHE=1 path below).
 compile_unit() {
-	local unit_src="$1" unit_base="$2"
-	shift 2
+	local unit_src="$1" unit_base="$2" outd="$3"
+	shift 3
 	# -D__ia16__ keeps __far real and selects the GCC MK_FP branch in
 	# v9k_hw.h, matching minic semantics (same flags as the §6a sweep).
 	clang -E -P -nostdinc -DDOS -D__ia16__ "$@" \
@@ -146,31 +149,103 @@ compile_unit() {
 		"-I$NL/include" "-I$NL/drivers" "-I$NL/libgloss" "-I$NL/vfs" \
 		"$unit_src" 2>>"$ERR" \
 		| tr -d '\r\032' | sed "$NORMALIZE" | sed "$HALT2DOS" \
-		> "$OUT_DIR/$unit_base.pp.c" \
+		> "$outd/$unit_base.pp.c" \
 		|| return 1
-	"$MINIC" -m "$MODEL" < "$OUT_DIR/$unit_base.pp.c" \
-		> "$OUT_DIR/$unit_base.ssa" 2>>"$ERR" || return 1
-	"$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$unit_base.ssa" \
-		> "$OUT_DIR/$unit_base.asm" 2>>"$ERR" || return 1
+	"$MINIC" -m "$MODEL" < "$outd/$unit_base.pp.c" \
+		> "$outd/$unit_base.ssa" 2>>"$ERR" || return 1
+	"$QBE" -t i8086 -m "$MODEL" "$outd/$unit_base.ssa" \
+		> "$outd/$unit_base.asm" 2>>"$ERR" || return 1
 	"$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" "$unit_base" \
-		"$OUT_DIR/$unit_base.asm" "$OUT_DIR/$unit_base.omf.asm" 2>>"$ERR" \
+		"$outd/$unit_base.asm" "$outd/$unit_base.omf.asm" 2>>"$ERR" \
 		|| return 1
-	nasm -w-label-redef-late -f obj "$OUT_DIR/$unit_base.omf.asm" \
-		-o "$OUT_DIR/$unit_base.obj" 2>>"$ERR" || return 1
+	nasm -w-label-redef-late -f obj "$outd/$unit_base.omf.asm" \
+		-o "$outd/$unit_base.obj" 2>>"$ERR" || return 1
 }
 
 fail() { echo "$0: $1 (see $ERR)" >&2; tail -5 "$ERR" >&2; exit 1; }
 
-# Test TU: rename its main so the shim's main can run vfs_init() first.
-compile_unit "$SRC" "$base" -Dmain=newlibc_test_main $NL_DEFS \
+# Test TU: rename its main so the shim's main can run vfs_init() first.  Always
+# per-test (OUT_DIR) — it is the one TU that differs per build.
+compile_unit "$SRC" "$base" "$OUT_DIR" -Dmain=newlibc_test_main $NL_DEFS \
 	|| fail "compile failed: $base"
 
 OBJ_FILES=("$OUT_DIR/$base.obj")
-for tu in "${SUPPORT_TUS[@]}"; do
-	tu_base="$(echo "${tu#$NL/}" | sed 's,.*/,,;s/\.c$//')"
-	compile_unit "$tu" "$tu_base" $NL_DEFS || fail "compile failed: $tu_base"
-	OBJ_FILES+=("$OUT_DIR/$tu_base.obj")
-done
+
+# §7z: cache the newlibc portable-subset support objs per (model, libstub mode),
+# mirroring §7y's build-example.sh cache.  Each support TU compiles to a .obj
+# that depends ONLY on (model, NL_DEFS, its source+headers, the toolchain) —
+# never on the test being built — so it is byte-identical across every test of
+# a given (model, libstub) pair.  Before §7z each test recompiled its whole
+# support subset (clang -E -> minic -> qbe -> asm_to_omf -> nasm, ~2s/TU) even
+# though the gate builds 13+ small tests x {libstub, --no-libstub} plus the
+# medium fat_write pair, all sharing identical support objs.  Now they live
+# under build/nl-test-cache/<model>[-nolibstub] and are reused across a run.
+#
+# Unlike build-example.sh's FIXED 10-TU set, the support SUBSET varies per test
+# (fat_write tests add fat_write/mkdir/rmdir/rename; --no-libstub adds dos_libc).
+# So we cache PER-TU and GAP-FILL: a matching stamp means every obj already in
+# the cache was built from the current inputs, and we then compile only the TUs
+# this test needs that aren't present yet.  The stamp hashes a FIXED SUPERSET of
+# every possible support source (test-independent), so a fat_write test and a
+# plain test compute the SAME stamp and share one cache — a per-test SUPPORT_TUS
+# hash would make them perpetually invalidate each other.  Separate cache dirs
+# per libstub mode because NL_DEFS (=-DNO_LIBSTUB or empty) changes the objs
+# (dos_shim.c is #ifndef NO_LIBSTUB-guarded).  NL_CACHE=0 forces the pre-§7z
+# per-OUT_DIR recompile; NL_TEST_CACHE_DIR overrides the cache root.
+NL_CACHE="${NL_CACHE:-1}"
+nl_support_objbase() { echo "${1#$NL/}" | sed 's,.*/,,;s/\.c$//'; }
+if [ "$NL_CACHE" = 1 ]; then
+	nl_key="$MODEL"; [ "$NO_LIBSTUB" = 1 ] && nl_key="$MODEL-nolibstub"
+	CACHE="${NL_TEST_CACHE_DIR:-$QBE_DIR/build/nl-test-cache}/$nl_key"
+	nl_stamp_input() {
+		printf '%s\n' "$MODEL" "nolibstub=$NO_LIBSTUB"
+		local f
+		# The FIXED superset of every support source (base + the fat_write
+		# group + dos_libc), so the stamp is the same regardless of which test
+		# triggered it; plus the runtime asm, toolchain binaries, and scripts.
+		for f in \
+			"$NL/libgloss/printf_wrappers.c" "$NL/libgloss/scanf_wrappers.c" \
+			"$NL/libgloss/syscalls.c" "$NL/libgloss/reent_stubs.c" \
+			"$NL/libgloss/dirent.c" "$NL/libgloss/unlink.c" \
+			"$NL/libgloss/mkdir.c" "$NL/libgloss/rmdir.c" "$NL/libgloss/rename.c" \
+			"$NL/vfs/vfs.c" "$NL/vfs/fat.c" "$NL/vfs/fat_write.c" \
+			"$NL/drivers/block.c" \
+			"$DOS_DIR/newlibc/dos_shim.c" "$DOS_DIR/newlibc/dos_libc.c" \
+			"$DOS_DIR"/*.asm \
+			"$MINIC" "$QBE" "$QBE_DIR/tools/asm_to_omf.py" \
+			"$QBE_DIR/tools/near_to_far_rt.py" "$0"; do
+			[ -e "$f" ] && stat -f '%N %z %m' "$f"
+		done
+		find "$SHIM" "$NL/include" "$NL/drivers" "$NL/libgloss" "$NL/vfs" \
+			"$INC" -name '*.h' -exec stat -f '%N %z %m' {} + 2>/dev/null | sort
+	}
+	nl_stamp="$(nl_stamp_input | shasum | cut -d' ' -f1)"
+	# Stamp mismatch (or first build): every cached obj is keyed to stale
+	# inputs — drop the whole dir (and its old stamp).  The gap-fill loop then
+	# rebuilds whatever this test needs into the fresh cache.
+	if ! { [ -f "$CACHE/.stamp" ] && \
+	       [ "$(cat "$CACHE/.stamp" 2>/dev/null)" = "$nl_stamp" ]; }; then
+		rm -rf "$CACHE"
+	fi
+	mkdir -p "$CACHE"
+	for tu in "${SUPPORT_TUS[@]}"; do
+		tu_base="$(nl_support_objbase "$tu")"
+		[ -f "$CACHE/$tu_base.obj" ] || \
+			compile_unit "$tu" "$tu_base" "$CACHE" $NL_DEFS \
+			|| fail "compile failed: $tu_base"
+		OBJ_FILES+=("$CACHE/$tu_base.obj")
+	done
+	# Stamp written LAST so set -e leaves no valid stamp if a compile above
+	# failed mid-rebuild (idempotent on a cache hit — same value re-written).
+	echo "$nl_stamp" > "$CACHE/.stamp"
+else
+	for tu in "${SUPPORT_TUS[@]}"; do
+		tu_base="$(nl_support_objbase "$tu")"
+		compile_unit "$tu" "$tu_base" "$OUT_DIR" $NL_DEFS \
+			|| fail "compile failed: $tu_base"
+		OBJ_FILES+=("$OUT_DIR/$tu_base.obj")
+	done
+fi
 
 # crt0 + --no-stdio libstub.  small/tiny: -DNEAR_CODE (_main reached by a
 # near call, all code in one _TEXT).  medium: far code (crt0 far-calls
