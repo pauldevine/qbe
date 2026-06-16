@@ -1,3 +1,66 @@
+# Next session (§8d — optional: flip MicroPython's default to libstub-free (rebaseline the regression corpus) / carried compiler tracks.  §8c [2026-06-16, this session] **MOVED MicroPython ONTO THE LIBSTUB-FREE RUNTIME — the byte-frozen regression corpus now builds AND runs with NO libstub, byte-exact vs host `python3` in BOTH DOSBox and on real-hardware-equivalent MAME victor9k; `tools/build-micropython.sh --no-libstub` is the new path (OPT-IN — the default still builds the libstub corpus, byte-identical at image 751,664 / body 731,088), `make check` green, no compiler/qbe/emit/minic source touched (→ no emit audit).**  §8c's brief was "retire `libstub_to_exe.py`'s printf"; the FIRST finding overturned the §8b handoff's premise that "nothing depends on it now" — `build-micropython.sh` builds MP DIRECTLY through `libstub_to_exe.py` (no `--no-stdio`) and MP's gc'd map links `_far_printf`/`_far_sprintf`/`_far_fprintf`/`_printf`/`_sprintf` from `libstub_exe.obj`, so libstub's printf engine IS part of MP's frozen 731,088-byte body (and the `--libstub` anchor + tiny/.COM/absent-tree fallbacks + the probe scripts use it too).  The user directed: "go ahead and update MP, don't worry about the byte-freeze" — i.e. genuinely retire libstub for MP, the last big non-anchor consumer (the §7r/§7v stevie migration scaled up).  **THE TRUE GAP WAS TINY, NOT 124 SYMBOLS:** MP's libstub map lists 124 symbols, but `libstub_exe.obj` is a MONOLITHIC hand-asm object so `--gc-sections` can't strip individual functions — most (`_mouse_*`, `_putpixel`, `_set_video_mode`, `_getch`/`_kbhit`, `_dos_*`) are PASSENGERS MP never calls.  An empirical relink of MP's existing `.obj` against the libstub-free runtime showed the real undefined set: **(1) `___builtin_clzl` (103 refs) + `___builtin_clz`/`expect`/`unreachable`** — the one symbol set MP needs that libstub provided and the libstub-free runtime did not; **(2)** `_fopen`/`_fread`/…/`_read`/`__impure_ptr`/`_timer_*` — ALL provided by `dos_shim.c` (lost only because excluding it for its `_main` collision).  MP's file reader is fd-based (`read(fd)`/`close()` POSIX via `mp_reader_new_file_from_fd`), NOT stdio `FILE`, so the §7s cross-regime `FILE`-ABI landmine does NOT apply (`_far_fopen` is referenced only inside `libstub_exe.obj`).  **THE FIX (COPY/ADD, NEVER MUTATE):** (a) NEW **`minic/dos/builtins_rt.asm`** — the 4 `__builtin_*` bodies COPIED VERBATIM from `libstub.asm` (NEAR form, `[bp+N]` args; far-rewritten by `near_to_far_rt.py --seg-name=BUILTINS_RT_TEXT` for far models, exactly like `qbe_rt.asm`); `libstub.asm` UNTOUCHED.  (b) `build-micropython.sh` gained an OPT-IN `--no-libstub` branch (the §7v stevie far-data recipe: `dos_printf`/`scanf_wrappers`/`syscalls`/`reent_stubs`/`dirent`/`unlink`/`rename`/`dos_vfs`/`dos_shim`/`dos_libc` compiled in newlibc's regime + `qbe_rt`-far/`dos_syscall_far_data`/`far_stdlib_bridge`/`builtins_rt`-far/`setjmp_rt`(SJ_FAR_DATA)/`heap` INSTEAD of `libstub_exe.obj`), with MP's own `main()` renamed to `newlibc_test_main` via `-Dmain` so `dos_shim.c`'s `main` wrapper (`vfs_init()`→ a no-op on the DOS path → MP's main) is the crt0 entry — the §7r pattern.  `dos_shim.c` stays PRISTINE: a tried `-DNO_SHIM_MAIN` variant hit a **minic emission quirk** (removing the trailing `main()` drops ALL file-scope FILE-layer statics — `shim_files`/`shim_file_used`/`_impure_ptr` — from the TU; a latent minic bug noted, not fixed), so the `-Dmain` rename keeps `main()` present and sidesteps it.  **VERIFIED:** libstub-free MP (compact) links clean (110 modules, 0 undefined, image 710,352 / body 689,760 — smaller, the monolith passengers gone); a DOSBox-sized build (`MP_HEAP_SIZE=8192 MP_HEAP2_SIZE=12288 MP_STACK_SIZE=16384`, 571,600 B) ran a 13-line smoke test (filter/reversed/comprehensions/dict+sorted/`%`-format/str methods/slicing + FLOAT + `math` sqrt/pi/sin + recursion + ZeroDivisionError) BYTE-EXACT vs host `python3`; the default-heap build (710,352 B) ran the SAME test BYTE-EXACT on MAME victor9k (`run-victor-sasi.sh`, real SASI disk); the DEFAULT (libstub) build re-confirmed BYTE-IDENTICAL to the frozen corpus (751,664 / 731,088 — my `OBJS` refactor is a no-op for it); `make check` green.  STRATEGY: `builtins_rt.asm` is all-new; `build-micropython.sh`'s change is an additive opt-in branch (default path byte-unchanged); `dos_shim.c`/`libstub.asm`/`libstub_to_exe.py`/`near_to_far_rt.py`/every runtime asm + newlibc are UNTOUCHED.  libstub is now retired as MP's runtime *capability* (opt-in, verified); `libstub_to_exe.py` survives as MP's DEFAULT runtime + the `--libstub` equivalence anchor + the fallbacks.  **⇒ Next session (§8d):** the literal end-state would be to FLIP `build-micropython.sh`'s default to `--no-libstub` and REBASELINE the regression corpus (the frozen body becomes ~689,760; update every "731,088 byte-identical" reference + the MP byte-compare tooling/docs) — deferred because it rebaselines the project's regression baseline and is the user's call (the opt-in path is proven, so the flip is de-risked).  Carried compiler tracks (await a consumer, unchanged): the aoa sub-gaps (file-scope/static multi-decl array-first parse-error gap; plain `jmp_buf a, b;` multi-decl); the huge pointer EQUALITY flat-compare (the §7u relational sibling); the minic file-scope-statics-need-a-trailing-main quirk surfaced this session (no consumer — the `-Dmain` rename avoids it).  Bare-metal phase-3 bm_testhost tests EXHAUSTED.  NO QBE backend bug open.)
+
+## §8c session notes (2026-06-16)
+
+### The pick + the overturned premise
+- §8b handoff offered "retire libstub_to_exe.py's printf (nothing depends on it
+  now)".  The user (AskUserQuestion) chose it.  Investigation showed the premise
+  is FALSE: build-micropython.sh builds MP through libstub_to_exe.py (no
+  --no-stdio); MP's gc'd map links _far_printf/_far_sprintf/_printf/_sprintf
+  from libstub_exe.obj → libstub's printf is in MP's frozen 731,088-byte body.
+  It's also the --libstub anchor (build-example/stevie) + tiny/.COM/absent-tree
+  fallbacks + build-{sprintf,int86x,divmod32}-probe.sh.  Surfaced this; the user
+  said "go ahead and update MP, don't worry about the byte-freeze" → the real
+  goal = move MP onto the libstub-free runtime (the §7r/§7v stevie migration).
+
+### The gap was tiny (124-symbol map was mostly monolith passengers)
+- libstub_exe.obj is a MONOLITHIC hand-asm object → --gc-sections can't strip
+  individual functions, so _mouse_*/_putpixel/_set_video_mode/_getch/_kbhit/
+  _dos_* are passengers MP never calls.  Empirical relink of MP's existing .obj
+  against the libstub-free runtime gave the TRUE undefined set:
+    (1) ___builtin_clzl (103) + ___builtin_clz/expect/unreachable — NEW work.
+    (2) _fopen/_fread/.../_read/__impure_ptr/_timer_* — all in dos_shim.c
+        (undefined only because I'd excluded it for its _main collision).
+- FILE-ABI (§7s) does NOT apply: MP's reader is fd-based (read(fd)/close via
+  mp_reader_new_file_from_fd), not stdio FILE; _far_fopen is referenced only
+  inside libstub_exe.obj.
+
+### The fix
+- NEW minic/dos/builtins_rt.asm: the 4 __builtin_* COPIED VERBATIM from
+  libstub.asm (near form; far-rewritten via near_to_far_rt.py
+  --seg-name=BUILTINS_RT_TEXT, like qbe_rt.asm).  libstub.asm UNTOUCHED.
+- build-micropython.sh: opt-in --no-libstub branch (default keeps libstub).
+  The §7v far-data recipe + builtins_rt + -Dmain=newlibc_test_main so
+  dos_shim.c's main wrapper is the crt0 entry (vfs_init() is a no-op on DOS).
+- dos_shim.c PRISTINE.  A -DNO_SHIM_MAIN variant hit a minic quirk: removing
+  the trailing main() drops the file-scope FILE-layer statics (shim_files/
+  shim_file_used/_impure_ptr) from the TU entirely (confirmed via .ssa diff —
+  0 data defs without main, 4 with).  The -Dmain rename keeps main() present
+  and sidesteps it.  (Latent minic bug noted, no consumer → not fixed.)
+
+### Verification (no compiler change → no emit audit)
+- libstub-free MP compact: links clean, 110 modules, 0 undefined, image
+  710,352 / body 689,760 (smaller — monolith passengers gone).
+- DOSBox (571,600 B small-heap build): smoke test BYTE-EXACT vs host python3
+  (build/mp-nl-smoke.py / .golden.txt — language + FLOAT + math + recursion +
+  ZeroDivisionError).
+- MAME victor9k (710,352 B default-heap, run-victor-sasi.sh, real SASI):
+  SAME smoke test BYTE-EXACT vs host python3.
+- DEFAULT (libstub) MP: rebuilt, BYTE-IDENTICAL frozen corpus 751,664/731,088
+  (the OBJS-assembly refactor is a no-op for the default path).
+- make check green.
+
+### ⇒ Next session (§8d)
+- Optional end-state: flip build-micropython.sh's default to --no-libstub and
+  REBASELINE the corpus (frozen body → ~689,760; update every "731,088"
+  reference + MP byte-compare tooling/docs).  Deferred — rebaselines the
+  project's regression baseline, the user's call; the opt-in path is proven so
+  the flip is de-risked.
+- Carried compiler tracks (await a consumer): aoa sub-gaps; huge pointer
+  EQUALITY flat-compare; the minic file-scope-statics-need-a-trailing-main
+  quirk (no consumer — the -Dmain rename avoids it).
+---
+
 # Next session (§8c — finish Phase‑6 libstub-retirement / open compiler tracks.  §8b [2026-06-16, this session] **CLOSED the `%p`/`%o` printf track — the LAST four `--libstub` pins (`cstrprobe`/`compactprobe_extra`/`huge_norm_probe`/`mediumprobe`) now run libstub-free byte-identical to their goldens, so NO gate probe pins `--libstub` anymore and the Phase-6 libstub-retirement campaign is COMPLETE; `tools/test-dos.sh` GREEN 366/366 (count unchanged — an unpin, not a new probe), `make check` green, no compiler/qbe/emit/minic source touched (→ no emit audit; MP links NONE of the changed files and builds via `libstub_to_exe.py` directly → no MP byte-compare).**  The four probes gate the §4i/§4s/§7g far/huge normalisation arithmetic against libstub-captured goldens via `%p`/`%o`, but newlibc's `tiny_vformat` (`printf_wrappers.c`) prints `%p` as a `0x`-prefixed width-4 hex and does NOT implement `%o` (echoes the literal), so they pinned the libstub python-printf anchor.  **FIX (COPY/ADD, NEVER MUTATE — the dos_vfs.c pattern):** new **`minic/dos/newlibc/dos_printf.c`** is a VERBATIM fork of `printf_wrappers.c` with exactly two deltas — `%p` (raw value, lowercase, NO `0x`, zero-padded to the full pointer width: 8 hex far / 4 hex near; the far branch reads the arg as `va_arg(ap, unsigned long)` because minic's `(uintptr_t)(void*)` cast DROPS the segment under far-data, recovering the raw `(seg<<16)|off` so `1734:0007`→`17340007`; the near branch keeps the offset cast → `5678`) and `%o` (base-8, no prefix → `0777`→`777`) — linked INSTEAD of `printf_wrappers.c` ONLY on the `build-example.sh`/`build-stevie.sh` `--no-libstub` path (the `NL_SUPPORT` swap), so newlibc stays pristine and the bare-metal (`bm_stdio`) + `build-newlibc-test.sh` paths keep newlibc's printf → their goldens + the newlibc corpus (no `%p`/`%o`) are byte-untouched.  Gate: removed the four-probe `libstubflag="--libstub"` case in `test-dos.sh` (goldens UNTOUCHED — libstub-captured, the libstub-free path now reproduces them).  VERIFIED: each probe byte-identical to its golden libstub-free across every gated model; full gate 366/366; stevie startup screen BYTE-IDENTICAL 152 B (libstub-free default vs `--libstub` anchor, §7r/§7v); `make check` green; the §7y/§7z caches auto-invalidate (stamp hashes `NL_SUPPORT`).  With setjmp (§7x), the DGROUP heap (§8a), and now printf `%p`/`%o` (§8b) all libstub-free, libstub is no longer a correctness dependency of ANY gate probe — `--libstub` survives only as the optional equivalence anchor.  **⇒ Next session (§8c):** the literal end-state — delete `libstub_to_exe.py`'s python printf for non-anchor use (or retire `libstub_to_exe.py` outright), now that nothing depends on it; OR a carried compiler track (the aoa sub-gaps; the huge pointer EQUALITY flat-compare, the §7u relational fix's latent sibling — both await a consumer).  Bare-metal phase-3 bm_testhost tests EXHAUSTED.  NO QBE backend bug open; easy frame-size levers spent (§7k).)
 
 ## §8b session notes (2026-06-16)
@@ -70,76 +133,6 @@
 - Carried compiler tracks (await a consumer): the aoa sub-gaps (file-scope/
   static multi-decl array-first parse-error gap; plain `jmp_buf a, b;`
   multi-decl); the huge pointer EQUALITY flat-compare (§7u relational sibling).
----
-
-
-# Next session (§8b — finish Phase‑6 libstub-retirement cleanup / open compiler tracks.  §8a [2026-06-15, this session] **UNPINNED `split_stack_probe` FROM `--libstub` — the LAST setjmp-family pin (the §7w/§7x carry) is closed: the probe now runs libstub-free byte-identical to its golden under compact AND large, by teaching `tools/omf_link.py` to resolve EVERY far reference to a DGROUP member against the canonical DGROUP group frame; `tools/test-dos.sh` GREEN 366/366 (unchanged count — no new probe, just an unpin), `make check` green, MicroPython compact BYTE-IDENTICAL (no Victor run), stevie startup screen byte-identical (152 B).**  This is an `omf_link.py` (toolchain) change, NOT an `i8086/emit.c` change → no emit audit; the toolchain-change MP byte-compare was MANDATORY and came back identical.  **The bug:** `split_stack_probe`'s `ok7` asserts `heapseg == dgroupseg` (malloc memory lands in the SAME far segment as a global).  Under a far-data model + `--split-stack`, omf_link laid the libstub-free BSS heap (`heap.asm`'s `_BSS`) ABOVE `_DATA` inside DGROUP (`_DATA` para `0x06F2`, `_BSS` para `0x070D`), and resolved a far reference's SELECTOR to a DGROUP member against that member's OWN paragraph base — so `seg ___heap_start` (in `_BSS`) yielded `0x070D` while a global's `seg _g` (in `_DATA`, the LOWEST member = the group base) yielded `0x06F2`.  Two different segment words for the same group → `heapseg != dgroupseg`.  (The heap was still usable: the OFFSET `mov ax, ___heap_start` was ALREADY group-framed = `0x298` while the SELECTOR was `_BSS`-framed = `0x070D`, so the heap pointer was self-consistent-but-non-canonical `0x070D:0x298` — a valid address 432 B into the heap region, not exactly `___heap_start`.)  libstub's single-base DGROUP heap never exposed this, which is why the probe stayed pinned `--libstub` through §7x.  **The fix (`omf_link.py` `_frame_para`, ~3 edits):** a far reference to a DGROUP member now resolves its frame to the canonical GROUP base (the min member paragraph) for EVERY frame method (0 = segment, 2 = external, 5 = target-frame) and EVERY location — previously method 5 group-framed only the 16-bit OFFSET (loc 1/5), not the SELECTOR (loc 2) or the 32-bit far ptr (loc 3); the loc-3 far-ptr OFFSET was also generalized to be frame-relative (`tgt_abs_byte − frame_byte`, identical for the common frame==target-seg case).  This is a NO-OP for the lowest DGROUP member (`_DATA`, already the group base, so a global's selector was always canonical) and for ungrouped CODE / FAR_* segments → it only normalizes non-lowest members like `_BSS`.  Offset and selector stay mutually consistent because both derive from the one `_frame_para` result.  The heap reference is nasm target-frame (method 5), NOT external/segment (method 0/2) — confirmed via a throwaway `OMF_DEBUG_HEAP` instrumentation; the method 0/2 edits are kept for rule-completeness (correct OMF group semantics) though no current consumer exercises them, proven harmless by MP byte-identity.  **VERIFICATION:** built MP compact once, then re-linked the SAME objects with the OLD (git-stashed) vs the NEW omf_link and `cmp`'d → BYTE-IDENTICAL (image 751,664, body 731,088), so MP has zero far references to a non-lowest DGROUP member and needs no Victor run; stevie rendered startup screen byte-identical 152 B (libstub-free vs `--libstub` anchor, the §7r/§7v pattern, stripping the run-dos-exe banner line); the `split_stack_probe` `--libstub` anchor still matches its golden (the change is benign for libstub's heap too); full gate 366/366.  **Gate change:** removed `split_stack_probe` from `build_runtime_probe`'s `libstubflag` pin (so it takes the libstub-free default like the §7x setjmp family); golden UNTOUCHED (it matched both engines already).  STRATEGY: the COPY/ADD-NEVER-MUTATE runtime toolchain (`heap.asm`, `qbe_rt.asm`, `dos_syscall*.asm`, `far_stdlib_bridge.asm`, `setjmp_rt.asm`, `dos_vfs.c`, `libstub.asm`, `libstub_to_exe.py`, `near_to_far_rt.py`, newlibc) is UNTOUCHED; the only source change is the `omf_link.py` `_frame_para` group-framing rule (correctness-preserving for every existing pointer) + the one-line gate unpin.  **⇒ Next session (§8b): finish the retirement / remaining cleanup.**  Pick by appetite: **(1)** the `%p`/`%o` printf track to UNPIN the four remaining `--libstub` pins (`cstrprobe`, `compactprobe_extra`, `huge_norm_probe`, `mediumprobe`) — requires making newlibc's SHARED `printf_wrappers.c::tiny_vformat` match libstub's `%p` (full 32-bit far ptr, 8 lowercase hex, no `0x`) and add `%o`, which DIVERGES from the upstream newlibc corpus and risks other `%p` goldens (the messiest track; a local-patch-or-override decision); **(2)** delete `libstub_to_exe.py`'s python printf engine for non-anchor use (the literal 'retire outright'), now that the asm-runtime gaps — setjmp (§7x) and the DGROUP heap layout (§8a) — are all closed and the only remaining libstub dependency is the four printf-format pins.  Carried compiler tracks (await a consumer, unchanged): the aoa sub-gaps (file-scope/static multi-decl array-first = grammar parse-error gap; plain `jmp_buf a, b;` multi-decl); huge pointer EQUALITY flat-compare (the §7u relational fix's latent sibling — `==`/`!=` of two differently-normalised huge pointers; no consumer, `_sbrk` only does `== NULL`).  Bare-metal phase-3 bm_testhost tests EXHAUSTED.  NO QBE backend bug open; easy frame-size levers spent (§7k).)
-
-## §8a session notes (2026-06-15)
-
-### The pick (continued §7z handoff — the split_stack heap-layout track)
-- §7z listed four §8a options; the user (AskUserQuestion) chose **make
-  split_stack_probe pass libstub-free** (the heap.asm _BSS DGROUP-base track)
-  over the %p/%o printf shim (messiest — edits newlibc's shared
-  printf_wrappers.c, diverges from the upstream corpus), the
-  delete-python-printf track, and the carried compiler tracks.  Rationale:
-  self-contained, toolchain-only, lowest-risk, and it closes the LAST
-  setjmp-family pin carried since §7w/§7x.
-
-### The bug (ok7 0 libstub-free; everything else passed)
-- ok7 asserts heapseg == dgroupseg: malloc memory in the SAME far segment as a
-  global.  The map showed _DATA at para 0x06F2 (the lowest DGROUP member = the
-  group base) and the libstub-free BSS heap (heap.asm _BSS) at 0x070D, above it.
-- omf_link resolved a far reference's SELECTOR to a DGROUP member against the
-  member's OWN para_base, so `seg ___heap_start` (in _BSS) = 0x070D while a
-  global's `seg _g` (in _DATA) = 0x06F2 → different segment words, same group.
-- Subtle: the heap OFFSET (mov ax, ___heap_start) was ALREADY group-framed
-  (0x298) but the SELECTOR was not (0x070D), so the live heap pointer was a
-  self-consistent-but-non-canonical 0x070D:0x298 — valid (432 B into the heap
-  region), so hp[0]=='Z' passed; only the segment compare failed.
-- libstub's single-base DGROUP heap never exposed this → the §7x pin.
-
-### The fix (tools/omf_link.py _frame_para, ~3 edits)
-- A far reference to a DGROUP member now resolves to the canonical GROUP base
-  (min member para) for EVERY frame method (0 segment, 2 external, 5
-  target-frame) AND every location.  Method 5 previously group-framed only the
-  16-bit offset (loc 1/5), not the selector (loc 2) or far ptr (loc 3).
-- The loc-3 far-ptr OFFSET was generalized to be frame-relative
-  (tgt_abs_byte - frame_byte) — identical to the old tgt_byte_in_out whenever
-  the frame is the target segment, so the common case is byte-unchanged.
-- No-op for the lowest member (_DATA, already the group base) and for ungrouped
-  CODE / FAR_* segments → only non-lowest members (_BSS) are normalized.  Offset
-  and selector stay consistent because both come from the one _frame_para call.
-- The heap reference is nasm method 5 (target-frame), NOT 0/2 — confirmed with a
-  throwaway OMF_DEBUG_HEAP print.  The method 0/2 edits are kept for
-  rule-completeness (correct OMF group semantics) though no current consumer
-  hits them; harmless per MP byte-identity.
-
-### Verification (toolchain change → MP byte-compare MANDATORY; not emit.c → no emit audit)
-- split_stack_probe libstub-free: ok7 1, byte-identical to golden, compact+large.
-- split_stack_probe --libstub anchor: still matches golden (change benign for
-  libstub's single-base heap too).
-- MP compact: built once, re-linked the SAME objs with old (git-stashed) vs new
-  omf_link → cmp BYTE-IDENTICAL (image 751,664, body 731,088).  ⇒ MP has zero far
-  refs to a non-lowest DGROUP member; no Victor run.
-- stevie: rendered startup screen byte-identical 152 B (libstub-free vs --libstub
-  anchor, §7r/§7v pattern — capture via run-dos-exe at timeout on STDERR, strip
-  the first banner line that embeds the exe name).
-- make check green; full gate 366/366 (count unchanged — unpin, not a new probe).
-
-### Gate change
-- Removed split_stack_probe from build_runtime_probe's libstubflag pin (it takes
-  the libstub-free default now, like the §7x setjmp family).  Golden UNTOUCHED
-  (it already matched both engines).
-
-### ⇒ Next session (§8b)
-- %p/%o printf shim (unpin cstrprobe/compactprobe_extra/huge_norm_probe/
-  mediumprobe — edits newlibc's SHARED printf_wrappers.c; messiest) /
-  delete libstub_to_exe.py's python printf for non-anchor use (the asm-runtime
-  gaps — setjmp §7x, DGROUP heap §8a — are now all closed; the four printf
-  pins are the only remaining libstub dependency).
-- Carried compiler tracks (await a consumer): aoa sub-gaps; huge pointer
-  EQUALITY flat-compare.
 ---
 
 Older session headers (§7w and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).

@@ -28,13 +28,35 @@
 set -u
 KEEP_GOING=0
 MODEL=medium
+# §8c: libstub retirement for MicroPython.  --no-libstub links the libstub-FREE
+# runtime (the §7r/§7v stevie path scaled to MP): newlibc's portable stdio +
+# the dos_libc.c libc fill + qbe_rt/dos_syscall_far_data/far_stdlib_bridge/
+# heap/setjmp_rt + the §8c builtins_rt.asm (___builtin_clz/clzl/expect/
+# unreachable — the one symbol set MP needs that libstub provided and the
+# libstub-free runtime did not), INSTEAD of libstub_exe.obj.  MP's own main()
+# is renamed to newlibc_test_main via -Dmain so dos_shim.c's main wrapper runs
+# first (vfs_init() is a no-op on the DOS path), exactly as stevie does.
+# Opt-in for now (default keeps the libstub build = the byte-frozen regression
+# corpus + the equivalence anchor); --libstub re-asserts the default.
+NO_LIBSTUB=0
 for arg in "$@"; do
 	case "$arg" in
 		--keep-going) KEEP_GOING=1 ;;
 		--model=*) MODEL="${arg#--model=}" ;;
+		--no-libstub) NO_LIBSTUB=1 ;;
+		--libstub) NO_LIBSTUB=0 ;;
 		*) echo "unknown arg '$arg'" >&2; exit 1 ;;
 	esac
 done
+
+# Under --no-libstub MP's own main() is renamed so dos_shim.c's main() (which
+# calls vfs_init() then newlibc_test_main()) is the crt0 entry — the §7r
+# stevie pattern.  Renaming via -Dmain is also why dos_shim is linked WITH its
+# main(): a libstub-free build that dropped it (-DNO_SHIM_MAIN) hits a minic
+# quirk where removing the trailing main() drops the file-scope FILE-layer
+# statics (shim_files/_impure_ptr) from the TU — the rename sidesteps it.
+MP_LIBC_DEFS=""
+[ "$NO_LIBSTUB" = 1 ] && MP_LIBC_DEFS="-Dmain=newlibc_test_main"
 
 # Far-data models route each module's statics to its own far segment so
 # total static data can exceed the single 64KB DGROUP.  DOS_FAR_DATA tells
@@ -155,7 +177,7 @@ for f in "${ALL_SRCS[@]}"; do
 	err="$OUT_DIR/$base.err"
 	: > "$err"
 
-	if ! clang -E -P -nostdinc -DDOS -D__TURBOC__ $FARDATA_DEF \
+	if ! clang -E -P -nostdinc -DDOS -D__TURBOC__ $FARDATA_DEF $MP_LIBC_DEFS \
 			"-DMP_GC_HEAP2_SIZE=$MP_HEAP2_SIZE" \
 			$MP_EXTRA_CPPFLAGS \
 			"-I$DOSPORT" "-I$STUB" "-I$INC_DIR" "-I$MP" "-I$GENHDR" \
@@ -222,14 +244,99 @@ case "$MODEL" in
 esac
 nasm $CRT0_FLAGS -f obj "$DOS_DIR/crt0_exe.asm" -o "$OUT_DIR/crt0_exe.obj" 2>"$OUT_DIR/crt0.err" || {
 	echo "FAIL crt0 nasm"; cat "$OUT_DIR/crt0.err"; exit 1; }
-"$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" \
-	"$DOS_DIR/libstub.asm" "$OUT_DIR/libstub_exe.asm" 2>"$OUT_DIR/libstub.err" || {
-	echo "FAIL libstub conv"; cat "$OUT_DIR/libstub.err"; exit 1; }
-nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$OUT_DIR/libstub.err" || {
-	echo "FAIL libstub nasm"; cat "$OUT_DIR/libstub.err"; exit 1; }
+
+SUPPORT_OBJS=()
+RUNTIME_OBJS=()
+if [ "$NO_LIBSTUB" = 1 ]; then
+	# §8c libstub-free MP: the §7r/§7v stevie recipe.  newlibc's portable
+	# stdio + dos_libc.c libc fill compiled in newlibc's own regime (shiminc +
+	# newlibc headers, clang -E -D__ia16__), meeting the MP TUs only at the
+	# linker.  MP is far-data (compact/large/huge; FARSTATIC_FLAG set above)
+	# or near-data medium — the runtime shape follows, mirroring
+	# build-stevie.sh.  --gc-sections drops the FAT/block/printf code MP never
+	# reaches.
+	case "$MODEL" in
+		tiny|small) echo "FAIL: --no-libstub needs medium or a far-data model (MP is not small)"; exit 1 ;;
+	esac
+	NL="${NEWLIBC_DIR:-$HOME/projects/newlibc/phase3_newlib}"
+	[ -d "$NL" ] || { echo "FAIL: --no-libstub needs the newlibc tree: $NL"; exit 77; }
+	SHIM="$DOS_DIR/newlibc/shiminc"
+	NL_NORMALIZE="$NORMALIZE"
+	NL_HALT2DOS='s/__asm__[[:space:]]*volatile[[:space:]]*([[:space:]]*"hlt"[[:space:]]*)/{ __asm__ volatile ("mov ax, 0x4c00"); __asm__ volatile ("int 0x21"); }/g'
+	compile_newlibc_unit() {
+		local unit_src="$1" unit_base="$2"
+		clang -E -P -nostdinc -DDOS -D__ia16__ -DNO_LIBSTUB \
+			"-I$SHIM" "-I$INC_DIR" \
+			"-I$NL/include" "-I$NL/drivers" "-I$NL/libgloss" "-I$NL/vfs" \
+			"$unit_src" 2>>"$OUT_DIR/nl.err" \
+			| tr -d '\r\032' | sed "$NL_NORMALIZE" | sed "$NL_HALT2DOS" \
+			> "$OUT_DIR/$unit_base.pp.c"
+		"$MINIC" -m "$MODEL" < "$OUT_DIR/$unit_base.pp.c" \
+			> "$OUT_DIR/$unit_base.ssa" 2>>"$OUT_DIR/nl.err"
+		"$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$unit_base.ssa" \
+			> "$OUT_DIR/$unit_base.nlasm" 2>>"$OUT_DIR/nl.err"
+		"$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" "$unit_base" \
+			"$OUT_DIR/$unit_base.nlasm" "$OUT_DIR/$unit_base.nlomf.asm" 2>>"$OUT_DIR/nl.err"
+		nasm -w-label-redef-late -f obj "$OUT_DIR/$unit_base.nlomf.asm" \
+			-o "$OUT_DIR/$unit_base.obj" 2>>"$OUT_DIR/nl.err" || {
+			echo "FAIL nasm-obj newlibc: $unit_base"; tail -20 "$OUT_DIR/nl.err"; exit 1; }
+	}
+	: > "$OUT_DIR/nl.err"
+	NL_SUPPORT=(
+		"$DOS_DIR/newlibc/dos_printf.c"     # §8b libstub-compatible %p/%o shadow
+		"$NL/libgloss/scanf_wrappers.c"
+		"$NL/libgloss/syscalls.c"
+		"$NL/libgloss/reent_stubs.c"
+		"$NL/libgloss/dirent.c"
+		"$NL/libgloss/unlink.c"
+		"$NL/libgloss/rename.c"
+		"$DOS_DIR/newlibc/dos_vfs.c"        # real-DOS VFS (INT 21h), §7s
+		"$DOS_DIR/newlibc/dos_shim.c"       # FILE layer + std streams + main wrapper
+		"$DOS_DIR/newlibc/dos_libc.c"       # str/mem/ctype/malloc fill
+	)
+	for tu in "${NL_SUPPORT[@]}"; do
+		compile_newlibc_unit "$tu" "$(basename "$tu" .c)"
+		SUPPORT_OBJS+=("$OUT_DIR/$(basename "$tu" .c).obj")
+	done
+	# Runtime asm: qbe_rt (_qbe_* helpers) + dos_syscall (INT 21h) +
+	# far_stdlib_bridge (_far_X -> _X tail calls) + setjmp_rt + heap +
+	# builtins_rt (§8c ___builtin_clz/clzl/expect/unreachable).  Three shapes
+	# mirror build-stevie.sh; builtins_rt rides with qbe_rt (near raw / far via
+	# near_to_far_rt.py) since its bodies are NEAR form with [bp+N] args.
+	MP_DOSLIBC_HEAP_SIZE=${MP_DOSLIBC_HEAP_SIZE:-8192}
+	nasm "-DHEAP_SIZE=$MP_DOSLIBC_HEAP_SIZE" -f obj "$DOS_DIR/heap.asm" \
+		-o "$OUT_DIR/heap.obj" 2>>"$OUT_DIR/nl.err" || { echo "FAIL heap nasm"; exit 1; }
+	if [ "$MODEL" = medium ]; then
+		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=QBE_RT_TEXT "$DOS_DIR/qbe_rt.asm" "$OUT_DIR/qbe_rt_far.asm" 2>>"$OUT_DIR/nl.err"
+		nasm -f obj "$OUT_DIR/qbe_rt_far.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$OUT_DIR/nl.err"
+		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=DOS_SYSCALL_TEXT "$DOS_DIR/dos_syscall.asm" "$OUT_DIR/dos_syscall_far.asm" 2>>"$OUT_DIR/nl.err"
+		nasm -f obj "$OUT_DIR/dos_syscall_far.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$OUT_DIR/nl.err"
+		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=BUILTINS_RT_TEXT "$DOS_DIR/builtins_rt.asm" "$OUT_DIR/builtins_rt_far.asm" 2>>"$OUT_DIR/nl.err"
+		nasm -f obj "$OUT_DIR/builtins_rt_far.asm" -o "$OUT_DIR/builtins_rt.obj" 2>>"$OUT_DIR/nl.err"
+		nasm -dSJ_FAR_CODE -f obj "$DOS_DIR/setjmp_rt.asm" -o "$OUT_DIR/setjmp_rt.obj" 2>>"$OUT_DIR/nl.err"
+		RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/builtins_rt.obj" "$OUT_DIR/setjmp_rt.obj" "$OUT_DIR/heap.obj")
+	else
+		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=QBE_RT_TEXT "$DOS_DIR/qbe_rt.asm" "$OUT_DIR/qbe_rt_far.asm" 2>>"$OUT_DIR/nl.err"
+		nasm -f obj "$OUT_DIR/qbe_rt_far.asm" -o "$OUT_DIR/qbe_rt.obj" 2>>"$OUT_DIR/nl.err"
+		nasm -f obj "$DOS_DIR/dos_syscall_far_data.asm" -o "$OUT_DIR/dos_syscall.obj" 2>>"$OUT_DIR/nl.err"
+		nasm -f obj "$DOS_DIR/far_stdlib_bridge.asm" -o "$OUT_DIR/far_stdlib_bridge.obj" 2>>"$OUT_DIR/nl.err"
+		"$QBE_DIR/tools/near_to_far_rt.py" --seg-name=BUILTINS_RT_TEXT "$DOS_DIR/builtins_rt.asm" "$OUT_DIR/builtins_rt_far.asm" 2>>"$OUT_DIR/nl.err"
+		nasm -f obj "$OUT_DIR/builtins_rt_far.asm" -o "$OUT_DIR/builtins_rt.obj" 2>>"$OUT_DIR/nl.err"
+		nasm -dSJ_FAR_DATA -f obj "$DOS_DIR/setjmp_rt.asm" -o "$OUT_DIR/setjmp_rt.obj" 2>>"$OUT_DIR/nl.err"
+		RUNTIME_OBJS=("$OUT_DIR/qbe_rt.obj" "$OUT_DIR/dos_syscall.obj" "$OUT_DIR/far_stdlib_bridge.obj" "$OUT_DIR/builtins_rt.obj" "$OUT_DIR/setjmp_rt.obj" "$OUT_DIR/heap.obj")
+	fi
+	echo "  libstub-free runtime: ${#SUPPORT_OBJS[@]} support + ${#RUNTIME_OBJS[@]} runtime objs"
+else
+	"$QBE_DIR/tools/libstub_to_exe.py" "--model=$MODEL" \
+		"$DOS_DIR/libstub.asm" "$OUT_DIR/libstub_exe.asm" 2>"$OUT_DIR/libstub.err" || {
+		echo "FAIL libstub conv"; cat "$OUT_DIR/libstub.err"; exit 1; }
+	nasm -f obj "$OUT_DIR/libstub_exe.asm" -o "$OUT_DIR/libstub_exe.obj" 2>>"$OUT_DIR/libstub.err" || {
+		echo "FAIL libstub nasm"; cat "$OUT_DIR/libstub.err"; exit 1; }
+	RUNTIME_OBJS=("$OUT_DIR/libstub_exe.obj")
+fi
 
 echo "=== Linking ==="
-OBJS=("$OUT_DIR/crt0_exe.obj" "${pass_objs[@]}" "$OUT_DIR/libstub_exe.obj")
+OBJS=("$OUT_DIR/crt0_exe.obj" "${pass_objs[@]}" ${SUPPORT_OBJS[@]+"${SUPPORT_OBJS[@]}"} "${RUNTIME_OBJS[@]}")
 printf '%s\n' "${OBJS[@]}" > /tmp/mp_objs.txt
 # --gc-sections dead-strips CODE/FAR_DATA segments unreachable from _start
 # (the standard linker --gc-sections model, sound here because every
