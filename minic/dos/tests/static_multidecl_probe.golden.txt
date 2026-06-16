@@ -1,0 +1,7 @@
+tick=11,22,33
+arrfirst=7,14
+scalfirst=106,206
+twoptrs=175
+ptrscalar=105,106,107
+jmpmulti=71,72
+stmtscope=5,10

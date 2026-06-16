@@ -7005,6 +7005,118 @@ emit_global_sized_array(char *name, long count)
 		var_set_aoa_dim(name, aoa);
 }
 
+/* --- function-local `static` MULTI-declarator support ---------------------
+ * The `dcls STATIC ...` / statement-scope `STATIC ...` grammar carried only
+ * single-declarator productions; `static int x, y;` / `static int a[3], b;` /
+ * `static jmp_buf a, b;` were a hard parse error (a general grammar hole that
+ * predates aoa and affects plain int too).  The three helpers below emit each
+ * declarator of such a multi-decl as a mangled file-scope data global via
+ * emit_static_local, sharing the base type with its siblings (so g_td_arraydim,
+ * the inner dim of an array-typedef base such as jmp_buf, still applies).  All
+ * are g_td_arraydim-gated so a non-array-typedef base emits byte-identically to
+ * the existing single-declarator rules.  Uninitialized declarators only — a
+ * per-item initializer is rejected (see emit_static_local_rest_item). */
+
+/* Plain scalar or array-typedef INSTANCE first declarator (`static int x` /
+ * `static jmp_buf a`).  Mirrors the `dcls STATIC type IDENT ';'` rule body. */
+static void
+emit_static_local_scalar_or_instance(unsigned base, char *v)
+{
+	char buf[64];
+	if (base == NIL)
+		die("invalid void declaration");
+	if (g_td_arraydim > 0) {
+		int total = SIZE(g_td_arrayelem) * g_td_arraydim;
+		sprintf(buf, "align %d { z %d }", iralign(g_td_arrayelem), total);
+		emit_static_local(v, IDIR(g_td_arrayelem), 1, buf);
+		var_set_arraybytes(v, total);
+	} else {
+		emit_zero_init(buf, base);
+		emit_static_local(v, base, 0, buf);
+	}
+}
+
+/* Sized array declarator (`static int a[3]` / `static jmp_buf bufs[N]`),
+ * aoa-aware like the statement-scope `STATIC type IDENT [ expr ] ;` rule. */
+static void
+emit_static_local_sized_array(unsigned base, char *v, long count)
+{
+	char buf[64];
+	unsigned elemtyp = base;
+	int aoa = 0;
+	int total;
+	if (base == NIL)
+		die("invalid void array");
+	if (g_td_arraydim > 0) {
+		aoa = g_td_arraydim;
+		elemtyp = g_td_arrayelem;
+	}
+	total = (aoa > 0 ? SIZE(elemtyp) * aoa : SIZE(base)) * count;
+	sprintf(buf, "align %d { z %d }", iralign(elemtyp), total);
+	emit_static_local(v, IDIR(elemtyp), 1, buf);
+	var_set_arraybytes(v, total);
+	if (aoa > 0)
+		var_set_aoa_dim(v, aoa);
+	maybe_mark_huge_global(nglo - 1, gloname[nglo - 1], total);
+}
+
+/* One ext_decllist item (the declarators after the first) of a static
+ * multi-decl, dispatched on the ext_decl tag.  Subsequent items peel one
+ * `*` off a base that greedily absorbed the leading pointer (the uniform-*
+ * rule in emit_local_multi_decl), so `static char *p, *q;` makes both char*. */
+static void
+emit_static_local_rest_item(unsigned base, Node *n)
+{
+	char buf[64];
+	char *v = n->u.v;
+	unsigned ebase = (KIND(base) == PTR) ? DREF(base) : base;
+	unsigned t;
+	int total;
+
+	if (n->op == 'F') {
+		varadd(v, 1, FUNC(base), 0);
+		return;
+	}
+	if (n->op == 'G' || n->op == 'H') {
+		/* `*ident()` / `*ident(par1)` — K&R/ANSI proto returning a
+		 * pointer; register the function type, no storage. */
+		varadd(v, 1, FUNC(IDIR(ebase)), 0);
+		return;
+	}
+	if (n->op == 'A')
+		die("static array declarator needs a size");
+	if (n->op == 'B') {
+		long count;
+		unsigned elemtyp = ebase;
+		int aoa = 0;
+		count = n->l->u.n;
+		if (g_td_arraydim > 0) {
+			aoa = g_td_arraydim;
+			elemtyp = g_td_arrayelem;
+		}
+		total = (aoa > 0 ? SIZE(elemtyp) * aoa : SIZE(ebase)) * count;
+		sprintf(buf, "align %d { z %d }", iralign(elemtyp), total);
+		emit_static_local(v, IDIR(elemtyp), 1, buf);
+		var_set_arraybytes(v, total);
+		if (aoa > 0)
+			var_set_aoa_dim(v, aoa);
+		maybe_mark_huge_global(nglo - 1, gloname[nglo - 1], total);
+		return;
+	}
+	if (n->op == 0 && g_td_arraydim > 0) {
+		total = SIZE(g_td_arrayelem) * g_td_arraydim;
+		sprintf(buf, "align %d { z %d }", iralign(g_td_arrayelem), total);
+		emit_static_local(v, IDIR(g_td_arrayelem), 1, buf);
+		var_set_arraybytes(v, total);
+		return;
+	}
+	if (n->l)
+		die("initializer in static multi-declarator not supported");
+	t = (n->op == 'P') ? IDIR(ebase) : ebase;
+	emit_zero_init(buf, t);
+	emit_static_local(v, t, 0, buf);
+}
+
 /* Emit a K&R-style function header.  Called from the prot_knr action
  * for definitions like `foo(a, b) int a; char *b; { ... }`.  `params`
  * is a Node chain of bare parameter names built by kr_idlist; each
@@ -8599,6 +8711,25 @@ dcls:
 	var_set_arraybytes($4->u.v, total);
 	maybe_mark_huge_global(nglo - 1, gloname[nglo - 1], total);
 }
+    | dcls STATIC type IDENT ',' ext_decllist ';'
+{
+	/* Function-local static MULTI-declarator, plain-first form:
+	 * `static int x, y;` / `static jmp_buf a, b;`.  Each declarator
+	 * becomes its own mangled file-scope data global. */
+	Node *n;
+	emit_static_local_scalar_or_instance($3, $4->u.v);
+	for (n = $6; n; n = n->r)
+		emit_static_local_rest_item($3, n);
+}
+    | dcls STATIC type IDENT '[' expr ']' ',' ext_decllist ';'
+{
+	/* Function-local static MULTI-declarator, array-first form:
+	 * `static int a[3], b;`. */
+	Node *n;
+	emit_static_local_sized_array($3, $4->u.v, const_eval($6));
+	for (n = $9; n; n = n->r)
+		emit_static_local_rest_item($3, n);
+}
     | dcls EXTERN type IDENT ';'
 {
 	/* extern declaration inside a function body: declares an external
@@ -9374,6 +9505,22 @@ stmt: ';'                            { $$ = 0; }
         if (aoa > 0)
             var_set_aoa_dim($3->u.v, aoa);
         maybe_mark_huge_global(nglo - 1, gloname[nglo - 1], total);
+        $$ = 0;
+    }
+    | STATIC type IDENT ',' ext_decllist ';' {
+        /* Statement-scope static MULTI-declarator, plain-first form. */
+        Node *n;
+        emit_static_local_scalar_or_instance($2, $3->u.v);
+        for (n = $5; n; n = n->r)
+            emit_static_local_rest_item($2, n);
+        $$ = 0;
+    }
+    | STATIC type IDENT '[' expr ']' ',' ext_decllist ';' {
+        /* Statement-scope static MULTI-declarator, array-first form. */
+        Node *n;
+        emit_static_local_sized_array($2, $3->u.v, const_eval($5));
+        for (n = $8; n; n = n->r)
+            emit_static_local_rest_item($2, n);
         $$ = 0;
     }
     | EXTERN type IDENT ';'          {
