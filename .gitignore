@@ -5,6 +5,10 @@ config.h
 *.out
 *~
 
+# Build/scratch output tree (probes, caches, MP/newlibc/stevie builds, logs).
+# Already-tracked files inside (e.g. build/mp-spike/run-asmobj.sh) stay tracked.
+build/
+
 # MiniC compiler build artifacts
 minic/yacc
 minic/minic
@@ -29,6 +33,18 @@ minic/minimal_*
 
 # Tool binaries
 tools/lexh
+
+# Debug symbol bundles (macOS)
+*.dSYM/
+
+# MAME runtime artifacts
+cfg/
+nvram/
+snap/
+
+# Victor disk images (large binaries — fixtures/scratch, never committed) + edited config
+*.img
+config_edited.sys
 
 # Editor/IDE files
 .DS_Store
