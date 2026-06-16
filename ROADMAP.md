@@ -35,7 +35,7 @@ This roadmap was created on 2025-11-21 as a **plan** for implementation. The "Ac
 | **OMF Link Toolchain** | ✅ Complete | asm→OMF, MZ .EXE linker with --gc-sections (per-function), separate stack (SS≠DS), code-segment splitting + coalescing, all six models | tools/omf_link.py, tools/asm_to_omf.py |
 | **Type encoding** | ✅ Hardened | FAR bit 26 / QVOLATILE 27 (relocated 2026-06-11 to clear the FLOAT@2-shifts collision); `fnproto.rett`/`fpproto.rett` side tables make direct + fn-pointer return types layout-independent.  Residual: far-data nested-far depth is ONE level (`T**` ok, `T***` loses innermost FAR). | minic/minic.y (FAR define comment) |
 | **Upstream QBE** | ✅ In sync | 211-commit rebase landed via PR #23 (2026-06-06); synced through `e786f06` (2026-06-11) | git remote `upstream` |
-| **MicroPython Port** | ✅ **COMPLETE — now the regression corpus** | 108/108 TUs, runs on real Victor 9000 over SASI disk.  Full language surface, FLOAT + `math` module (Victor-verified byte-exact vs host python3), 114 KB split GC heap, interactive REPL with DOS-native line editor, disk-loaded PROG.PY.  Body 731,088 B, ~93 KB under the ~824 KB ceiling.  Remaining feature tracks PARKED; its role now is rebuild + byte-compare after toolchain changes. | MICROPYTHON_PORT.md, tools/build-micropython.sh |
+| **MicroPython Port** | ✅ **COMPLETE — now the regression corpus** | 108/108 TUs, runs on real Victor 9000 over SASI disk.  Full language surface, FLOAT + `math` module (Victor-verified byte-exact vs host python3), 114 KB split GC heap, interactive REPL with DOS-native line editor, disk-loaded PROG.PY.  Body 689,760 B (§8d libstub-FREE default; was 731,088 under libstub, the `--libstub` opt-out anchor), well under the ~824 KB ceiling.  Remaining feature tracks PARKED; its role now is rebuild + byte-compare after toolchain changes. | MICROPYTHON_PORT.md, tools/build-micropython.sh |
 | **Stevie editor** | ✅ Complete | 146,672-byte medium-model .EXE; interactively verified on real Victor (2026-06-10) | tools/build-stevie.sh |
 
 **Phase Completion:**
@@ -80,7 +80,7 @@ This loop grew the gate from 59 to **262 entries** and fixed on the order of 60 
 - **`math` module** — soft-libm in softfloat.c; math probe byte-exact vs host python3.
 - **114 KB split GC heap** (`MICROPY_GC_SPLIT_HEAP`, two areas) — heap-split stress probe byte-exact.
 - Interactive REPL with DOS-native line editor (history, arrows) + disk-loaded `PROG.PY`.
-- Image: body 731,088 bytes, ~93 KB under the ~824 KB Victor load ceiling.
+- Image: body 689,760 bytes (§8d libstub-FREE default; was 731,088 under libstub, now the `--libstub` opt-out anchor), well under the ~824 KB Victor load ceiling.
 
 **Ongoing role — regression corpus:** after any toolchain change, rebuild the 108-TU compact image (`tools/build-micropython.sh --model=compact`) and byte-compare the body.  Byte-identical ⇒ no Victor run needed; bytes moved ⇒ diff the asm and re-run the Victor feature probes (`tools/run-victor-sasi.sh`).
 

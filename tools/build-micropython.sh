@@ -9,7 +9,10 @@
 #   3. SSA → i8086 asm        via qbe -t i8086 -m medium
 #   4. asm → OMF asm          via tools/asm_to_omf.py  (per-TU label prefixing)
 #   5. OMF asm → .obj         via nasm -f obj
-# Then: crt0_exe.obj + all TU .obj + libstub_exe.obj → omf_link → mpython.exe
+# Then: crt0_exe.obj + all TU .obj + the runtime (§8d default = the libstub-FREE
+# stack: dos_*/newlibc support + qbe_rt/dos_syscall_far_data/far_stdlib_bridge/
+# builtins_rt/setjmp_rt/heap; --libstub anchor = libstub_exe.obj) → omf_link →
+# mpython.exe
 #
 # This is a SPIKE: the point is to surface the link-layer gap (undefined
 # symbols, segment-count limits, setjmp/longjmp).  --keep-going tolerates
@@ -28,17 +31,22 @@
 set -u
 KEEP_GOING=0
 MODEL=medium
-# §8c: libstub retirement for MicroPython.  --no-libstub links the libstub-FREE
-# runtime (the §7r/§7v stevie path scaled to MP): newlibc's portable stdio +
-# the dos_libc.c libc fill + qbe_rt/dos_syscall_far_data/far_stdlib_bridge/
-# heap/setjmp_rt + the §8c builtins_rt.asm (___builtin_clz/clzl/expect/
-# unreachable — the one symbol set MP needs that libstub provided and the
-# libstub-free runtime did not), INSTEAD of libstub_exe.obj.  MP's own main()
-# is renamed to newlibc_test_main via -Dmain so dos_shim.c's main wrapper runs
-# first (vfs_init() is a no-op on the DOS path), exactly as stevie does.
-# Opt-in for now (default keeps the libstub build = the byte-frozen regression
-# corpus + the equivalence anchor); --libstub re-asserts the default.
-NO_LIBSTUB=0
+# §8c/§8d: libstub retirement for MicroPython.  The libstub-FREE runtime (the
+# §7r/§7v stevie path scaled to MP): newlibc's portable stdio + the dos_libc.c
+# libc fill + qbe_rt/dos_syscall_far_data/far_stdlib_bridge/heap/setjmp_rt + the
+# §8c builtins_rt.asm (___builtin_clz/clzl/expect/unreachable — the one symbol
+# set MP needs that libstub provided and the libstub-free runtime did not),
+# INSTEAD of libstub_exe.obj.  MP's own main() is renamed to newlibc_test_main
+# via -Dmain so dos_shim.c's main wrapper runs first (vfs_init() is a no-op on
+# the DOS path), exactly as stevie does.
+#
+# §8d (2026-06-16): libstub-free is now the DEFAULT.  The regression corpus is
+# the libstub-free compact build (default heaps → image 710,352 / body 689,760;
+# the old libstub body was 731,088).  --libstub is the opt-out equivalence
+# ANCHOR (libstub_to_exe.py's python printf + the .COM-stub libc), kept for the
+# cross-check and still used by the probe build scripts; --no-libstub re-asserts
+# the default.
+NO_LIBSTUB=1
 for arg in "$@"; do
 	case "$arg" in
 		--keep-going) KEEP_GOING=1 ;;
