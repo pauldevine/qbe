@@ -1044,7 +1044,17 @@ class Linker:
         if method == 0:  # segment
             mod_seg_idx = fix.frame_index
             out_idx, _ = self.seg_map[(mi, mod_seg_idx)]
-            return self.out_segs[out_idx].para_base
+            # A DGROUP member's canonical frame is the group base, so a far
+            # pointer/selector to _DATA and to _BSS share one segment word
+            # (matching how DS addresses the whole group, and how a global's
+            # `seg _g` already resolves — _DATA is the lowest member).  Without
+            # this, `seg ___heap_start` (in _BSS) yields _BSS's own higher para,
+            # so a heap far pointer's segment differs from a global's even
+            # though both live in DGROUP (§8a).  No-op for the lowest member and
+            # for ungrouped CODE / FAR_* segments; offset (loc 1) and selector
+            # (loc 2) stay consistent because both derive from this frame.
+            gp = containing_group_para(out_idx)
+            return gp if gp is not None else self.out_segs[out_idx].para_base
         if method == 1:  # group
             g = m.groups[fix.frame_index]
             og = self.out_groups[g.name]
@@ -1054,18 +1064,28 @@ class Linker:
             ext_name = m.externs[fix.frame_index]
             sym = self.symbols[ext_name]
             out_idx, _ = self.seg_map[(sym.module_idx, sym.seg_idx)]
-            return self.out_segs[out_idx].para_base
+            # Same DGROUP-canonical-frame rule as method 0 (see above): an
+            # external symbol in a non-lowest DGROUP member (e.g. ___heap_start
+            # in _BSS) gets the group frame, not its own segment para.
+            gp = containing_group_para(out_idx)
+            return gp if gp is not None else self.out_segs[out_idx].para_base
         if method == 5:  # target-frame
             # NASM commonly emits target-frame fixups for `mov ax, [_data]`.
             # In the generated instruction there is no segment override, so
             # the CPU uses DS.  For grouped DATA/BSS, DS is DGROUP, not the
-            # physical target segment.  Use the group frame for 16-bit offset
-            # fixups to DATA/BSS members so the patched displacement is
-            # DGROUP-relative.
-            if fix.location in (1, 5):
-                para = containing_group_para(target_out_idx)
-                if para is not None:
-                    return para
+            # physical target segment.  Use the group frame for ALL locations
+            # to a DATA/BSS member so the patched displacement is DGROUP-
+            # relative AND any far selector (loc 2) / far pointer (loc 3) shares
+            # the one group segment word.  Previously only the 16-bit offset
+            # (loc 1/5) was group-framed, so `mov ax, ___heap_start` (offset,
+            # group-relative) paired with `mov dx, seg ___heap_start`
+            # (selector, _BSS's own higher para) — a self-consistent but
+            # non-canonical heap far pointer whose segment differed from a
+            # global's, failing split_stack_probe's ok7 (§8a).  No-op for the
+            # lowest member (_DATA) and for ungrouped CODE / FAR_* segments.
+            para = containing_group_para(target_out_idx)
+            if para is not None:
+                return para
             return self.out_segs[target_out_idx].para_base
         if method == 4:  # preceding-frame
             return self.out_segs[target_out_idx].para_base
@@ -1176,10 +1196,15 @@ class Linker:
                 self._add_reloc(site_out, mod_base_in_out + fix.where)
             return
 
-        if loc == 3:  # 32-bit far ptr: low word = offset within target segment, high word = selector
+        if loc == 3:  # 32-bit far ptr: low word = offset within frame, high word = selector
             cur_off = struct.unpack_from('<H', site_out.data,
                                          mod_base_in_out + fix.where)[0]
-            off = (tgt_byte_in_out + cur_off) & 0xFFFF
+            # Offset is relative to the SELECTED frame, not the target segment
+            # base — identical (tgt_abs_byte - frame_byte == tgt_byte_in_out)
+            # whenever the frame is the target segment, but for a DGROUP member
+            # whose frame is the group base (§8a) the offset must step from the
+            # group base so seg:off resolves to the same linear address.
+            off = (tgt_abs_byte - frame_byte + cur_off) & 0xFFFF
             struct.pack_into('<H', site_out.data,
                              mod_base_in_out + fix.where, off)
             struct.pack_into('<H', site_out.data,

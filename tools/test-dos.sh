@@ -704,19 +704,20 @@ build_runtime_probe() {
 	# §7x: setjmp/longjmp now HAVE a libstub-free impl (minic/dos/setjmp_rt.asm,
 	# all three ABI forms), so setjmp_probe / setjmp_clobber_probe /
 	# arr_jmpbuf_probe / aoa_extended_probe are UNPINNED and run libstub-free.
-	# split_stack_probe STAYS pinned, but for an UNRELATED reason: its ok7
-	# asserts malloc memory lands in the SAME segment as a global (heapseg ==
-	# dgroupseg), which holds for libstub's single-base DGROUP heap but not for
-	# the libstub-free BSS heap (heap.asm's _BSS gets its own DGROUP paragraph
-	# under far-data + --split-stack, so a heap pointer's far segment differs
-	# from a global's — a layout difference, not a correctness bug; setjmp
-	# itself, ok6, passes libstub-free here).
+	# §8a: split_stack_probe is ALSO unpinned now.  Its ok7 asserts malloc
+	# memory lands in the SAME far segment as a global (heapseg == dgroupseg);
+	# that held for libstub's single-base DGROUP heap but not for the
+	# libstub-free BSS heap, because omf_link resolved a far reference to a
+	# DGROUP member against that member's OWN paragraph base (heap.asm's _BSS
+	# sits above _DATA under far-data + --split-stack) instead of the canonical
+	# DGROUP group frame.  omf_link now group-frames every far reference (offset
+	# AND selector AND far ptr) to a DGROUP member (the lowest member, _DATA, was
+	# always the group base, so a global's selector was already canonical), so a
+	# heap pointer's segment matches a global's and the probe runs libstub-free.
 	libstubflag=""
 	case "$base" in
 		# printf %p / %o divergence
 		cstrprobe|compactprobe_extra|huge_norm_probe|mediumprobe) libstubflag="--libstub" ;;
-		# malloc-segment-in-DGROUP layout (NOT setjmp — that now works libstub-free)
-		split_stack_probe) libstubflag="--libstub" ;;
 	esac
 	QBE_FAR_STATIC_DATA="$farstatic" \
 		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag $ssflag $libstubflag "$QBE_DIR/$src" >/dev/null
