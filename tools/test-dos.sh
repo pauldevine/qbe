@@ -82,6 +82,7 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/fnptrprobe.c:minic/dos/tests/fnptrprobe.golden.txt:huge"
 	"minic/dos/examples/farretprobe.c:minic/dos/tests/farretprobe.golden.txt:huge"
 	"minic/dos/examples/huge_norm_probe.c:minic/dos/tests/huge_norm_probe.golden.txt:huge"
+	"minic/dos/examples/huge_ptreq_probe.c:minic/dos/tests/huge_ptreq_probe.golden.txt:huge"
 	"minic/dos/examples/hugeprobe.c:minic/dos/tests/hugeprobe.golden.txt:huge"
 	"minic/dos/examples/mediumprobe.c:minic/dos/tests/mediumprobe.golden.txt:medium"
 	"minic/dos/examples/mediumprobe.c:minic/dos/tests/mediumprobe.golden.txt:large"

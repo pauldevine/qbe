@@ -1,3 +1,45 @@
+# Next session (carried compiler tracks — the §7u huge-normalisation family is now COMPLETE (relational §7u + equality §8e).  §8e [2026-06-16, this session] **CLOSED the huge-pointer EQUALITY flat-compare — the latent sibling of the §7u relational fix; `==`/`!=` of two huge pointers that denote the SAME linear byte through DIFFERENT seg:off normalisations now compare correctly; `tools/test-dos.sh` 366 → 367, the fix is an MHuge-gated `minic.y` frontend change → no emit audit, MP compact body 689,760 BYTE-IDENTICAL → no Victor run, `make check` green.**  §7u routed huge RELATIONAL compares (`p < q`, `p <= q`) through `_qbe_huge_cmp` because the flat 32-bit `cultl`/`csltl` of two seg:off words is only monotonic-in-linear-address when BOTH operands are NORMALISED, and it explicitly LEFT the equality case unfixed (the sole live consumer `_sbrk` only does `== NULL` = 0:0 = linear 0, fine flat).  The equality gap is the SAME defect: the flat `ceql`/`cnel` compares the raw 32-bit (seg<<16)|off words bit-for-bit, so an UNNORMALISED operand (a bare symbol address whose offset can exceed 0xF) wrongly compares UNEQUAL to the NORMALISED pointer `_qbe_huge_add` returns for the same byte — a pure FALSE-NEGATIVE (a genuinely different address can never alias).  **FIX (minic.y `Binop` default arm, ~25 lines, mirrors the §7u relational block):** under `memmodel == MHuge` an equality compare (`o == 'e' || o == 'n'`) with BOTH operands non-function pointers routes through `_qbe_huge_cmp(p,q)` (= signed `linear(p)−linear(q)`, the SAME helper §7u uses) and tests its sign — `p == q ⟺ ceql cmp,0`, `p != q ⟺ cnel cmp,0`.  Linear equality is exactly C11 6.5.9 pointer equality on the flat 8086 huge model, and stays correct for NULL (`0:0` → linear 0).  MHuge-gated → compact/large/near (incl. the MP byte-compare) keep flat `ceql`/`cnel`, untouched.  Gated by the all-new `huge_ptreq_probe` (`minic/dos/examples/huge_ptreq_probe.c`, :huge) — bug-loud: it builds two pointers to the same linear byte through different normalisations (`(char *)constant` raw/unnormalised vs the normalised result of `+ 0` through `_qbe_huge_add`) and asserts `==`/`!=`; the UNFIXED compiler prints `eqconst=FAIL`/`neconst=FAIL`/`eqarith=FAIL`/`nearith=FAIL` (verified by reverting), while the address-distinct and NULL cases stay correct.  Every existing huge probe (huge_norm, hugeprobe, gc_bigheap, caddr family) still passes — their `p==q`/`p!=NULL` now goes through `huge_cmp` but yields the SAME answer.  STRATEGY: only the MHuge-gated minic.y arm + the new probe/golden + one gate entry changed; the COPY/ADD-NEVER-MUTATE libstub-free toolchain is untouched → MP/stevie/every gate provably can't regress.  **⇒ Next session: pick a remaining carried COMPILER track (each awaits a real consumer — synthetic-but-bug-loud gating):** (1) the aoa sub-gaps (file-scope/static multi-decl array-first = a grammar parse-error gap; plain `jmp_buf a, b;` multi-decl); (2) the minic file-scope-statics-need-a-trailing-`main` emission quirk surfaced in §8c (removing the last `main()` drops a TU's file-scope `static` data defs — confirmed via `.ssa` diff; no consumer, the `-Dmain` rename avoids it).  The huge pointer-arith family (relational §7u + equality §8e) is now CLOSED.  Bare-metal phase-3 bm_testhost tests EXHAUSTED.  Libstub-retirement campaign COMPLETE (gate probes + stevie + MicroPython all libstub-free by default; `libstub_to_exe.py` survives only as the `--libstub` anchor + probe scripts + tiny/.COM fallbacks).  NO QBE backend bug open; easy frame-size levers spent (§7k).)
+
+## §8e session notes (2026-06-16)
+
+### The pick
+- §8d handoff offered three carried compiler tracks (huge ptr equality / aoa
+  sub-gaps / minic trailing-main quirk).  User (AskUserQuestion) chose the huge
+  pointer EQUALITY flat-compare — the most concrete, a direct follow-on to §7u.
+
+### The bug + fix
+- §7u fixed huge RELATIONAL compares (p<q, p<=q) via _qbe_huge_cmp but LEFT
+  equality unfixed (only consumer _sbrk does ==NULL = linear 0, fine flat).
+- Same defect for ==/!=: flat ceql/cnel compares raw seg:off words, so two
+  pointers to the SAME linear byte with DIFFERENT normalisations (unnormalised
+  symbol addr off>0xF vs the normalised _qbe_huge_add result) wrongly compare
+  UNEQUAL (false-negative only; a different address never aliases).
+- FIX (minic.y Binop default arm, ~25 lines, mirrors §7u relational block):
+  MHuge + (o=='e'||o=='n') + both operands non-FUN PTR → route through
+  _qbe_huge_cmp(p,q) and test ceql/cnel cmp,0.  Correct for NULL too (0:0→0).
+  MHuge-gated → compact/large/near (incl. MP) keep flat ceql/cnel, untouched.
+
+### Gate + verification
+- NEW minic/dos/examples/huge_ptreq_probe.c (:huge), golden
+  minic/dos/tests/huge_ptreq_probe.golden.txt.  Bug-loud: (char*)0x10000010UL
+  (unnorm, linear 0x10010) vs (char*)0x10010000UL (norm, same linear) AND vs
+  unnorm+0 (huge_add normalises) — UNFIXED prints eqconst/neconst/eqarith/
+  nearith=FAIL (verified by git-stashing the fix); address-distinct + NULL OK.
+- test-dos 366→367; make check green; 8 qbe_huge_cmp calls in the probe .ssa.
+- All existing huge probes still pass (their p==q/p!=NULL now via huge_cmp,
+  same answer).
+- MP compact rebuilt: image 710,352 / body 689,760 BYTE-IDENTICAL to §8d
+  baseline (MHuge-gated → compact provably untouched) → no Victor run.
+- minic.y frontend change (not emit.c) → no emit audit.
+
+### ⇒ Next session
+- Remaining carried compiler tracks (await a consumer): aoa sub-gaps
+  (file-scope/static multi-decl array-first parse-error gap; plain jmp_buf a,b
+  multi-decl); the minic trailing-main file-scope-statics quirk (§8c).
+- Huge pointer-arith family CLOSED (relational §7u + equality §8e).
+- NO QBE backend bug open.
+---
+
 # Next session (carried compiler tracks — the Phase-6 libstub-retirement campaign is now COMPLETE end-to-end (every gate probe AND every shipped program: stevie §7r–§7v, then MicroPython §8c–§8d).  §8d [2026-06-16, this session] **FLIPPED MicroPython's default to libstub-free and REBASELINED the regression corpus — `tools/build-micropython.sh` (no flag) now builds the libstub-FREE MP (compact default-heap body 689,760, was 731,088 under libstub); `--libstub` is the opt-out equivalence anchor (verified still body 731,088); `make check` green, no compiler/qbe/emit/minic source touched (→ no emit audit).**  §8c had landed libstub-free MP as an OPT-IN `--no-libstub` path (byte-exact vs host `python3` in DOSBox AND on MAME victor9k); §8d is the small end-state flip the user requested.  **The change is one line + doc rebaseline:** `build-micropython.sh` `NO_LIBSTUB=0`→`1` (default), `--libstub` now the opt-out anchor.  The produced `--model=compact` binary is BYTE-IDENTICAL to §8c's already-Victor-verified `--no-libstub` build (same code path; the flag only chooses which path is default), so NO new Victor run was needed.  **VERIFIED:** default compact = image 710,352 / body 689,760 (reproducible, matches §8c); `--libstub` compact = image 751,664 / body 731,088 (anchor intact); the default small-heap build (571,600 B) runs the §8c smoke test (language + FLOAT + `math` sqrt/pi/sin + recursion + ZeroDivisionError) BYTE-EXACT vs host `python3` in DOSBox; `make check` green.  **Rebaseline scope:** the 731,088 baseline was DOCUMENTATION-ONLY — `git grep 731088` over `tools/`/`*.sh`/`*.py` is EMPTY (no hardcoded assertion), and `recompile-mp-tu.sh` is data-driven from `/tmp/mp_objs.txt` (written by `build-micropython.sh`), so it adapts automatically.  Updated the FORWARD-looking refs only: `CLAUDE.md` (regression-corpus line + the "After ANY toolchain change" house rule + a §8d status clause + Last-Updated), `ROADMAP.md` (the two "Body 731,088 B" lines), and `build-micropython.sh`'s banner/arg comments.  HISTORICAL "MP body 731,088 byte-identical" session records (§4t…§8a) are LEFT verbatim — accurate point-in-time records of the libstub corpus.  STRATEGY (ADD/FLIP, NEVER MUTATE the runtime): `dos_shim.c`/`libstub.asm`/`libstub_to_exe.py`/`near_to_far_rt.py`/`builtins_rt.asm`/every runtime asm + newlibc are UNTOUCHED; only the default flag + docs changed.  `libstub_to_exe.py` now survives ONLY as: the `--libstub` MP anchor, the `build-example.sh`/`build-stevie.sh` `--libstub` anchor, the `build-{sprintf,int86x,divmod32}-probe.sh` probe scripts, and the tiny/.COM fallbacks — it is no longer the DEFAULT runtime of ANY shipped artifact.  **⇒ Next session: the libstub-retirement campaign is DONE; pick a carried COMPILER track (each awaits a real consumer — synthetic-but-bug-loud gating):** (1) the huge pointer EQUALITY flat-compare (the §7u relational fix's latent sibling — `==`/`!=` of two differently-normalised huge pointers; `_sbrk` only does `== NULL` so no live consumer); (2) the aoa sub-gaps (file-scope/static multi-decl array-first = a grammar parse-error gap; plain `jmp_buf a, b;` multi-decl); (3) the minic file-scope-statics-need-a-trailing-`main` emission quirk surfaced in §8c (removing the last `main()` drops a TU's file-scope `static` data defs — confirmed via `.ssa` diff; no consumer, the `-Dmain` rename avoids it).  Bare-metal phase-3 bm_testhost tests EXHAUSTED.  NO QBE backend bug open; easy frame-size levers spent (§7k).)
 
 ## §8d session notes (2026-06-16)
@@ -32,68 +74,4 @@
 - Carried compiler tracks (await a consumer): huge pointer EQUALITY flat-compare
   (§7u sibling); aoa sub-gaps; the minic trailing-main file-scope-statics quirk.
 ---
-
-# Next session (§8d — optional: flip MicroPython's default to libstub-free (rebaseline the regression corpus) / carried compiler tracks.  §8c [2026-06-16, this session] **MOVED MicroPython ONTO THE LIBSTUB-FREE RUNTIME — the byte-frozen regression corpus now builds AND runs with NO libstub, byte-exact vs host `python3` in BOTH DOSBox and on real-hardware-equivalent MAME victor9k; `tools/build-micropython.sh --no-libstub` is the new path (OPT-IN — the default still builds the libstub corpus, byte-identical at image 751,664 / body 731,088), `make check` green, no compiler/qbe/emit/minic source touched (→ no emit audit).**  §8c's brief was "retire `libstub_to_exe.py`'s printf"; the FIRST finding overturned the §8b handoff's premise that "nothing depends on it now" — `build-micropython.sh` builds MP DIRECTLY through `libstub_to_exe.py` (no `--no-stdio`) and MP's gc'd map links `_far_printf`/`_far_sprintf`/`_far_fprintf`/`_printf`/`_sprintf` from `libstub_exe.obj`, so libstub's printf engine IS part of MP's frozen 731,088-byte body (and the `--libstub` anchor + tiny/.COM/absent-tree fallbacks + the probe scripts use it too).  The user directed: "go ahead and update MP, don't worry about the byte-freeze" — i.e. genuinely retire libstub for MP, the last big non-anchor consumer (the §7r/§7v stevie migration scaled up).  **THE TRUE GAP WAS TINY, NOT 124 SYMBOLS:** MP's libstub map lists 124 symbols, but `libstub_exe.obj` is a MONOLITHIC hand-asm object so `--gc-sections` can't strip individual functions — most (`_mouse_*`, `_putpixel`, `_set_video_mode`, `_getch`/`_kbhit`, `_dos_*`) are PASSENGERS MP never calls.  An empirical relink of MP's existing `.obj` against the libstub-free runtime showed the real undefined set: **(1) `___builtin_clzl` (103 refs) + `___builtin_clz`/`expect`/`unreachable`** — the one symbol set MP needs that libstub provided and the libstub-free runtime did not; **(2)** `_fopen`/`_fread`/…/`_read`/`__impure_ptr`/`_timer_*` — ALL provided by `dos_shim.c` (lost only because excluding it for its `_main` collision).  MP's file reader is fd-based (`read(fd)`/`close()` POSIX via `mp_reader_new_file_from_fd`), NOT stdio `FILE`, so the §7s cross-regime `FILE`-ABI landmine does NOT apply (`_far_fopen` is referenced only inside `libstub_exe.obj`).  **THE FIX (COPY/ADD, NEVER MUTATE):** (a) NEW **`minic/dos/builtins_rt.asm`** — the 4 `__builtin_*` bodies COPIED VERBATIM from `libstub.asm` (NEAR form, `[bp+N]` args; far-rewritten by `near_to_far_rt.py --seg-name=BUILTINS_RT_TEXT` for far models, exactly like `qbe_rt.asm`); `libstub.asm` UNTOUCHED.  (b) `build-micropython.sh` gained an OPT-IN `--no-libstub` branch (the §7v stevie far-data recipe: `dos_printf`/`scanf_wrappers`/`syscalls`/`reent_stubs`/`dirent`/`unlink`/`rename`/`dos_vfs`/`dos_shim`/`dos_libc` compiled in newlibc's regime + `qbe_rt`-far/`dos_syscall_far_data`/`far_stdlib_bridge`/`builtins_rt`-far/`setjmp_rt`(SJ_FAR_DATA)/`heap` INSTEAD of `libstub_exe.obj`), with MP's own `main()` renamed to `newlibc_test_main` via `-Dmain` so `dos_shim.c`'s `main` wrapper (`vfs_init()`→ a no-op on the DOS path → MP's main) is the crt0 entry — the §7r pattern.  `dos_shim.c` stays PRISTINE: a tried `-DNO_SHIM_MAIN` variant hit a **minic emission quirk** (removing the trailing `main()` drops ALL file-scope FILE-layer statics — `shim_files`/`shim_file_used`/`_impure_ptr` — from the TU; a latent minic bug noted, not fixed), so the `-Dmain` rename keeps `main()` present and sidesteps it.  **VERIFIED:** libstub-free MP (compact) links clean (110 modules, 0 undefined, image 710,352 / body 689,760 — smaller, the monolith passengers gone); a DOSBox-sized build (`MP_HEAP_SIZE=8192 MP_HEAP2_SIZE=12288 MP_STACK_SIZE=16384`, 571,600 B) ran a 13-line smoke test (filter/reversed/comprehensions/dict+sorted/`%`-format/str methods/slicing + FLOAT + `math` sqrt/pi/sin + recursion + ZeroDivisionError) BYTE-EXACT vs host `python3`; the default-heap build (710,352 B) ran the SAME test BYTE-EXACT on MAME victor9k (`run-victor-sasi.sh`, real SASI disk); the DEFAULT (libstub) build re-confirmed BYTE-IDENTICAL to the frozen corpus (751,664 / 731,088 — my `OBJS` refactor is a no-op for it); `make check` green.  STRATEGY: `builtins_rt.asm` is all-new; `build-micropython.sh`'s change is an additive opt-in branch (default path byte-unchanged); `dos_shim.c`/`libstub.asm`/`libstub_to_exe.py`/`near_to_far_rt.py`/every runtime asm + newlibc are UNTOUCHED.  libstub is now retired as MP's runtime *capability* (opt-in, verified); `libstub_to_exe.py` survives as MP's DEFAULT runtime + the `--libstub` equivalence anchor + the fallbacks.  **⇒ Next session (§8d):** the literal end-state would be to FLIP `build-micropython.sh`'s default to `--no-libstub` and REBASELINE the regression corpus (the frozen body becomes ~689,760; update every "731,088 byte-identical" reference + the MP byte-compare tooling/docs) — deferred because it rebaselines the project's regression baseline and is the user's call (the opt-in path is proven, so the flip is de-risked).  Carried compiler tracks (await a consumer, unchanged): the aoa sub-gaps (file-scope/static multi-decl array-first parse-error gap; plain `jmp_buf a, b;` multi-decl); the huge pointer EQUALITY flat-compare (the §7u relational sibling); the minic file-scope-statics-need-a-trailing-main quirk surfaced this session (no consumer — the `-Dmain` rename avoids it).  Bare-metal phase-3 bm_testhost tests EXHAUSTED.  NO QBE backend bug open.)
-
-## §8c session notes (2026-06-16)
-
-### The pick + the overturned premise
-- §8b handoff offered "retire libstub_to_exe.py's printf (nothing depends on it
-  now)".  The user (AskUserQuestion) chose it.  Investigation showed the premise
-  is FALSE: build-micropython.sh builds MP through libstub_to_exe.py (no
-  --no-stdio); MP's gc'd map links _far_printf/_far_sprintf/_printf/_sprintf
-  from libstub_exe.obj → libstub's printf is in MP's frozen 731,088-byte body.
-  It's also the --libstub anchor (build-example/stevie) + tiny/.COM/absent-tree
-  fallbacks + build-{sprintf,int86x,divmod32}-probe.sh.  Surfaced this; the user
-  said "go ahead and update MP, don't worry about the byte-freeze" → the real
-  goal = move MP onto the libstub-free runtime (the §7r/§7v stevie migration).
-
-### The gap was tiny (124-symbol map was mostly monolith passengers)
-- libstub_exe.obj is a MONOLITHIC hand-asm object → --gc-sections can't strip
-  individual functions, so _mouse_*/_putpixel/_set_video_mode/_getch/_kbhit/
-  _dos_* are passengers MP never calls.  Empirical relink of MP's existing .obj
-  against the libstub-free runtime gave the TRUE undefined set:
-    (1) ___builtin_clzl (103) + ___builtin_clz/expect/unreachable — NEW work.
-    (2) _fopen/_fread/.../_read/__impure_ptr/_timer_* — all in dos_shim.c
-        (undefined only because I'd excluded it for its _main collision).
-- FILE-ABI (§7s) does NOT apply: MP's reader is fd-based (read(fd)/close via
-  mp_reader_new_file_from_fd), not stdio FILE; _far_fopen is referenced only
-  inside libstub_exe.obj.
-
-### The fix
-- NEW minic/dos/builtins_rt.asm: the 4 __builtin_* COPIED VERBATIM from
-  libstub.asm (near form; far-rewritten via near_to_far_rt.py
-  --seg-name=BUILTINS_RT_TEXT, like qbe_rt.asm).  libstub.asm UNTOUCHED.
-- build-micropython.sh: opt-in --no-libstub branch (default keeps libstub).
-  The §7v far-data recipe + builtins_rt + -Dmain=newlibc_test_main so
-  dos_shim.c's main wrapper is the crt0 entry (vfs_init() is a no-op on DOS).
-- dos_shim.c PRISTINE.  A -DNO_SHIM_MAIN variant hit a minic quirk: removing
-  the trailing main() drops the file-scope FILE-layer statics (shim_files/
-  shim_file_used/_impure_ptr) from the TU entirely (confirmed via .ssa diff —
-  0 data defs without main, 4 with).  The -Dmain rename keeps main() present
-  and sidesteps it.  (Latent minic bug noted, no consumer → not fixed.)
-
-### Verification (no compiler change → no emit audit)
-- libstub-free MP compact: links clean, 110 modules, 0 undefined, image
-  710,352 / body 689,760 (smaller — monolith passengers gone).
-- DOSBox (571,600 B small-heap build): smoke test BYTE-EXACT vs host python3
-  (build/mp-nl-smoke.py / .golden.txt — language + FLOAT + math + recursion +
-  ZeroDivisionError).
-- MAME victor9k (710,352 B default-heap, run-victor-sasi.sh, real SASI):
-  SAME smoke test BYTE-EXACT vs host python3.
-- DEFAULT (libstub) MP: rebuilt, BYTE-IDENTICAL frozen corpus 751,664/731,088
-  (the OBJS-assembly refactor is a no-op for the default path).
-- make check green.
-
-### ⇒ Next session (§8d)
-- Optional end-state: flip build-micropython.sh's default to --no-libstub and
-  REBASELINE the corpus (frozen body → ~689,760; update every "731,088"
-  reference + MP byte-compare tooling/docs).  Deferred — rebaselines the
-  project's regression baseline, the user's call; the opt-in path is proven so
-  the flip is de-risked.
-- Carried compiler tracks (await a consumer): aoa sub-gaps; huge pointer
-  EQUALITY flat-compare; the minic file-scope-statics-need-a-trailing-main
-  quirk (no consumer — the -Dmain rename avoids it).
----
-
 Older session headers (§7w and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).

@@ -1,0 +1,8 @@
+eqconst=eq
+neconst=ne-false
+eqarith=eq
+nearith=ne-false
+eqdiff=ne
+nediff=ne
+eqnull=eq
+nenull=ne

@@ -4542,6 +4542,39 @@ expr(Node *n)
 			break;
 		}
 
+		/* Under MHuge, a pointer EQUALITY compare (p == q, p != q) has the
+		 * SAME latent flat-compare gap as the relational compare above: the
+		 * `ceql`/`cnel` further down compares the raw 32-bit seg:off words
+		 * bit-for-bit, so two pointers that denote the SAME linear address
+		 * through DIFFERENT normalisations — e.g. an unnormalised symbol
+		 * address (offset > 0xF) vs the normalised pointer _qbe_huge_add
+		 * returns for the same byte — wrongly compare UNEQUAL (and a genuinely
+		 * different address can never alias, so == has no false-positive risk;
+		 * the bug is purely false-negative).  Route through _qbe_huge_cmp(p,q)
+		 * = signed linear(p)-linear(q) and test == 0 / != 0: linear equality is
+		 * exactly C pointer equality (C11 6.5.9) on the flat 8086 huge model,
+		 * and it stays correct for NULL too (0:0 → linear 0, so p == NULL ⟺
+		 * linear(p) == 0).  §7u closed the relational sibling (the live _sbrk
+		 * `> __heap_end` consumer); this closes the equality gap noted there.
+		 * MHuge-gated, so compact/large/near — including the MP byte-compare —
+		 * are untouched.  See [[huge-mode-plan]]. */
+		if (memmodel == MHuge && (o == 'e' || o == 'n')
+		&& KIND(s0.ctyp) == PTR && KIND(s1.ctyp) == PTR
+		&& KIND(DREF(s0.ctyp)) != FUN) {
+			int ct = tmp++;
+			fprintf(of, "\t%%t%d =l call $qbe_huge_cmp(l ", ct);
+			psymb(s0);
+			fprintf(of, ", l ");
+			psymb(s1);
+			fprintf(of, ")\n");
+			sr.ctyp = INT;
+			fprintf(of, "\t");
+			psymb(sr);
+			fprintf(of, " =%c %s %%t%d, 0\n", irtyp_ret(sr.ctyp),
+				o == 'e' ? "ceql" : "cnel", ct);
+			break;
+		}
+
 		/* Compact/large (or explicit __far): `far_ptr ± idx` must use the
 		 * offset-only addfo/subfo ops (segment preserved, 16-bit offset
 		 * wraparound) — a flat `=l add` of the Scale path's sign-extended
