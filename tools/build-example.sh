@@ -289,23 +289,24 @@ if [ "$NO_LIBSTUB" = 1 ]; then
 	SHIM="$DOS_DIR/newlibc/shiminc"
 	NL_NORMALIZE='s/\bunsigned short int\b/unsigned short/g;s/\bunsigned long int\b/unsigned long/g;s/\bsigned short int\b/short/g;s/\bsigned long int\b/long/g;s/\blong long int\b/long long/g;s/\blong int\b/long/g;s/\bshort int\b/short/g;s/\bsigned char\b/char/g;s/\bsigned long long\b/long long/g;s/\bsigned long\b/long/g;s/\bsigned int\b/int/g'
 	NL_HALT2DOS='s/__asm__[[:space:]]*volatile[[:space:]]*([[:space:]]*"hlt"[[:space:]]*)/{ __asm__ volatile ("mov ax, 0x4c00"); __asm__ volatile ("int 0x21"); }/g'
-	# compile_newlibc_unit <source.c> <obj-base>
+	# compile_newlibc_unit <source.c> <obj-base> <out-dir>: cpp -> minic -> qbe
+	# -> asm_to_omf -> nasm into <out-dir>/<obj-base>.obj.
 	compile_newlibc_unit() {
-		local unit_src="$1" unit_base="$2"
+		local unit_src="$1" unit_base="$2" outd="$3"
 		clang -E -P -nostdinc -DDOS -D__ia16__ -DNO_LIBSTUB \
 			"-I$SHIM" "-I$INC_DIR" \
 			"-I$NL/include" "-I$NL/drivers" "-I$NL/libgloss" "-I$NL/vfs" \
 			"$unit_src" 2>>"$ERR" \
 			| tr -d '\r\032' | sed "$NL_NORMALIZE" | sed "$NL_HALT2DOS" \
-			> "$OUT_DIR/$unit_base.pp.c"
-		"$MINIC" -m "$MODEL" < "$OUT_DIR/$unit_base.pp.c" \
-			> "$OUT_DIR/$unit_base.ssa" 2>>"$ERR"
-		"$QBE" -t i8086 -m "$MODEL" "$OUT_DIR/$unit_base.ssa" \
-			> "$OUT_DIR/$unit_base.asm" 2>>"$ERR"
+			> "$outd/$unit_base.pp.c"
+		"$MINIC" -m "$MODEL" < "$outd/$unit_base.pp.c" \
+			> "$outd/$unit_base.ssa" 2>>"$ERR"
+		"$QBE" -t i8086 -m "$MODEL" "$outd/$unit_base.ssa" \
+			> "$outd/$unit_base.asm" 2>>"$ERR"
 		"$QBE_DIR/tools/asm_to_omf.py" "--model=$MODEL" "$unit_base" \
-			"$OUT_DIR/$unit_base.asm" "$OUT_DIR/$unit_base.omf.asm" 2>>"$ERR"
-		nasm -w-label-redef-late -f obj "$OUT_DIR/$unit_base.omf.asm" \
-			-o "$OUT_DIR/$unit_base.obj" 2>>"$ERR"
+			"$outd/$unit_base.asm" "$outd/$unit_base.omf.asm" 2>>"$ERR"
+		nasm -w-label-redef-late -f obj "$outd/$unit_base.omf.asm" \
+			-o "$outd/$unit_base.obj" 2>>"$ERR"
 	}
 	NL_SUPPORT=(
 		"$NL/libgloss/printf_wrappers.c"
@@ -319,11 +320,63 @@ if [ "$NO_LIBSTUB" = 1 ]; then
 		"$DOS_DIR/newlibc/dos_shim.c"
 		"$DOS_DIR/newlibc/dos_libc.c"
 	)
-	for tu in "${NL_SUPPORT[@]}"; do
-		tu_base="$(basename "$tu" .c)"
-		compile_newlibc_unit "$tu" "$tu_base"
-		LINK_OBJS+=("$OUT_DIR/$tu_base.obj")
-	done
+
+	# §7y: the newlibc support set depends ONLY on (model, its sources +
+	# headers, the toolchain) — never on the example being built — so the
+	# objs are byte-identical across every probe of a given model.  Before
+	# §7y every libstub-free build recompiled all ten TUs (~2 s/build, the
+	# §7w gate-build-time regression); now they are cached per model under
+	# build/nl-cache/<model> and reused across a whole gate run.  The stamp
+	# is a hash over the size+mtime of every dependency (support sources,
+	# runtime asm, the headers under shiminc / newlibc / minic-include, the
+	# minic+qbe binaries, asm_to_omf.py, near_to_far_rt.py, and this script —
+	# the clang flags + sed scripts live here), so editing ANY of them
+	# invalidates the cache (no stale-obj trap; cf. §7q).  NL_CACHE=0 forces
+	# a per-OUT_DIR recompile (the pre-§7y behavior).
+	NL_CACHE="${NL_CACHE:-1}"
+	if [ "$NL_CACHE" = 1 ]; then
+		CACHE="${NL_CACHE_DIR:-$QBE_DIR/build/nl-cache}/$MODEL"
+		nl_stamp_input() {
+			printf '%s\n' "$MODEL"
+			local f
+			for f in "${NL_SUPPORT[@]}" "$DOS_DIR"/*.asm \
+				"$MINIC" "$QBE" "$QBE_DIR/tools/asm_to_omf.py" \
+				"$QBE_DIR/tools/near_to_far_rt.py" "$0"; do
+				[ -e "$f" ] && stat -f '%N %z %m' "$f"
+			done
+			find "$SHIM" "$NL/include" "$NL/drivers" "$NL/libgloss" \
+				"$NL/vfs" "$INC_DIR" -name '*.h' \
+				-exec stat -f '%N %z %m' {} + 2>/dev/null | sort
+		}
+		nl_stamp="$(nl_stamp_input | shasum | cut -d' ' -f1)"
+		nl_want=()
+		for tu in "${NL_SUPPORT[@]}"; do
+			nl_want+=("$CACHE/$(basename "$tu" .c).obj")
+		done
+		nl_hit=0
+		if [ -f "$CACHE/.stamp" ] && \
+		   [ "$(cat "$CACHE/.stamp")" = "$nl_stamp" ]; then
+			nl_hit=1
+			for o in "${nl_want[@]}"; do [ -f "$o" ] || nl_hit=0; done
+		fi
+		if [ "$nl_hit" = 1 ]; then
+			LINK_OBJS+=("${nl_want[@]}")
+		else
+			rm -rf "$CACHE"; mkdir -p "$CACHE"
+			for tu in "${NL_SUPPORT[@]}"; do
+				tu_base="$(basename "$tu" .c)"
+				compile_newlibc_unit "$tu" "$tu_base" "$CACHE"
+				LINK_OBJS+=("$CACHE/$tu_base.obj")
+			done
+			echo "$nl_stamp" > "$CACHE/.stamp"   # stamp last: set -e aborts on a failed compile
+		fi
+	else
+		for tu in "${NL_SUPPORT[@]}"; do
+			tu_base="$(basename "$tu" .c)"
+			compile_newlibc_unit "$tu" "$tu_base" "$OUT_DIR"
+			LINK_OBJS+=("$OUT_DIR/$tu_base.obj")
+		done
+	fi
 fi
 
 # Stage 5: crt0_exe.obj + the runtime.
