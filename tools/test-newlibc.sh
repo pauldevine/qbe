@@ -125,6 +125,29 @@ NEWLIBC_BM_TESTS=(
 	# $NL/drivers/pic.c (the test includes upstream "pic.h", not bm_pic.h) and
 	# upstream timer.c (§8l).  Deterministic; bare-metal ONLY; small.
 	"pic_upstream_bm:35:::"
+	# §8s: the driver-sweep CAPSTONE -- ONE bare-metal program linking and
+	# running ALL SIX of newlibc's OWN drivers together (timer §8l, display
+	# §8m, keyboard §8n, sasi §8o, console §8p, pic §8q, the §8k gas->nasm
+	# in-place ports) in place of every bm_*.c mirror, where §8l..§8q each ran
+	# one upstream driver in isolation.  Two ISR-driven drivers run live the
+	# whole test (timer IR2 + keyboard IR6, acknowledged through the UPSTREAM
+	# pic_send_eoi); the SASI sector read runs UNDER those live ISRs (the §8k
+	# SAVE_ES drop), and data flows ACROSS drivers no single-driver test could
+	# exercise: the SASI LBA-0 disk label is written to the CRT via display.c
+	# and read back from VRAM, and the typed "v9k" (V9K_KEYPOST) is echoed to
+	# the CRT via display.c and read back from VRAM.  build-newlibc-
+	# baremetal.sh's per-upstream-header rules each fire on this file's
+	# `#include "<drv>.h"` lines and pull the matching $NL/drivers/<drv>.c, so
+	# NO build-glue change was needed -- the rules were designed additive for
+	# exactly this (link map: timer/display/keyboard/console/pic/sasi/block/
+	# font_data .obj, the only bm_*.obj is the always-linked harness
+	# bm_console.c).  Deterministic (booleans + the captured upstream
+	# console_puts line + the received chars); bare-metal ONLY (no live
+	# 8253/8259/VRAM/SASI on the DOS host); small (27,427 B code, well under
+	# the 64KB _TEXT ceiling).  The keypost fires at ~3 emulated seconds and
+	# the keyboard ring buffers it across the slow SASI read, so the keyboard
+	# loop drains all three chars whenever they land -> 45 s budget ample.
+	"all_upstream_bm:45:v9k::hd"
 	"serial_bm:25::victor:"
 	"memory_bm:15:::"
 	"crtc_bm:20:::"
