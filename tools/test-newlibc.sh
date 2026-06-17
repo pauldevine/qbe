@@ -101,6 +101,18 @@ NEWLIBC_BM_TESTS=(
 	# (V9K_KEYPOST); deterministic (fixed text + the received chars).  Bare-
 	# metal ONLY; small; 25 s budget.
 	"keyboard_upstream_bm:25:v9k::"
+	# §8p: the §8l/§8m/§8n upstream-driver pattern applied to the 7201
+	# channel-A serial console driver -- links and runs newlibc's OWN
+	# drivers/console.c (the §8k gas->nasm in-place port) instead of relying on
+	# the hand-mirrored bm_console.c.  Pure polled MMIO (no interrupts, like the
+	# §8m display); the captured harness serial IS channel A, the same channel
+	# console_putc/console_puts drive, so the driver under test produces the
+	# captured output directly (a console_* line in the golden proves its TX
+	# ran).  RX exercised in the deterministic no-input idle form.  build-
+	# newlibc-baremetal.sh links $NL/drivers/console.c (the test includes
+	# upstream "console.h", not bm_console.h) and -D__MINIC__ takes the Intel
+	# HW_*_BYTE fork.  Deterministic; bare-metal ONLY; small.
+	"console_upstream_bm:20:::"
 	"serial_bm:25::victor:"
 	"memory_bm:15:::"
 	"crtc_bm:20:::"

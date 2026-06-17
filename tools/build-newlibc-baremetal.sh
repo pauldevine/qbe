@@ -150,6 +150,22 @@ if [ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h' "$SRC" \
    && grep -q '"keyboard\.h"' "$SRC"; then
 	SUPPORT_TUS+=("$NL/drivers/keyboard.c")
 fi
+# §8p: same pattern for the UPSTREAM serial console driver -- a hand-written
+# bare-metal program that includes newlibc's OWN drivers/console.h (NOT a
+# bm_*.h mirror) links drivers/console.c (the §8k gas->nasm in-place port: its
+# intel_dev_write_byte + SAVE_ES/RESTORE_ES sites fork `#if __MINIC__`).  No
+# symbol collision with the always-linked bm_console.c: bm_console.c defines
+# only bm_*-prefixed names, and the unprefixed console_* aliases live in
+# bm_shim.c -- which is test-host / bm_stdio only, so the guard excludes the
+# §7i serial_loopback_test that uses them.  The `"console.h"` pattern (leading
+# quote) does NOT match `"bm_console.h"`.  console.c compiles to one TU code
+# segment, so --gc-sections keeps its unused cooked-console paths
+# (console_dev_read/console_echo_input) live; the test supplies stub
+# keyboard_getc/display_putc for them.
+if [ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h' "$SRC" \
+   && grep -q '"console\.h"' "$SRC"; then
+	SUPPORT_TUS+=("$NL/drivers/console.c")
+fi
 if grep -q 'bm_interrupts\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
 fi

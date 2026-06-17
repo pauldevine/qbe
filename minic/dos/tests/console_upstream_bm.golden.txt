@@ -1,0 +1,8 @@
+Victor 9000 bare-metal UPSTREAM console.c test (qbe/minic)
+phase 1: console_init ran; channel A alive in captured region
+phase 2: console_puts -> UPSTREAM_console_puts_OK
+phase 3: console_putc -> wxyz
+phase 4: console_tx_ready signals ready after drain: yes
+phase 5: console_rx_ready with no input is 0: yes
+phase 6: console_getc_nonblock with no input is -1: yes
+PASS: upstream console.c bare-metal checks completed.
