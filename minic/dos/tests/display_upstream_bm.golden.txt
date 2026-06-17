@@ -1,0 +1,11 @@
+Victor 9000 bare-metal UPSTREAM display.c test (qbe/minic)
+phase 1: upstream display_init (font + CRTC + clear)
+phase 2: cursor homed after clear: yes
+phase 3: VRAM blank word is glyph-ptr 0x80: yes
+phase 4: font RAM matches table at glyph 'A': yes
+phase 5: puts writes glyph pointers + advances cursor: yes
+phase 6: putc_at honors position + attribute: yes
+phase 7: newline blanks rest of row, moves cursor: yes
+phase 8: tab + backspace cursor movement: yes
+phase 9: scroll from bottom row: yes
+PASS: upstream display.c bare-metal checks completed.

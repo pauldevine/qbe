@@ -126,6 +126,17 @@ if [ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h' "$SRC" \
    && grep -q '"timer\.h"' "$SRC"; then
 	SUPPORT_TUS+=("$NL/drivers/timer.c")
 fi
+# §8m: same pattern for the UPSTREAM display driver -- a hand-written
+# bare-metal program that includes newlibc's OWN drivers/display.h (NOT the
+# bm_display.h mirror) links drivers/display.c + drivers/font_data.c (display.c
+# copies victor_font into font RAM).  Same guard as timer.c: test-host /
+# bm_stdio programs pull bm_display.c + bm_shim.c's display_* aliases, which
+# would collide with upstream display.c's display_* symbols.  The `"display.h"`
+# pattern (leading quote) does NOT match `"bm_display.h"`.
+if [ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h' "$SRC" \
+   && grep -q '"display\.h"' "$SRC"; then
+	SUPPORT_TUS+=("$NL/drivers/display.c" "$NL/drivers/font_data.c")
+fi
 if grep -q 'bm_interrupts\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
 fi

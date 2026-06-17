@@ -74,6 +74,17 @@ NEWLIBC_BM_TESTS=(
 	# (the [50..80] window absorbs MAME's 125 KHz ch2 clock), so the golden
 	# is toolchain-stable.  Bare-metal ONLY; small; 30 s budget.
 	"timer_upstream_bm:30:::"
+	# §8m: the same display checks as display_bm, but linking newlibc's OWN
+	# drivers/display.c + drivers/font_data.c (the §8k gas->nasm in-place
+	# port) IN PLACE OF the hand-mirrored bm_display.c/bm_font_data.c -- the
+	# second proof an upstream phase3 driver RUNS bare-metal (after §8l's
+	# timer.c).  build-newlibc-baremetal.sh links $NL/drivers/display.c (the
+	# test includes upstream "display.h", not bm_display.h) and -D__MINIC__
+	# makes display.c's write/read_crtc_reg take the Intel HW_*_BYTE fork.
+	# The display driver is pure polled MMIO (no interrupts); the test reads
+	# every effect back from VRAM/CRTC over serial.  Deterministic booleans
+	# only, so the golden is toolchain-stable.  Bare-metal ONLY; small.
+	"display_upstream_bm:20:::"
 	"display_bm:20:::"
 	"keyboard_bm:25:v9k::"
 	"serial_bm:25::victor:"
