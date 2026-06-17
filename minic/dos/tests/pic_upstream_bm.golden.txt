@@ -1,0 +1,14 @@
+Victor 9000 bare-metal UPSTREAM pic.c test (qbe/minic)
+phase 1: upstream pic_init() + install timer ISR (INT 0x42)
+phase 2: upstream timer_init() (8253 ch2 + unmask IR2)
+phase 3: sti (whole test runs under the live timer ISR)
+phase 4: IMR after init is 0xfb (only IR2 open): yes
+phase 5: timer ticks advance (EOI through pic_send_eoi): yes
+phase 6: pic_disable_irq(5) sets the IR5 bit: yes
+phase 7: timer undisturbed by IR5 masking: yes
+phase 8: pic_enable_irq(5) clears the IR5 bit: yes
+phase 9: pic_set_mask whole-mask restore reads back: yes
+phase 10: pic_disable_irq(2) freezes ticks: yes
+phase 11: pic_enable_irq(2) resumes ticks: yes
+phase 12: EOI verified by continuous ticks: yes
+PASS: upstream pic.c bare-metal checks completed.

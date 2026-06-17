@@ -113,6 +113,18 @@ NEWLIBC_BM_TESTS=(
 	# upstream "console.h", not bm_console.h) and -D__MINIC__ takes the Intel
 	# HW_*_BYTE fork.  Deterministic; bare-metal ONLY; small.
 	"console_upstream_bm:20:::"
+	# §8q: the §8l/§8m/§8n/§8o/§8p upstream-driver pattern applied to the LAST
+	# §8k-translated driver -- the 8259A PIC itself.  Links and runs newlibc's
+	# OWN drivers/pic.c (pic_init/enable_irq/disable_irq/send_eoi/get/set_mask)
+	# IN PLACE OF the hand-mirrored bm_pic.c (pic_* vs bm_pic_*, no collision).
+	# The whole test runs UNDER A LIVE TIMER ISR routed through the UPSTREAM
+	# pic_send_eoi every tick (continuous ticks across the run prove the EOI
+	# path); masking IR2 must freeze ticks and unmasking resume them (the mask
+	# gates delivery).  Exercises the §8k Intel interrupt_flags_save fork
+	# (pushf/pop word [bp-10]/cli) live.  build-newlibc-baremetal.sh links
+	# $NL/drivers/pic.c (the test includes upstream "pic.h", not bm_pic.h) and
+	# upstream timer.c (§8l).  Deterministic; bare-metal ONLY; small.
+	"pic_upstream_bm:35:::"
 	"serial_bm:25::victor:"
 	"memory_bm:15:::"
 	"crtc_bm:20:::"

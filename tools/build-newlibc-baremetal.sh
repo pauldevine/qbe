@@ -166,6 +166,19 @@ if [ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h' "$SRC" \
    && grep -q '"console\.h"' "$SRC"; then
 	SUPPORT_TUS+=("$NL/drivers/console.c")
 fi
+# §8q: same pattern for the UPSTREAM 8259A PIC driver -- a hand-written
+# bare-metal program that includes newlibc's OWN drivers/pic.h (NOT a bm_*.h
+# mirror) links drivers/pic.c (the §8k gas->nasm in-place port: its pic_delay +
+# interrupt_flags_save + SAVE_ES/RESTORE_ES sites fork `#if __MINIC__`).  No
+# symbol collision with the mirror: upstream pic.c defines pic_* and bm_pic.c
+# defines bm_pic_*, so even if a future test pulled both they would not clash;
+# but the guard keeps the upstream pic.c rule off the bm_*-mirror tests, which
+# all pull bm_pic.c via their own bm_*.h grep rules below.  The `"pic.h"`
+# pattern (leading quote) does NOT match `"bm_pic.h"`.
+if [ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h' "$SRC" \
+   && grep -q '"pic\.h"' "$SRC"; then
+	SUPPORT_TUS+=("$NL/drivers/pic.c")
+fi
 if grep -q 'bm_interrupts\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
 fi
