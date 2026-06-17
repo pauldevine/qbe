@@ -108,7 +108,23 @@ NEWLIBC_BM_TESTS=(
 	"interrupt_bm:120:::"
 	"tty_bm:30:vx\b9k\nz::"
 	"stdio_bm:45:vx\b9k\nz::"
-	"sasi_bm:90:::hd"
+	# §8o: bumped small -> medium.  Upstream newlibc growth (FAT/VFS/block)
+	# pushed sasi_bm's small-model code to 66,315 B, 779 B over the 65,536
+	# _TEXT ceiling, so it WRAPPED and hung at startup (the §6p/§6q symptom:
+	# "read-only" or here bm_stdio+SASI code creeping past 64 KB).  This is the
+	# heaviest small disk test (full bm_stdio FAT stack + bm_sasi.c); the
+	# others still have margin (sasi_fat_smoke_test 65,221).  Medium is
+	# multi-CS (71,615 B code, no single-_TEXT ceiling); golden unchanged.
+	"sasi_bm:180:::hd:medium"
+	# §8o: the §8l/§8m/§8n upstream-driver pattern applied to drivers/sasi.c
+	# (the first block-storage driver).  Drives the UPSTREAM sasi_register +
+	# block read/write on the real -scsi:0 disk (hd field -> V9K_HARD_DISK
+	# scratch copy) IN PLACE OF the hand-mirrored bm_sasi.c.  The SASI
+	# transfers run UNDER A LIVE TIMER ISR (upstream timer.c, §8l) so a clean
+	# round-trip validates the §8k SAVE_ES drop (the §6d ISR ABI owns ES).
+	# Block-level only (no FAT/VFS) -> small model; single-sector WRITE(6) is
+	# fast, so the 90 s budget is ample.
+	"sasi_upstream_bm:90:::hd"
 	# §6j: UNMODIFIED upstream newlibc tests re-run bare-metal through
 	# bm_testhost + the bm_stdio stack (build-newlibc-baremetal.sh
 	# test-host mode).  Output is line-identical to the DOS-hosted

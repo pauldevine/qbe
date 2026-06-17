@@ -1,0 +1,13 @@
+Victor 9000 bare-metal UPSTREAM sasi.c test (qbe/minic)
+phase 1: PIC re-init + install timer ISR (INT 0x42)
+phase 2: upstream timer_init() (timeout clock, IR2)
+phase 3: sti (SASI transfers will run under live ticks)
+phase 4: register UPSTREAM sasi + block_init: controller up
+phase 5: geometry sectors==59058: yes
+phase 6: read LBA 0 under live ISR
+phase 6: LBA0[0..15] = 0x0002 0x0000 0x0001 0x0000 0x0074 0x0061 0x006e 0x0064 0x006f 0x006e 0x005f 0x0037 0x0030 0x0033 0x005f 0x006d
+phase 7: LBA-0 label is "tandon_703_mame": yes
+phase 8: uncached re-read checksum matches: yes
+phase 9: WRITE(6) round-trip @ LBA 59057 under live ISR: pattern verified
+phase 10: timer still ticking after transfers: yes
+PASS: upstream sasi.c bare-metal checks completed.

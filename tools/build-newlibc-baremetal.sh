@@ -203,8 +203,23 @@ fi
 # registry it registers with.  Unmodified upstream SASI tests (§6p) include
 # the API header by its upstream name "sasi.h"; bm_sasi.h is a byte-for-byte
 # compatible port (same struct layout, names, constants), so either include
-# links bm_sasi.c.  The pattern matches both `sasi.h` and `bm_sasi.h`.
-if grep -q 'sasi\.h' "$SRC"; then
+# links bm_sasi.c.  The `sasi\.h` pattern matches both `sasi.h` and
+# `bm_sasi.h`.
+#
+# §8o: same upstream-driver pattern as timer.c (§8l) / display.c (§8m) /
+# keyboard.c (§8n) -- a non-test-host, non-bm_stdio program including newlibc's
+# OWN drivers/sasi.h (the leading-quote `"sasi\.h"`, which does NOT match
+# `"bm_sasi.h"`) links the UPSTREAM drivers/sasi.c (the §8k gas->nasm in-place
+# port) instead of bm_sasi.c.  The guard is REQUIRED: the §6p/§6q upstream SASI
+# tests run test-host (they print through bm_stdio, which pulls no sasi symbols
+# but is the wrong harness for this) and the §6i sasi_bm includes bm_stdio.h --
+# both must keep bm_sasi.c, so they fall to the elif.  Mutually exclusive with
+# the bm_sasi.c branch so the two SASI drivers never both link.
+if [ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h' "$SRC" \
+   && grep -q '"sasi\.h"' "$SRC"; then
+	SUPPORT_TUS+=("$NL/drivers/sasi.c"
+	              "$NL/drivers/block.c")
+elif grep -q 'sasi\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_sasi.c"
 	              "$NL/drivers/block.c")
 fi
