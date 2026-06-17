@@ -1,0 +1,10 @@
+Victor 9000 bare-metal UPSTREAM timer.c test (qbe/minic)
+phase 1: PIC re-init + install timer ISR (INT 0x42)
+phase 2: upstream timer_init() (8253 ch2 100 Hz + IR2 unmask)
+phase 3: upstream timer_get_frequency()==100: yes
+phase 4: sti
+phase 5: ticks advance: yes
+phase 6: delay(500ms) elapsed in [50..80]: yes
+phase 7: 1500ms under live interrupts: survived
+phase 8: cli freezes ticks: yes
+PASS: upstream timer.c bare-metal checks completed.

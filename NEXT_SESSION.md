@@ -1,3 +1,65 @@
+# Next session (the §8k handoff left NO carried compiler track and offered three consumer-driven directions; the user (AskUserQuestion) chose the **functional bare-metal gate** — prove a §8k-translated upstream phase3 driver RUNS on hardware, not just compiles.  §8l [2026-06-17, this session] **WIRED newlibc's OWN `drivers/timer.c` into a bare-metal image IN PLACE OF the hand-mirrored `bm_timer.c` and ran it on MAME victor9k — the FIRST proof an upstream phase3 driver RUNS bare-metal (§8k was compile-only); the new `timer_upstream_bm` battery test is a FIRST-RUN PASS (bare-metal battery 41 → 42), NO qbe/minic/emit compiler source touched (→ `make check` green, compiler byte-identical, test-dos/MP/stevie provably unaffected, no emit audit, no MP byte-compare).**  The new test (`minic/dos/newlibc/timer_upstream_bm.c`, modeled on §6d's `timer_bm.c`) drives the UPSTREAM `timer_init`/`timer_get_ticks`/`timer_delay_ms`/`timer_get_frequency`/`timer_tick_handler` API; the interrupt plumbing is the GENERIC toolchain feature (not a driver) — a local `timer_isr` is the compiler-emitted ES-safe iret ABI (`__attribute__((interrupt))` → QBE `interrupt` linkage → the §6d i8086 prologue/epilogue) routing each IR2 tick to upstream `timer_tick_handler()` + the specific EOI, installed via an inline IVT write (mirroring `bm_install_isr`'s model-agnostic seg:off / `qbe_get_cs()` logic), with `bm_pic_init()` doing the mandatory 8259 re-init before `sti`.  **NOTHING from `bm_timer.c` is linked** — verified via the link map: every `timer_*` symbol resolves to `mod=timer.obj` (upstream), and `bm_timer.obj` is absent.  **Two build-glue changes to `tools/build-newlibc-baremetal.sh` ONLY (additive):** (1) added `-D__MINIC__` to the `clang -E` line — the §8k convention extended to the real bare-metal build path — so `timer.c`'s `intel_dev_write_byte` takes the Intel `#if defined(__MINIC__)` → `HW_WRITE_BYTE` fork (verified in the generated asm: `mov es,0xE000` + `mov byte es:[bx]` byte stores in the 8253-control-then-count order, ZERO gas `movb`/`pushw`/`%%es` leftovers); harmless for every existing test because none of the linked `bm_*.c` or portable stdio TUs test `__MINIC__`, and the §8k-ported upstream driver `.c` files + `drivers/interrupts.h` are NOT linked by the bare-metal build (the §6y `minic/dos/newlibc/interrupts.h` shadow wins the include path) — re-confirmed by `timer_bm`'s golden being byte-unmoved.  (2) a SUPPORT_TUS rule: a non-test-host, non-`bm_stdio` program that includes upstream `"timer.h"` (NOT `bm_timer.h`) links `$NL/drivers/timer.c`, guarded `[ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h'`, because test-host / `bm_stdio` tests already pull `bm_timer.c` + `bm_shim.c`'s unprefixed `timer_*` aliases, which would DUPLICATE-SYMBOL-collide with upstream `timer.c`'s `timer_*` — verified bug-free: `pic_test` (a test-host test that ALSO `#include "timer.h"`) links only `bm_timer.obj`, never `timer.obj`.  The test adds a `timer_get_frequency()==100` phase — an upstream function `bm_timer.c` does not even have.  The golden (`minic/dos/tests/timer_upstream_bm.golden.txt`) is deterministic booleans/ranges only (the `[50..80]` elapsed window absorbs MAME's 125 KHz channel-2 clock vs the documented 100 KHz, so it is toolchain-stable, NOT timing-derived); bare-metal ONLY (the DOS host has no live 8253); small model (6609 B code); 30 s budget; FIRST-RUN PASS on MAME — all 8 phases (freq==100 / live ticks advance / 500 ms delay measured / 1500 ms sustained under live interrupts / cli freezes ticks).  **VERIFICATION:** `timer_upstream_bm` `[ok]` AND `timer_bm` `[ok]` through the battery harness (which builds, runs on MAME, and golden-diffs); only build scripts + a new test + golden + one battery entry changed, so the compiler is byte-identical → test-dos UNCHANGED, MP/stevie provably unaffected, no emit audit, no MP byte-compare.  newlibc tree is UNTOUCHED this session (the §8k port is already committed on branch `minic-asm-port` @ `5b6b261`).  **⇒ Next session — the bare-metal-RUN end-state is now proven for ONE driver; all follow-ups consumer-driven (pick with the user):** (1) wire the other §8k-translated drivers (`display`/`keyboard`/`pic`/`sasi`/`console`) bare-metal IN PLACE OF their `bm_*.c` mirrors — each needs its hand-mirrored battery test re-pointed at the upstream API, the exact `timer_upstream_bm` pattern (a self-contained test + the upstream-driver SUPPORT_TUS rule generalized, OR per-driver rules); (2) the minic-PARSE bucket (a DIFFERENT track than §8k's nasm bucket): `interrupts.c`'s ISR-function-pointer parameter declarator (`void ISR_HANDLER (*isr)(void)`) is a real bounded minic FRONTEND parse-feature, `vshell.c` + 6 `dos_tests` carry Watcom `_asm{}` blocks (park or rewrite); (3) decide whether to MERGE the `minic-asm-port` newlibc branch into `main` and retire the now-redundant §6y `minic/dos/newlibc/interrupts.h` shadow now that upstream `interrupts.h` is minic-aware.  NO QBE/minic codegen bug open; NO carried compiler track remains.)
+
+## §8l session notes (2026-06-17)
+
+### The pick
+- §8k handoff: NO carried compiler track; three consumer-driven options.
+  User (AskUserQuestion) chose option (1) the **functional bare-metal gate** —
+  prove a §8k upstream driver RUNS on hardware, not just compiles.
+
+### What was built
+- New test `minic/dos/newlibc/timer_upstream_bm.c` (modeled on §6d timer_bm.c):
+  drives the UPSTREAM timer_* API (timer_init/get_ticks/delay_ms/
+  get_frequency/tick_handler), links newlibc's OWN drivers/timer.c IN PLACE
+  OF bm_timer.c.  The ISR plumbing is the generic compiler-emitted ABI: a
+  local `__attribute__((interrupt))` timer_isr routes each IR2 tick to
+  upstream timer_tick_handler() + the specific EOI; installed via an inline
+  IVT write (mirrors bm_install_isr); bm_pic_init() re-inits the 8259.
+  NOTHING from bm_timer.c linked (map: every timer_* from mod=timer.obj).
+- Adds a timer_get_frequency()==100 phase (an upstream fn bm_timer.c lacks).
+
+### build-newlibc-baremetal.sh changes (build-glue ONLY, additive)
+- (1) `clang -E` line gained `-D__MINIC__` (the §8k convention, now on the
+  REAL bare-metal build path) → timer.c's intel_dev_write_byte takes the
+  Intel HW_WRITE_BYTE fork.  Verified codegen: `mov es,0xE000` + `mov byte
+  es:[bx]` in control-then-count order, 0 gas leftovers (movb/pushw/%%es).
+  Harmless for existing tests: no linked bm_*.c / portable stdio TU tests
+  __MINIC__, and the §8k-ported upstream driver .c + drivers/interrupts.h
+  aren't linked (the §6y minic/dos/newlibc/interrupts.h shadow wins the
+  include path).  timer_bm golden byte-unmoved confirms it.
+- (2) SUPPORT_TUS rule: non-test-host, non-bm_stdio program including
+  upstream "timer.h" (not bm_timer.h) links $NL/drivers/timer.c.  Guard
+  `[ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h'` is REQUIRED: test-host /
+  bm_stdio tests pull bm_timer.c + bm_shim.c's timer_* aliases, which would
+  duplicate-symbol-collide with upstream timer.c.  Verified: pic_test (a
+  test-host test that ALSO #include "timer.h") links only bm_timer.obj.
+
+### Verification
+- timer_upstream_bm: FIRST-RUN PASS on MAME victor9k, 8 phases (freq==100 /
+  ticks advance / 500ms delay in [50..80] / 1500ms survived / cli freezes).
+- Battery harness (build + MAME run + golden-diff): timer_upstream_bm [ok]
+  AND timer_bm [ok] (the -D__MINIC__ addition didn't move timer_bm).
+- pic_test build inspected: links bm_timer.obj only, NOT timer.obj (guard ok).
+- Only build scripts + new test + golden + battery entry changed → compiler
+  byte-identical → make check green, no emit audit, no MP byte-compare,
+  test-dos unchanged.  Golden is deterministic ([50..80] absorbs MAME's
+  125 KHz ch2 clock), toolchain-stable.  Bare-metal ONLY (no live 8253 on
+  DOS); small; 30 s budget.  newlibc tree untouched (§8k port already
+  committed on minic-asm-port @ 5b6b261).
+
+### ⇒ Next session (consumer-driven, with the user)
+- The bare-metal-RUN end-state is proven for ONE driver (timer.c).
+- (1) wire the other §8k drivers (display/keyboard/pic/sasi/console)
+  bare-metal in place of their bm_*.c — same timer_upstream_bm pattern
+  (self-contained test + the upstream-driver SUPPORT_TUS rule generalized);
+- (2) minic-PARSE bucket: interrupts.c ISR-fn-ptr param declarator (bounded
+  frontend feature); vshell + 6 dos_tests Watcom _asm{} (park/rewrite);
+- (3) decide: merge minic-asm-port into newlibc main; retire the redundant
+  §6y minic/dos/newlibc/interrupts.h shadow.
+- NO QBE/minic codegen bug open; NO carried compiler track remains.
+
+---
+
 # Next session (the §8j handoff left NO carried compiler track open and offered "gas→nasm driver porting" as track #1 of the consumer-driven Phase-6 frontier; the user (AskUserQuestion) chose it, and chose to **translate the gas/AT&T inline asm in-place in the upstream `~/projects/newlibc/phase3_newlib` tree** (behind a minic-detection `#ifdef`, alongside the existing ia16-gcc/Watcom branches) rather than maintain ported copies in the qbe tree.  §8k [2026-06-17, this session] **PORTED the entire nasm-failure bucket — the triage sweep's gas/AT&T inline-asm TUs now compile END-TO-END under minic: triage PASS 53 → 65 at BOTH small AND medium, the nasm bucket 12 → 0; NO qbe compiler source touched (minic/qbe/emit byte-identical → `make check` green, test-dos/MP/stevie provably unaffected, no emit audit, no MP byte-compare).**  The 12 nasm-bucket TUs were the 6 drivers (`console`/`display`/`keyboard`/`pic`/`sasi`/`timer`), `libgloss/board_init`, and 5 tests (`crtc_test`/`es_ss_diagnostic`/`font_ram_test`/`pic_test`/`serial_debug`); every one failed nasm at a gas/AT&T construct minic passes through VERBATIM (it compiles C faithfully but does not translate asm syntax — the §8j conclusion).  **CONVENTION introduced:** the minic-driving preprocess now defines `-D__MINIC__` (added to `build/newlibc-triage/sweep.sh`'s `clang -E` line; the existing `-D__ia16__` stays — ia16-gcc ALSO defines `__ia16__`, so it can't distinguish minic, and the far-pointer `MK_FP` GCC branch is still wanted), so upstream forks its inline asm `#if defined(__MINIC__)` (minic/nasm/Intel) `#else` (gas/AT&T) — ia16-gcc and Watcom take the unchanged `#else`, leaving their builds BYTE-IDENTICAL.  **THE IDIOMS + their minic translations (all additive, all `#if defined(__MINIC__)`-gated):** (1) **shared `drivers/interrupts.h`** — `SAVE_ES`/`RESTORE_ES` (`movw %%es,%0`) → no-ops (the §6d ISR ABI owns ES; a volatile far access carries its own segment — the §6e/§6i/§6y reasoning), which makes `get_interrupt_vector` collapse to a plain far-pointer IVT read with an unused `static`, exactly the §6y `minic/dos/newlibc/interrupts.h` shadow; THIS HEADER ALONE unblocked board_init + crtc_test + font_ram_test + pic_test and the `get_interrupt_vector` copy every driver carries (PASS 53→57); (2) **`intel_dev_write_byte`** (timer.c, console.c, serial_debug.c — the order-sensitive 8253 byte store the ia16 compiler must not merge) → `HW_WRITE_BYTE(0xE000, offset, value)` (the v9k_hw.h volatile far MMIO macro; minic does not coalesce volatile far stores, so ordering holds — the bm_*.c approach); (3) **`write_crtc_reg`/`read_crtc_reg`** (display.c, ES byte access to 0xE800:0/1) → `HW_WRITE_BYTE`/`HW_READ_BYTE(0xE800, …)` with the `delay()` between, ordering preserved; (4) **`pic_delay`** (pic.c, gas local labels `jmp 1f;1:jmp 2f;2:`) → `jmp short $+2` twice (nasm has no `1f`/`2f`; same two fall-through jumps); (5) **flags-save/cli** (pic.c `interrupt_flags_save`, keyboard.c `keyboard_flags_save`, sasi.c `sasi_save_flags_cli`/`sasi_restore_flags`) → Intel `pushf`/`pop word %0`/`cli` (and `push word %0`/`popf`), the §8j extended-asm operand `%0` resolving to the local's frame slot — verified in the generated asm as `pushf / pop word [bp-10] / cli`; (6) the empty `__asm__ volatile("" ::: "memory")` barrier in sasi.c compiles to nothing, fine.  **THE ONE NON-OBVIOUS BUG (the es_ss_diagnostic lesson): the §8j extended-asm operand resolution matches a local by NAME and needs a uniquely-named slot-resident temp.**  `CAPTURE_REGISTERS` is a macro that reuses local names (`_cap_es`, …) and is expanded at SEVERAL call sites in one function → multiple same-named allocs → emit's `%name`→`[bp±N]` scan can't pick a slot-resident temp → the `%_cap_es` token reached nasm unresolved.  FIX: read each register through its OWN `static` helper function (`cap_seg_es()`/…), so the operand local is unique within each function scope — one operand, one frame slot, the documented §8j single-operand pattern.  (Faithful-enough for the diagnostic, which is moot under minic anyway: CS/SP now reflect the helper frame but consistently before/after, so no false "corruption".)  **VERIFICATION:** triage at small AND medium both PASS 65, nasm bucket empty; the ported codegen inspected and sound (flags-save resolves to `[bp-10]`; the CRTC/dev-write emit `mov ax,0xE800/0xE000; mov es,ax; mov byte ptr es:[bx],cl` with the address→delay→data ordering intact; `pic_delay` emits `jmp short $+2` ×2).  NO qbe-tree source changed (only the gitignored `build/newlibc-triage/sweep.sh` got `-D__MINIC__`; the newlibc edits are a separate repo) → `make check` green, the compiler is byte-identical, so test-dos/MP/stevie can't regress (no emit audit, no MP byte-compare needed).  newlibc-repo diff: 9 files, +127 lines, ALL additive + `__MINIC__`-gated (left UNCOMMITTED on `~/projects/newlibc` branch `main` pending the user — separate repo).  **WHAT THIS DOES AND DOESN'T BUY:** the user's ask — "real phase3 drivers compiling end-to-end under minic" — is MET (12/12 nasm-bucket TUs, small + medium).  The honest limitation is COMPILE-correctness, not yet HARDWARE-correctness: the translations mirror the already-MAME-verified bm_*.c / §6y idioms and the codegen is sound, but nothing here was RUN bare-metal — the upstream drivers are not yet wired into a bare-metal image (the build path currently links the hand-mirrored bm_*.c).  **⇒ Next session — pick consumer-driven (with the user):** (1) **functional bare-metal gate** — wire ONE upstream driver (e.g. `timer.c`) into a bare-metal image IN PLACE OF its `bm_*.c` and run an existing battery test on MAME victor9k, proving the in-place-translated driver RUNS (the real Phase-6 end-state: newlibc's own drivers replace the bm_*.c mirrors); (2) the **minic-parse bucket** (8 TUs, a DIFFERENT track than this session's nasm bucket): `interrupts.c`'s ISR-function-pointer parameter declarator (`void ISR_HANDLER (*isr)(void)`) is a real bounded minic FRONTEND parse-feature, `vshell.c` + 6 `dos_tests` carry Watcom `_asm{}` blocks (park or rewrite); (3) decide whether to commit the newlibc ports and/or retire the now-redundant §6y `minic/dos/newlibc/interrupts.h` shadow now that upstream is minic-aware.  NO QBE/minic codegen bug is open; NO carried compiler track remains.)
 
 ## §8k session notes (2026-06-17)
@@ -65,66 +127,4 @@
 
 ---
 
-# Next session (the §8i handoff said NO carried compiler track remained, so this session took on the user-chosen Phase-6 frontier **"compile newlib proper"** — scoped (per the user's correction) to `~/projects/newlibc/phase3_newlib`'s OWN sources, NOT external/upstream newlib.  §8j [2026-06-16, this session] **RE-RAN the §6a triage sweep on the current phase3_newlib tree (now 53/66 TUs compile, up from §6a's 46 — the portable subset all lands) and FIXED the one genuine codegen bug it flushed: GCC extended-asm OUTPUT/INPUT operands (`"=r"`/`"=m"`/`"r"`/`"m"` bound to a local) now work END-TO-END; `tools/test-dos.sh` 376 → 381, the triage qbe failure bucket went 4 → 0, `make check` green, emit audit clean (0 clobbers / 124,955 regions — i8086/emit.c changed so the audit was REQUIRED and run), MP compact body 689,760 BYTE-IDENTICAL → no Victor run.**  The triage's 20 failures split into three clean buckets: **qbe (4)** — `display`/`keyboard`/`pic`/`sasi`, the `"=r"`/`"=m"` output-operand bug (the LONE genuine codegen defect); **nasm (8→12 after the fix)** — gas/AT&T mnemonics (`pushw %%es`, `movb`, `$imm`, AT&T operand order) that nasm rejects; **minic-parse (8)** — `interrupts.c` (an ISR-function-pointer parameter declarator), `vshell.c`, and 6 `dos_tests` (Watcom `_asm{}` blocks).  KEY FINDING: the `"=r"` bug was an **incomplete feature**, not a one-line abort — minic parsed extended-asm operands and substituted the local as `[bp-%name]` into the opaque asm string, but (1) QBE's `promote` ABORTED on an output slot (`slot %x is read but never stored to`, mem.c:108 — the asm's write is invisible to QBE dataflow), (2) an INPUT slot was the dual defect (stored-but-IR-never-read → `promote` forwarded it into a register and removed the alloc, leaving `[bp-%name]` dangling), and (3) the i8086 backend printed the asm string VERBATIM — it never resolved `%name` to a real frame offset, so even past the abort `[bp-%name]` reached nasm as an undefined symbol.  The existing `minic/test/asm_clobber_test.c` (same `"=m"(result)` pattern) was NEVER gated, confirming the feature had never worked end-to-end.  **FIX (3 parts, COPY/ADD-style, additive):** (A) **minic.y** — lower a local-Var operand `%0` to the bare temp ref `%name` (was the never-resolved `[bp-%name]` guess; output branch ~5309, input branch ~5323; the `[_glo%d]` global branch left as-is, no consumer); (B) **QBE `mem.c` new pass `asmvol(fn)`** (declared in all.h, called in main.c right before `markvol`, after `filluse`) — scans every `Oasm` instruction's string for `%name` tokens (skips `%%` escapes), matches each to an alloc temp by name, and sets that alloc's `vol=1` so BOTH `promote` (mem.c:65 vol-skip) and `coalesce` (mem.c:275 vol-skip) keep the slot in memory; `markvol` (run next) then propagates the bit to the slot's own readback load/store.  Handles inputs AND outputs uniformly with NO `promote`-logic change; a no-op unless an asm names a slot, so all currently-compiling code (MP/stevie/the gate) is byte-identical; (C) **i8086/emit.c** `Oasm` handler — resolve each `%name` token to `[bp±N]` via `fn->tmp[t].slot` + the existing `slot(SLOT(idx), fn)` offset formatter; a name matching no slot-resident temp (e.g. a gas `%reg` surviving `%%` handling) is emitted verbatim, so the `%%`→`%` path is byte-identical.  Gated by the all-new `asm_output_probe` (`minic/dos/examples/asm_output_probe.c`, small+medium+compact+large+huge, NASM-valid Intel-syntax mnemonics so it compiles end-to-end and runs) — bug-loud: on the unfixed toolchain the build aborts at the QBE stage → no `.exe` → golden diff fails.  Golden `out_r=4660 / out_m=22136 / dbl21=42 / dblr=9320 / PASS`, byte-identical across all five .EXE models (verified each in DOSBox; `out_r` = `"=r"` immediate write, `out_m` = sasi's `"=m"`, `dbl` = `"=r"` output + `"r"` input round trip).  Generated asm confirms the slot survives + resolves: `mov word [bp-10], 0x1234` (the asm write) then `mov ax, word [bx]` reading the SAME `[bp-10]` (the readback).  **WHAT THIS DOES AND DOESN'T BUY for "compile newlib proper":** the fix eliminates the entire qbe failure CLASS — the 4 drivers no longer abort at QBE and advance one full stage to the nasm bucket — but they STILL don't compile end-to-end because their inline asm is gas/AT&T syntax (minic faithfully compiles C but passes asm templates through VERBATIM; it does not translate syntax).  So PASS stayed at 53; the fix is a real codegen-correctness gain and a PREREQUISITE for any ported driver (a nasm-ported `keyboard.c` still uses `"=r"(flags)`), but the real drivers need source porting to Intel/nasm — exactly what the project already did via the hand-mirrored `bm_*.c` ports, and what §6a flagged as "driver asm needs per-target porting" (step-4 work).  STRATEGY: the fix is additive (new QBE pass + emit-handler extension + 2-line minic substitution change), and provably codegen-neutral for everything that compiles today (MP byte-identical; gate's existing entries all unchanged at 381/381).  **⇒ Next session: NO carried compiler track is open again.**  The "compile newlib proper" frontier for phase3_newlib is now portable-subset-COMPLETE (53/66) with the lone codegen bug fixed; the remaining 13 fails are ALL non-compiler-bug porting work — (1) **gas→nasm inline-asm porting/translation** for the 12 nasm-bucket TUs (drivers display/keyboard/pic/sasi/console/timer + board_init + 6 diagnostic tests) — either an AT&T→Intel translation layer in minic (big, speculative) or per-TU source porting (the `bm_*.c` approach); (2) the **ISR-function-pointer parameter declarator** parse gap in `interrupts.c` (`void ISR_HANDLER (*isr)(void)`); (3) **Watcom `_asm{}` blocks** in the 6 phase-1-style `dos_tests` (park or rewrite).  None is a QBE/minic codegen bug.  A natural next direction is consumer-driven: pursue gas→nasm porting if more real phase3 drivers are wanted under minic, OR pick a different frontier (a parked MicroPython feature track) — chosen with the user.)
-
-## §8j session notes (2026-06-16)
-
-### The pick
-- §8i handoff: NO carried compiler track.  User (AskUserQuestion) chose the
-  Phase-6 frontier "compile newlib proper".  I initially mis-scoped it to
-  external/picolibc newlib; user corrected: it is `~/projects/newlibc/
-  phase3_newlib`'s OWN sources.
-
-### Triage re-run (foundation = §6a build/newlibc-triage/sweep.sh, still present)
-- Current tree: PASS 53/66 (was 46 at §6a — the portable subset all lands now).
-  20 fails: qbe(4) display/keyboard/pic/sasi; nasm(8) gas mnemonics; minic(8)
-  interrupts.c ISR-fn-ptr param + vshell + 6 Watcom-_asm dos_tests.
-- The qbe bucket was the ONLY genuine codegen bug; the rest is gas-syntax
-  porting / toolchain-specific source (the §6a "driver asm needs porting"
-  conclusion, re-confirmed).
-
-### The bug = an INCOMPLETE feature (not a one-line abort)
-- minic substituted a local operand as `[bp-%name]` but: (1) QBE promote ABORTS
-  on the output slot (read-never-stored, mem.c:108); (2) input slots are the
-  dual defect (stored-never-read-in-IR → promoted into a register, alloc gone,
-  `[bp-%name]` dangling); (3) i8086 emit printed the asm string VERBATIM —
-  `%name` was never resolved to a frame offset.  `minic/test/asm_clobber_test.c`
-  (same pattern) was never gated → the feature never worked end-to-end.
-
-### The fix (3 parts, additive)
-- minic.y: local-Var operand `%0` → bare `%name` (not `[bp-%name]`).
-- mem.c asmvol(fn): new pass before markvol; scans Oasm strings for `%name`,
-  marks the matching alloc vol=1 → promote+coalesce keep it in memory (inputs
-  AND outputs, no promote-logic change).  No-op unless an asm names a slot.
-- i8086/emit.c Oasm: resolve `%name` → [bp±N] via tmp->slot + slot(); a name
-  matching no slot-resident temp is emitted verbatim (%%→% path unchanged).
-
-### Gate + verification
-- NEW minic/dos/examples/asm_output_probe.c + golden, gated small+medium+
-  compact+large+huge (NASM-valid mnemonics → runs end-to-end).  Bug-loud:
-  unfixed aborts at QBE stage → no .exe → diff fails.
-- All 5 .EXE models PASS in DOSBox (out_r=4660/out_m=22136/dbl21=42/dblr=9320).
-- test-dos 376 → 381/381 ok; make check green; conflicts unchanged (frontend
-  change adds no productions — only action edits + a QBE pass).
-- emit audit: i8086/emit.c CHANGED → ran it → 0 clobbers / 124,955 regions
-  (the mathfns_probe "build failed" lines are pre-existing soft-float link
-  gaps in the standalone audit build, zero inline asm, unrelated).
-- MP compact body 689,760 BYTE-IDENTICAL → no Victor run.
-- Triage re-run after fix: qbe bucket 4 → 0 (drivers advance to nasm bucket,
-  8 → 12, now blocked only on gas syntax).  PASS stays 53 (drivers need asm
-  porting to compile end-to-end).
-
-### ⇒ Next session
-- NO carried compiler track open.  "Compile newlib proper" portable-subset is
-  COMPLETE (53/66); the one codegen bug is fixed.  Remaining 13 fails are all
-  porting / toolchain-specific, NOT compiler bugs:
-  - gas→nasm porting/translation for the 12 nasm-bucket TUs (the bm_*.c path);
-  - interrupts.c ISR-function-pointer param declarator parse gap;
-  - Watcom `_asm{}` in the 6 dos_tests (park/rewrite).
-- The asm-operand fix is a prerequisite for any nasm-ported driver (ported
-  keyboard.c still uses "=r"(flags)).
-- Next direction is consumer-driven (gas→nasm porting, or a parked MicroPython
-  track) — pick with the user.
----
-
-Older session headers (§8i and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).
+Older session headers (§8j and everything before) are archived verbatim in [SESSION_LOG.md](./SESSION_LOG.md).

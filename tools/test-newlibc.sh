@@ -61,6 +61,19 @@ export V9K_SHOW="$SHOW"
 NEWLIBC_BM_TESTS=(
 	"hello_bm:15:::"
 	"timer_bm:30:::"
+	# §8l: the same timer/ISR checks as timer_bm, but linking newlibc's OWN
+	# drivers/timer.c (the §8k gas->nasm in-place port) IN PLACE OF the
+	# hand-mirrored bm_timer.c -- the first proof an upstream phase3 driver
+	# RUNS bare-metal, not just compiles (§8k was compile-only).  build-
+	# newlibc-baremetal.sh links $NL/drivers/timer.c (the test includes
+	# upstream "timer.h", not bm_timer.h) and passes -D__MINIC__ so timer.c's
+	# intel_dev_write_byte takes the Intel/HW_WRITE_BYTE fork; the interrupt
+	# plumbing is the generic compiler-emitted ISR ABI routing each IR2 tick
+	# to upstream timer_tick_handler.  Adds a timer_get_frequency()==100
+	# phase (an upstream fn bm_timer.c lacks).  Deterministic booleans only
+	# (the [50..80] window absorbs MAME's 125 KHz ch2 clock), so the golden
+	# is toolchain-stable.  Bare-metal ONLY; small; 30 s budget.
+	"timer_upstream_bm:30:::"
 	"display_bm:20:::"
 	"keyboard_bm:25:v9k::"
 	"serial_bm:25::victor:"

@@ -116,6 +116,16 @@ SUPPORT_TUS=(
 if grep -q 'bm_timer\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_timer.c")
 fi
+# §8l: a hand-written bare-metal program that includes newlibc's OWN
+# drivers/timer.h (NOT the bm_timer.h mirror) links the UPSTREAM
+# drivers/timer.c -- the §8k gas->nasm in-place port, now RUN on hardware
+# (timer_upstream_bm).  Excluded for test-host / bm_stdio programs: those
+# pull bm_timer.c + bm_shim.c's timer_* aliases, which would collide with
+# upstream timer.c's timer_* symbols.
+if [ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h' "$SRC" \
+   && grep -q '"timer\.h"' "$SRC"; then
+	SUPPORT_TUS+=("$NL/drivers/timer.c")
+fi
 if grep -q 'bm_interrupts\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
 fi
@@ -204,9 +214,13 @@ compile_unit() {
 	local unit_src="$1" unit_base="$2"
 	shift 2
 	# -D__ia16__ keeps __far real and selects the GCC MK_FP branch in
-	# v9k_hw.h, matching minic semantics.  No -DDOS, no HALT2DOS: this is
-	# the bare machine.
-	clang -E -P -nostdinc -D__ia16__ "$@" \
+	# v9k_hw.h, matching minic semantics.  -D__MINIC__ is the §8k
+	# convention: upstream driver TUs (e.g. drivers/timer.c, §8l) fork
+	# their inline asm `#if defined(__MINIC__)` to Intel/nasm idioms
+	# (HW_WRITE_BYTE etc.); harmless for every other TU (none of the bm_*.c
+	# or portable stdio TUs test the macro).  No -DDOS, no HALT2DOS: this
+	# is the bare machine.
+	clang -E -P -nostdinc -D__ia16__ -D__MINIC__ "$@" \
 		"-I$NLC_DIR" "-I$SHIM" "-I$INC" \
 		"-I$NL/include" "-I$NL/drivers" "-I$NL/libgloss" "-I$NL/vfs" \
 		"$unit_src" 2>>"$ERR" \
