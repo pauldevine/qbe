@@ -5305,8 +5305,14 @@ stmt(Stmt *s, int b, int c)
 						/* Output operand */
 						Symb s = lval(a->outputs[opnum].expr);
 						if (s.t == Var) {
-							/* Local variable - use stack-relative addressing */
-							dst += sprintf(dst, "[bp-%%%s]", s.u.v);
+							/* Local: emit the bare temp ref `%name`.
+							 * The i8086 backend resolves it to the
+							 * slot's [bp±N] at emit time, and QBE's
+							 * asmvol() keeps the slot in memory (an asm
+							 * output the dataflow can't see).  Emitting
+							 * `[bp-%name]` here was a never-resolved
+							 * guess (the §6a "=r"/"=m" gap). */
+							dst += sprintf(dst, "%%%s", s.u.v);
 						} else if (s.t == Glo) {
 							/* Global variable - use NASM syntax with underscore prefix */
 							dst += sprintf(dst, "[_glo%d]", s.u.n);
@@ -5319,8 +5325,10 @@ stmt(Stmt *s, int b, int c)
 						if (inpidx < a->ninputs) {
 							Symb s = lval(a->inputs[inpidx].expr);
 							if (s.t == Var) {
-								/* Local variable - use stack-relative addressing */
-								dst += sprintf(dst, "[bp-%%%s]", s.u.v);
+								/* Local: bare temp ref `%name`,
+								 * resolved to [bp±N] by the i8086
+								 * backend (see the output branch). */
+								dst += sprintf(dst, "%%%s", s.u.v);
 							} else if (s.t == Glo) {
 								/* Global variable - use NASM syntax with underscore prefix */
 								dst += sprintf(dst, "[_glo%d]", s.u.n);

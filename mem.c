@@ -37,6 +37,68 @@ markvol(Fn *fn)
 		}
 }
 
+/* An inline-asm template can reference a local's stack slot by name: minic
+ * lowers a GCC extended-asm operand bound to a local (`"=r"`/`"=m"`/`"r"`/`"m"`)
+ * to the bare temp ref `%name`, which the i8086 backend resolves to the slot's
+ * [bp±N] at emit time.  QBE cannot see inside the opaque asm string, so an
+ * OUTPUT slot looks "read but never stored" (promote() would abort) and an
+ * INPUT slot looks "stored but never read" (promote() would forward it into a
+ * register, leaving the asm's [bp-N] dangling).  Mark every alloc an asm
+ * string names volatile so promote() and coalesce() keep it in memory; markvol
+ * (run next) then propagates the bit to the slot's own loads/stores.  Run after
+ * filluse, before markvol/promote.  No-op unless an asm names a slot, so code
+ * without operand-bound asm is unaffected. */
+static int
+asm_name_char(int c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	    || (c >= '0' && c <= '9') || c == '_' || c == '$' || c == '.';
+}
+
+void
+asmvol(Fn *fn)
+{
+	Blk *b, *b2;
+	Ins *i, *j;
+	char *p, *e;
+	char nm[128];
+	int idx;
+
+	for (b=fn->start; b; b=b->link)
+		for (i=b->ins; i<&b->ins[b->nins]; i++) {
+			if (i->op != Oasm)
+				continue;
+			idx = rsval(i->arg[0]);
+			if (idx < 0 || idx >= fn->nasmstr || !fn->asmstr[idx])
+				continue;
+			for (p=fn->asmstr[idx]; *p; ) {
+				if (*p != '%') {
+					p++;
+					continue;
+				}
+				if (p[1] == '%') {  /* %% escapes a literal % */
+					p += 2;
+					continue;
+				}
+				p++;
+				e = nm;
+				while (asm_name_char((unsigned char)*p)
+				    && e < &nm[(int)sizeof nm - 1])
+					*e++ = *p++;
+				*e = 0;
+				if (e == nm)
+					continue;
+				/* Mark the matching alloc volatile (kept in memory). */
+				for (b2=fn->start; b2; b2=b2->link)
+					for (j=b2->ins; j<&b2->ins[b2->nins]; j++)
+						if (isalloc(j->op)
+						 && rtype(j->to) == RTmp
+						 && strcmp(fn->tmp[j->to.val].name, nm) == 0)
+							j->vol = 1;
+			}
+		}
+}
+
 /* require use, maintains use counts */
 void
 promote(Fn *fn)

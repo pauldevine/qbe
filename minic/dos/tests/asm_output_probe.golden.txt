@@ -1,0 +1,5 @@
+out_r=4660
+out_m=22136
+dbl21=42
+dblr=9320
+PASS

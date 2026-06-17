@@ -178,6 +178,15 @@ slot(Ref r, Fn *fn)
 		return -6 - 2 * (fn->slot - s);
 }
 
+/* A character that can appear in a QBE temp name embedded in an inline-asm
+ * string (`%name` operand reference resolved in the Oasm handler). */
+static int
+is_asm_name(int c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	    || (c >= '0' && c <= '9') || c == '_' || c == '$' || c == '.';
+}
+
 static void
 emitaddr(Con *c, FILE *f)
 {
@@ -1271,6 +1280,29 @@ emitins(Ins *i, Fn *fn, FILE *f)
 					/* %% in GCC asm becomes single % */
 					fputc('%', f);
 					s += 2;
+				} else if (*s == '%' && is_asm_name(s[1])) {
+					/* `%name`: a minic extended-asm operand bound to a
+					 * local (asmvol() kept its slot in memory).  Resolve
+					 * to the slot's frame address [bp±N].  A name that
+					 * matches no slot-resident temp (e.g. a gas `%reg`
+					 * left after %% handling) is emitted verbatim. */
+					char nm[128], *e = nm;
+					int t, off, matched = 0;
+					s++;
+					while (is_asm_name(*s) && e < &nm[(int)sizeof nm - 1])
+						*e++ = *s++;
+					*e = 0;
+					for (t=Tmp0; t<fn->ntmp; t++)
+						if (fn->tmp[t].slot >= 0
+						 && fn->tmp[t].name[0]
+						 && strcmp(fn->tmp[t].name, nm) == 0) {
+							off = (int)slot(SLOT(fn->tmp[t].slot), fn);
+							fprintf(f, "[bp%+d]", off);
+							matched = 1;
+							break;
+						}
+					if (!matched)
+						fprintf(f, "%%%s", nm);
 				} else {
 					fputc(*s, f);
 					s++;

@@ -84,6 +84,7 @@ func(Fn *fn)
 	T.abi0(fn);
 	fillcfg(fn);
 	filluse(fn);
+	asmvol(fn);   /* keep inline-asm operand slots in memory (before markvol) */
 	markvol(fn);  /* propagate C volatile from allocs to their loads/stores */
 	promote(fn);
 	filluse(fn);

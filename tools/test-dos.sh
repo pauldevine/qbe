@@ -528,6 +528,20 @@ RUNTIME_TESTS=(
 	# (retf → iret + far fn-ptr IVT install).
 	"minic/dos/examples/isr_probe.c:minic/dos/tests/isr_probe.golden.txt:small"
 	"minic/dos/examples/isr_probe.c:minic/dos/tests/isr_probe.golden.txt:medium"
+
+	# GCC extended-asm OUTPUT/INPUT operands ("=r"/"=m"/"r"/"m" bound to a
+	# local) — the §6a triage's lone genuine codegen bug (newlibc phase3
+	# drivers display/keyboard/pic/sasi failed the qbe stage on it).  minic
+	# now lowers the operand to the bare temp ref `%name`; asmvol() keeps the
+	# slot in memory (an asm read/write QBE can't see in the opaque string);
+	# the i8086 backend resolves `%name` -> [bp±N].  Bug-loud: the unfixed
+	# toolchain aborts at the QBE stage ("slot read but never stored") -> no
+	# .exe -> golden diff fails.  Verified on every .EXE model.
+	"minic/dos/examples/asm_output_probe.c:minic/dos/tests/asm_output_probe.golden.txt:small"
+	"minic/dos/examples/asm_output_probe.c:minic/dos/tests/asm_output_probe.golden.txt:medium"
+	"minic/dos/examples/asm_output_probe.c:minic/dos/tests/asm_output_probe.golden.txt:compact"
+	"minic/dos/examples/asm_output_probe.c:minic/dos/tests/asm_output_probe.golden.txt:large"
+	"minic/dos/examples/asm_output_probe.c:minic/dos/tests/asm_output_probe.golden.txt:huge"
 )
 
 # --- Stevie size budget ----------------------------------------------------

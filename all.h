@@ -664,6 +664,7 @@ void simplcfg(Fn *);
 void promote(Fn *);
 void coalesce(Fn *);
 void markvol(Fn *);
+void asmvol(Fn *);
 
 /* alias.c */
 void fillalias(Fn *);
