@@ -87,6 +87,20 @@ NEWLIBC_BM_TESTS=(
 	"display_upstream_bm:20:::"
 	"display_bm:20:::"
 	"keyboard_bm:25:v9k::"
+	# §8n: the same keyboard/ISR checks as keyboard_bm, but linking newlibc's
+	# OWN drivers/keyboard.c (the §8k gas->nasm in-place port) IN PLACE OF the
+	# hand-mirrored bm_keyboard.c -- the third proof an upstream phase3 driver
+	# RUNS bare-metal (after §8l's timer.c and §8m's display.c).  Like the
+	# timer it is INTERRUPT-DRIVEN: a local compiler-emitted IR6 ISR routes
+	# each KBINT to upstream keyboard_irq_handler (the §6d ISR ABI), and
+	# upstream timer.c (§8l) supplies the timeout clock on IR2 -- TWO §8k
+	# drivers running together under live interrupts.  build-newlibc-
+	# baremetal.sh links $NL/drivers/keyboard.c (the test includes upstream
+	# "keyboard.h", not bm_keyboard.h) and -D__MINIC__ makes keyboard.c's
+	# flags-save take the Intel pushf/pop/cli fork.  The harness types "v9k"
+	# (V9K_KEYPOST); deterministic (fixed text + the received chars).  Bare-
+	# metal ONLY; small; 25 s budget.
+	"keyboard_upstream_bm:25:v9k::"
 	"serial_bm:25::victor:"
 	"memory_bm:15:::"
 	"crtc_bm:20:::"

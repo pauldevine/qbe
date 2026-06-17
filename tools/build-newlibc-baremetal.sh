@@ -137,6 +137,19 @@ if [ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h' "$SRC" \
    && grep -q '"display\.h"' "$SRC"; then
 	SUPPORT_TUS+=("$NL/drivers/display.c" "$NL/drivers/font_data.c")
 fi
+# §8n: same pattern for the UPSTREAM keyboard driver -- a hand-written
+# bare-metal program that includes newlibc's OWN drivers/keyboard.h (NOT the
+# bm_keyboard.h mirror) links drivers/keyboard.c (the §8k gas->nasm in-place
+# port).  It is INTERRUPT-DRIVEN: the program installs an IR6 ISR routing each
+# KBINT to keyboard_irq_handler (like §8l's timer routes IR2 to
+# timer_tick_handler).  Same guard as timer.c/display.c: test-host / bm_stdio
+# programs pull bm_keyboard.c + bm_shim.c's keyboard_* aliases, which would
+# collide with upstream keyboard.c's keyboard_* symbols.  The `"keyboard.h"`
+# pattern (leading quote) does NOT match `"bm_keyboard.h"`.
+if [ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h' "$SRC" \
+   && grep -q '"keyboard\.h"' "$SRC"; then
+	SUPPORT_TUS+=("$NL/drivers/keyboard.c")
+fi
 if grep -q 'bm_interrupts\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
 fi

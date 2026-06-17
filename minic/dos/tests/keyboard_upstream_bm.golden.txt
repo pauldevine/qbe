@@ -1,0 +1,11 @@
+Victor 9000 bare-metal UPSTREAM keyboard.c test (qbe/minic)
+phase 1: PIC re-init + install timer + keyboard ISRs
+phase 2: upstream timer_init() (timeout clock, IR2)
+phase 3: upstream keyboard_init() (VIA CS2 + IR6 unmask)
+phase 4: sti
+phase 5: no key pending at start: yes
+phase 6: waiting for 3 typed chars: got "v9k"
+phase 7: chars match "v9k": yes
+phase 8: keyboard ISR entered: yes
+phase 9: timer still ticking alongside IR6: yes
+PASS: upstream keyboard.c bare-metal checks completed.
