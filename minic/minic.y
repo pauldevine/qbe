@@ -313,6 +313,13 @@ int lbl, tmp, nglo;
 int enumval; /* Current enum value */
 int cur_fn_interrupt; /* 1 if current function has __attribute__((interrupt)) */
 int cur_fn_weak;      /* 1 if current function has __attribute__((weak)) */
+/* §8r: an __attribute__((...)) on a function-POINTER parameter's pointee
+ * (e.g. newlibc interrupts.c's `void __far __attribute__((interrupt)) (*isr)(void)`)
+ * runs attrlist's actions, which would clobber cur_fn_interrupt/cur_fn_weak of
+ * the ENCLOSING function (read by ansi_func_proto AFTER params are parsed).
+ * Save before, restore after, so the param attribute is recorded-and-dropped
+ * without changing the host function's ISR linkage. */
+int fp_saved_interrupt, fp_saved_weak;
 /* Struct/union return-by-value: when the current function's return type
  * is an aggregate, it is lowered (System-V style) with a hidden first
  * parameter — a caller-allocated pointer to result storage.  The callee
@@ -8472,7 +8479,45 @@ par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
         $$ = param($4->u.v, fptr_type, 0);
         varsetfpid($4->u.v, fpproto_alloc($1, $7));
     }
+    | type fpquals '(' '*' IDENT ')' '(' fptpar0 ')' ',' par1 {
+        /* §8r: function pointer parameter whose pointee carries far/attribute
+         * qualifiers — newlibc interrupts.c's
+         *   static void isr_entry(ivt_entry_t *entry,
+         *                         void __far __attribute__((interrupt)) (*isr)(void))
+         * The fpquals (__far and/or __attribute__((interrupt))) qualify the
+         * pointed-to function (a far-call/iret calling convention), which on
+         * this toolchain is a memory-model property; they are accepted and
+         * dropped, exactly as the `type TFAR attropt IDENT` function-header
+         * rule drops them.  The pointer type is computed identically to the
+         * unqualified fn-ptr param above. */
+        unsigned fptr_type = IDIR(FUNC($1));
+        $$ = param($5->u.v, fptr_type, $11);
+        varsetfpid($5->u.v, fpproto_alloc($1, $8));
+    }
+    | type fpquals '(' '*' IDENT ')' '(' fptpar0 ')' {
+        unsigned fptr_type = IDIR(FUNC($1));
+        $$ = param($5->u.v, fptr_type, 0);
+        varsetfpid($5->u.v, fpproto_alloc($1, $8));
+    }
     ;
+
+/* §8r: non-empty qualifier run between a fn-ptr param's return type and its
+ * `(*name)` declarator.  Distinct first-tokens (TFAR / ATTRIBUTE) keep this
+ * conflict-free against the `type TFAR '*'` pointer-type extension. */
+fpquals: TFAR
+       | fp_attr
+       | TFAR fp_attr
+       ;
+
+fp_attr: ATTRIBUTE '(' '(' fp_attr_save attrlist ')' ')'
+{
+	/* attrlist's attritem actions mutate cur_fn_interrupt/cur_fn_weak;
+	 * restore the enclosing function's values saved by fp_attr_save. */
+	cur_fn_interrupt = fp_saved_interrupt;
+	cur_fn_weak = fp_saved_weak;
+};
+
+fp_attr_save: { fp_saved_interrupt = cur_fn_interrupt; fp_saved_weak = cur_fn_weak; };
 
 fptpar0: fptpar1
        |                  { $$ = 0; }

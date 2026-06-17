@@ -1,0 +1,6 @@
+far_attr_stable=1
+far_attr_addr=1
+far_addr=1
+attr_addr=1
+distinct=1
+returned=1
