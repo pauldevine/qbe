@@ -1,0 +1,10 @@
+top_unsized=hi len=2
+top_sized=cd len=2
+mid_unsized=mid len=3
+mid_sized=ef len=2
+mid_static=gh len=2
+esc0=9 esc1=65 esc2=0
+top_sized_slack=1
+fresh=1 1
+persist=2 3
+blockscope_str_array_probe done

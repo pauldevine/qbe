@@ -5467,6 +5467,104 @@ mk_local_array_init(char *v, Node *initlist, int zerofill, int known_n, int *out
 	return chain;
 }
 
+/* Decode the string literal stored at global index `idx` into raw bytes
+ * (NOT including the terminating NUL) written to out[0..max).  Returns the
+ * number of content bytes decoded.  The escape handling mirrors
+ * strlit_bytelen() exactly so the decoded count agrees with sizeof. */
+static int
+strlit_decode(int idx, unsigned char *out, int max)
+{
+	char *s = ini[idx];
+	int contentlen, n = 0;
+
+	s += 5;                 /* skip the `{ b "` prefix */
+	contentlen = (int)strlen(s);
+	contentlen -= 8;        /* drop the `", b 0 }` suffix */
+	if (contentlen < 0)
+		contentlen = 0;
+	while (contentlen > 0 && n < max) {
+		unsigned char b;
+		if (*s == '\\' && contentlen > 1) {
+			s++; contentlen--;          /* the escape char */
+			if (*s == 'x') {
+				int v = 0;
+				s++; contentlen--;
+				while (contentlen > 0 &&
+				    ((*s >= '0' && *s <= '9') ||
+				     (*s >= 'a' && *s <= 'f') ||
+				     (*s >= 'A' && *s <= 'F'))) {
+					int d = (*s <= '9') ? *s - '0' :
+					    (*s <= 'F') ? *s - 'A' + 10 :
+					    *s - 'a' + 10;
+					v = v * 16 + d;
+					s++; contentlen--;
+				}
+				b = (unsigned char)v;
+			} else if (*s >= '0' && *s <= '7') {
+				int v = 0, k = 0;
+				while (contentlen > 0 && k < 3 &&
+				    *s >= '0' && *s <= '7') {
+					v = v * 8 + (*s - '0');
+					s++; contentlen--; k++;
+				}
+				b = (unsigned char)v;
+			} else {
+				switch (*s) {
+				case 'n': b = '\n'; break;
+				case 't': b = '\t'; break;
+				case 'r': b = '\r'; break;
+				case 'a': b = '\a'; break;
+				case 'b': b = '\b'; break;
+				case 'f': b = '\f'; break;
+				case 'v': b = '\v'; break;
+				case '\\': b = '\\'; break;
+				case '"': b = '"'; break;
+				case '\'': b = '\''; break;
+				case '?': b = '?'; break;
+				default: b = (unsigned char)*s; break;
+				}
+				s++; contentlen--;
+			}
+		} else {
+			b = (unsigned char)*s;
+			s++; contentlen--;
+		}
+		out[n++] = b;
+	}
+	return n;
+}
+
+/* Build a deferred initializer for a block-scoped (non-static) local char
+ * array `char v[total] = "string";`.  The literal's decoded bytes occupy
+ * v[0..natural) and the slack v[natural..total) is zero-filled (C
+ * char-array string-init semantics).  Each byte is a deferred `v[i] = B`
+ * assignment (mkidx scales by sizeof(elem)==1 for char), chained into one
+ * comma node so the stores run in lexical/control-flow order and re-run on
+ * each block re-entry.  `total` must be >= natural (the caller checks). */
+static Node *
+mk_local_string_init(char *v, int str_idx, long total)
+{
+	static unsigned char bytes[65536];
+	int natural;
+	long i;
+	Node *chain = 0;
+
+	natural = strlit_decode(str_idx, bytes, sizeof bytes);
+	for (i = 0; i < total; i++) {
+		Node *av = mknode('V', 0, 0);
+		Node *iv = mknode('N', 0, 0);
+		Node *bv = mknode('N', 0, 0);
+		Node *lhs, *asgn;
+		strcpy(av->u.v, v);
+		iv->u.n = (int)i;
+		lhs = mkidx(av, iv);
+		bv->u.n = (i < natural) ? bytes[i] : 0;
+		asgn = mknode('=', lhs, bv);
+		chain = chain ? mknode(',', chain, asgn) : asgn;
+	}
+	return chain;
+}
+
 /* Build a deferred initializer for a block-scoped local 2-D table
  * `ELEM v[N] = {{…},{…}}` whose element ELEM is an array typedef of inner
  * dimension `dim` (`typedef int row3_t[3]`).  minic has no true `int[N][3]`,
@@ -8817,6 +8915,15 @@ dcls:
 		die("invalid void array");
 	emit_string_array($3, $4->u.v, $8->u.n, 1);
 }
+    | dcls STATIC type IDENT '[' expr ']' '=' STR ';'
+{
+	/* Function-local static SIZED char array from a string literal:
+	 * `static char cwd[64] = "/";` — literal bytes at the front, the
+	 * rest zero-filled (file-scope production §8v, static_local form). */
+	if ($3 == NIL)
+		die("invalid void array");
+	emit_string_array_sized($3, $4->u.v, $9->u.n, const_eval($6), 1);
+}
     | dcls STATIC type IDENT '[' expr ']' ';'
 {
 	/* Function-local static array (uninitialized) — emit as a
@@ -9095,6 +9202,47 @@ dcls:
 		}
 	}
 	}
+}
+    | dcls type IDENT '[' expr ']' '=' STR ';'
+{
+	/* Function-top SIZED (non-static) char array from a string literal:
+	 * `char buf[64] = "hi";`.  Local stack array, initialised at runtime
+	 * (literal bytes then zero-filled slack) via a deferred store chain
+	 * emit_at parse time (dcls entry block == lexical order). */
+	int n, total;
+	char *v;
+	Node *ch;
+	if ($2 == NIL)
+		die("invalid void array");
+	v = $3->u.v;
+	n = const_eval($5);
+	total = SIZE($2) * n;
+	if (total < strlit_bytelen($8->u.n))
+		die("string initializer too long for array");
+	varadd(v, 0, IDIR($2), 1);
+	var_set_arraybytes(v, total);
+	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), total);
+	ch = mk_local_string_init(v, $8->u.n, total);
+	if (ch)
+		expr(ch);
+}
+    | dcls type IDENT '[' ']' '=' STR ';'
+{
+	/* Function-top UNSIZED (non-static) char array from a string literal:
+	 * `char buf[] = "hi";`.  Size is the literal length incl NUL. */
+	int total;
+	char *v;
+	Node *ch;
+	if ($2 == NIL)
+		die("invalid void array");
+	v = $3->u.v;
+	total = strlit_bytelen($7->u.n);
+	varadd(v, 0, IDIR($2), 1);
+	var_set_arraybytes(v, total);
+	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), total);
+	ch = mk_local_string_init(v, $7->u.n, total);
+	if (ch)
+		expr(ch);
 }
     | dcls type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
 {
@@ -9508,6 +9656,43 @@ stmt: ';'                            { $$ = 0; }
         }
         $$ = mkstmt(Expr, chain, 0, 0);
     }
+    | type IDENT '[' expr ']' '=' STR ';' {
+        /* Block-scoped SIZED (non-static) char array from a string literal:
+         * mid-block `char buf[N] = "hi";`.  Stack array; the store chain is
+         * deferred as an Expr stmt so it re-runs on each block re-entry. */
+        int n, total;
+        char *v;
+        Node *chain;
+        if ($1 == NIL)
+            die("invalid void array");
+        v = block_scope_decl($2, IDIR($1), 1);
+        n = const_eval($4);
+        total = SIZE($1) * n;
+        if (total < strlit_bytelen($7->u.n))
+            die("string initializer too long for array");
+        varadd(v, 0, IDIR($1), 1);
+        var_set_arraybytes(v, total);
+        fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), total);
+        chain = mk_local_string_init(v, $7->u.n, total);
+        $$ = mkstmt(Expr, chain, 0, 0);
+    }
+    | type IDENT '[' ']' '=' STR ';' {
+        /* Block-scoped UNSIZED (non-static) char array from a string literal:
+         * mid-block `char buf[] = "hi";`.  Size is the literal length, NUL
+         * included; deferred store chain (control-flow order). */
+        int total;
+        char *v;
+        Node *chain;
+        if ($1 == NIL)
+            die("invalid void array");
+        v = block_scope_decl($2, IDIR($1), 1);
+        total = strlit_bytelen($6->u.n);
+        varadd(v, 0, IDIR($1), 1);
+        var_set_arraybytes(v, total);
+        fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), total);
+        chain = mk_local_string_init(v, $6->u.n, total);
+        $$ = mkstmt(Expr, chain, 0, 0);
+    }
     | type IDENT '[' expr ']' ',' ext_decllist ';' {
         /* Block-scoped multi-declarator whose FIRST declarator is a sized
          * array: `int arr[3], *counter;`.  Mirrors the dcls-context
@@ -9614,6 +9799,15 @@ stmt: ';'                            { $$ = 0; }
         if ($2 == NIL)
             die("invalid void array");
         emit_string_array($2, $3->u.v, $7->u.n, 1);
+        $$ = 0;
+    }
+    | STATIC type IDENT '[' expr ']' '=' STR ';' {
+        /* Statement-scope SIZED static char array from a string literal:
+         * mid-block `static char cwd[64] = "/";` (the §8v file-scope
+         * production, static_local form). */
+        if ($2 == NIL)
+            die("invalid void array");
+        emit_string_array_sized($2, $3->u.v, $8->u.n, const_eval($5), 1);
         $$ = 0;
     }
     | STATIC type IDENT '[' expr ']' ';' {
