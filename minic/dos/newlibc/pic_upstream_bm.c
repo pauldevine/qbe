@@ -10,7 +10,7 @@
  * its interrupt_flags_save forks `#if defined(__MINIC__)` to the Intel
  * `pushf`/`pop word %0`/`cli` form, with the §8j extended-asm operand resolving
  * to a frame slot; its pic_write_command/data SAVE_ES/RESTORE_ES sites collapse
- * to no-ops via the §6y shadow interrupts header).  §8k proved that file
+ * to no-ops via the upstream interrupts.h __MINIC__ fork).  §8k proved that file
  * COMPILES; this proves it RUNS on the bare machine, the Phase-6 end-state
  * where newlibc's own drivers replace the bm_*.c mirrors.  NOTHING from
  * bm_pic.c is linked -- the upstream pic_* functions (pic_*, not the mirror's
@@ -42,7 +42,7 @@
 
 #include <stdint.h>
 #include "bm_console.h"
-#include "interrupts.h"   /* §6y shadow: interrupts_enable/disable decls, SAVE_ES no-ops */
+#include "interrupts.h"   /* merged upstream (§8k __MINIC__ fork): interrupts_enable/disable decls, SAVE_ES no-ops */
 #include "pic.h"          /* UPSTREAM: pic_init/enable_irq/disable_irq/send_eoi/get/set_mask */
 #include "timer.h"        /* UPSTREAM: timer_init/get_ticks/delay_ms/tick_handler */
 #include "v9k_hw.h"       /* INT_TIMER, IRQ_TIMER, PIC_INT_BASE */
@@ -58,7 +58,7 @@ extern unsigned qbe_get_cs(void);
  * interrupt_flags_restore() calls interrupts_enable() -- both defined only in
  * upstream drivers/interrupts.c, which we deliberately do NOT link (it also
  * defines its own timer_isr that would collide with the local one here).
- * Supply the one-liners the §6y shadow interrupts header declares.
+ * Supply the one-liners the upstream interrupts.h declares.
  */
 void interrupts_enable(void) {
     __asm__ volatile ("sti");

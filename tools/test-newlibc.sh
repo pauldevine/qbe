@@ -390,13 +390,13 @@ NEWLIBC_BM_TESTS=(
 	# bm_pic_get_mask/set_mask, pic_enable_irq/pic_disable_irq ->
 	# bm_pic_unmask/mask) + the timer aliases — bm_pic.c is already linked
 	# into every bm_stdio build (the testhost preamble calls bm_pic_init).
-	# One new support header: minic/dos/newlibc/interrupts.h, a minic-dialect
-	# port of drivers/interrupts.h (the upstream header is a gratuitous
-	# include here — pic_test uses no symbol from it — but its `static inline
-	# get_interrupt_vector` carries ia16-gcc extended asm minic emits dead +
-	# verbatim, which nasm rejects; the port reimplements it as a plain
-	# far-pointer read and no-ops SAVE_ES/RESTORE_ES, the §6e/§6i ES-drop
-	# reasoning).  The mask-test values are fully deterministic; the timer
+	# interrupts.h is a gratuitous include here — pic_test uses no symbol
+	# from it — and resolves to the merged upstream drivers/interrupts.h,
+	# whose `#if defined(__MINIC__)` fork (§8k) no-ops SAVE_ES/RESTORE_ES so
+	# its `static inline get_interrupt_vector` collapses to a plain far-ptr
+	# read (the §6e/§6i ES-drop reasoning).  The §6y minic-dialect shadow
+	# (minic/dos/newlibc/interrupts.h) was retired in §8t now that upstream
+	# is minic-aware.  The mask-test values are fully deterministic; the timer
 	# test's 3 tick lines are timing-derived (run-stable, byte-identical
 	# across two MAME runs, but WILL shift on a bm_tty/printf codegen change
 	# -> re-capture then; the PASS verdicts are robust).  Bare-metal ONLY:

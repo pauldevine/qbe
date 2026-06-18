@@ -40,7 +40,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "bm_console.h"    /* harness serial: bm_puts/bm_puthex (channel A) */
-#include "interrupts.h"    /* §6y shadow: interrupts_enable/disable, SAVE_ES no-ops */
+#include "interrupts.h"    /* merged upstream (§8k __MINIC__ fork): interrupts_enable/disable decls, SAVE_ES no-ops */
 #include "timer.h"         /* UPSTREAM timer.c */
 #include "display.h"       /* UPSTREAM display.c (+ font_data.c) */
 #include "keyboard.h"      /* UPSTREAM keyboard.c */
@@ -62,7 +62,7 @@ extern unsigned qbe_get_cs(void);
  * flags-restore call interrupts_enable() -- both defined only in upstream
  * drivers/interrupts.c, which we deliberately do NOT link (it also defines
  * its own timer_isr/keyboard_isr that would collide with the local ISRs
- * here).  Supply the one-liners the §6y shadow interrupts.h declares.
+ * here).  Supply the one-liners the upstream interrupts.h declares.
  */
 void interrupts_enable(void) {
     __asm__ volatile ("sti");

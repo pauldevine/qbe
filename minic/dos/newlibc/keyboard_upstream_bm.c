@@ -7,8 +7,8 @@
  * this links and runs newlibc's OWN drivers/keyboard.c -- the file the §8k
  * gas->nasm in-place port made minic-compilable (its keyboard_flags_save now
  * forks `#if defined(__MINIC__)` to the Intel `pushf`/`pop word %0`/`cli`
- * form, and its SAVE_ES/RESTORE_ES collapse to no-ops via the §6y shadow
- * interrupts.h).  §8k proved that file COMPILES; this proves it RUNS on the
+ * form, and its SAVE_ES/RESTORE_ES collapse to no-ops via the upstream
+ * interrupts.h __MINIC__ fork).  §8k proved that file COMPILES; this proves it RUNS on the
  * bare machine -- the Phase-6 end-state where newlibc's own drivers replace
  * the bm_*.c mirrors.
  *
@@ -33,7 +33,7 @@
 #include <stdint.h>
 #include "bm_console.h"
 #include "bm_pic.h"
-#include "interrupts.h"   /* §6y shadow: interrupts_enable decl, SAVE_ES no-ops */
+#include "interrupts.h"   /* merged upstream (§8k __MINIC__ fork): interrupts_enable decl, SAVE_ES no-ops */
 #include "timer.h"        /* UPSTREAM: timer_init/get_ticks/tick_handler (timeout clock) */
 #include "keyboard.h"     /* UPSTREAM: keyboard_init/getc_nonblock/irq_handler */
 #include "v9k_hw.h"        /* INT_*, IRQ_*, INTEL_DEV_SEGMENT, PIC_COMMAND_PORT, HW_WRITE_BYTE */
@@ -47,7 +47,7 @@ extern unsigned qbe_get_cs(void);
  * Upstream keyboard.c's flags-restore calls interrupts_enable() (defined in
  * upstream drivers/interrupts.c, which we deliberately do NOT link -- it also
  * defines its own timer_isr/keyboard_isr that would collide with the local
- * ISRs here).  Supply the one-liner the §6y shadow interrupts.h declares.
+ * ISRs here).  Supply the one-liner the upstream interrupts.h declares.
  */
 void interrupts_enable(void) {
     __asm__ volatile ("sti");

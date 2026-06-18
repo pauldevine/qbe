@@ -9,7 +9,7 @@
  * drivers/console.c -- the file the §8k gas->nasm in-place port made
  * minic-compilable (its intel_dev_write_byte + every serial_write_control /
  * status / RX site fork `#if defined(__MINIC__)` to HW_WRITE_BYTE/HW_READ_BYTE
- * and no-op SAVE_ES/RESTORE_ES via the §6y shadow interrupts.h).  §8k proved
+ * and no-op SAVE_ES/RESTORE_ES via the upstream interrupts.h __MINIC__ fork).  §8k proved
  * that file COMPILES; this proves it RUNS on the bare machine.
  *
  * The console driver is pure polled MMIO (no interrupts), so -- like §8m's

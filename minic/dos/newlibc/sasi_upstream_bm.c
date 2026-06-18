@@ -7,7 +7,7 @@
  * and runs newlibc's OWN drivers/sasi.c -- the file the §8k gas->nasm in-place
  * port made minic-compilable (its sasi_save_flags_cli now forks
  * `#if defined(__MINIC__)` to the Intel `pushf`/`pop word %0`/`cli` form, and
- * its SAVE_ES/RESTORE_ES collapse to no-ops via the §6y shadow interrupts.h --
+ * its SAVE_ES/RESTORE_ES collapse to no-ops via the upstream interrupts.h __MINIC__ fork --
  * the §8k decision that the §6d ISR ABI OWNS ES, so the driver need not save
  * it).  §8k proved that file COMPILES; this proves it RUNS on the bare machine
  * reading and writing real sectors, the Phase-6 end-state where newlibc's own
