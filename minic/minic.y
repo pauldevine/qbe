@@ -5849,6 +5849,48 @@ emit_global_sym_init(char *sym, long off)
 	varadd(parsed_ident, nglo++, parsed_type, 0);
 }
 
+/* §9a: file-scope function-pointer VARIABLE definition.
+ *   void (*v)(void);            is_static=0, init=0
+ *   static int (*cmp)(int,int); is_static=1, init=0
+ *   void (*v)(void) = foo;      init = the initializer expr
+ * Mirrors the dcls / statement-scope fn-ptr-variable rules (which alloc a
+ * stack slot) but emits a zero-initialized — or symbol-initialized — DATA
+ * global, like the typed_decl_rest scalar globals, and records the fn-ptr
+ * prototype id (varsetfpid) so an indirect call coerces its arguments.
+ * Until now only the EXTERN and TYPEDEF file-scope fn-ptr forms existed, so
+ * a plain file-scope fn-ptr definition was a parse error. */
+void
+emit_global_fnptr(char *name, unsigned base, Node *fptpar, Node *init, int is_static)
+{
+	unsigned fptr_type = IDIR(FUNC(base));
+	char buf[NString + 32];
+	int start = nglo;
+
+	if (nglo == NGlo)
+		die("too many globals");
+	if (init) {
+		struct CIVal v;
+		cival_eval(init, &v);
+		if (v.issym) {
+			if (v.off)
+				sprintf(buf, "{ %c $%s+%ld }", irtyp(fptr_type), v.sym, v.off);
+			else
+				sprintf(buf, "{ %c $%s }", irtyp(fptr_type), v.sym);
+		} else {
+			sprintf(buf, "{ %c %ld }", irtyp(fptr_type), v.off);
+		}
+	} else {
+		emit_zero_init(buf, fptr_type);
+	}
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], name);
+	varadd(name, nglo++, fptr_type, 0);
+	varsetfpid(name, fpproto_alloc(base, fptpar));
+	if (is_static)
+		glo_mark_static_range(start);
+}
+
 #define NSAI 4096
 int  nsai = 0;
 char sai_kind[NSAI];   /* 'N' = literal number, 'S' = string global idx,
@@ -7521,7 +7563,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %%
 
-prog: | prog kfunc | prog attr_kfunc | prog typed_decl | prog attr_typed_decl | prog edcl | prog tdcl | prog sdcl | prog static_assert_dcl | prog externdcl | prog ';' ;
+prog: | prog kfunc | prog attr_kfunc | prog typed_decl | prog attr_typed_decl | prog edcl | prog tdcl | prog sdcl | prog static_assert_dcl | prog externdcl | prog gfnptrdcl | prog ';' ;
 
 attr_kfunc: attrspec storageopt inlineopt init_attr prot_knr '{' dcls stmts '}'
 {
@@ -7737,6 +7779,27 @@ externdcl: EXTERN type IDENT ';'
 			var_set_arraybytes(n->u.v, SIZE($2) * n->l->u.n);
 	}
 	varclr();
+}
+         ;
+
+gfnptrdcl: type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
+{
+	/* File-scope function-pointer variable: void (*v)(void); */
+	emit_global_fnptr($4->u.v, $1, $7, 0, 0);
+}
+         | type '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr ';'
+{
+	/* File-scope fn-ptr variable with initializer: void (*v)(void) = foo; */
+	emit_global_fnptr($4->u.v, $1, $7, $10, 0);
+}
+         | STATIC type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
+{
+	/* static file-scope fn-ptr variable (internal linkage). */
+	emit_global_fnptr($5->u.v, $2, $8, 0, 1);
+}
+         | STATIC type '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr ';'
+{
+	emit_global_fnptr($5->u.v, $2, $8, $11, 1);
 }
          ;
 

@@ -1,0 +1,6 @@
+g_op add=13
+g_op sub=3
+s_op sub=13
+marker ran
+s_init add=7
+file_fnptr_probe done
