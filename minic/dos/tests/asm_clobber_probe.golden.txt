@@ -1,0 +1,3 @@
+a=22 b=25 c=28 d=31 e=34
+sum=140
+asm_clobber_probe done

@@ -102,6 +102,25 @@ static int slot4; /* next slot of 4 bytes */
 static int slot8; /* ditto, 8 bytes */
 static BSet mask[2][1]; /* class masks */
 
+/* Register-clobber mask declared by an inline-asm instruction: BIT(reg)
+ * of the i8086 GP regs the asm trashes (minic emits it as an `asm "code",
+ * <mask>` operand; 0 for any non-asm op or a memory-only clobber).  A live
+ * value must never sit in a clobbered reg across the asm — the divclob /
+ * Ocall caller-save pattern, except the clobber set may include callee-
+ * saves (e.g. `int 0x21` trashes BX), so we honor the exact set. */
+static bits
+asmclobmask(Fn *fn, Ins *i)
+{
+	int idx;
+
+	if (i->op != Oasm || !fn->asmclob)
+		return 0;
+	idx = rsval(i->arg[0]);
+	if (idx < 0 || idx >= fn->nasmstr)
+		return 0;
+	return fn->asmclob[idx];
+}
+
 static int
 tcmp0(const void *pa, const void *pb)
 {
@@ -506,7 +525,7 @@ spill(Fn *fn)
 	Ins *i;
 	Phi *p;
 	Mem *m;
-	bits r;
+	bits r, acm;
 	int force_kl_slot;
 
 	tmp = fn->tmp;
@@ -704,7 +723,27 @@ spill(Fn *fn)
 				 * in a caller-save register that the call clobbers.
 				 * See feedback memory qbe-gcm-sinks-load-past-call. */
 				limit2(v, T.nrsave[0] + T.nrglob, T.nrsave[1], w);
-			else
+			else if ((acm = asmclobmask(fn, i))) {
+				/* Inline asm with declared register clobbers: the
+				 * temps live across it must avoid those regs.  Reserve
+				 * one register per clobbered GP (count) so enough
+				 * spill, then sethint(avoid) below steers the survivors
+				 * off the exact clobbered set — the call pattern, but
+				 * the set may include callee-saves (BX/SI/DI).  Clamp
+				 * so the always-live RGLOB regs (BP/SP) are still kept
+				 * (limit keeps `ngpr-k1` highest-cost temps, which must
+				 * leave room for the nrglob globals); when the asm
+				 * clobbers every allocatable GP the live-across set
+				 * simply spills entirely. */
+				int nc, rb, k1;
+				for (nc=0, rb=0; rb<NBit; rb++)
+					if (acm & BIT(rb))
+						nc++;
+				k1 = nc + T.nrglob;
+				if (k1 > T.ngpr - T.nrglob)
+					k1 = T.ngpr - T.nrglob;
+				limit2(v, k1, 0, w);
+			} else
 				limit2(v, 0, 0, w);
 			/* i8086: evict Kl temps from v and u so they never get
 			 * register-allocated.  arg-rewrite below will turn Kl
@@ -788,6 +827,9 @@ spill(Fn *fn)
 			  || i->op == Orem || i->op == Ourem
 			  || i->op == Omul))
 				r |= T.divclob;
+			/* Inline asm clobbers (the limit2 above reserved the count;
+			 * steer the survivors off the exact clobbered regs). */
+			r |= asmclobmask(fn, i);
 			if (r)
 				sethint(v, r);
 		}

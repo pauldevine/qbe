@@ -15,33 +15,33 @@ Test 1: PSP Structure
 Test 2: Segment Layout
 ----------------------
   Code segment (CS): 01A2
-  Data segment (DS): 0EA1
-  Stack segment(SS): 0EA1
-  Extra segment(ES): 0EA1
+  Data segment (DS): 0EAF
+  Stack segment(SS): 0EAF
+  Extra segment(ES): 0EAF
   Model: Medium (CS != DS, DS == SS)
   PASS: Segment layout valid
 
 Test 3: Stack Information
 -------------------------
-  Stack segment:     0EA1
-  Stack pointer:     547C
+  Stack segment:     0EAF
+  Stack pointer:     558C
   Stack top:         ~FFFE
-  Stack used:        43906 bytes
-  Stack remaining:   21628 bytes
+  Stack used:        43634 bytes
+  Stack remaining:   21900 bytes
   PASS: Adequate stack space
 
 Test 4: Heap Information
 ------------------------
-  Heap start:        14D4
-  malloc(100):       0x1870 (OK)
+  Heap start:        15E4
+  malloc(100):       0x1980 (OK)
   Heap available:    ~4096 bytes
   PASS: Heap functional
 
 Test 5: Heap/Stack Separation
 -----------------------------
-  Heap allocation:   24D8
-  Heap end (approx): 28D8
-  Stack pointer:     546C
+  Heap allocation:   25E8
+  Heap end (approx): 29E8
+  Stack pointer:     557C
   Gap:               11156 bytes
   PASS: Heap and stack separated
 

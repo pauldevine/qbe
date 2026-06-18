@@ -5073,6 +5073,42 @@ genswitchbody(Stmt *s, int brk, int cont, Stmt **cases, int *caselbl, int ncase)
 	}
 }
 
+/* Map an inline-asm clobber name to the i8086 register bit the QBE
+ * backend allocates (i8086/all.h: RAX=1,RCX=2,RDX=3,RBX=4,RSI=5,RDI=6;
+ * a MAKESURE there pins those values so a reorder breaks the build).
+ * "memory" and the non-GP clobbers (cc/flags/es/ds/sp/bp) map to 0 —
+ * "memory" is handled by QBE's asmvol() pass and the segment/frame regs
+ * are not GP-allocatable.  The OR of these masks is emitted as the
+ * `asm "code", <mask>` operand so spill.c/rega.c keep no live value in a
+ * clobbered reg across the asm. */
+static unsigned long
+asm_clobber_bit(const char *c)
+{
+	if (!strcmp(c,"ax")||!strcmp(c,"eax")||!strcmp(c,"al")||!strcmp(c,"ah"))
+		return 1UL<<1;  /* RAX */
+	if (!strcmp(c,"cx")||!strcmp(c,"ecx")||!strcmp(c,"cl")||!strcmp(c,"ch"))
+		return 1UL<<2;  /* RCX */
+	if (!strcmp(c,"dx")||!strcmp(c,"edx")||!strcmp(c,"dl")||!strcmp(c,"dh"))
+		return 1UL<<3;  /* RDX */
+	if (!strcmp(c,"bx")||!strcmp(c,"ebx")||!strcmp(c,"bl")||!strcmp(c,"bh"))
+		return 1UL<<4;  /* RBX */
+	if (!strcmp(c,"si")||!strcmp(c,"esi"))
+		return 1UL<<5;  /* RSI */
+	if (!strcmp(c,"di")||!strcmp(c,"edi"))
+		return 1UL<<6;  /* RDI */
+	return 0;
+}
+
+static unsigned long
+asm_clobber_mask(struct AsmStmt *a)
+{
+	unsigned long m = 0;
+	int i;
+	for (i = 0; i < a->nclobbers; i++)
+		m |= asm_clobber_bit(a->clobbers[i]);
+	return m;
+}
+
 int
 stmt(Stmt *s, int b, int c)
 {
@@ -5294,9 +5330,10 @@ stmt(Stmt *s, int b, int c)
 		 * 2. For extended asm with operands, substitute %0, %1, etc.
 		 * 3. Emit clobbers as a comment for documentation
 		 */
+		unsigned long clobmask = asm_clobber_mask(a);
 		if (a->noutputs == 0 && a->ninputs == 0) {
 			/* Simple inline assembly - emit directly */
-			fprintf(of, "\tasm \"%s\"\n", a->code);
+			fprintf(of, "\tasm \"%s\"", a->code);
 		} else {
 			/*
 			 * Extended inline assembly with operands
@@ -5349,8 +5386,15 @@ stmt(Stmt *s, int b, int c)
 				}
 			}
 			*dst = '\0';
-			fprintf(of, "\tasm \"%s\"\n", processed);
+			fprintf(of, "\tasm \"%s\"", processed);
 		}
+		/* Register-clobber mask operand (only when nonzero, so a
+		 * memory-only clobber leaves the .ssa byte-stable).  QBE's
+		 * spill.c/rega.c use it to keep no live value in a clobbered
+		 * reg across the asm. */
+		if (clobmask)
+			fprintf(of, ", %lu", clobmask);
+		fprintf(of, "\n");
 		/* Emit clobbers as a comment for documentation/debugging */
 		if (a->nclobbers > 0) {
 			fprintf(of, "# clobbers:");

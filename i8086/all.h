@@ -35,6 +35,11 @@ enum I8086Reg {
 	NSEG = RDS - RES + 1,  /* segment registers */
 };
 MAKESURE(reg_not_tmp, RSP < (int)Tmp0);
+/* minic's asm_clobber_bit() emits inline-asm clobber masks as BIT(reg)
+ * using these fixed GP register numbers; pin them so a reorder of the
+ * enum above breaks the build instead of silently mis-mapping clobbers. */
+MAKESURE(asm_clobber_regnums,
+	RAX==1 && RCX==2 && RDX==3 && RBX==4 && RSI==5 && RDI==6);
 
 struct I8086Op {
 	char nmem;  /* number of memory operands allowed */

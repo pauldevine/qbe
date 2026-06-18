@@ -732,7 +732,20 @@ parseline(PState ps)
 			/* Add to function's asm string table */
 			idx = curf->nasmstr++;
 			curf->asmstr = realloc(curf->asmstr, curf->nasmstr * sizeof(char*));
+			curf->asmclob = realloc(curf->asmclob, curf->nasmstr * sizeof(bits));
 			curf->asmstr[idx] = strdup(str);
+			/* Optional register-clobber mask: `asm "code", <mask>`.
+			 * minic emits BIT(reg) of the i8086 GP regs the asm
+			 * declares clobbered, and only when nonzero — a
+			 * memory-only clobber omits the operand, so existing
+			 * .ssa stays byte-stable.  spill.c/rega.c then keep no
+			 * live value in a clobbered reg across the asm. */
+			curf->asmclob[idx] = 0;
+			if (peek() == Tcomma) {
+				next();
+				expect(Tint);
+				curf->asmclob[idx] = (bits)tokval.num;
+			}
 			arg[0] = INT(idx);
 			arg[1] = R;
 		}

@@ -512,6 +512,11 @@ struct Fn {
 	Lnk lnk;
 	/* Inline assembly support */
 	char **asmstr;   /* array of inline asm strings */
+	bits *asmclob;   /* parallel array: per-asm register-clobber mask
+	                  * (BIT(reg) of the i8086 GP regs the asm declares
+	                  * clobbered).  Consumed by spill.c/rega.c so a live
+	                  * value is never kept in a clobbered reg across the
+	                  * asm; 0 means no register clobbers (memory-only). */
 	int nasmstr;     /* number of asm strings */
 };
 

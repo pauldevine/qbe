@@ -20,6 +20,7 @@ enum {
 };
 
 static bits regu;      /* registers used */
+static Fn *curfn;      /* function being allocated (for asm clobbers) */
 static Tmp *tmp;       /* function temporaries */
 static Mem *mem;       /* function mem references */
 static struct {
@@ -430,6 +431,20 @@ doblk(Blk *b, RMap *cur)
 				if (!(BIT(T.rsave[r]) & rs))
 					rfree(cur, T.rsave[r]);
 			break;
+		case Oasm:
+			/* Inline asm clobbers: free every register the asm
+			 * declares trashed so no temp is held there across it
+			 * (minic emits the mask, spill.c already reserved/steered
+			 * the live-across set).  The set may include callee-saves
+			 * (e.g. `int 0x21` trashes BX), unlike the call path. */
+			if (curfn->asmclob && rsval(i->arg[0]) >= 0
+			 && rsval(i->arg[0]) < curfn->nasmstr) {
+				rs = curfn->asmclob[rsval(i->arg[0])];
+				for (r=0; rs; r++, rs>>=1)
+					if (rs & 1)
+						rfree(cur, r);
+			}
+			break;
 		case Ocopy:
 			if (regcpy(i)) {
 				curi++;
@@ -551,6 +566,7 @@ rega(Fn *fn)
 	stmov = 0;
 	stblk = 0;
 	regu = 0;
+	curfn = fn;
 	tmp = fn->tmp;
 	mem = fn->mem;
 	blk = alloc(fn->nblk * sizeof blk[0]);
