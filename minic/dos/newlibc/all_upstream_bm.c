@@ -1,24 +1,33 @@
 /*
- * all_upstream_bm.c -- the Phase-6 driver-sweep CAPSTONE (§8s): a single
- * bare-metal Victor 9000 program that links and runs ALL SIX of newlibc's
- * OWN drivers together -- timer.c (§8l), display.c (§8m), keyboard.c (§8n),
- * sasi.c (§8o), console.c (§8p), and pic.c (§8q) -- the §8k gas->nasm
- * in-place ports.  Where §8l..§8q each ran one upstream driver in isolation
- * (in place of its bm_*.c mirror), this proves the six coexist in ONE image,
- * under live interrupts, with data flowing ACROSS drivers.  NOTHING from any
- * bm_*.c driver mirror is linked: the unprefixed upstream symbols (timer_*,
- * display_*, keyboard_*, console_*, pic_*, sasi_* + block_*) are the only
- * drivers in the image.  The build script's per-upstream-header rules
- * (build-newlibc-baremetal.sh) each fire on this file's `#include "<drv>.h"`
- * lines and pull the matching $NL/drivers/<drv>.c, so NO build-glue change
- * is needed -- the rules were designed additive for exactly this.
+ * all_upstream_bm.c -- the Phase-6 driver-sweep CAPSTONE: a single bare-metal
+ * Victor 9000 program that links and runs ALL SIX of newlibc's OWN drivers
+ * together -- timer.c (§8l), display.c (§8m), keyboard.c (§8n), sasi.c (§8o),
+ * console.c (§8p), and pic.c (§8q) -- the §8k gas->nasm in-place ports.  Where
+ * §8l..§8q each ran one upstream driver in isolation (in place of its bm_*.c
+ * mirror), this proves the six coexist in ONE image, under live interrupts,
+ * with data flowing ACROSS drivers.  NOTHING from any bm_*.c driver mirror is
+ * linked: the unprefixed upstream symbols (timer_*, display_*, keyboard_*,
+ * console_*, pic_*, sasi_* + block_*) are the only drivers in the image.
+ *
+ * §8u DEEPENING: the interrupt plumbing is now the UPSTREAM interrupt
+ * framework itself -- drivers/interrupts.c, the SEVENTH upstream TU.  Where the
+ * §8s capstone hand-rolled a local install_isr + local timer_isr/keyboard_isr +
+ * local interrupts_enable/disable, this calls the upstream interrupts_init()
+ * (which builds each IVT entry with the model-aware isr_entry and writes it
+ * with set_interrupt_vector) and runs the UPSTREAM timer_isr/keyboard_isr/
+ * serial_isr.  Phase 15 reads the vectors back with the upstream
+ * get_interrupt_vector to prove interrupts_init installed exactly those ISRs.
+ * interrupts.c's lone remaining gas-asm site (isr_entry's near-model CS grab)
+ * is now ported to the §8k __MINIC__ Intel fork, so the whole framework
+ * compiles AND runs under minic.  The build script links interrupts.c on the
+ * word-bounded interrupts_init() call (it stays off every bm_*-mirror test).
  *
  * Two ISR-driven drivers run live the whole time: the timer on IR2 and the
  * keyboard on IR6, each through the compiler-emitted ES-safe iret ABI (§6d)
- * acknowledged with the UPSTREAM pic_send_eoi (§8q).  pic.c's pic_init does
- * the §6d-mandatory full 8259A re-init before sti.  The SASI sector read
- * (phase 10) runs UNDER those live ISRs -- sasi.c's far-MMIO ES loads are
- * safe only because the §6d prologue owns ES (the §8k SAVE_ES drop, §8o).
+ * acknowledged with the UPSTREAM pic_send_eoi (via interrupts.c's PIC_SEND_EOI,
+ * §8q).  pic.c's pic_init does the §6d-mandatory full 8259A re-init before sti.
+ * The SASI sector read (phase 10) runs UNDER those live ISRs -- sasi.c's
+ * far-MMIO ES loads are safe only because the §6d prologue owns ES (§8o).
  *
  * Cross-driver flows that no single-driver test could exercise:
  *   - the SASI LBA-0 disk label is written to the CRT through display.c and
@@ -28,19 +37,21 @@
  *
  * Output framing/results go over the proven-good harness serial path
  * (bm_console.c's bm_puts, 7201 channel A, captured by the harness); the
- * upstream console.c TX path is exercised separately (phase 11) by a
- * console_puts line that also lands on channel A -- its presence in the
- * golden is the proof console.c's TX ran.  Disk: the known MAME Victor image
- * (label "tandon_703_mame" at LBA-0 offset 4), attached as a SCRATCH COPY
- * (hd field -> V9K_HARD_DISK).  The harness types "v9k" (V9K_KEYPOST) a few
- * seconds in.  Output is deterministic (booleans + the captured console line
- * + the received chars).  Every phase prints before it runs (5 MHz 8088).
+ * upstream console.c TX path is exercised separately (phase 12) by a
+ * console_puts line that also lands on channel A -- its presence in the golden
+ * is the proof console.c's TX ran.  Disk: the known MAME Victor image (label
+ * "tandon_703_mame" at LBA-0 offset 4), attached as a SCRATCH COPY (hd field
+ * -> V9K_HARD_DISK).  The harness types "v9k" (V9K_KEYPOST) a few seconds in.
+ * Output is deterministic (booleans + the captured console line + the received
+ * chars).  Every phase prints before it runs (5 MHz 8088).
  */
 
 #include <stdint.h>
 #include <string.h>
 #include "bm_console.h"    /* harness serial: bm_puts/bm_puthex (channel A) */
-#include "interrupts.h"    /* merged upstream (§8k __MINIC__ fork): interrupts_enable/disable decls, SAVE_ES no-ops */
+#include "interrupts.h"    /* UPSTREAM interrupts.c: interrupts_init/_enable/  */
+                           /* _disable, set/get_interrupt_vector, timer_isr,   */
+                           /* keyboard_isr, ivt_entry_t, INT_* (§8u)           */
 #include "timer.h"         /* UPSTREAM timer.c */
 #include "display.h"       /* UPSTREAM display.c (+ font_data.c) */
 #include "keyboard.h"      /* UPSTREAM keyboard.c */
@@ -54,61 +65,7 @@
 #define GLYPH_OFFSET 0x60   /* VRAM cell glyph_ptr = char + 0x60 */
 #define LABEL_LEN    15     /* "tandon_703_mame" */
 
-/* Near offset of the (single) code frame, for the small-model IVT install. */
-extern unsigned qbe_get_cs(void);
-
-/*
- * pic.c's pic_init() calls interrupts_disable() and keyboard.c / pic.c's
- * flags-restore call interrupts_enable() -- both defined only in upstream
- * drivers/interrupts.c, which we deliberately do NOT link (it also defines
- * its own timer_isr/keyboard_isr that would collide with the local ISRs
- * here).  Supply the one-liners the upstream interrupts.h declares.
- */
-void interrupts_enable(void) {
-    __asm__ volatile ("sti");
-}
-void interrupts_disable(void) {
-    __asm__ volatile ("cli");
-}
-
 static int fails;
-static volatile unsigned kbd_isr_entries;
-
-/* Timer ISR (IR2, INT 0x42): route the tick to the UPSTREAM tick handler,
- * acknowledge with the UPSTREAM pic_send_eoi.  The §6d prologue saved ES,
- * set DS/ES=DGROUP and saved every register, so pic_send_eoi's far MMIO
- * write to the PIC command register is ES-safe (§8q). */
-void __far __attribute__((interrupt)) timer_isr(void) {
-    timer_tick_handler();
-    pic_send_eoi(IRQ_TIMER);
-}
-
-/* Keyboard ISR (IR6, INT 0x46): service the UPSTREAM state machine, EOI. */
-void __far __attribute__((interrupt)) keyboard_isr(void) {
-    kbd_isr_entries++;
-    keyboard_irq_handler();
-    pic_send_eoi(IRQ_KEYBOARD);
-}
-
-/* Model-agnostic IVT install, mirroring bm_interrupts.c's bm_install_isr:
- * far-code models carry seg:off in the pointer; near-code models a bare
- * offset whose segment is qbe_get_cs().  Call with interrupts disabled. */
-static void install_isr(unsigned char int_num, void (*fn)(void)) {
-    volatile uint16_t __far *ivt;
-    uint32_t lin;
-    uint16_t seg, off;
-
-    lin = (uint32_t)fn;
-    off = (uint16_t)lin;
-    seg = (uint16_t)(lin >> 16);
-    if (seg == 0)
-        seg = (uint16_t)qbe_get_cs();
-
-    ivt = (volatile uint16_t __far *)
-        ((((uint32_t)0) << 16) | ((uint16_t)(int_num * 4)));
-    ivt[0] = off;
-    ivt[1] = seg;
-}
 
 /* Bounded spin that does NOT touch the timer (must not call timer_delay_ms,
  * which waits on ticks and would hang when delivery is frozen): returns
@@ -166,6 +123,15 @@ static void check(const char *label, int ok) {
     }
 }
 
+/* The IVT entry interrupts_init() installs for `fn` in the small-model image:
+ * offset is fn's near address, segment is the (single) code segment != 0. */
+static int vector_points_at(uint8_t int_num, void ISR_HANDLER (*fn)(void)) {
+    ivt_entry_t v;
+
+    get_interrupt_vector(int_num, &v);
+    return v.offset == (uint16_t)(uint32_t)fn && v.segment != 0;
+}
+
 static sasi_device_t sasi0;
 static uint8_t sector[SASI_SECTOR_SIZE];
 
@@ -178,7 +144,6 @@ int main(void) {
     unsigned long t0;
 
     fails = 0;
-    kbd_isr_entries = 0;
 
     /* Exercise console.c's init FIRST, before the captured region opens, so
      * the harness trims the channel-reset glitch byte (the §8p lesson):
@@ -187,13 +152,14 @@ int main(void) {
     console_init();
 
     bm_puts("__V9BEGIN__\n");
-    bm_puts("Victor 9000 bare-metal CAPSTONE: all six upstream drivers (qbe/minic)\n");
+    bm_puts("Victor 9000 bare-metal CAPSTONE: six upstream drivers + the\n");
+    bm_puts("upstream interrupt framework (qbe/minic)\n");
 
     /* ----- driver bring-up (§6d order: PIC re-init, then unmaskers) ----- */
-    bm_puts("phase 1: upstream pic_init() + install timer(IR2)+keyboard(IR6) ISRs\n");
+    bm_puts("phase 1: upstream pic_init() + interrupts_init() "
+            "(installs timer/keyboard/serial ISRs)\n");
     pic_init();                       /* full 8259A re-init, all IRQs masked */
-    install_isr(INT_TIMER, timer_isr);
-    install_isr(INT_KEYBOARD, keyboard_isr);
+    interrupts_init();                /* upstream IVT install of all 3 ISRs */
 
     bm_puts("phase 2: upstream timer_init() (8253 ch2 + unmask IR2)\n");
     timer_init();
@@ -219,10 +185,10 @@ int main(void) {
         fails++;
     }
 
-    bm_puts("phase 6: sti (timer+keyboard ISRs now live for the whole test)\n");
-    __asm__ volatile ("sti");
+    bm_puts("phase 6: interrupts_enable() (upstream sti; ISRs now live)\n");
+    interrupts_enable();
 
-    /* ----- the six drivers verified together ----- */
+    /* ----- the six drivers + the framework verified together ----- */
     bm_puts("phase 7: IMR is 0xbb (IR2 timer + IR6 keyboard open): ");
     imr = pic_get_mask();
     if (imr == 0xBB) {
@@ -272,10 +238,8 @@ int main(void) {
     /* The harness types "v9k" at ~3 s (V9K_KEYPOST_DELAY).  The keyboard ring
      * buffers every keystroke, so the slow SASI read above may have let the
      * keys arrive before this loop starts -- it drains the ring either way.
-     * (The non-consuming "no key pending at start" idle check is racy once
-     * typing has begun and is already gated by keyboard_upstream_bm §8n; the
-     * capstone just collects the typed chars.)  Echo each char to the CRT
-     * through display.c (cross-driver keyboard->display) at a known empty row. */
+     * Each char is echoed to the CRT through display.c (cross-driver
+     * keyboard->display) at a known empty row. */
     bm_puts("phase 13: waiting for 3 typed chars (echoed to display): ");
     display_set_cursor(4, 0);
     ngot = 0;
@@ -303,7 +267,16 @@ int main(void) {
     check("phase 14: typed chars match \"v9k\": ",
           ngot == 3 && got[0] == 'v' && got[1] == '9' && got[2] == 'k');
 
-    check("phase 15: keyboard ISR entered: ", kbd_isr_entries > 0);
+    /* interrupts_init() wrote the IVT via the upstream set_interrupt_vector;
+     * read the timer + keyboard vectors back with the upstream
+     * get_interrupt_vector and confirm each points at the matching upstream
+     * ISR (offset == the ISR's near address, segment == CS != 0).  That the
+     * keyboard chars arrived (phase 14) already proves the keyboard_isr ran;
+     * this proves the framework, not a hand-rolled poke, installed it. */
+    check("phase 15: get_interrupt_vector confirms the installed timer ISR: ",
+          vector_points_at(INT_TIMER, timer_isr));
+    check("phase 15b: get_interrupt_vector confirms the installed keyboard ISR: ",
+          vector_points_at(INT_KEYBOARD, keyboard_isr));
 
     bm_puts("phase 16: cross-driver keyboard->display, \"v9k\" echoed in VRAM: ");
     check("", row_matches(4, "v9k", 3));
@@ -319,12 +292,14 @@ int main(void) {
     check("phase 18: pic_enable_irq(2) resumes ticks: ",
           wait_tick_change(timer_get_ticks(), 2000));
 
-    bm_puts("phase 19: all six drivers alive at exit: ");
-    check("", kbd_isr_entries > 0 &&
+    bm_puts("phase 19: framework + drivers alive at exit "
+            "(keyboard delivered, timer ticking): ");
+    check("", ngot == EXPECT_LEN &&
               wait_tick_change(timer_get_ticks(), 2000));
 
     if (fails == 0)
-        bm_puts("PASS: all six upstream drivers ran together bare-metal.\n");
+        bm_puts("PASS: six upstream drivers + the upstream interrupt framework "
+                "ran together bare-metal.\n");
     else
         bm_puts("FAIL: capstone checks failed.\n");
     bm_puts("__V9END__\n");

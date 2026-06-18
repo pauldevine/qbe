@@ -1,10 +1,11 @@
-Victor 9000 bare-metal CAPSTONE: all six upstream drivers (qbe/minic)
-phase 1: upstream pic_init() + install timer(IR2)+keyboard(IR6) ISRs
+Victor 9000 bare-metal CAPSTONE: six upstream drivers + the
+upstream interrupt framework (qbe/minic)
+phase 1: upstream pic_init() + interrupts_init() (installs timer/keyboard/serial ISRs)
 phase 2: upstream timer_init() (8253 ch2 + unmask IR2)
 phase 3: upstream keyboard_init() (VIA CS2 + unmask IR6)
 phase 4: upstream display_init() (font RAM + CRTC + clear)
 phase 5: register UPSTREAM sasi + block_init: controller up
-phase 6: sti (timer+keyboard ISRs now live for the whole test)
+phase 6: interrupts_enable() (upstream sti; ISRs now live)
 phase 7: IMR is 0xbb (IR2 timer + IR6 keyboard open): yes
 phase 8: timer ticks advance (EOI through pic_send_eoi): yes
 phase 9: display a banner, read it back from VRAM: yes
@@ -14,9 +15,10 @@ phase 11: cross-driver disk->display, label shown + read back: yes
 phase 12: console_puts -> UPSTREAM_console_puts_OK
 phase 13: waiting for 3 typed chars (echoed to display): got "v9k"
 phase 14: typed chars match "v9k": yes
-phase 15: keyboard ISR entered: yes
+phase 15: get_interrupt_vector confirms the installed timer ISR: yes
+phase 15b: get_interrupt_vector confirms the installed keyboard ISR: yes
 phase 16: cross-driver keyboard->display, "v9k" echoed in VRAM: yes
 phase 17: pic_disable_irq(2) freezes ticks: yes
 phase 18: pic_enable_irq(2) resumes ticks: yes
-phase 19: all six drivers alive at exit: yes
-PASS: all six upstream drivers ran together bare-metal.
+phase 19: framework + drivers alive at exit (keyboard delivered, timer ticking): yes
+PASS: six upstream drivers + the upstream interrupt framework ran together bare-metal.

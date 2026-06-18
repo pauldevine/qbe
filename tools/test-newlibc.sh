@@ -143,10 +143,24 @@ NEWLIBC_BM_TESTS=(
 	# font_data .obj, the only bm_*.obj is the always-linked harness
 	# bm_console.c).  Deterministic (booleans + the captured upstream
 	# console_puts line + the received chars); bare-metal ONLY (no live
-	# 8253/8259/VRAM/SASI on the DOS host); small (27,427 B code, well under
-	# the 64KB _TEXT ceiling).  The keypost fires at ~3 emulated seconds and
-	# the keyboard ring buffers it across the slow SASI read, so the keyboard
+	# 8253/8259/VRAM/SASI on the DOS host); small code, well under the 64KB
+	# _TEXT ceiling.  The keypost fires at ~3 emulated seconds and the
+	# keyboard ring buffers it across the slow SASI read, so the keyboard
 	# loop drains all three chars whenever they land -> 45 s budget ample.
+	# §8u DEEPENING: the interrupt plumbing is now the UPSTREAM framework
+	# itself -- drivers/interrupts.c, the SEVENTH upstream TU -- in place of
+	# the §8s local install_isr/timer_isr/keyboard_isr/interrupts_enable.
+	# pic_init() + interrupts_init() install and the upstream timer_isr/
+	# keyboard_isr/serial_isr run; phase 15/15b read the vectors back with the
+	# upstream get_interrupt_vector to prove interrupts_init installed them.
+	# interrupts.c's lone remaining gas-asm site (isr_entry's near-model CS
+	# grab) is now the §8k __MINIC__ Intel fork, so the whole framework
+	# compiles AND runs under minic (code grew 27,427 -> 27,849 B).  This DID
+	# need one additive build-glue rule: build-newlibc-baremetal.sh links
+	# $NL/drivers/interrupts.c on a WORD-BOUNDED interrupts_init() match (does
+	# NOT match bm_interrupts_init) with a `! bm_interrupts.h` guard, so it
+	# fires only for this capstone and never collides with the bm-mirror
+	# tests' own ISRs.
 	"all_upstream_bm:45:v9k::hd"
 	"serial_bm:25::victor:"
 	"memory_bm:15:::"

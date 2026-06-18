@@ -179,6 +179,25 @@ if [ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h' "$SRC" \
    && grep -q '"pic\.h"' "$SRC"; then
 	SUPPORT_TUS+=("$NL/drivers/pic.c")
 fi
+# §8u: the UPSTREAM interrupt framework (drivers/interrupts.c) -- its
+# set_interrupt_vector IVT writer + interrupts_init (installs the upstream
+# timer_isr/keyboard_isr/serial_isr) + interrupts_enable/disable.  Linked only
+# for a program that actually drives the framework via interrupts_init(): a
+# WORD-BOUNDED `interrupts_init` match (the `(^|[^_[:alnum:]])` prefix) does
+# NOT match `bm_interrupts_init` (the bm-mirror entry point), and the
+# `! bm_interrupts.h` guard keeps interrupts.c off every bm_*-mirror test
+# (those define their own timer_isr/keyboard_isr/interrupts_enable, which
+# WOULD collide with interrupts.c).  The other upstream-driver bm tests
+# (timer/keyboard/pic_upstream_bm) define LOCAL ISRs + a local install_isr and
+# never call interrupts_init, so this rule fires only for the capstone that
+# adopts the whole upstream framework (§8u).  interrupts.c's deps
+# (timer_tick_handler, keyboard_irq_handler, PIC_SEND_EOI macro) come from the
+# timer.c/keyboard.c/v9k_hw.h the same program already pulls.
+if [ "$TESTHOST" = 0 ] && ! grep -q 'bm_stdio\.h' "$SRC" \
+   && ! grep -q 'bm_interrupts\.h' "$SRC" \
+   && grep -qE '(^|[^_[:alnum:]])interrupts_init' "$SRC"; then
+	SUPPORT_TUS+=("$NL/drivers/interrupts.c")
+fi
 if grep -q 'bm_interrupts\.h' "$SRC"; then
 	SUPPORT_TUS+=("$NLC_DIR/bm_interrupts.c" "$NLC_DIR/bm_pic.c")
 fi
