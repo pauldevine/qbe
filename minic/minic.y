@@ -6555,6 +6555,53 @@ emit_string_array(unsigned elemtyp, char *name, int str_idx, int static_local)
 	var_set_arraybytes(name, total);
 }
 
+/* `T NAME[N] = "string";` — like emit_string_array but with an EXPLICIT
+ * element count N (the `[expr]` form).  The literal's bytes (incl. its NUL)
+ * occupy the front of the array and the remaining `N*sizeof(T) - natural`
+ * bytes are zero-filled, matching C char-array string initialization.  The
+ * QBE data block `{ b "...", b 0 }` is reused verbatim when N fits exactly;
+ * otherwise a `, z PAD` zero-fill is spliced before the closing brace.  A
+ * declared size SMALLER than the natural length (the exact-fit drop-NUL edge,
+ * `char a[3]="abc"`) is unsupported (dies clearly) — no consumer. */
+void
+emit_string_array_sized(unsigned elemtyp, char *name, int str_idx, long count,
+    int static_local)
+{
+	static char buf[65536];
+	int natural;
+	long total, pad;
+	char *blk, *brace;
+
+	if (elemtyp == NIL)
+		die("invalid void array");
+	natural = strlit_bytelen(str_idx);
+	total = count * (long)SIZE(elemtyp);
+	pad = total - natural;
+	if (pad < 0)
+		die("string initializer too long for array");
+	if (pad == 0) {
+		blk = ini[str_idx];
+	} else {
+		strcpy(buf, ini[str_idx]);
+		brace = strrchr(buf, '}');
+		if (!brace)
+			die("malformed string literal data block");
+		sprintf(brace, ", z %ld }", pad);
+		blk = alloc(strlen(buf) + 1);
+		strcpy(blk, buf);
+	}
+	if (static_local) {
+		emit_static_local(name, IDIR(elemtyp), 1, blk);
+	} else {
+		if (nglo == NGlo)
+			die("too many globals");
+		ini[nglo] = blk;
+		strcpy(gloname[nglo], name);
+		varadd(name, nglo++, IDIR(elemtyp), 1);
+	}
+	var_set_arraybytes(name, total);
+}
+
 /* `T NAME[] = { ... };` / `T NAME[N] = { ... };` at file scope, routed
  * through the generic aggregate machinery (agg_emit_array) so each
  * element may itself be a designated struct, a nested array, or a
@@ -8200,6 +8247,15 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	if (parsed_type == NIL)
 		die("invalid void array");
 	emit_string_array(parsed_type, parsed_ident, $4->u.n, 0);
+}
+               | '[' expr ']' '=' STR ';'
+{
+	/* char NAME[N] = "string";  Explicit size — emit the literal bytes
+	 * (NUL-terminated), zero-filled to N elements. */
+	if (parsed_type == NIL)
+		die("invalid void array");
+	emit_string_array_sized(parsed_type, parsed_ident, $5->u.n,
+	    const_eval($2), 0);
 }
                ;
 

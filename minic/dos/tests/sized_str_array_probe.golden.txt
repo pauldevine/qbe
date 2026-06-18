@@ -1,0 +1,8 @@
+cwd=/ len=1
+greeting=hi len=2
+exactfit=ab len=2
+emptied=[] len=0
+tailzero=1 slackzero=1
+cwd[30]=X off=30
+cwd_rewrite_len=63
+sized_str_array_probe done
