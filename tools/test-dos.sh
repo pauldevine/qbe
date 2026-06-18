@@ -1111,6 +1111,31 @@ if prep "newlibc libstub-free (malloc_probe)" \
 		"$QBE_DIR/minic/dos/tests/malloc_probe.golden.txt"
 fi
 
+# §8y: the phase-1 Victor DOS hardware probes (newlibc dos_tests/) — the §8w
+# Watcom-_asm{} ports now made RUNNABLE.  The v9k_hardware.h #pragma aux helper
+# intrinsics (register reads / set_es / far MMIO / delay) got __MINIC__ Intel
+# inline-asm + MK_FP-far definitions (was extern-only, undefined at link), so
+# the tests now LINK and run, not just compile.  build-newlibc-test.sh resolves
+# a dos_tests/ name and passes -D__MINIC__ to the test TU.
+#
+# Only test_memory_layout is DOSBox-portable: it validates DOS PSP / segment
+# regs / stack / heap / INT 0x12 conventional memory (all real DOS), and its
+# one Victor-specific check (font RAM at 0:0C00, test 7) degrades to a WARNING
+# off-Victor, never a failure — all tests PASS under DOSBox.  The six hardware
+# tests (es_preservation / integration / serial / display / timer / keyboard)
+# poke Victor MMIO (CRTC / 7201 / VIA) that DOSBox lacks — they hang or diverge
+# there — and belong on MAME victor9k (run-victor-sasi.sh), a separate on-target
+# gate.  Built --no-libstub (the §7w real-program default; supplies the
+# __heap_start the test reads for heap-start).  The address/segment lines are
+# DOSBox-loader-derived (run-stable; re-capture on a layout change — the §6v
+# pattern), the PASS verdicts robust.
+if prep "dos_test (test_memory_layout)" \
+	build_newlibc_test test_memory_layout --no-libstub; then
+	stage_runtime_case "dos_test (test_memory_layout)" \
+		"$QBE_DIR/build/newlibc-tests/test_memory_layout/test_memory_layout.exe" \
+		"$QBE_DIR/minic/dos/tests/dos_test_memory_layout.golden.txt"
+fi
+
 # §6n: the keyboard-input tests — getchar/fgets (stdin_test) and scanf
 # (scanf_test) read DOS handle 0 via INT 21h AH=3Fh through newlibc's
 # /dev/console.  A DOS stdin redirect (`< IN.TXT`, the run-dos-batch.sh 3rd

@@ -1,0 +1,63 @@
+
+===============================================
+  Victor 9000 Memory Layout Test Suite
+  DOS Environment Validation
+===============================================
+
+Test 1: PSP Structure
+---------------------
+  PSP segment:       0192
+  INT 20h at PSP:0:  20CD (correct)
+  Memory paragraphs: 9FFF (639 KB)
+  Environment seg:   0188
+  PASS: PSP structure valid
+
+Test 2: Segment Layout
+----------------------
+  Code segment (CS): 01A2
+  Data segment (DS): 0EA1
+  Stack segment(SS): 0EA1
+  Extra segment(ES): 0EA1
+  Model: Medium (CS != DS, DS == SS)
+  PASS: Segment layout valid
+
+Test 3: Stack Information
+-------------------------
+  Stack segment:     0EA1
+  Stack pointer:     547C
+  Stack top:         ~FFFE
+  Stack used:        43906 bytes
+  Stack remaining:   21628 bytes
+  PASS: Adequate stack space
+
+Test 4: Heap Information
+------------------------
+  Heap start:        14D4
+  malloc(100):       0x1870 (OK)
+  Heap available:    ~4096 bytes
+  PASS: Heap functional
+
+Test 5: Heap/Stack Separation
+-----------------------------
+  Heap allocation:   24D8
+  Heap end (approx): 28D8
+  Stack pointer:     546C
+  Gap:               11156 bytes
+  PASS: Heap and stack separated
+
+Test 6: Conventional Memory
+---------------------------
+  Reported memory:   640 KB
+  Expected (V9000):  896 KB
+  PASS: Memory size reasonable
+
+Test 7: Font RAM Location (V9000 specific)
+------------------------------------------
+  Lower ASCII fonts: 00C0:0000 - 01C0:0FFF
+  Upper ASCII fonts: 01C0:0000 - 02C0:0FFF
+  Font data present: No (may be uninitialized)
+  WARNING: No font data found
+
+===============================================
+  All tests PASSED
+===============================================

@@ -71,6 +71,9 @@ if [ ! -f "$SRC" ]; then
 	# malloc_probe lives in minic/dos/newlibc/, not the newlibc tree).
 	if [ -f "$NL/tests/$name.c" ]; then
 		SRC="$NL/tests/$name.c"
+	elif [ -f "$NL/dos_tests/$name.c" ]; then
+		# §8y: the phase-1 Victor DOS hardware probes (dos_tests/), DOS-hosted.
+		SRC="$NL/dos_tests/$name.c"
 	else
 		SRC="$QBE_DIR/minic/dos/newlibc/$name.c"
 	fi
@@ -78,6 +81,17 @@ fi
 [ -f "$SRC" ] || { echo "$0: cannot find test source: $SRC" >&2; exit 2; }
 
 base="$(basename "$SRC" .c)"
+
+# §8y: the dos_tests (phase-1 Victor DOS hardware probes) carry __MINIC__-gated
+# Intel inline-asm forks (§8w) plus the v9k_hardware.h helper definitions, so
+# the test TU needs -D__MINIC__.  The portable newlibc support set is
+# __MINIC__-neutral, so this is scoped to the test TU only.  The quote-include
+# "v9k_hardware.h" resolves relative to the source's own dir (dos_tests/).
+TEST_DEFS=""
+case "$SRC" in
+	*/dos_tests/*) TEST_DEFS="-D__MINIC__" ;;
+esac
+
 OUT_DIR="$QBE_DIR/build/newlibc-tests/$base"
 MINIC="$QBE_DIR/minic/minic"
 QBE="$QBE_DIR/qbe"
@@ -166,7 +180,7 @@ fail() { echo "$0: $1 (see $ERR)" >&2; tail -5 "$ERR" >&2; exit 1; }
 
 # Test TU: rename its main so the shim's main can run vfs_init() first.  Always
 # per-test (OUT_DIR) — it is the one TU that differs per build.
-compile_unit "$SRC" "$base" "$OUT_DIR" -Dmain=newlibc_test_main $NL_DEFS \
+compile_unit "$SRC" "$base" "$OUT_DIR" -Dmain=newlibc_test_main $TEST_DEFS $NL_DEFS \
 	|| fail "compile failed: $base"
 
 OBJ_FILES=("$OUT_DIR/$base.obj")
