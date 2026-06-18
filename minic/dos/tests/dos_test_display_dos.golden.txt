@@ -1,0 +1,90 @@
+
+===============================================
+  Victor 9000 Display/CRTC Test Suite
+  Memory-Mapped Display Hardware
+===============================================
+
+Victor 9000 Display Architecture:
+---------------------------------
+  CRTC:       HD46505 @ E800:0000 (memory-mapped)
+  Screen RAM: F000:0000 (16-bit words, NOT byte pairs)
+  Font RAM:   0000:0C00 (loaded by DOS, not ROM)
+  Mode:       80x25 text
+
+Test 1: CRTC Memory-Mapped I/O
+------------------------------
+  Victor 9000 CRTC: HD46505 (6845 compatible)
+  Address register: E800:0000
+  Data register:    E800:0001
+  NOT IBM PC: 0x3D4/0x3D5 I/O ports
+
+  Cursor position:  07A0 (row=24, col=32)
+  H displayed (R1): 0 columns
+  V displayed (R6): 0 rows
+  WARNING: Unexpected display dimensions
+  (May be in graphics mode or unusual config)
+
+Test 2: Screen RAM Format
+-------------------------
+  Victor 9000 screen RAM: F000:0000 - F000:0FFF (4KB)
+  Format: 16-bit words [attr:flags:glyph_ptr]
+  NOT IBM PC: [char][attr] byte pairs
+
+  Screen[0,0]: 4084
+  Screen[0,1]: 4084
+  Screen[0,2]: 4084
+
+  Word format breakdown:
+    Bits 15-12: Attributes (intensity, blink, etc.)
+    Bits 11-8:  Flags
+    Bits 7-0:   Glyph pointer (offset into font RAM)
+  PASS: Screen RAM access successful
+
+Test 3: Font RAM Location
+-------------------------
+  Victor 9000 has NO character ROM!
+  Fonts must be loaded into RAM
+
+  Lower ASCII (0-127):   0000:0C00 - 0000:1BFF (7KB)
+  Upper ASCII (128-255): 0000:1C00 - 0000:2BFF (4KB)
+
+  Lower ASCII fonts: PRESENT
+  Upper ASCII fonts: PRESENT
+
+  Font data for 'A' (first 8 bytes):
+  FE 01 00 00 00 00 00 00 
+  PASS: Fonts present in RAM
+
+Test 4: Display Output
+----------------------
+  Writing test pattern to screen RAM
+
+  Original cursor:  07A0
+  Test position:    row 5, col 10 (offset 0334)
+  Original word:    4084
+  Wrote word:       4058 ('X' with attr 0x40)
+  Verify read:      4058 (correct)
+  Restored:         4084
+
+  Look at row 5, col 10 - should briefly show 'X'
+  PASS: Display output works
+
+Test 5: Cursor Movement
+-----------------------
+  Current cursor:   07A0 (row=24, col=32)
+  Moved to:         0334 (row=10, col=20)
+  Cursor moved successfully
+  Restored to:      07A0
+  PASS: Cursor movement works
+
+Test 6: Display String
+----------------------
+  Writing 'V9K TEST' to row 6, starting at col 30
+
+  Written 8 characters
+  Check row 6 for 'V9K TEST'
+  PASS: String output works
+
+===============================================
+  All tests PASSED
+===============================================

@@ -27,14 +27,16 @@ STACK_SIZE=8192
 # objects: qbe_rt.asm (compiler runtime), dos_syscall.asm (INT 21h primitives),
 # and the minic-compiled dos_libc.c (the libc fill newlibc itself lacks).
 NO_LIBSTUB=0
+SOFTFLOAT=0
 SRC=""
 for arg in "$@"; do
 	case "$arg" in
 		--model=*) MODEL="${arg#--model=}" ;;
 		--stack-size=*) STACK_SIZE="${arg#--stack-size=}" ;;
 		--no-libstub) NO_LIBSTUB=1 ;;
+		--softfloat) SOFTFLOAT=1 ;;
 		-h|--help)
-			echo "usage: $0 [--model=small] [--stack-size=N] [--no-libstub] <test-name|path/to/test.c>" >&2
+			echo "usage: $0 [--model=small] [--stack-size=N] [--no-libstub] [--softfloat] <test-name|path/to/test.c>" >&2
 			exit 0 ;;
 		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
 		*) SRC="$arg" ;;
@@ -259,6 +261,17 @@ else
 			|| fail "compile failed: $tu_base"
 		OBJ_FILES+=("$OUT_DIR/$tu_base.obj")
 	done
+fi
+
+# §8z: --softfloat links minic/dos/softfloat.c (the single-precision Ks helper
+# library the i8086 backend lowers `call far _sf_*` to).  Needed by the dos_tests
+# that do float math (test_timer_dos's frequency calc); neither libstub nor the
+# libstub-free libc fill supplies _sf_*.  Compiled into OUT_DIR directly (not the
+# shared support cache) so the cache stamp is unaffected — mirrors build-example.sh.
+if [ "$SOFTFLOAT" = 1 ]; then
+	compile_unit "$DOS_DIR/softfloat.c" softfloat "$OUT_DIR" \
+		|| fail "softfloat compile failed"
+	OBJ_FILES+=("$OUT_DIR/softfloat.obj")
 fi
 
 # crt0 + --no-stdio libstub.  small/tiny: -DNEAR_CODE (_main reached by a

@@ -1,0 +1,87 @@
+
+===============================================
+  Victor 9000 ES/SS Preservation Test Suite
+  CRITICAL: ES corruption breaks hardware I/O
+===============================================
+
+Victor 9000 Memory-Mapped I/O Info:
+-----------------------------------
+  ALL hardware access uses ES segment register
+  DOS/BIOS interrupt handlers corrupt ES
+  Solution: Save ES to STATIC memory before DOS calls
+  Why static? Interrupts corrupt stack and registers
+
+Test 1: ES Corruption by DOS INT 0x21
+-------------------------------------
+  Purpose: Verify that DOS calls corrupt ES register
+  This is EXPECTED behavior on Victor 9000
+
+  ES before DOS call: 1234
+  ES after DOS call:  1234
+  Result: ES was preserved (unexpected)
+  Note: This DOS version preserves ES
+
+Test 2: ES Preservation Using Static Memory
+-------------------------------------------
+  Key insight: Save ES to STATIC memory, not stack/registers
+  Interrupts corrupt stack and registers but not static vars
+
+  ES original value: 5678
+  Saved to static:   5678 (address 0x0220)
+  ES after corrupt:  E800
+  ES after restore:  5678
+  PASS: ES restored correctly from static memory
+
+Test 3: Standard Hardware Access Pattern
+----------------------------------------
+  Pattern: Save ES -> Load HW segment -> Access -> Restore ES
+
+  Step 1: Save ES = 5678
+  Step 2: Load ES = E800 (CRTC segment)
+  Step 3: Access CRTC registers
+          CRTC R14 (cursor H): 07
+          CRTC R15 (cursor L): A0
+  Step 4: Restore ES = 5678
+  PASS: Hardware access pattern executed correctly
+
+Test 4: SS Register Preservation
+--------------------------------
+  Check if DOS corrupts SS (stack segment)
+
+  SS before DOS call: 0FF0
+  SS after DOS call:  0FF0
+  PASS: SS preserved by DOS
+
+Test 5: Multiple DOS Calls with ES Preservation
+-----------------------------------------------
+  Simulates real-world pattern of DOS + hardware access
+
+  Initial ES: 0FF0
+  Iteration 1: saved=0FF0, after_dos=0FF0, restored=0FF0
+  Iteration 2: saved=0FF0, after_dos=0FF0, restored=0FF0
+  Iteration 3: saved=0FF0, after_dos=0FF0, restored=0FF0
+  Iteration 4: saved=0FF0, after_dos=0FF0, restored=0FF0
+  Iteration 5: saved=0FF0, after_dos=0FF0, restored=0FF0
+  PASS: ES consistently preserved across multiple DOS calls
+
+Test 6: Safe Far Memory Access (ES-preserving)
+----------------------------------------------
+  Using helper functions that preserve ES
+
+  ES before access: 0FF0
+  Screen RAM[0]:    4084
+  CRTC R14:         07
+  ES after access:  0FF0
+  PASS: Safe helpers preserve ES
+
+Test 7: ES During Potential Interrupt Window
+--------------------------------------------
+  Tests that static ES save survives interrupts
+
+  Completed 100 hardware access cycles
+  PASS: ES stable across interrupt windows
+
+===============================================
+  All tests PASSED
+  ES preservation pattern validated!
+===============================================
