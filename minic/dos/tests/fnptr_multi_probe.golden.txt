@@ -1,0 +1,6 @@
+m1=11 m2=9
+sm1=14 sm2=-7
+mi1=10 mi2=-5
+hello ran
+fc=42
+fnptr_multi_probe done

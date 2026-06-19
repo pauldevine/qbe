@@ -5891,6 +5891,32 @@ emit_global_fnptr(char *name, unsigned base, Node *fptpar, Node *init, int is_st
 		glo_mark_static_range(start);
 }
 
+/* §9b: one declarator in a file-scope fn-ptr declaration.  These list nodes
+ * are consumed ONLY by emit_global_fnptr_list and never reach codegen, so the
+ * 'Q'/'Z' op tags are private bookkeeping:
+ *   'Q': u.v = name, l = holder, r = next declarator in the comma chain
+ *   'Z' holder: l = fptpar (param list), r = init expr (or 0) */
+Node *
+mk_fnptr_decl(char *name, Node *fptpar, Node *init)
+{
+	Node *holder = mknode('Z', fptpar, init);
+	Node *n = mknode('Q', holder, 0);
+	strcpy(n->u.v, name);
+	return n;
+}
+
+/* Emit every declarator in a file-scope fn-ptr declaration, all sharing the
+ * single return type `base` (C: the declaration's type applies to each
+ * declarator — `int (*a)(int), (*b)(int);`). */
+void
+emit_global_fnptr_list(unsigned base, Node *list, int is_static)
+{
+	Node *it;
+
+	for (it = list; it; it = it->r)
+		emit_global_fnptr(it->u.v, base, it->l->l, it->l->r, is_static);
+}
+
 #define NSAI 4096
 int  nsai = 0;
 char sai_kind[NSAI];   /* 'N' = literal number, 'S' = string global idx,
@@ -7557,7 +7583,7 @@ mkfor(Node *ini, Node *tst, Node *inc, Stmt *s)
 
 %type <u> type
 %type <s> stmt stmts asmstmt
-%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc idlist kr_idlist kr_namelist kr_name sm_more_names ext_decllist ext_decl comma_expr comma_exp0 init_decllist init_decl gaggr gilist gitem gival forinit_var
+%type <n> expr exp0 pref post arg0 arg1 par0 par1 fptpar0 fptpar1 initlist inititem generic_list generic_assoc idlist kr_idlist kr_namelist kr_name sm_more_names ext_decllist ext_decl comma_expr comma_exp0 init_decllist init_decl gaggr gilist gitem gival forinit_var gfnptr_decllist gfnptr_decl
 %type <n> asmoutputs asmoutputlist asmoutput asminputs asminputlist asminput asmclobbers asmclobberlist
 %token <u> TNAME
 
@@ -7782,26 +7808,50 @@ externdcl: EXTERN type IDENT ';'
 }
          ;
 
-gfnptrdcl: type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
+gfnptrdcl: type gfnptr_decllist ';'
 {
-	/* File-scope function-pointer variable: void (*v)(void); */
-	emit_global_fnptr($4->u.v, $1, $7, 0, 0);
+	/* File-scope function-pointer variable declaration, one or more
+	 * declarators sharing the return type: void (*v)(void);  (§9a single)
+	 * int (*a)(int), (*b)(int);  (§9b multi-declarator + qualified pointee). */
+	emit_global_fnptr_list($1, $2, 0);
 }
-         | type '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr ';'
+         | STATIC type gfnptr_decllist ';'
 {
-	/* File-scope fn-ptr variable with initializer: void (*v)(void) = foo; */
-	emit_global_fnptr($4->u.v, $1, $7, $10, 0);
-}
-         | STATIC type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
-{
-	/* static file-scope fn-ptr variable (internal linkage). */
-	emit_global_fnptr($5->u.v, $2, $8, 0, 1);
-}
-         | STATIC type '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr ';'
-{
-	emit_global_fnptr($5->u.v, $2, $8, $11, 1);
+	/* static file-scope fn-ptr declaration (internal linkage). */
+	emit_global_fnptr_list($2, $3, 1);
 }
          ;
+
+gfnptr_decllist: gfnptr_decl                       { $$ = $1; }
+               | gfnptr_decl ',' gfnptr_decllist   { $1->r = $3; $$ = $1; }
+               ;
+
+gfnptr_decl: '(' '*' IDENT ')' '(' fptpar0 ')'
+{
+	$$ = mk_fnptr_decl($3->u.v, $6, 0);
+}
+           | '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr
+{
+	$$ = mk_fnptr_decl($3->u.v, $6, $9);
+}
+           | TFAR '(' '*' IDENT ')' '(' fptpar0 ')'
+{
+	/* §9b: __far-qualified pointee — `void __far (*v)(void);`.  The far
+	 * calling convention is a memory-model property on this toolchain, so
+	 * TFAR is accepted and dropped (the pointer type is computed identically
+	 * to the unqualified declarator above).  Only TFAR is admitted here, NOT
+	 * the §8r fp_attr form: a file-scope fn-ptr VARIABLE has no enclosing
+	 * function for an interrupt attribute to qualify, there is no consumer,
+	 * and merging fp_attr's empty save-marker into this file-scope context
+	 * collides with attrreset (reduce/reduce).  TFAR's distinct first token
+	 * keeps this conflict-free against the `type TFAR '*'` pointer type. */
+	$$ = mk_fnptr_decl($4->u.v, $7, 0);
+}
+           | TFAR '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr
+{
+	$$ = mk_fnptr_decl($4->u.v, $7, $10);
+}
+           ;
 
 ext_decllist: ext_decl
 {
