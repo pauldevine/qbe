@@ -7834,24 +7834,53 @@ gfnptr_decl: '(' '*' IDENT ')' '(' fptpar0 ')'
 {
 	$$ = mk_fnptr_decl($3->u.v, $6, $9);
 }
-           | TFAR '(' '*' IDENT ')' '(' fptpar0 ')'
+           | gfnptr_quals '(' '*' IDENT ')' '(' fptpar0 ')'
 {
-	/* §9b: __far-qualified pointee — `void __far (*v)(void);`.  The far
-	 * calling convention is a memory-model property on this toolchain, so
-	 * TFAR is accepted and dropped (the pointer type is computed identically
-	 * to the unqualified declarator above).  Only TFAR is admitted here, NOT
-	 * the §8r fp_attr form: a file-scope fn-ptr VARIABLE has no enclosing
-	 * function for an interrupt attribute to qualify, there is no consumer,
-	 * and merging fp_attr's empty save-marker into this file-scope context
-	 * collides with attrreset (reduce/reduce).  TFAR's distinct first token
-	 * keeps this conflict-free against the `type TFAR '*'` pointer type. */
+	/* §9c: a qualified pointee — `void __far (*v)(void);` (§9b), and now
+	 * `void __attribute__((interrupt)) (*v)(void);` and the combined far +
+	 * attribute forms (newlibc interrupts.h spells a far ISR
+	 * `void __far __attribute__((interrupt)) ...`).  gfnptr_quals collapses
+	 * the whole qualifier run into ONE symbol, so the declarator's $ indices
+	 * are fixed regardless of how many qualifiers were written.  Every
+	 * qualifier is ACCEPTED and DROPPED: __far is a memory-model property on
+	 * this toolchain and an interrupt/weak attribute on a fn-ptr VARIABLE has
+	 * no codegen meaning (the ISR ABI lives on a function DEFINITION, not a
+	 * pointer's pointee type), so the pointer type is IDIR(FUNC(base))
+	 * identical to the unqualified declarator. */
 	$$ = mk_fnptr_decl($4->u.v, $7, 0);
 }
-           | TFAR '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr
+           | gfnptr_quals '(' '*' IDENT ')' '(' fptpar0 ')' '=' expr
 {
 	$$ = mk_fnptr_decl($4->u.v, $7, $10);
 }
            ;
+
+/* A non-empty qualifier run on a file-scope fn-ptr declarator.  It is
+ * deliberately NOT nullable (the bare, no-qualifier declarator keeps its own
+ * gfnptr_decl productions above) so an empty reduction can never compete with
+ * typed_decl's `type TFAR attropt IDENT` on a TFAR lookahead.  gfnptr_attr
+ * reuses attropt's OWN `attrreset` empty marker (NOT the §8r fp_attr form,
+ * whose separate `fp_attr_save` marker collided reduce/reduce with attrreset
+ * when §9b tried it at file scope), so the attribute is parsed by the exact
+ * same item sequence as attropt and is distinguished only by the token after
+ * the closing `))`: IDENT continues typed_decl, `(` continues this fn-ptr
+ * declarator. */
+gfnptr_quals: TFAR
+            | gfnptr_attr
+            | TFAR gfnptr_attr
+            | gfnptr_attr TFAR
+            ;
+
+gfnptr_attr: ATTRIBUTE '(' '(' attrreset attrlist ')' ')'
+{
+	/* File-scope fn-ptr VARIABLE: the attribute (interrupt/weak/...) has no
+	 * codegen meaning on a pointer, so drop whatever attrlist set.  The reset
+	 * is defensive — every top-level definition that reads cur_fn_interrupt
+	 * runs through its own attropt/attrreset first — but it keeps the global
+	 * state clean across the declaration. */
+	cur_fn_interrupt = 0;
+	cur_fn_weak = 0;
+};
 
 ext_decllist: ext_decl
 {

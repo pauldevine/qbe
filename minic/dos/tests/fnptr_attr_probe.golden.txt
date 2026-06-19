@@ -1,0 +1,8 @@
+hello ran
+a_sw=21
+hello ran
+a_afc=19
+a_w1=14 a_w2=-7
+a_mi=10
+after_attr=101
+fnptr_attr_probe done
