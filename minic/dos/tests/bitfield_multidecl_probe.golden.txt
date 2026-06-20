@@ -1,0 +1,7 @@
+A a=5 b=20 c=9
+A wrap a=5 b=20 c=9
+B x=10 y=1000
+C p=500 q=20
+D m=5 n=300 o=9 r=400
+sizeof A=2 B=4 C=4 D=8
+bitfield_multidecl_probe done

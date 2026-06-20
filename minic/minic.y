@@ -8065,6 +8065,22 @@ smembers:
 	 * already folds to an 'N' node, so const_eval handles it. */
 	structaddbitfield(curstruct, $3->u.v, $2, const_eval($5));
 }
+        | smembers type IDENT ':' expr ',' sm_more_names ';'
+{
+	/* Multi-declarator bitfield list whose FIRST declarator is a
+	 * bitfield: `unsigned a:3, b:5, c:4;` (the common hardware-register
+	 * pattern), and the mixed `unsigned a:3, b;` (bitfield then plain).
+	 * All declarators share the base type ($2).  A tail node carries an
+	 * optional width-expr in n->l (NIL = a plain member). */
+	Node *n;
+	structaddbitfield(curstruct, $3->u.v, $2, const_eval($5));
+	for (n = $7; n; n = n->r) {
+		if (n->l)
+			structaddbitfield(curstruct, n->u.v, $2, const_eval(n->l));
+		else
+			structaddmember(curstruct, n->u.v, $2);
+	}
+}
         | smembers type IDENT ',' sm_more_names ';'
 {
 	/* Multi-name member: `struct line *prev, *next;` — all share the
@@ -8072,11 +8088,18 @@ smembers:
 	 * the first declarator are tolerated but not honored (each '*' in
 	 * sm_more_names is consumed for syntactic compatibility but does
 	 * not add another pointer level).  This works for the common K&R
-	 * pattern where every name in the list has matching decoration. */
+	 * pattern where every name in the list has matching decoration.
+	 * A tail node carries an optional bitfield width-expr in n->l
+	 * (NIL = plain member), so the mixed `unsigned a, b:5;` form — a
+	 * plain first declarator followed by a bitfield — also parses. */
 	Node *n;
 	structaddmember(curstruct, $3->u.v, $2);
-	for (n = $5; n; n = n->r)
-		structaddmember(curstruct, n->u.v, $2);
+	for (n = $5; n; n = n->r) {
+		if (n->l)
+			structaddbitfield(curstruct, n->u.v, $2, const_eval(n->l));
+		else
+			structaddmember(curstruct, n->u.v, $2);
+	}
 }
         | smembers type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
 {
@@ -8104,18 +8127,46 @@ sm_more_names: IDENT
 	strcpy(n->u.v, $2->u.v);
 	$$ = n;
 }
+             | IDENT ':' expr
+{
+	/* A bitfield item in a multi-declarator list: the width-expr is
+	 * stashed in n->l so the smembers action emits a bitfield (not a
+	 * plain member) for it.  Lets a list lead with a plain declarator
+	 * and still contain bitfields, e.g. `unsigned a, b:5;`. */
+	Node *n = mknode(0, 0, 0);
+	strcpy(n->u.v, $1->u.v);
+	n->l = $3;
+	$$ = n;
+}
              | sm_more_names ',' IDENT
 {
-	Node *n = mknode(0, 0, 0);
+	/* Append at the list TAIL.  (The earlier `$1->r = n` overwrote the
+	 * head's link, so a list of 3+ trailing declarators silently dropped
+	 * its middle members -- latent because real `T a, b;` lists rarely
+	 * exceed one trailing name; a multi-declarator bitfield run exposes
+	 * it.) */
+	Node *n = mknode(0, 0, 0), *tl = $1;
 	strcpy(n->u.v, $3->u.v);
-	$1->r = n;
+	while (tl->r) tl = tl->r;
+	tl->r = n;
 	$$ = $1;
 }
              | sm_more_names ',' '*' IDENT
 {
-	Node *n = mknode(0, 0, 0);
+	Node *n = mknode(0, 0, 0), *tl = $1;
 	strcpy(n->u.v, $4->u.v);
-	$1->r = n;
+	while (tl->r) tl = tl->r;
+	tl->r = n;
+	$$ = $1;
+}
+             | sm_more_names ',' IDENT ':' expr
+{
+	/* A bitfield item appended to the list (see the start-item rule). */
+	Node *n = mknode(0, 0, 0), *tl = $1;
+	strcpy(n->u.v, $3->u.v);
+	n->l = $5;
+	while (tl->r) tl = tl->r;
+	tl->r = n;
 	$$ = $1;
 }
              ;
