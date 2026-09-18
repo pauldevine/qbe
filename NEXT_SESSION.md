@@ -21,12 +21,13 @@ audit only if `i8086/emit.c` changes).
 - `ia16-ubuntu-2` container (Watcom `wcc -p`) needs `container system start`
   then `container start ia16-ubuntu-2` first.
 
-### Item 0 — preserve the triage tooling (small, do first)
-- `build/ckermit-triage/` is untracked and `build/` gets wiped.  Move
-  `sweep.sh`, `fixups.pl`, `splitdecl.pl`, `one.sh`, `it.sh`, `m.sh`,
-  `locate.py`, `omfsize.py`, `FINDINGS.md` into a tracked `tools/ckermit/`
-  (keep outputs under `build/`).  `locate.py` + minic's new
-  "(in statement ending near line N)" suffix are how to find emit-time errors.
+### Item 0 — preserve the triage tooling — DONE (2026-09-18)
+- Tracked in `tools/ckermit/` (README.md there).  Paths via `common.sh`
+  (`CK`, `CKW`, `MODEL`, `MINICFLAGS`, `OUTSUFFIX`); outputs stay in
+  `build/ckermit-triage/`.  New `pp.sh` regenerates the Watcom `.i` inputs in
+  the container (byte-identical to §9f's).  `MINICFLAGS=-G sweep.sh large`
+  reproduces §9f's out-large-G exactly (24/24; `.omf.asm` identical modulo
+  QBE's heap-address local labels `_0x…`, which vary under ASLR).
 
 ### Item 1 — minic gaps whose rewrites CHANGE MEANING (highest priority)
 These make the current objects wrong C-Kermit; fix before anything links.
