@@ -7,13 +7,16 @@ set -u
 . "$(dirname "$0")/common.sh"
 mkdir -p "$OUT"
 [ -d "$W/pp" ] || { echo "no $W/pp -- run $TOOLS/pp.sh first" >&2; exit 1; }
+# Rewrites for text that only Watcom's own headers produce (moved out of
+# fixups.pl by item 3; build-ckermit.sh uses our headers and needs none).
+WATCOM_HDR='s/\b__int64\b/long long/g; s/^.*__based\(__segname.*$//; s/(\((?:[^()]++|(?1))*\))\s*:>\s*(\((?:[^()]++|(?2))*\))/((void __far *)(((unsigned long)$1 << 16) | (unsigned short)$2))/g'
 NORMALIZE='s/\bunsigned short int\b/unsigned short/g;s/\bunsigned long int\b/unsigned long/g;s/\bsigned short int\b/short/g;s/\bsigned long int\b/long/g;s/\blong long int\b/long long/g;s/\blong int\b/long/g;s/\bshort int\b/short/g;s/\bsigned char\b/char/g;s/\bsigned long long\b/long long/g;s/\bsigned long\b/long/g;s/\bsigned int\b/int/g'
 for pp in ${ONLY:-"$W"/pp/*.i}; do
   b=$(basename "$pp" .i); err="$OUT/$b.err"; : > "$err"
   # drop pragma lines (+ backslash continuations), Watcom calling-convention noise
   awk 'BEGIN{c=0} { if (c) { c = ($0 ~ /\\$/); next } if ($0 ~ /^[ \t]*#/) { c = ($0 ~ /\\$/); next } print }' "$pp" \
    | perl -pe 's/__declspec\([^)]*\)//g; s/\b(__watcall|__near|__cdecl)\b//g' \
-   | perl -p "$TOOLS/fixups.pl" | tr -d '\r\032' | perl -pe "$NORMALIZE" > "$OUT/$b.c"
+   | perl -p "$TOOLS/fixups.pl" | perl -pe "$WATCOM_HDR" | tr -d '\r\032' | perl -pe "$NORMALIZE" > "$OUT/$b.c"
   if ! "$Q/minic/minic" -m "$MODEL" ${MINICFLAGS:-} < "$OUT/$b.c" > "$OUT/$b.ssa" 2>"$err"; then echo "$b MINIC: $(head -c 300 $err | tr '\n' ' ')"; continue; fi
   if ! "$Q/qbe" -t i8086 -m "$MODEL" "$OUT/$b.ssa" > "$OUT/$b.asm" 2>"$err"; then echo "$b QBE: $(head -c 300 $err| tr '\n' ' ')"; continue; fi
   if ! "$Q/tools/asm_to_omf.py" "--model=$MODEL" "$b" "$OUT/$b.asm" "$OUT/$b.omf.asm" 2>"$err"; then echo "$b OMF: $(head -c 300 $err| tr '\n' ' ')"; continue; fi

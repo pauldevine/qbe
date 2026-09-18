@@ -127,21 +127,55 @@ frontend-only → no emit audit.
   aoa_flatten yet); a definition form for functions returning fn pointers;
   string rows in a 2-D char array (`char a[2][4] = {"ab","cd"}` dies).
 
-### Item 3 — switch from Watcom's headers to ours
-- §9f preprocessed with Open Watcom's headers (exact config match, right for
-  "does it parse").  Wrong for linking: objects assume Watcom's `FILE`,
-  `struct stat`, `struct tm`, `struct dirent` layouts (packed to 1 byte) —
-  the §7s cross-header struct-ABI landmine.
-- Write `tools/build-ckermit.sh`: `clang -E` with minic/include + the
-  newlibc shim headers + C-Kermit's own `victor/` and `victorow/` shims
-  (`termios.h`, `pwd.h`, `sys/utsname.h`, `sys/time.h`, `curses.h`),
-  `-include ckvictor.h`, `-D__MINIC__`; compile large with `-G`; follow the
-  build-stevie.sh `--no-libstub` pattern for the runtime + support TUs.
-- Expect new gaps (headers we lack, Watcom-only declarations in ckvictor.c).
-  This removes the Watcom-internal undefined symbols (`___iob`, `__IsTable`,
-  `___get_errno_ptr`, `__setjmp`, `_disable`/`_enable`).
-- `ckcpro.c` is generated from `ckcpro.w` by the host tool `wart`
-  (`cc -DSIGTYP=void -o wart ckwart.c`); build it host-side into build/.
+### Item 3 — switch from Watcom's headers to ours — DONE (2026-09-18)
+`tools/build-ckermit.sh` builds all **24/24** modules (large, `-G`) against
+our own header set, `minic/dos/ckermit/include/` (21 headers, self-contained;
+README there), with no Watcom headers.  No compiler/qbe/emit change → no
+make check / MP byte-compare / emit audit needed; test-dos untouched.
+- Pipeline: wart (host, from ckwart.c; output byte-identical to the
+  committed ckcpro.c) → `clang -E -undef -nostdinc` with victorow → victor →
+  our headers → CK, `-include ckvictor.h` → `fixups.pl` → minic -G → qbe →
+  asm_to_omf → nasm → `build/ckermit/<model>/*.obj`.  Flags live in
+  `tools/ckermit/cppflags.sh` (shared).  `-undef` matters: clang's own
+  predefines (`__APPLE__`, `__GNUC__`) would steer C-Kermit's platform
+  ifdefs; wcc's (`M_I86`, `__DOS__`, `MSDOS`, `__LARGE__`, `_M_IX86=0`...)
+  are defined instead, minus `__WATCOMC__`.
+- **Equivalence with the Watcom build is checked, not assumed**:
+  `tools/ckermit/hdrcheck.sh` (needs the container) compares (1) definedness
+  of all ~3,300 identifiers C-Kermit tests in `#if`s, after all system
+  headers, Watcom vs ours, plus the values of shared ones used in `#if`
+  expressions; (2) per module, the C-Kermit statements both ways as
+  multisets — value-only differences pair up, a code path in one build only
+  unbalances the counts.  PASS: every module balanced.  Bug-loud: putting
+  `F_SETFL`/`O_NDELAY` back flags both checks (ckutio 36/48, ckufio 40/45).
+- What that check caught in the first draft of the headers (all fixed):
+  `fcntl()`/`F_*`/`O_NDELAY`/`O_NONBLOCK` and `EWOULDBLOCK` — Watcom's DOS
+  headers have none, and they switched on ckutio/ckufio non-blocking paths
+  (`#ifdef F_SETFL`, `DONDELAY`) absent from the reference build;
+  `PATH_MAX` is 143 in Watcom (144 changed buffer sizes).  Watcom-only macros
+  left are all foreign-platform/dead/cosmetic (listed in hdrcheck's ACCEPTED).
+- `fixups.pl` is now only source-level Watcom-isms: W3 `__interrupt`, W5 XI
+  records, W6 (new) object `__near` — items 5a/5c/5b.  W1/W2/W4 matched only
+  Watcom-header text and moved into `sweep.sh` (still 24/24 on the Watcom
+  path).
+- Sizes: code 421,495 B vs 426,922 with Watcom headers (ctype calls instead
+  of inline table macros), data 83,095 vs 83,127.
+- External symbols: 97 (`tools/ckermit/undefined-ours.txt`).  Watcom
+  internals gone (`___iob`, `__IsTable`, `___get_errno_ptr`, `__setjmp`);
+  new are ordinary libc (`feof`/`ferror`/`fileno`/`clearerr`/`getc`/`putc`/
+  `getchar`/`putchar`/`isalnum`/..., `__errno`, `stdin`/`stdout`/`stderr`,
+  `_far_setjmp`/`_far_longjmp`, `_far_intdos`, `_intdosx`).
+- **Item 4 ABI hazards** (README table): `struct stat` and `off_t` (long)
+  differ from shiminc — dos_vfs's `vfs_stat` writes nothing and `vfs_lseek`
+  returns 16 bits, so stat/fstat/lseek need implementations compiled against
+  these headers; `signal` must return a function pointer (dos_libc's is an
+  `int` stub); `struct dirent`/`DIR` is Watcom's layout, not
+  libgloss/dirent.c's; `_fmode` and all of time.h have no provider.  `FILE`,
+  `jmp_buf`, `errno` match the runtime.
+- Noticed, not fixed: the i8086 emitter prints a `w` compare against -1 as
+  `cmp bx, 4294967295` (nasm warns "word exceeds bounds", truncates to
+  0xFFFF — correct, 422 warnings in C-Kermit, same under Watcom headers).
+  Cosmetic; a fix is an emit.c change (audit).
 
 ### Item 4 — libc fill (84 undefined → 0)
 From `build/ckermit-triage/undefined.txt` (84 symbols, Watcom headers).
@@ -200,12 +234,15 @@ unlink/rename/stat, isatty, setjmp, _qbe_div32*, tolower/toupper.
   materialization before branches, linear `switch` chains — §9f measured
   2.7× Watcom `-os` with -G.
 
-### Current state (end of item 2)
-- Items 0–2 done; test-dos 462/462; MP compact body 689,760; grammar
+### Current state (end of item 3)
+- Items 0–3 done; test-dos 462/462; MP compact body 689,760; grammar
   conflicts 115 s/r, 0 r/r.
-- `build/ckermit-triage/out-large-G/` = the latest 24/24 compile (large, -G);
-  `FINDINGS.md` and `undefined.txt` there are the inputs to items 3–5.
-- **Next: item 3** (our headers instead of Watcom's; `tools/build-ckermit.sh`).
+- `tools/build-ckermit.sh` = the 24/24 compile (large, -G, our headers) into
+  `build/ckermit/large/`; `tools/ckermit/undefined-ours.txt` (97 symbols) and
+  `minic/dos/ckermit/include/README.md` (ABI table) are the inputs to item 4.
+- **Next: item 4** (libc fill).  Build its TUs against
+  `minic/dos/ckermit/include`, not shiminc; re-run `hdrcheck.sh` whenever a
+  header there changes.
 
 ---
 
