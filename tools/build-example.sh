@@ -27,6 +27,12 @@ SPLITSTACK=0
 # .COM-only (no libstub-free path) and an absent newlibc tree both fall back to
 # libstub automatically (see the resolution block below).
 NO_LIBSTUB=1
+# --near-globals: minic -G for the program's own TUs (far-data models) —
+# small named globals live in DGROUP and are accessed DS-relative; string
+# literals and objects >= 128 B go to each module's far <BASE>_FAR segment.
+# The runtime/support TUs stay without -G (all-DGROUP data, far access),
+# which is link-compatible in both directions.
+NEAR_GLOBALS=0
 LIBSTUB_EXPLICIT=0   # 1 once --libstub / --no-libstub forces a choice
 SOURCES=()
 for arg in "$@"; do
@@ -34,10 +40,11 @@ for arg in "$@"; do
 		--model=*) MODEL="${arg#--model=}" ;;
 		--softfloat) SOFTFLOAT=1 ;;
 		--split-stack) SPLITSTACK=1 ;;
+		--near-globals) NEAR_GLOBALS=1 ;;
 		--libstub) NO_LIBSTUB=0; LIBSTUB_EXPLICIT=1 ;;
 		--no-libstub) NO_LIBSTUB=1; LIBSTUB_EXPLICIT=1 ;;
 		-h|--help)
-			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] [--softfloat] [--split-stack] [--libstub|--no-libstub] <source.c> [extra.c ...]" >&2
+			echo "usage: $0 [--model=<tiny|small|medium|compact|large|huge>] [--softfloat] [--split-stack] [--near-globals] [--libstub|--no-libstub] <source.c> [extra.c ...]" >&2
 			exit 0 ;;
 		--*) echo "$0: unknown option: $arg" >&2; exit 2 ;;
 		*) SOURCES+=("$arg") ;;
@@ -122,6 +129,14 @@ SRC="${SOURCES[0]}"
 base="$(basename "$SRC" .c)"
 OUT_DIR="$QBE_DIR/build/examples/$base"
 MINIC="$QBE_DIR/minic/minic"
+MINIC_NEAR_FLAG=""
+if [ "$NEAR_GLOBALS" = 1 ]; then
+	if [ "${QBE_FAR_STATIC_DATA:-0}" = "1" ]; then
+		echo "$0: --near-globals and QBE_FAR_STATIC_DATA=1 are incompatible" >&2
+		exit 2
+	fi
+	MINIC_NEAR_FLAG="-G"
+fi
 INC_DIR="$QBE_DIR/minic/include"
 QBE="$QBE_DIR/qbe"
 DOS_DIR="$QBE_DIR/minic/dos"
@@ -162,7 +177,7 @@ pp="$OUT_DIR/$unit_base.pp.c"
 cpp -P -nostdinc -isysroot/var/empty -DDOS -D__TURBOC__ ${EXAMPLE_DEFS:-} \
 	"-I$INC_DIR" "-I$(dirname "$unit_src")" \
 	"$unit_src" 2>>"$ERR" | tr -d '\r\032' | sed "$NORMALIZE_TYPES" > "$pp"
-"$MINIC" -m "$MODEL" < "$pp" > "$OUT_DIR/$unit_base.ssa" 2>>"$ERR"
+"$MINIC" -m "$MODEL" $MINIC_NEAR_FLAG < "$pp" > "$OUT_DIR/$unit_base.ssa" 2>>"$ERR"
 
 # Stage 2: SSA → ASM
 "$QBE" -t i8086 -m "$MODEL" $QBE_SPLIT_FLAG "$OUT_DIR/$unit_base.ssa" > "$OUT_DIR/$unit_base.asm" 2>>"$ERR"

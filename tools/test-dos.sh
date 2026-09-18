@@ -376,6 +376,11 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/ckermit_decl_probe.c:minic/dos/tests/ckermit_decl_probe.golden.txt:compact"
 	"minic/dos/examples/ckermit_decl_probe.c:minic/dos/tests/ckermit_decl_probe.golden.txt:large"
 	"minic/dos/examples/ckermit_decl_probe.c:minic/dos/tests/ckermit_decl_probe.golden.txt:huge"
+	"minic/dos/examples/near_globals_probe.c:minic/dos/tests/near_globals_probe.golden.txt:small"
+	"minic/dos/examples/near_globals_probe.c:minic/dos/tests/near_globals_probe.golden.txt:medium"
+	"minic/dos/examples/near_globals_probe.c:minic/dos/tests/near_globals_probe.golden.txt:compact"
+	"minic/dos/examples/near_globals_probe.c:minic/dos/tests/near_globals_probe.golden.txt:large"
+	"minic/dos/examples/near_globals_probe.c:minic/dos/tests/near_globals_probe.golden.txt:huge"
 	"minic/dos/examples/file_fnptr_probe.c:minic/dos/tests/file_fnptr_probe.golden.txt:small"
 	"minic/dos/examples/file_fnptr_probe.c:minic/dos/tests/file_fnptr_probe.golden.txt:medium"
 	"minic/dos/examples/file_fnptr_probe.c:minic/dos/tests/file_fnptr_probe.golden.txt:compact"
@@ -761,6 +766,13 @@ build_runtime_probe() {
 	# omf_link --separate-stack); its ok8 asserts stack seg != DGROUP seg.
 	ssflag=""
 	case "$base" in split_stack_probe) ssflag="--split-stack" ;; esac
+	# minic -G probe: two TUs, built with --near-globals (small named
+	# globals DS-relative in DGROUP, literals/big objects in <BASE>_FAR).
+	ngflag=""; extra=""
+	case "$base" in near_globals_probe)
+		ngflag="--near-globals"
+		extra="$QBE_DIR/minic/dos/examples/near_globals_probe2.c" ;;
+	esac
 	# §7w: libstub-free is build-example.sh's default, so every codegen probe
 	# builds through newlibc's portable stdio.  The libstub-retirement campaign
 	# is now complete — NO probe pins --libstub anymore:
@@ -781,7 +793,7 @@ build_runtime_probe() {
 	# To re-pin a probe to the libstub equivalence anchor, set libstubflag here.
 	libstubflag=""
 	QBE_FAR_STATIC_DATA="$farstatic" \
-		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag $ssflag $libstubflag "$QBE_DIR/$src" >/dev/null
+		"$QBE_DIR/tools/build-example.sh" --model="$model" $sfflag $ssflag $ngflag $libstubflag "$QBE_DIR/$src" $extra >/dev/null
 }
 
 # §6b newlibc DOS-hosted tests (Phase-6 step 2).  Each builds a newlibc

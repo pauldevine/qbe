@@ -151,7 +151,18 @@ int memmodel = MSmall;
  * those models stay byte-identical.  Correct whether the global is left in
  * DGROUP (far access via ES=DGROUP reads the same bytes) or relocated to
  * its own far segment by asm_to_omf --far-static-data. */
-#define FARSTORAGE(s) (!NEAR_DATA() && ((s).t == Glo || (s).t == Ext))
+#define FARSTORAGE(s) farstorage(s)
+/* -G (near globals, far-data models only): a named global/extern whose
+ * object is smaller than NEAR_GLOBAL_MAX bytes, not an array and not in a `_HUGE_` section is DGROUP-resident and accessed DS-relative
+ * with plain load/store (Watcom's large-model default).  The rule depends
+ * only on the declared TYPE, so an extern access in one TU agrees with the
+ * definition's placement in another (see the placement loop in main()).
+ * String literals and objects >= NEAR_GLOBAL_MAX are placed in the module's
+ * far `_FARDATA` section instead, keeping DGROUP small.  A TU built WITHOUT
+ * -G keeps all its data in DGROUP and accesses it far, which stays
+ * compatible either way.  NOT compatible with asm_to_omf --far-static-data. */
+#define NEAR_GLOBAL_MAX 128
+int near_globals;
 #define BASETYPE(x) (KIND(x) & ~UNSIGNED)
 /* Storage sizes — must match `irtyp`'s storage class so struct member
  * offsets agree with the layout emit_struct_array_data writes:
@@ -194,6 +205,8 @@ struct Symb {
 	} u;
 	unsigned long ctyp;
 };
+int farstorage(Symb s);
+int neargloaddr(Symb s);
 
 struct Node {
 	char op;
@@ -1484,6 +1497,81 @@ varget(char *v)
 		h = (h+1) % NVar;
 	} while (h != h0 && varh[h].v[0] != 0);
 	return 0;
+}
+
+/* varh index of a symbol name, or -1. */
+static int
+varh_index(char *v)
+{
+	unsigned h0, h;
+
+	h0 = hash(v);
+	h = h0;
+	do {
+		if (strcmp(varh[h].v, v) == 0)
+			return (int)h;
+		h = (h+1) % NVar;
+	} while (h != h0 && varh[h].v[0] != 0);
+	return -1;
+}
+
+char glonear[NGlo];  /* -G: slot was accessed DS-relative, must stay in DGROUP */
+
+/* -G: 1 when Symb `s` (a Glo/Ext object, NOT an address) qualifies for a
+ * DGROUP-resident near access.  See NEAR_GLOBAL_MAX. */
+static int
+near_global_ok(Symb s)
+{
+	char *name;
+	int h;
+
+	if (!near_globals || NEAR_DATA())
+		return 0;
+	if (s.t == Glo) {
+		if (s.u.n <= 0 || s.u.n >= NGlo)
+			return 0;
+		if (gloname[s.u.n][0] == 0 || glosec[s.u.n][0] != 0)
+			return 0;   /* anonymous literal slot, or huge section */
+		name = gloname[s.u.n];
+	} else if (s.t == Ext)
+		name = s.u.v;
+	else
+		return 0;
+	/* NOT ISFAR(s.ctyp): under far-data a pointer object's TYPE carries
+	 * FAR (it holds a far pointer value); that says nothing about where
+	 * the pointer variable itself lives. */
+	h = varh_index(name);
+	if (h >= 0 && varh[h].isarray)
+		return 0;
+	if (KIND(s.ctyp) == FUN || s.ctyp == NIL)
+		return 0;
+	if (SIZE(s.ctyp) >= NEAR_GLOBAL_MAX)
+		return 0;
+	return 1;
+}
+
+/* FARSTORAGE(s): see the macro. */
+int
+farstorage(Symb s)
+{
+	if (NEAR_DATA() || (s.t != Glo && s.t != Ext))
+		return 0;
+	if (near_global_ok(s)) {
+		if (s.t == Glo)
+			glonear[s.u.n] = 1;
+		return 0;
+	}
+	return 1;
+}
+
+/* -G: `s` is the address base of a near (DGROUP) global struct, so its
+ * member address stays a 16-bit DS offset (the `|| !NEAR_DATA()` far
+ * default at the member sites is for LOCAL aggregates, whose addresses
+ * are far SS pointers). */
+int
+neargloaddr(Symb s)
+{
+	return (s.t == Glo || s.t == Ext) && !farstorage(s);
 }
 
 /* Return 1 if the local/param named `v` was declared `volatile`. */
@@ -3909,7 +3997,7 @@ expr(Node *n)
 			 * and feeds an invalid narrow temp into the far loadfX (and
 			 * trips gvn's assoccon KWIDE assert when const-folded). */
 			{
-				int base_far = ISFAR(s0.ctyp) || FARSTORAGE(s0) || !NEAR_DATA();
+				int base_far = ISFAR(s0.ctyp) || FARSTORAGE(s0) || (!NEAR_DATA() && !neargloaddr(s0));
 				char klass = base_far ? 'l' : 'w';
 				unsigned ptyp = base_far ? IDIR_FAR(m->ctyp)
 				                              : (IDIR(m->ctyp) & ~FAR);
@@ -4115,7 +4203,7 @@ expr(Node *n)
 					Symb addr, oldval, newval, clearmask, shifted, merged;
 					unsigned long mask, invmask;
 					/* !NEAR_DATA(): local aggregate addresses are far Kl too. */
-					int base_far = ISFAR(s_struct.ctyp) || FARSTORAGE(s_struct) || !NEAR_DATA();
+					int base_far = ISFAR(s_struct.ctyp) || FARSTORAGE(s_struct) || (!NEAR_DATA() && !neargloaddr(s_struct));
 					char klass = base_far ? 'l' : 'w';
 					unsigned ptyp = base_far
 					    ? IDIR_FAR(m->ctyp)
@@ -4857,7 +4945,7 @@ lval(Node *n)
 			 * needs the Kl address + FAR propagation.  !NEAR_DATA(): a
 			 * local aggregate's address is far Kl as well. */
 			{
-			int base_far = ISFAR(s0.ctyp) || FARSTORAGE(s0) || !NEAR_DATA();
+			int base_far = ISFAR(s0.ctyp) || FARSTORAGE(s0) || (!NEAR_DATA() && !neargloaddr(s0));
 			klass = base_far ? 'l' : 'w';
 			far_flag = base_far ? FAR : 0;
 			/* The member lives in far storage iff its containing struct
@@ -11352,6 +11440,76 @@ yyerror(char *err)
 	return 0;
 }
 
+/* Approximate byte size of a QBE data initializer (`{ b "ab", b 0 }`,
+ * `{ w 1 2 }`, `{ z 300 }`, `{ l $sym + 4 }`).  Only used by -G placement
+ * to decide whether an object is big enough to leave DGROUP; an error here
+ * changes the DGROUP budget, never correctness. */
+static int
+ini_size(const char *p)
+{
+	int w = 0, n = 0, zmode = 0;
+
+	for (; *p; p++) {
+		if (*p == '"') {
+			for (p++; *p && *p != '"'; p++) {
+				if (*p == '\\' && p[1]) {
+					p++;
+					if (*p >= '0' && *p <= '7')
+						while (p[1] >= '0' && p[1] <= '7')
+							p++;
+				}
+				n += w ? w : 1;
+			}
+			if (!*p)
+				break;
+		} else if ((p[0] == 'b' || p[0] == 'h' || p[0] == 'w' || p[0] == 'l'
+		    || p[0] == 's' || p[0] == 'd' || p[0] == 'z')
+		    && (p[1] == ' ' || p[1] == '\t')) {
+			zmode = p[0] == 'z';
+			w = p[0] == 'b' ? 1 : p[0] == 'h' || p[0] == 'w' ? 2
+			    : p[0] == 'd' ? 8 : 4;
+		} else if (*p == '+') {
+			/* `$sym + off`: skip the addend */
+			for (p++; *p == ' '; p++)
+				;
+			while (p[1] >= '0' && p[1] <= '9')
+				p++;
+		} else if (*p == '$' || *p == '-' || (*p >= '0' && *p <= '9')) {
+			if (zmode)
+				n += atoi(p);
+			else
+				n += w;
+			while (p[1] && p[1] != ' ' && p[1] != ',' && p[1] != '}')
+				p++;
+		} else if (*p == 'a' && strncmp(p, "align", 5) == 0) {
+			for (p += 5; *p == ' '; p++)
+				;
+			while (p[1] >= '0' && p[1] <= '9')
+				p++;
+		}
+	}
+	return n;
+}
+
+/* -G placement: 1 if data slot `i` goes to the module's far _FARDATA
+ * section.  Must never be 1 for an object any TU may access DS-relative:
+ * mirrors near_global_ok() on the declared type for file-scope names, and
+ * glonear[] pins anything this TU actually accessed near. */
+static int
+glo_goes_far(int i)
+{
+	int h;
+
+	if (glonear[i] || glosec[i][0] != 0)
+		return 0;
+	if (gloname[i][0] == 0)   /* anonymous: move string literals only */
+		return strncmp(ini[i], "{ b \"", 5) == 0;
+	h = varh_index(gloname[i]);
+	if (h >= 0 && varh[h].glo == i && !varh[h].isextern && !varh[h].isarray)
+		return SIZE(varh[h].ctyp) >= NEAR_GLOBAL_MAX;
+	return ini_size(ini[i]) >= NEAR_GLOBAL_MAX;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -11375,11 +11533,18 @@ main(int argc, char **argv)
 			m = a + 2;
 		else if (strncmp(a, "--model=", 8) == 0)
 			m = a + 8;
+		else if (strcmp(a, "-G") == 0 || strcmp(a, "--near-globals") == 0) {
+			near_globals = 1;
+			continue;
+		}
 		else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
 			fprintf(stderr,
 			    "usage: %s [-m <model>] < input.c > output.ssa\n"
 			    "  -m <model>   memory model: tiny, small (default),\n"
-			    "               medium, compact, large, huge\n",
+			    "               medium, compact, large, huge\n"
+			    "  -G           far-data models: small named globals in DGROUP,\n"
+			    "               accessed DS-relative; literals and big objects\n"
+			    "               in the module's far _FARDATA section\n",
 			    argv[0]);
 			return 0;
 		} else {
@@ -11405,6 +11570,8 @@ main(int argc, char **argv)
 	if (yyparse() != 0)
 		die("parse error");
 	for (i=1; i<nglo; i++) {
+		if (near_globals && !NEAR_DATA() && glo_goes_far(i))
+			strcpy(glosec[i], "_FARDATA");
 		if (glosec[i][0] != 0)
 			fprintf(of, "section \"%s\" ", glosec[i]);
 		if (gloname[i][0] != 0)

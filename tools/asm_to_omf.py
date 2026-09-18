@@ -334,7 +334,7 @@ def main():
     # jumps to segment 0.
     split_sym_long = model in ('compact', 'large', 'huge', 'medium')
 
-    sections = {'text': [], 'data': [], 'bss': []}
+    sections = {'text': [], 'data': [], 'bss': [], 'fardata': []}
     # `huge_sections` is OrderedDict-like: maps `_HUGE_<sym>` → list of
     # lines emitted by qbe between the `.section "_HUGE_<sym>"` marker
     # and the next section/text/data/bss marker.  Each huge section
@@ -372,6 +372,13 @@ def main():
             current = 'data'; current_huge = None; continue
         if s == '.bss':
             current = 'bss'; current_huge = None; continue
+        # minic -G: string literals and objects >= NEAR_GLOBAL_MAX go to
+        # the module's far `<BASE>_FAR` segment (class FAR_DATA, laid out
+        # outside DGROUP by omf_link) so DGROUP keeps only the small,
+        # DS-addressed globals.  Those objects are only ever reached far
+        # (`seg _sym`), so their placement is free.
+        if re.match(r'^\.section\s+"?_FARDATA"?\s*$', s):
+            current = 'fardata'; current_huge = None; continue
         m = huge_re.match(s)
         if m:
             current_huge = m.group(1)
@@ -397,7 +404,7 @@ def main():
                 n = int(m.group(1))
             else:
                 n = 1 << int(m.group(2))
-            if current in ('data', 'bss'):
+            if current in ('data', 'bss', 'fardata'):
                 sections[current].append('align %d' % n)
             elif current == 'huge':
                 huge_sections[current_huge].append('align %d' % n)
@@ -518,6 +525,11 @@ def main():
     out.append('segment %s class=%s align=16 use16' % (bss_seg, bss_cls))
     out.extend(sections['bss'])
     out.append('')
+
+    if sections['fardata']:
+        out.append('segment %sFAR class=FAR_DATA align=16 use16' % prefix.upper())
+        out.extend(sections['fardata'])
+        out.append('')
 
     # Huge data segments: one per `.section "_HUGE_<sym>"` marker.  Each
     # segment is class=HUGE so the linker can recognise it and place it

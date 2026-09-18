@@ -1,0 +1,8 @@
+scalar ok 4321
+long ok 100005
+small_struct ok 12
+big_struct ok 100
+array ok 1
+literal ok near-globals
+statics ok 10 4
+extern ok 6 614

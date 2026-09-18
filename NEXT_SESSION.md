@@ -1,5 +1,53 @@
 # Next session (the §9d handoff completed the file-scope function-pointer grammar family and left only consumer-driven options; the user (AskUserQuestion) chose **HUNT A COMPILER TRACK**.  §9e [2026-06-19, this session] **CLOSED the MULTI-DECLARATOR bitfield list — `unsigned a:3, b:5, c:4;` (the common hardware-register form) plus the mixed `unsigned a:3, b;` / `unsigned a, b:5;` and arbitrary interleavings — all of which were hard parse errors; AND fixed a latent pre-existing bug in the same `sm_more_names` code path that silently dropped middle members from any struct declaration with 4+ comma-separated members.  The fix is a frontend `minic.y` change → no emit audit; test-dos 417 → 422; conflicts UNCHANGED at the §9a/§9b/§9d baseline 117 s/r, 0 r/r; MP compact body 689,760 BYTE-IDENTICAL → no Victor run; `make check` green.**  EMPIRICAL SCOPING FIRST (house rule): batch-probed ~30 C11/GNU constructs through `minic -m small < x.c` to find a REAL gap rather than assume one.  Genuine gaps surfaced — multi-declarator bitfields; block-scope/static-local/`__far`/array function-pointer VARIABLES (`int (*p)(int)` block-scope works, but `static int (*p)(int);`, `int __far (*p)(int);`, `int (*tab[3])(int);` all parse-error); pointer-to-array (`int (*p)[3];`); array-of-fn-ptr file-scope + typedef; unnamed fn-ptr parameter (`int f(int (*)(int))`); compound-literal-array (`(int[]){1,2,3}`); nested designated initializer (`{[0].x=1}`).  Picked **multi-declarator bitfields**: bounded, codegen already works (a single bitfield packs correctly with `and`/`shl`/`or` mask-shift), directly relevant to Victor 9000 hardware-register structs, and no consumer needed.  **THE GAP:** `smembers` had only a single-bitfield production (`type IDENT ':' expr ';'`) and a plain multi-NAME production (`type IDENT ',' sm_more_names ';'`, for `struct L *prev, *next;`) — there was no C11 struct-declarator-list (6.7.2.1) in which each comma-separated item can independently carry a `: width`.  **THE FIX (frontend `minic.y`, additive):** (1) a `sm_more_names` list node now carries an optional bitfield width-expr in `n->l` (NIL = a plain member); added a start item `IDENT ':' expr` and a chain item `sm_more_names ',' IDENT ':' expr`.  (2) a NEW production `smembers type IDENT ':' expr ',' sm_more_names ';'` handles a list whose FIRST declarator is a bitfield.  (3) the existing plain multi-name action was generalized to emit a bitfield (`structaddbitfield`) when a node's `n->l` is set, else `structaddmember` — so the plain-only path is byte-identical (every node keeps `n->l == NIL`, exactly the prior behavior) and an all-bitfield list emits SSA byte-identical to the equivalent separate-declaration form (verified by `diff`).  Lookahead distinguishes the single-bitfield rule (`;` after `expr`) from the new multi (`,` after `expr`), so it is conflict-free.  **THE LATENT BUG (found + fixed in the SAME code):** `sm_more_names` chained new items with `$1->r = n` — writing the HEAD node's link, not the tail's — so a list of 3+ TRAILING declarators (4+ comma-separated members total in one declaration) silently DROPPED its middle members: `struct L { int a, b, c, d; }` registered only 3 members (`alloc 6`, should be 8).  Latent because real `T a, b;` / `struct L *prev, *next;` lists rarely exceed ONE trailing name (the overwrite only bites the 2nd-and-later append); the new multi-declarator bitfield probe's 3-item tail (`n, o:4, r`) was the first construct to hit it.  Fixed all three `sm_more_names ','` chain productions to APPEND at the tail (`Node *tl = $1; while (tl->r) tl = tl->r; tl->r = n;`).  The MP body byte-compare being IDENTICAL proves MP contains no 4+-comma struct member lists (so the correctness fix changes no existing gated output).  **GATED bug-loud** by `minic/dos/examples/bitfield_multidecl_probe.c` (small+medium+compact+large+huge): on the pre-fix compiler the first multi-declarator bitfield is `error:46: parse error` so the program does not build (confirmed by `git stash`-ing the §9e `minic.y` change and recompiling); the probe covers form A all-bitfield / B bitfield+plain / C plain+bitfield / D mixed (bitfield,plain,bitfield,plain), field-independence (assigning `a = 13` to a 3-bit field wraps to `5` AND leaves `b`/`c` untouched — proving the per-field read-modify-write masking), and the four struct `sizeof`s (A=2 B=4 C=4 D=8).  All values are field contents and sizes (not addresses), so the golden is model-independent and byte-identical across all five models (golden ends `bitfield_multidecl_probe done`, no §8y trailing-blank trap).  **VALIDATION:** `make check` green; full gate **422/422 ok** (417 → 422, the 5 new probe entries, no regressions); MP compact body **689,760 BYTE-IDENTICAL** (the chaining fix + bitfield productions never alter MP's codegen → no Victor run); frontend-only (`minic.y`) → no emit audit.  **git scope:** qbe master (`minic.y` = the `smembers` bitfield-list productions + the generalized actions + the `sm_more_names` tail-append chaining fix; new `minic/dos/examples/bitfield_multidecl_probe.c` + `minic/dos/tests/bitfield_multidecl_probe.golden.txt`; 5 `tools/test-dos.sh` entries — NO compiler-backend/qbe/emit/build-script change, NO newlibc-tree change).  **NOTE on conflict figures:** they come from the SYSTEM yacc (`/usr/bin/yacc` = bison): `yacc -v minic/minic.y`, then sum the per-state `N shift/reduce` lines in `y.output` → 117 s/r, 0 r/r.  The vendored `minic/yacc` can no longer parse the current `minic.y` (the §9c finding, [[minic miniyacc and lexer quirks]]).  Rebuild minic staleness-safe: `rm -f minic/minic && touch minic/minic.y && make minic/minic`.  **⇒ Next session — still consumer-driven (pick with the user):** (1) hunt another bounded no-consumer compiler track — the scoping sweep above is a ready menu (block-scope/static-local/`__far`/array fn-ptr VARIABLES; ptr-to-array; unnamed fn-ptr param; compound-literal-array; nested designated init); (2) merge newlibc **PR #24** is ALREADY DONE (`victor9K_newlibc` `46eb8a7`, confirmed §9c/§9e); (3) deepen the capstone (cooked `/dev/console`; a far-code `interrupts.c` model); (4) Victor-native INT 1Ah/16h-free timer/keyboard DOS probes if wanted (the §8l/§8n bare-metal pattern already covers that ground).  NO QBE/minic codegen bug open; NO carried compiler track remains.)
 
+## §9f session notes (2026-09-18) — C-Kermit triage + minic -G near globals
+
+### C-Kermit triage (~/projects/ckermit, Victor port, 24 modules)
+- Method: Open Watcom `wcc -p` (real victorow.mak flags, in the
+  `ia16-ubuntu-2` container; `container system start` first) → strip
+  Watcom-isms → minic -m large → qbe → asm_to_omf → nasm.  Scripts + full
+  gap list: `build/ckermit-triage/` (untracked; FINDINGS.md, sweep.sh,
+  fixups.pl, locate.py, omfsize.py).  All 24 modules compile end-to-end
+  with ~20 frontend gaps worked around by text rewrites (fixups.pl, G1..G24).
+- Fixed (647d4f9): comma-expression statements + comma in while/if
+  conditions, block-scope extern of an initialized global, local array
+  shadowing a file-scope name, NGlo 512→8192, die() statement line.
+- Grammar conflict baseline is **117** (HEAD already had 117 with the system
+  yacc; CLAUDE.md said 115).
+
+### minic -G (near globals) — the far-data code-size / DGROUP fix
+- Before: `FARSTORAGE(s)` made EVERY global/extern access far under
+  compact/large/huge (`loadfw $g` → ES:BX + push/pop brackets, ~14 B).
+  C-Kermit large: `wart()` 68,873 B (> 64 KB segment), DGROUP 78 KB.
+- `-G`: a named global/extern whose declared type is < NEAR_GLOBAL_MAX (128)
+  bytes, not an array, not in a `_HUGE_` section, is DGROUP-resident and
+  accessed with plain load/store (DS-relative).  Placement in main()'s data
+  loop mirrors the same TYPE rule (so extern access in one TU agrees with the
+  definer's placement); string literals + big objects + non-near arrays get
+  `section "_FARDATA"` → asm_to_omf emits `<BASE>_FAR` class FAR_DATA
+  (omf_link already places FAR_DATA outside DGROUP).  `glonear[]` pins any
+  slot this TU accessed near.  Pointer TYPES carry FAR under far-data — that
+  is the value's far-ness, NOT storage; do not exclude ISFAR.
+- The backend needed NO change: plain `loadw $g`/`storew`/`loadl` already emit
+  `mov [_g], r` in large, and §8a's group-framing makes `&g` (seg:off) agree
+  with DS:[_g].  DS==DGROUP holds everywhere (crt0, int86x restore, ISR
+  prologue).  The planned isel CAddr loadf→load rewrite was measured and
+  SKIPPED: only 100 const-address far accesses remain in all of C-Kermit,
+  nearly all on big (correctly far) arrays.
+- Compatibility: a TU built without -G keeps all data in DGROUP and accesses
+  it far → link-compatible both ways (support/runtime TUs stay without -G).
+  NOT compatible with asm_to_omf --far-static-data (MP) — build-example.sh
+  rejects the combination.
+- Gate: `near_globals_probe` (+ `near_globals_probe2.c`, 2 TUs) ×5 models via
+  `build-example.sh --near-globals`; bug-loud (sabotaged placement → 5 FAILs).
+  test-dos 432/432, make check green, MP compact image BYTE-IDENTICAL (cmp),
+  no emit.c change → no emit audit.
+- C-Kermit large with -G: DGROUP 78.0 KB → 14.0 KB, wart() 37,611 B, total
+  code 488 KB → 427 KB (Watcom -os: 160 KB).  Remaining 2.7× is the Kl
+  slot-resident design (32-bit values in stack slots with push/pop dx/ax
+  brackets: 53k push/pop in C-Kermit) + boolean materialization
+  (mov ax,0/1; test; jnz) + linear switch chains — separate backend work.
+
 ## §9e session notes (2026-06-19)
 
 ### The pick
