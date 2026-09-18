@@ -68,26 +68,64 @@ frontend-only → no emit audit.
   `register CHAR c = 0, *p;`); ext_decl dims must be a bare NUM
   (`char f1[64+1], f2[64+1];` in ckcpro/ckcfns).
 
-### Item 2 — remaining syntax-only minic gaps (same program, cleaner build)
-Each currently has a harmless rewrite in fixups.pl; fix in minic, delete the
-rule.  Rough priority by C-Kermit hit count / general usefulness:
-- G8 file-scope `int a = 1, b = 2;` (first declarator initialized) — very
-  common; worked around by `splitdecl.pl`.
-- G15 block-scope `char *p = 0, *q = x;` / `const char *p, *a[4];`.
-- G5 abstract fn-ptr parameter `int (*)(char)`; G6 abstract array params
-  `char *[]`, `char []`, `struct T[]`.
-- G12 true 2-D arrays `T a[N][M]` (declared + subscripted; 3 in C-Kermit,
-  currently via the aoa row-typedef path).
-- G2 function returning a function pointer (`signal`, `_dos_getvect`).
-- G1 non-pointer function typedef; G3 `extern struct T *f(...);`;
-  G7 `long double`; G19 unnamed bitfields `unsigned :16;`;
-  G20 parenthesized param declarator `T (name)`; G21 `void (__far *h)()`;
-  G23 east-const `void const *`; G24 struct-typed `?:` as an assignment
-  source ("invalid lvalue").
-- NEW (found while testing -G): file-scope `struct S { ... } s;` (tag
-  definition + variable in one declaration) is a parse error.
-- Done-when: fixups.pl holds only the Watcom-ism rules (W1–W5), which item 3
-  removes entirely.
+### Item 2 — remaining syntax-only minic gaps — DONE (2026-09-18)
+Every G rule is gone from fixups.pl (only W1–W5 remain) and `splitdecl.pl`
+is deleted; sweep still 24/24 (large, -G).  Gated: `initdecl_probe`,
+`structdecl_probe`, `paramdecl_probe`, `twod_probe` × 5 models (test-dos
+442 → 462); conflicts **117 → 115** (the removed `EXTERN STRUCT IDENT ...`
+rules were the source of 2 s/r); MP TU SSA byte-identical (118/118, old-vs-new
+minic) → body 689,760 unchanged; all other example probes SSA-identical;
+frontend-only → no emit audit.
+- **G8** file scope `T a = e, b, *c = &a;` (+ `= {…}` first item):
+  `'=' expr|gaggr ',' ext_decllist ';'`; cival_eval already handles string
+  literals, so no separate STR rule (it would add a conflict).
+- **G15** `T a = e, <any declarator>...` at block/function-top scope: the two
+  rules take `ext_decllist` (was `init_decllist`), items via
+  `local_init_rest_item` (plain items keep the old volatile-aware alloc path;
+  decorated ones go through emit_local_decl_item, starting from decl_base0).
+  Also fixed: `char *p = 0, c;` made c a `char *`.  `ext_decl` dims are now
+  constant expressions (`name[128+1]`).
+- **Tag definition as a type**: one `tagged_s_begin`/`tagged_u_begin` marker
+  (pushes curstruct like nested_s_begin) serves `struct T {..};`, `struct T
+  {..} v, *p, a[3];`, `typedef struct T {..} T_t;`, members, locals.  The
+  old `typedefstruct*` rules and the sdcl `structstart ... IDENT '[' NUM ']'`
+  rules were subsumed (identical emitters).
+- **Struct member lists**: later declarators start from the specifier and
+  honor their own `*` (was: `int a, *b;` → b int, `char *c, d;` → d char*).
+  **G19** unnamed bitfields `T :N;` (pads, no member — invisible to
+  positional init) and `T :0;` (closes the unit), also in lists.
+- **G3** removed the redundant `EXTERN STRUCT IDENT ...` rules (they stole the
+  `*` so `extern struct T *f(int);` dead-ended).  **G7** `long double`
+  (== double).  **G23** east const for void/char/int.
+- **G5/G6/G20/G21** params: `int (*)(char)` (also inside fn-ptr param lists),
+  `char *[]`, `struct K[]`, `T [N]`, `T (name)`, `int (__far *fn)(..)`;
+  `void (__far *m)(void);` members, file-scope vars and casts (`__far`
+  dropped: code pointers are already far in medium/large/huge).
+- **G1** `typedef void fn_t(int, int);`.  **G2** function returning a fn
+  pointer, `void (*signal(int, void (*)(int)))(int);`, plain/static/extern
+  and `(__far *f(..))()` — prototype only (tagged 'q' in gfnptr_decl; the
+  extern fn-ptr rule now takes a gfnptr_decllist).  No DEFINITION form yet.
+- **G24** aggregate `?:` as an assignment/return source: `lval('?')` =
+  `*(c ? &a : &b)`; `expr('?')` of struct arms (`agg_arm`: a struct var or
+  `*p`, a static no-side-effect check — NOT typeof_expr, which registers
+  string globals and would change MP output) yields the address so the
+  struct-assign path reuses it (condition evaluated once).
+- **G12** true 2-D arrays at file scope: `T a[N][M];`, `= {{..},{..}}`,
+  `T a[][M] = {..}` via the aoa machinery; `aoa_flatten` turns nested /
+  elided / designated rows into a designated flat list (agg_emit_array
+  zero-fills and coalesces).  **Found + fixed a silent miscompile**: a
+  file-scope array of array-typedef rows with a brace initializer
+  (`row_t t[2] = {{1,2,3},{4}}`) read each braced row as ONE element — i.e.
+  the §9f G12 rewrite made C-Kermit's `txtp`/`binp` [11][64] pattern tables
+  wrong.  The declaration's array-typedef state is now captured at
+  type_and_ident (`parsed_arraydim`/`parsed_arrayelem`) because the lexer
+  clears g_td_arraydim on any type keyword, e.g. a `(void *)0` in the
+  initializer.  `sizeof(a[i])` of such an array now gives the row size.
+- Not done (no C-Kermit need): `sizeof x` without parens; block-scope and
+  static-local 2-D declarators (static-local array-typedef-row brace init
+  likely has the same flatten bug — `emit_static_array` does not use
+  aoa_flatten yet); a definition form for functions returning fn pointers;
+  string rows in a 2-D char array (`char a[2][4] = {"ab","cd"}` dies).
 
 ### Item 3 — switch from Watcom's headers to ours
 - §9f preprocessed with Open Watcom's headers (exact config match, right for
@@ -162,11 +200,12 @@ unlink/rename/stat, isatty, setjmp, _qbe_div32*, tolower/toupper.
   materialization before branches, linear `switch` chains — §9f measured
   2.7× Watcom `-os` with -G.
 
-### Current state (end of §9f)
-- qbe master `afe82ad` (-G) on top of `647d4f9` (triage fixes); test-dos
-  432/432; MP compact body 689,760.
+### Current state (end of item 2)
+- Items 0–2 done; test-dos 462/462; MP compact body 689,760; grammar
+  conflicts 115 s/r, 0 r/r.
 - `build/ckermit-triage/out-large-G/` = the latest 24/24 compile (large, -G);
-  `FINDINGS.md` and `undefined.txt` there are the inputs to items 1–5.
+  `FINDINGS.md` and `undefined.txt` there are the inputs to items 3–5.
+- **Next: item 3** (our headers instead of Watcom's; `tools/build-ckermit.sh`).
 
 ---
 

@@ -13,7 +13,7 @@ for pp in ${ONLY:-"$W"/pp/*.i}; do
   # drop pragma lines (+ backslash continuations), Watcom calling-convention noise
   awk 'BEGIN{c=0} { if (c) { c = ($0 ~ /\\$/); next } if ($0 ~ /^[ \t]*#/) { c = ($0 ~ /\\$/); next } print }' "$pp" \
    | perl -pe 's/__declspec\([^)]*\)//g; s/\b(__watcall|__near|__cdecl)\b//g' \
-   | perl -p "$TOOLS/fixups.pl" | perl "$TOOLS/splitdecl.pl" | tr -d '\r\032' | perl -pe "$NORMALIZE" > "$OUT/$b.c"
+   | perl -p "$TOOLS/fixups.pl" | tr -d '\r\032' | perl -pe "$NORMALIZE" > "$OUT/$b.c"
   if ! "$Q/minic/minic" -m "$MODEL" ${MINICFLAGS:-} < "$OUT/$b.c" > "$OUT/$b.ssa" 2>"$err"; then echo "$b MINIC: $(head -c 300 $err | tr '\n' ' ')"; continue; fi
   if ! "$Q/qbe" -t i8086 -m "$MODEL" "$OUT/$b.ssa" > "$OUT/$b.asm" 2>"$err"; then echo "$b QBE: $(head -c 300 $err| tr '\n' ' ')"; continue; fi
   if ! "$Q/tools/asm_to_omf.py" "--model=$MODEL" "$b" "$OUT/$b.asm" "$OUT/$b.omf.asm" 2>"$err"; then echo "$b OMF: $(head -c 300 $err| tr '\n' ' ')"; continue; fi

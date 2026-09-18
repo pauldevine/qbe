@@ -1,0 +1,12 @@
+rq even odd even oDd
+rq sizes 36 9
+pats 0 3 1
+pats *.txt *.h *.bin
+pats nulls 1
+grid 324 rows 4
+lg 70003 2
+tab 1 2 3 4 0 0
+tab sizes 6 3
+tab write 9 3
+names ab cd ef 1
+twod_probe done

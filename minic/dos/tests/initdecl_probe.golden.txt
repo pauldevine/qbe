@@ -1,0 +1,11 @@
+g8 ints ok
+g8 ptrs ok
+g8 static ok
+g8 long ok
+dims ok
+top ptrs ok
+top char ok
+top dim ok
+top 7
+loop 11222
+initdecl_probe done

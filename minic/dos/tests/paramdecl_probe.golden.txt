@@ -1,0 +1,10 @@
+apply 66
+sum 6
+cnt 3
+keys 140
+run 57
+hk 42
+nest 196
+rtn 1 2
+binop 7
+paramdecl_probe done

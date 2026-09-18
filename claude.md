@@ -47,7 +47,7 @@ Compile **`~/projects/newlibc`** — a much-progressed Victor 9000 C library + d
 - **Victor harness is deterministic** — empty serial output means a host-invocation mistake or a real hang, never "MAME flakiness".  Run `tools/run-victor-sasi.sh` foreground.
 - **DOSBox fast loop for MP:** `MP_HEAP_SIZE=8192 MP_HEAP2_SIZE=12288 MP_STACK_SIZE=16384` → ~600 KB image that loads in DOSBox; PROG.PY beside the exe.
 - **miniyacc gotchas:** no standalone `/* … */` comment between a `;` and the next production head; action-body comments must avoid `'` `/` `[` `]`.
-- **Grammar conflict baseline:** 115 shift/reduce, 0 reduce/reduce.  Any change to that count needs justification.
+- **Grammar conflict baseline:** 115 shift/reduce, 0 reduce/reduce (system yacc via `make minic/minic`; 117 until C-Kermit item 2 removed the redundant `EXTERN STRUCT IDENT ...` rules on 2026-09-18).  Any change to that count needs justification.
 - **Commit at green-gate milestones** to master without asking; stage only the session's files; no push/PR unless asked.
 
 ## Build & test quick reference

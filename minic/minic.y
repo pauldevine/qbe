@@ -512,6 +512,11 @@ struct {
  * to 0 by the lexer on every type keyword and by the `type '*'` pointer
  * rules, so a stale dim never leaks into a following plain declaration. */
 int g_td_arraydim = 0;
+unsigned parsed_arrayelem;  /* ... and its g_td_arrayelem */
+int parsed_arraydim;   /* g_td_arraydim of the file-scope declaration being
+                        * parsed, captured at type_and_ident (the lexer
+                        * clears g_td_arraydim on any type keyword, e.g. a
+                        * `(void *)` cast inside the initializer). */
 unsigned g_td_arrayelem = 0;
 int g_td_fpid = -1;  /* fn-ptr proto index of the typedef the lexer last
                       * resolved to a TNAME (§2s), or -1.  Consumed by the
@@ -552,6 +557,7 @@ struct {
 } structh[NStruct];
 int nstruct = 0;
 int curstruct = -1;  /* Index of struct currently being defined */
+int anonbf_seq;      /* unnamed-bitfield list items (__anonbf<n>) */
 int parentstruct = -1;  /* Parent struct for anonymous members (legacy, unused) */
 #define NStructNest 32
 int structstk[NStructNest];  /* Saved curstruct for nested aggregate members */
@@ -1144,11 +1150,18 @@ structaddbitfield(int sidx, char *name, unsigned ctyp, int width)
 	int unitsize;      /* Size of storage unit in bits */
 	int unitbytes;     /* Size of storage unit in bytes */
 
+	/* name == 0: an unnamed bitfield (G19).  `T :0;` closes the current
+	 * storage unit; `T :N;` occupies N bits but adds no member (so it is
+	 * invisible to lookup and to positional initializers). */
+	if (!name && width == 0) {
+		structh[sidx].curbfoffset = 0;
+		return;
+	}
 	if (structh[sidx].nmembers >= NMember)
 		die("too many members in struct/union");
 
 	/* Check for duplicate member names */
-	for (i = 0; i < structh[sidx].nmembers; i++)
+	for (i = 0; name && i < structh[sidx].nmembers; i++)
 		if (strcmp(structh[sidx].members[i].name, name) == 0)
 			die("duplicate member name");
 
@@ -1175,6 +1188,10 @@ structaddbitfield(int sidx, char *name, unsigned ctyp, int width)
 		structh[sidx].curbfoffset = 0;
 		structh[sidx].size += unitbytes;
 	}
+	if (!name) {
+		structh[sidx].curbfoffset += width;
+		return;
+	}
 
 	m = &structh[sidx].members[structh[sidx].nmembers];
 	strcpy(m->name, name);
@@ -1190,6 +1207,28 @@ structaddbitfield(int sidx, char *name, unsigned ctyp, int width)
 	structh[sidx].curbfoffset += width;
 
 	structh[sidx].nmembers++;
+}
+
+/* Members after the first in a struct member list (`int a, *b, c:3;`),
+ * `type` the rule's type (which absorbed the first declarator's `*`s):
+ * each starts from the declaration's specifier plus its own `*`.  An item
+ * named __anonbf* is an unnamed bitfield (G19). */
+int const_eval(Node *);
+static void
+sm_rest_members(unsigned type, Node *list)
+{
+	unsigned base0 = decl_base0(type), t;
+	Node *n;
+
+	for (n = list; n; n = n->r) {
+		t = n->op == 'P' ? IDIR(base0) : base0;
+		if (n->l)
+			structaddbitfield(curstruct,
+			    strncmp(n->u.v, "__anonbf", 8) == 0 ? 0 : n->u.v,
+			    t, const_eval(n->l));
+		else
+			structaddmember(curstruct, n->u.v, t);
+	}
 }
 
 /* Hoist members from an anonymous struct/union into parent struct */
@@ -1869,6 +1908,30 @@ constfoldable(Node *n)
  * registered during the walk are left in place — harmless extra data
  * that is never referenced.)  Used for the `sizeof(arr)/sizeof(arr[0])`
  * count idiom and `sizeof(*ptr)`. */
+/* Is `n` (a ?: arm) syntactically an aggregate lvalue — a struct/union
+ * variable, or `*p` with p a struct/union pointer variable?  A cheap,
+ * side-effect-free test (no expr() walk) for the G24 aggregate ?: path. */
+static int
+agg_arm(Node *n)
+{
+	Symb *v;
+	unsigned t;
+
+	if (n->op == '@' && n->l->op == 'V') {
+		v = varget(n->l->u.v);
+		if (!v || KIND(v->ctyp) != PTR)
+			return 0;
+		t = DREF(v->ctyp);
+	} else if (n->op == 'V') {
+		v = varget(n->u.v);
+		if (!v)
+			return 0;
+		t = v->ctyp;
+	} else
+		return 0;
+	return KIND(t) == STRUCT_T || KIND(t) == UNION_T;
+}
+
 unsigned
 typeof_expr(Node *n)
 {
@@ -3547,6 +3610,14 @@ expr(Node *n)
 		break;
 
 	case '?':
+		/* A conditional whose arms are aggregates (G24) has no scalar
+		 * value: yield the chosen arm's ADDRESS (typed as the aggregate,
+		 * like a struct-returning call), which the struct-assign / return
+		 * paths reuse instead of re-evaluating the expression. */
+		if (agg_arm(n->r->l) || agg_arm(n->r->r)) {
+			sr = lval(n);
+			break;
+		}
 		/* Ternary operator: cond ? true_expr : false_expr.
 		 *
 		 * Each branch may itself emit basic blocks (e.g. nested ternaries
@@ -4408,7 +4479,7 @@ expr(Node *n)
 			 * time, so reuse s0 directly. */
 			if (n->r->op == '=')
 				src_addr = lval(n->r->l);
-			else if (n->r->op == 'C' || n->r->op == 'I')
+			else if (n->r->op == 'C' || n->r->op == 'I' || n->r->op == '?')
 				src_addr = s0;
 			else
 				src_addr = lval(n->r);
@@ -4961,6 +5032,14 @@ lval(Node *n)
 			fprintf(of, " =w copy %%_clit%d\n", clitnum);
 		}
 		break;
+	case '?':
+		/* A conditional whose arms are aggregate lvalues, as the source
+		 * of a struct assignment or return (G24, C-Kermit tcgetattr):
+		 *   *t = cond ? a : b;   ==>   *t = *(cond ? &a : &b);
+		 * Only the chosen arm's address is formed, so each arm is
+		 * evaluated at most once. */
+		return lval(mknode('@', mknode('?', n->l, mknode(':',
+		    mknode('A', n->r->l, 0), mknode('A', n->r->r, 0))), 0));
 	case '@':
 		sr = expr(n->l);
 		if (KIND(sr.ctyp) != PTR)
@@ -5293,7 +5372,7 @@ stmt(Stmt *s, int b, int c)
 			Node *rv = (Node *)s->p1;
 			if (!rv)
 				die("return; in struct-returning function");
-			if (rv->op == 'C' || rv->op == 'I')
+			if (rv->op == 'C' || rv->op == 'I' || rv->op == '?')
 				src = expr(rv);
 			else
 				src = lval(rv);
@@ -6076,9 +6155,45 @@ void
 emit_global_fnptr_list(unsigned base, Node *list, int is_static)
 {
 	Node *it;
+	int protos = 0;
 
-	for (it = list; it; it = it->r)
+	for (it = list; it; it = it->r) {
+		if (it->op == 'q') {
+			/* `void (*signal(int, void (*)(int)))(int);` (G2): a
+			 * FUNCTION returning a function pointer — a prototype, no
+			 * storage.  it->l->r holds its own parameter list. */
+			unsigned rt = IDIR(FUNC(base));
+			varadd(it->u.v, 1, FUNC(rt), 0);
+			if (it->l->r) {
+				fnproto_record(it->u.v, it->l->r, rt);
+				protos = 1;
+			}
+			continue;
+		}
 		emit_global_fnptr(it->u.v, base, it->l->l, it->l->r, is_static);
+	}
+	if (protos)
+		varclr();
+}
+
+/* The extern form of a gfnptr_decllist: fn-ptr variables are externs; a
+ * function returning a fn pointer ('q') is a prototype either way. */
+void
+extern_fnptr_list(unsigned base, Node *list)
+{
+	Node *it;
+
+	for (it = list; it; it = it->r) {
+		if (it->op == 'q') {
+			Node one = *it;
+			one.r = 0;
+			emit_global_fnptr_list(base, &one, 0);
+			continue;
+		}
+		if (it->l->r)
+			die("initializer on an extern declaration");
+		varaddextern(it->u.v, IDIR(FUNC(base)), 0);
+	}
 }
 
 #define NSAI 4096
@@ -7040,14 +7155,94 @@ array_vartyp(unsigned elemtyp)
 	return IDIR(elemtyp);
 }
 
+/* Flatten a 2-D brace initializer (`{ {a,b}, {c}, d, e }`) for rows of
+ * `dim` elements into one designated list over the flat N*dim array, so
+ * agg_emit_array lays it out (zero-filling short rows and coalescing the
+ * zero runs).  Braces may be elided (scalars fill row by row, C 6.7.9p20);
+ * `[k] = {row}` / `[k] = v` designators set the row.  *rows gets the row
+ * count reached (for an unsized `T a[][M]`). */
+static Node *
+aoa_flatten(unsigned elem, Node *agg, int dim, long *rows)
+{
+	Node *head = 0, *tail = 0, *ln, *sl, *val, *sv, *it;
+	long row = 0, col = 0, maxrow = 0, c;
+
+	if (!agg || agg->op != '{')
+		die("array initializer must be braced");
+	for (ln = agg->l; ln; ln = ln->r) {
+		val = ln->l;
+		if (val->op == 'd') {
+			row = const_eval(val->r);
+			col = 0;
+			val = val->l;
+		} else if (val->op == 'D')
+			die("field designator in array initializer");
+		if (val->op == '{') {
+			if (col != 0)
+				die("braced row after elided elements");
+			c = 0;
+			for (sl = val->l; sl; sl = sl->r) {
+				sv = sl->l;
+				if (sv->op == 'd') {
+					c = const_eval(sv->r);
+					sv = sv->l;
+				}
+				if (c < 0 || c >= dim)
+					die("too many elements in array row initializer");
+				it = mknode('N', 0, 0);
+				it->u.n = row * dim + c++;
+				it = mknode(0, mknode('d', sv, it), 0);
+				if (tail) tail->r = it; else head = it;
+				tail = it;
+			}
+			row++;
+		} else {
+			if (val->op == 'S' && KIND(elem) == CHR)
+				die("string row initializer in a 2-D char array (unsupported)");
+			it = mknode('N', 0, 0);
+			it->u.n = row * dim + col;
+			it = mknode(0, mknode('d', val, it), 0);
+			if (tail) tail->r = it; else head = it;
+			tail = it;
+			if (++col == dim) {
+				row++;
+				col = 0;
+			}
+		}
+		if (row + (col > 0) > maxrow)
+			maxrow = row + (col > 0);
+	}
+	*rows = maxrow;
+	return mknode('{', head, 0);
+}
+
 void
 emit_global_array(unsigned elemtyp, char *name, long count, Node *agg)
 {
 	static char buf[65536];
-	long total;
+	long total, rows;
+	int dim = parsed_arraydim;
 
 	if (nglo == NGlo)
 		die("too many globals");
+	if (dim > 0) {
+		/* 2-D: `T a[N][M] = {{..},{..}}` or an array-typedef row
+		 * `row_t a[N] = {{..}}` (dim M = the row width, element type
+		 * parsed_arrayelem).  Before this the nested braces were read
+		 * as ONE element each. */
+		elemtyp = parsed_arrayelem;
+		agg = aoa_flatten(elemtyp, agg, dim, &rows);
+		count = (count < 0 ? rows : count) * dim;
+		total = build_array_init(elemtyp, count, agg, buf);
+		ini[nglo] = alloc(strlen(buf) + 1);
+		strcpy(ini[nglo], buf);
+		strcpy(gloname[nglo], name);
+		maybe_mark_huge_global(nglo, name, total);
+		varadd(name, nglo++, array_vartyp(elemtyp), 1);
+		var_set_arraybytes(name, total);
+		var_set_aoa_dim(name, dim);
+		return;
+	}
 	total = build_array_init(elemtyp, count, agg, buf);
 	ini[nglo] = alloc(strlen(buf) + 1);
 	strcpy(ini[nglo], buf);
@@ -7139,21 +7334,6 @@ emit_static_local_init(unsigned ctyp, Node *ident, Node *initexpr)
 		emit_static_local(ident->u.v, ctyp, 0, buf);
 	} else {
 		emit_local_init(ctyp, ident, initexpr);
-	}
-}
-
-/* Walk a chain of init_decl Nodes (op='I', u.v=name, l=initexpr or 0)
- * and emit a local alloc + optional store for each. */
-void
-emit_local_init_list(unsigned ctyp, Node *list)
-{
-	Node *n;
-	Node id;
-	for (n = list; n; n = n->r) {
-		id.op = 'V';
-		id.l = id.r = 0;
-		strcpy(id.u.v, n->u.v);
-		emit_local_init(ctyp, &id, n->l);
 	}
 }
 
@@ -7276,6 +7456,27 @@ emit_local_decl_item(unsigned start, Node *n, Node *chain)
 	return chain;
 }
 
+/* One declarator after an initialized first one (`T a = e, <item>, ...`),
+ * `base0` the declaration's specifier.  A plain `name` / `name = e` item
+ * keeps the historical alloc path (volatile-aware, byte-identical when
+ * the first declarator had no `*`); decorated items (`*p = e`, `a[N]`,
+ * `f()`) go through emit_local_decl_item (G15).  The initializer is
+ * appended to `chain` (returned). */
+static Node *
+local_init_rest_item(unsigned base0, Node *n, Node *chain)
+{
+	char *nv;
+
+	if (n->op != 0 || g_td_arraydim > 0)
+		return emit_local_decl_item(base0, n, chain);
+	if (base0 == NIL)
+		die("invalid void declaration");
+	nv = block_scope_decl(n, base0, 0);
+	varadd(nv, 0, base0, 0);
+	emit_local_alloc(nv, ALLOC_T(), iralign(base0), SIZE(base0));
+	return n->l ? multi_decl_chain_init(chain, nv, n->l) : chain;
+}
+
 /* Same as emit_local_multi_decl but every declarator is in `list`.  Used
  * when the first declarator is decorated (`[N]`, `()`) — then
  * first_in_list is 1 and that node's type is `base` itself (its leading
@@ -7369,6 +7570,37 @@ emit_global_scalar_init(Node *init)
 
 void emit_global_arr_instance(char *name, unsigned elem, int dim);
 void emit_global_sized_array(char *name, long count);
+static int emit_global_rest_item(unsigned base0, Node *n, int aoa, unsigned aelem);
+
+/* `T *NAME = "literal";` at file scope: the lexer already reserved a slot
+ * for the string itself (glo<strslot>); this allocates the pointer. */
+static void
+emit_global_str_ptr(int strslot)
+{
+	char buf[64];
+	if (parsed_type == NIL)
+		die("invalid void declaration");
+	if (nglo == NGlo)
+		die("too many globals");
+	sprintf(buf, "{ l $glo%d }", strslot);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], parsed_ident);
+	varadd(parsed_ident, nglo++, parsed_type, 0);
+}
+
+/* The declarators after an initialized first one (G8: `int a = 1, b, c = 3;`).
+ * No array-typedef base here: an aoa first item cannot take `= expr`. */
+static void
+emit_global_rest_list(unsigned base0, Node *list)
+{
+	Node *n;
+	int protos = 0;
+	for (n = list; n; n = n->r)
+		protos |= emit_global_rest_item(base0, n, 0, 0);
+	if (protos)
+		varclr();
+}
 
 /* Register a multi-name extern list (`extern T a, *b, **c, *d[], *f();`).
  * `base` is the rule's type, which absorbed the FIRST declarator's leading
@@ -7878,6 +8110,8 @@ type_and_ident_noattr: type IDENT
 	parsed_type = $1;
 	strcpy(parsed_ident, $2->u.v);
 	glo_decl_start = nglo;
+	parsed_arraydim = g_td_arraydim;
+	parsed_arrayelem = g_td_arrayelem;
 };
 
 edcl: enumstart enums '}' ';'
@@ -7957,41 +8191,12 @@ externdcl: EXTERN type IDENT ';'
 	varaddextern($3->u.v, IDIR($2), 1);
 	var_set_arraybytes($3->u.v, SIZE($2) * const_eval($5));
 }
-         | EXTERN STRUCT IDENT IDENT ';'
+         | EXTERN type gfnptr_decllist ';'
 {
-	/* Extern struct variable: extern struct foo bar;  An undefined tag
-	 * is an incomplete type — legal for an extern decl (the definition
-	 * lives in another TU).  Forward-declare it rather than die, mirroring
-	 * the `type: STRUCT IDENT` rule. */
-	int idx = structfind($3->u.v);
-	if (idx < 0)
-		idx = structadd_forward($3->u.v, 0);
-	unsigned styp = (idx << 3) + STRUCT_T;
-	varaddextern($4->u.v, styp, 0);
-}
-         | EXTERN STRUCT IDENT IDENT '[' ']' ';'
-{
-	/* Extern struct array without size: extern struct foo bar[]; */
-	int idx = structfind($3->u.v);
-	if (idx < 0)
-		idx = structadd_forward($3->u.v, 0);
-	unsigned styp = (idx << 3) + STRUCT_T;
-	varaddextern($4->u.v, IDIR(styp), 1);
-}
-         | EXTERN STRUCT IDENT '*' IDENT ';'
-{
-	/* Extern struct pointer: extern struct foo *bar; */
-	int idx = structfind($3->u.v);
-	if (idx < 0)
-		idx = structadd_forward($3->u.v, 0);
-	unsigned styp = (idx << 3) + STRUCT_T;
-	varaddextern($5->u.v, IDIR(styp), 0);
-}
-         | EXTERN type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
-{
-	/* Extern function pointer: extern int (*callback)(int, int); */
-	unsigned fptr_type = IDIR(FUNC($2));
-	varaddextern($5->u.v, fptr_type, 0);
+	/* Extern function pointer(s): `extern int (*callback)(int, int);`,
+	 * `extern int (*a)(int), (*b)(int);`, and a function returning a
+	 * function pointer (G2): `extern void (*signal(int, void (*)(int)))(int);`. */
+	extern_fnptr_list($2, $3);
 }
          | EXTERN type IDENT '(' ')' ';'
 {
@@ -8074,6 +8279,26 @@ gfnptr_decl: '(' '*' IDENT ')' '(' fptpar0 ')'
 {
 	$$ = mk_fnptr_decl($4->u.v, $7, $10);
 }
+           | '(' TFAR '*' IDENT ')' '(' fptpar0 ')'
+{
+	/* `void (__far *h)(void);` (G21): __far inside the declarator parens;
+	 * dropped like the gfnptr_quals form. */
+	$$ = mk_fnptr_decl($4->u.v, $7, 0);
+}
+           | '(' '*' IDENT '(' par0 ')' ')' '(' fptpar0 ')'
+{
+	/* Function returning a function pointer (G2):
+	 *   void (*signal(int sig, void (*func)(int)))(int);
+	 * Tagged 'q' so emit_global_fnptr_list registers a prototype. */
+	$$ = mk_fnptr_decl($3->u.v, $9, $5);
+	$$->op = 'q';
+}
+           | '(' TFAR '*' IDENT '(' par0 ')' ')' '(' fptpar0 ')'
+{
+	/* `void (__far *_dos_getvect(unsigned))();` (Watcom dos.h). */
+	$$ = mk_fnptr_decl($4->u.v, $10, $6);
+	$$->op = 'q';
+}
            ;
 
 /* A non-empty qualifier run on a file-scope fn-ptr declarator.  It is
@@ -8116,7 +8341,7 @@ ext_decllist: ext_decl
 
 ext_decl: IDENT                 { $$ = kr_name_node($1->u.v, 0); }
         | IDENT '[' ']'         { $$ = kr_name_node($1->u.v, 'A'); }
-        | IDENT '[' NUM ']'     { $$ = kr_array_node($1->u.v, $3->u.n); }
+        | IDENT '[' expr ']'    { $$ = kr_array_node($1->u.v, const_eval($3)); }
         | '*' IDENT '(' par1 ')' { $$ = kr_name_node($2->u.v, 'H'); $$->l = $4; }
         | IDENT '(' ')'         { $$ = kr_name_node($1->u.v, 'F'); }
         | IDENT '=' expr        { $$ = kr_name_node($1->u.v, 0); $$->l = $3; }
@@ -8154,8 +8379,14 @@ tdcl: TYPEDEF type IDENT ';'
     | TYPEDEF ENUM IDENT IDENT ';' { typhadd($4->u.v, INT); }
     | TYPEDEF STRUCT IDENT IDENT ';' { typedef_struct_tag($3->u.v, $4->u.v); }
     | TYPEDEF typedefenum    {}
-    | TYPEDEF typedefstruct  {}
-    | TYPEDEF typedefunion   {}
+    | TYPEDEF type IDENT '(' fptpar0 ')' ';'
+{
+	/* Function typedef (G1): `typedef void sigfpe_fn(int, int);`.  Only
+	 * useful through a pointer (`sigfpe_fn *h`), which IDIR makes a
+	 * fn-ptr; the fpid rides along like the pointer-typedef form. */
+	typhadd($3->u.v, FUNC($2));
+	typhset_fpid($3->u.v, fpproto_alloc($2, $5));
+}
     | TYPEDEF type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
 {
 	/* Function pointer typedef: typedef int (*callback_t)(int, int); */
@@ -8183,41 +8414,6 @@ typedefenumstart: ENUM '{'
 }
                 ;
 
-typedefstruct: typedefstructstart smembers '}' IDENT ';'
-{
-	/* Create typedef to the (tagged) struct */
-	int idx = curstruct;
-	structfinish(idx);
-	curstruct = -1;
-	typhadd($4->u.v, (idx << 3) + STRUCT_T);
-}
-             ;
-
-typedefunion: typedefunionstart smembers '}' IDENT ';'
-{
-	/* Create typedef to the (tagged) union */
-	int idx = curstruct;
-	structfinish(idx);
-	curstruct = -1;
-	typhadd($4->u.v, (idx << 3) + UNION_T);
-}
-            ;
-
-typedefstructstart: STRUCT IDENT '{'
-{
-	/* Tagged-only typedef start.  The anonymous STRUCT { form is reached
-	 * through type: nested_s_begin smembers, so typedef struct {} T parses
-	 * via TYPEDEF type IDENT.  Tagged-only avoids a 2nd STRUCT { marker. */
-	curstruct = structadd($2->u.v, 0);
-}
-                  ;
-
-typedefunionstart: UNION IDENT '{'
-{
-	curstruct = structadd($2->u.v, 1);
-}
-                 ;
-
 static_assert_dcl: STATIC_ASSERT '(' expr ',' STR ')' ';'
 {
 	/* _Static_assert(constant-expression, string-literal).  The
@@ -8230,10 +8426,15 @@ static_assert_dcl: STATIC_ASSERT '(' expr ',' STR ')' ';'
 }
     ;
 
-sdcl: structstart smembers '}' ';'
+sdcl: tagged_s_begin smembers '}' ';'
 {
 	structfinish(curstruct);
-	curstruct = -1;  /* Done defining this struct */
+	curstruct = structstk[--structstksp];  /* Done defining this struct */
+}
+    | tagged_u_begin smembers '}' ';'
+{
+	structfinish(curstruct);
+	curstruct = structstk[--structstksp];
 }
     | STRUCT IDENT ';'
 {
@@ -8245,21 +8446,31 @@ sdcl: structstart smembers '}' ';'
 {
 	structadd_forward($2->u.v, 1);
 }
-    | structstart smembers '}' IDENT '[' NUM ']' ';'
-{
-	emit_struct_global_array($4->u.v, $6->u.n);
-}
-    | STATIC structstart smembers '}' IDENT '[' NUM ']' ';'
-{
-	emit_struct_global_array($5->u.v, $7->u.n);
-	glostatic[nglo - 1] = 1;  /* the slot emit_struct_global_array
-	                           * just registered (§6b) */
-}
     ;
 
-structstart: STRUCT IDENT '{'  { curstruct = structadd($2->u.v, 0); }
-           | UNION IDENT '{'    { curstruct = structadd($2->u.v, 1); }
-           ;
+tagged_s_begin: STRUCT IDENT '{'
+{
+	/* A tagged struct DEFINITION.  One marker for every context: the
+	 * bare `struct T { ... };` (sdcl) and `struct T { ... }` used as a
+	 * type (`struct T {...} v, *p;`, `typedef struct T {...} T_t;`, a
+	 * member or a local), so STRUCT IDENT '{' has exactly one reduction.
+	 * It pushes the enclosing curstruct like nested_s_begin (a tagged
+	 * definition can sit inside another struct's member list). */
+	if (structstksp >= NStructNest)
+		die("struct nesting too deep");
+	structstk[structstksp++] = curstruct;
+	curstruct = structadd($2->u.v, 0);
+}
+              ;
+
+tagged_u_begin: UNION IDENT '{'
+{
+	if (structstksp >= NStructNest)
+		die("struct nesting too deep");
+	structstk[structstksp++] = curstruct;
+	curstruct = structadd($2->u.v, 1);
+}
+              ;
 
 smembers:
         | smembers type IDENT ';'
@@ -8306,34 +8517,31 @@ smembers:
 	 * pattern), and the mixed `unsigned a:3, b;` (bitfield then plain).
 	 * All declarators share the base type ($2).  A tail node carries an
 	 * optional width-expr in n->l (NIL = a plain member). */
-	Node *n;
 	structaddbitfield(curstruct, $3->u.v, $2, const_eval($5));
-	for (n = $7; n; n = n->r) {
-		if (n->l)
-			structaddbitfield(curstruct, n->u.v, $2, const_eval(n->l));
-		else
-			structaddmember(curstruct, n->u.v, $2);
-	}
+	sm_rest_members($2, $7);
+}
+        | smembers type ':' expr ';'
+{
+	/* Unnamed bitfield (G19): `unsigned :16;` pads, `unsigned :0;`
+	 * closes the current storage unit. */
+	structaddbitfield(curstruct, 0, $2, const_eval($4));
+}
+        | smembers type ':' expr ',' sm_more_names ';'
+{
+	/* `unsigned :16, :16;` (Watcom dos.h INTPACKB) */
+	structaddbitfield(curstruct, 0, $2, const_eval($4));
+	sm_rest_members($2, $6);
 }
         | smembers type IDENT ',' sm_more_names ';'
 {
-	/* Multi-name member: `struct line *prev, *next;` — all share the
-	 * same base type ($2).  Note: per-declarator pointer levels beyond
-	 * the first declarator are tolerated but not honored (each '*' in
-	 * sm_more_names is consumed for syntactic compatibility but does
-	 * not add another pointer level).  This works for the common K&R
-	 * pattern where every name in the list has matching decoration.
+	/* Multi-name member: `struct line *prev, *next;`.  Declarators after
+	 * the first start from the declaration's specifier (sm_rest_members):
+	 * `int a, *b;` makes b an int*, `char *a, b;` makes b a char.
 	 * A tail node carries an optional bitfield width-expr in n->l
 	 * (NIL = plain member), so the mixed `unsigned a, b:5;` form — a
 	 * plain first declarator followed by a bitfield — also parses. */
-	Node *n;
 	structaddmember(curstruct, $3->u.v, $2);
-	for (n = $5; n; n = n->r) {
-		if (n->l)
-			structaddbitfield(curstruct, n->u.v, $2, const_eval(n->l));
-		else
-			structaddmember(curstruct, n->u.v, $2);
-	}
+	sm_rest_members($2, $5);
 }
         | smembers type '(' '*' IDENT ')' '(' fptpar0 ')' ';'
 {
@@ -8344,6 +8552,14 @@ smembers:
 	/* Record the member's parameter types so an indirect call through it
 	 * (`obj->fn(...)') coerces arguments to the declared widths (§2q). */
 	structset_last_fpid(curstruct, fpproto_alloc($2, $8));
+}
+        | smembers type '(' TFAR '*' IDENT ')' '(' fptpar0 ')' ';'
+{
+	/* `void (__far *rtn)(void);` (G21, ckvictor's XI init record).  The
+	 * __far is dropped: code pointers are already far in the models
+	 * C-Kermit builds with (a small-model struct would be 2 bytes short). */
+	structaddmember(curstruct, $6->u.v, IDIR(FUNC($2)));
+	structset_last_fpid(curstruct, fpproto_alloc($2, $9));
 }
         | smembers attrspec
         | smembers nestedagg
@@ -8357,8 +8573,16 @@ sm_more_names: IDENT
 }
              | '*' IDENT
 {
-	Node *n = mknode(0, 0, 0);
+	Node *n = mknode('P', 0, 0);
 	strcpy(n->u.v, $2->u.v);
+	$$ = n;
+}
+             | ':' expr
+{
+	/* Unnamed bitfield item (`unsigned :16, :16;`, G19): padding. */
+	Node *n = mknode(0, 0, 0);
+	sprintf(n->u.v, "__anonbf%d", anonbf_seq++);
+	n->l = $2;
 	$$ = n;
 }
              | IDENT ':' expr
@@ -8385,9 +8609,18 @@ sm_more_names: IDENT
 	tl->r = n;
 	$$ = $1;
 }
-             | sm_more_names ',' '*' IDENT
+             | sm_more_names ',' ':' expr
 {
 	Node *n = mknode(0, 0, 0), *tl = $1;
+	sprintf(n->u.v, "__anonbf%d", anonbf_seq++);
+	n->l = $4;
+	while (tl->r) tl = tl->r;
+	tl->r = n;
+	$$ = $1;
+}
+             | sm_more_names ',' '*' IDENT
+{
+	Node *n = mknode('P', 0, 0), *tl = $1;
 	strcpy(n->u.v, $4->u.v);
 	while (tl->r) tl = tl->r;
 	tl->r = n;
@@ -8486,6 +8719,8 @@ type_and_ident: type IDENT
 	parsed_type = $1;
 	strcpy(parsed_ident, $2->u.v);
 	glo_decl_start = nglo;
+	parsed_arraydim = g_td_arraydim;
+	parsed_arrayelem = g_td_arrayelem;
 }
               | type attropt IDENT
 {
@@ -8493,6 +8728,8 @@ type_and_ident: type IDENT
 	parsed_type = $1;
 	strcpy(parsed_ident, $3->u.v);
 	glo_decl_start = nglo;
+	parsed_arraydim = g_td_arraydim;
+	parsed_arrayelem = g_td_arrayelem;
 }
               | type TFAR attropt IDENT
 {
@@ -8504,6 +8741,8 @@ type_and_ident: type IDENT
 	parsed_type = $1;
 	strcpy(parsed_ident, $4->u.v);
 	glo_decl_start = nglo;
+	parsed_arraydim = g_td_arraydim;
+	parsed_arrayelem = g_td_arrayelem;
 };
 
 typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
@@ -8585,6 +8824,21 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	emit_global_scalar_init($2);
 }
                | '=' gaggr ';'                   { emit_global_aggregate(parsed_type, parsed_ident, $2); }
+               | '=' expr ',' ext_decllist ';'
+{
+	/* G8: file-scope multi-declarator whose FIRST item is initialized:
+	 *   int spsiz = 90, spmax = 90, rpsiz;     (C-Kermit ckcmai)
+	 *   CHAR *bigsbuf = NULL, *bigrbuf = NULL;
+	 * First item via the '=' expr path, the rest as in ', ext_decllist'. */
+	emit_global_scalar_init($2);
+	emit_global_rest_list(decl_base0(parsed_type), $4);
+}
+               | '=' gaggr ',' ext_decllist ';'
+{
+	/* G8 with a brace-initialized first item: `struct P p = {1,2}, q;` */
+	emit_global_aggregate(parsed_type, parsed_ident, $2);
+	emit_global_rest_list(decl_base0(parsed_type), $4);
+}
                | '[' expr ']' ';'
 {
 	/* Global array of basic type: emit a zero-filled data block.
@@ -8626,16 +8880,7 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	 * The lexer already reserved a global slot for the string itself
 	 * (in `ini[$2->u.n]`).  Allocate a separate slot for the pointer
 	 * variable that points at it. */
-	char buf[64];
-	if (parsed_type == NIL)
-		die("invalid void declaration");
-	if (nglo == NGlo)
-		die("too many globals");
-	sprintf(buf, "{ l $glo%d }", $2->u.n);
-	ini[nglo] = alloc(strlen(buf) + 1);
-	strcpy(ini[nglo], buf);
-	strcpy(gloname[nglo], parsed_ident);
-	varadd(parsed_ident, nglo++, parsed_type, 0);
+	emit_global_str_ptr($2->u.n);
 }
                | ',' ext_decllist ';'
 {
@@ -8704,6 +8949,31 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	for (n = $6; n; n = n->r)
 		emit_global_rest_item(base0, n, 0, 0);
 	varclr();
+}
+               | '[' expr ']' '[' expr ']' ';'
+{
+	/* True 2-D array (G12): `static char rq_tok[16][128+1];`.  The row
+	 * is laid out like an array-typedef row (the aoa path), so `a[i]` is
+	 * the row address and `a[i][j]` the element. */
+	if (parsed_type == NIL)
+		die("invalid void array");
+	g_td_arraydim = const_eval($5);
+	g_td_arrayelem = parsed_type;
+	emit_global_sized_array(parsed_ident, const_eval($2));
+	g_td_arraydim = 0;
+}
+               | '[' expr ']' '[' expr ']' '=' gaggr ';'
+{
+	/* `static char *txtp[11][64] = { {...}, {...} };` (G12) */
+	parsed_arraydim = const_eval($5);
+	parsed_arrayelem = parsed_type;
+	emit_global_array(parsed_type, parsed_ident, const_eval($2), $8);
+}
+               | '[' ']' '[' expr ']' '=' gaggr ';'
+{
+	parsed_arraydim = const_eval($4);
+	parsed_arrayelem = parsed_type;
+	emit_global_array(parsed_type, parsed_ident, -1, $7);
 }
                | '[' ']' '=' gaggr ';'
 {
@@ -9000,6 +9270,40 @@ par1: type IDENT ',' par1 { $$ = param($2->u.v, $1, $4); }
 }
     | type ',' par1       { $$ = abstract_param($1, $3); }
     | type                { $$ = abstract_param($1, 0); }
+    | type '[' ']' ',' par1
+{
+	/* Abstract array parameter (G6): `char *[]`, `struct keytab []`,
+	 * `int []` in a prototype.  Decays to a pointer like the named form. */
+	$$ = abstract_param(($1 & FAR) ? IDIR_FAR($1) : IDIR($1), $5);
+}
+    | type '[' ']'        { $$ = abstract_param(($1 & FAR) ? IDIR_FAR($1) : IDIR($1), 0); }
+    | type '[' expr ']' ',' par1 { $$ = abstract_param(($1 & FAR) ? IDIR_FAR($1) : IDIR($1), $6); }
+    | type '[' expr ']'   { $$ = abstract_param(($1 & FAR) ? IDIR_FAR($1) : IDIR($1), 0); }
+    | type '(' '*' ')' '(' fptpar0 ')' ',' par1
+{
+	/* Abstract function-pointer parameter (G5): `int (*)(char)`. */
+	$$ = abstract_param(IDIR(FUNC($1)), $9);
+}
+    | type '(' '*' ')' '(' fptpar0 ')' { $$ = abstract_param(IDIR(FUNC($1)), 0); }
+    | type '(' IDENT ')' ',' par1
+{
+	/* Parenthesized parameter declarator (G20): `ckjptr (sj_buf)`. */
+	$$ = param($3->u.v, $1, $6);
+}
+    | type '(' IDENT ')'  { $$ = param($3->u.v, $1, 0); }
+    | type '(' TFAR '*' IDENT ')' '(' fptpar0 ')' ',' par1
+{
+	/* `int (__far *fn)(...)` (G21, Watcom _harderr): the __far on the
+	 * pointer is a memory-model property here (code pointers are far in
+	 * the medium/large/huge models C-Kermit builds with); dropped. */
+	$$ = param($5->u.v, IDIR(FUNC($1)), $11);
+	varsetfpid($5->u.v, fpproto_alloc($1, $8));
+}
+    | type '(' TFAR '*' IDENT ')' '(' fptpar0 ')'
+{
+	$$ = param($5->u.v, IDIR(FUNC($1)), 0);
+	varsetfpid($5->u.v, fpproto_alloc($1, $8));
+}
     | ELLIPSIS            { $$ = 0; /* variadic marker: ... proto only, no IR */ }
     | type '(' '*' IDENT ')' '(' fptpar0 ')' ',' par1 {
         /* Function pointer parameter: int (*callback)(int, int), ...
@@ -9063,6 +9367,8 @@ fptpar1: type ',' fptpar1        { $$ = mkptype($1, $3); }
        | type                    { $$ = mkptype($1, 0); }
        | type IDENT ',' fptpar1  { $$ = mkptype($1, $4); }
        | type IDENT              { $$ = mkptype($1, 0); }
+       | type '(' '*' ')' '(' fptpar0 ')' ',' fptpar1 { $$ = mkptype(IDIR(FUNC($1)), $9); }
+       | type '(' '*' ')' '(' fptpar0 ')' { $$ = mkptype(IDIR(FUNC($1)), 0); }
        | ELLIPSIS                { $$ = 0; }
        ;
 
@@ -9185,14 +9491,21 @@ dcls:
 	if (ch)
 		expr(ch);
 }
-    | dcls type IDENT '=' expr ',' init_decllist ';'
+    | dcls type IDENT '=' expr ',' ext_decllist ';'
 {
-	/* Multi-name local declaration with initializers, all sharing
-	 * the same base type:  int row = 0, col = 0;
-	 * Each item in init_decllist is an IDENT with optional `=` expr
-	 * (the init expr is hung off node->l). */
+	/* Multi-name local declaration whose first declarator is
+	 * initialized:  int row = 0, col = 0;  char *p = 0, *q = s, c;
+	 * Later items are full declarators (G15) that start from the
+	 * declaration's specifier; each is allocated and initialized in
+	 * order (function top: entry == lexical order). */
+	Node *n, *ch;
+	unsigned base0 = decl_base0($2);
 	emit_local_init($2, $3, $5);
-	emit_local_init_list($2, $7);
+	for (n = $7; n; n = n->r) {
+		ch = local_init_rest_item(base0, n, 0);
+		if (ch)
+			expr(ch);
+	}
 }
     | dcls type IDENT '(' ')' ';'
 {
@@ -9739,6 +10052,10 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); starchain_note($1, $$)
     | TBOOL    { $$ = CHR | UNSIGNED; }
     | TFLOAT   { $$ = INT | FLOAT; }
     | TDOUBLE  { $$ = INT | FLOAT; /* no 8087 / no soft-double on i8086: double aliases to single-precision (Ks) */ }
+    | TLNG TDOUBLE  { $$ = INT | FLOAT; /* long double == double here (G7) */ }
+    | TVOID CONST   { $$ = NIL; /* east-const `void const *` (G23) */ }
+    | TCHAR CONST   { $$ = CHR; }
+    | TINT CONST    { $$ = INT; }
     | TVOID    { $$ = NIL; }
     | TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
     | TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }
@@ -9769,6 +10086,7 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); starchain_note($1, $$)
     | CONST TLNGLNG      { $$ = LNG; }
     | CONST TFLOAT       { $$ = INT | FLOAT; }
     | CONST TDOUBLE      { $$ = INT | FLOAT; /* double aliases to single (Ks), as bare TDOUBLE */ }
+    | CONST TLNG TDOUBLE { $$ = INT | FLOAT; }
     | CONST TUNSIGNED TCHAR    { $$ = CHR | UNSIGNED; }
     | CONST TUNSIGNED TSHORT   { $$ = INT | SHORT | UNSIGNED; }
     | CONST TUNSIGNED TINT     { $$ = INT | UNSIGNED; }
@@ -9854,6 +10172,20 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); starchain_note($1, $$)
         structfinish(idx);
         curstruct = structstk[--structstksp];
         $$ = (idx << 3) + STRUCT_T;
+    }
+    | tagged_s_begin smembers '}' {
+        /* Tagged struct definition used as a type: `struct S {...} s;`,
+         * `typedef struct S {...} S_t;` (see tagged_s_begin). */
+        int idx = curstruct;
+        structfinish(idx);
+        curstruct = structstk[--structstksp];
+        $$ = (idx << 3) + STRUCT_T;
+    }
+    | tagged_u_begin smembers '}' {
+        int idx = curstruct;
+        structfinish(idx);
+        curstruct = structstk[--structstksp];
+        $$ = (idx << 3) + UNION_T;
     }
     | nested_u_begin smembers '}' {
         /* Anonymous union used directly as a type. */
@@ -10089,7 +10421,7 @@ stmt: ';'                            { $$ = 0; }
         ch = emit_local_multi_decl($1, $2, $4);
         $$ = ch ? mkstmt(Expr, ch, 0, 0) : 0;
     }
-    | type IDENT '=' expr ',' init_decllist ';' {
+    | type IDENT '=' expr ',' ext_decllist ';' {
         /* Block-scoped multi-declarator where the FIRST declarator has
          * an initializer: `int a = 1, b = 2;` inside a block (the dcls
          * rule covers function top).  Allocs at parse time; ALL inits
@@ -10102,14 +10434,8 @@ stmt: ';'                            { $$ = 0; }
         varadd(v, 0, $1, 0);
         emit_local_alloc(v, ALLOC_T(), iralign($1), SIZE($1));
         chain = mknode('=', $2, $4);
-        for (n = $6; n; n = n->r) {
-            char *nv = block_scope_decl(n, $1, 0);
-            varadd(nv, 0, $1, 0);
-            emit_local_alloc(nv, ALLOC_T(), iralign($1), SIZE($1));
-            if (n->l)
-                chain = mknode(',', chain,
-                    multi_decl_chain_init(0, nv, n->l));
-        }
+        for (n = $6; n; n = n->r)
+            chain = local_init_rest_item(decl_base0($1), n, chain);
         $$ = mkstmt(Expr, chain, 0, 0);
     }
     | type '(' '*' IDENT ')' '(' fptpar0 ')' ';' {
@@ -10770,6 +11096,12 @@ pref: post
         $$ = mknode('K', $10, 0);
         $$->u.n = IDIR(FUNC($2));
     }
+    | '(' type '(' TFAR '*' ')' '(' fptpar0 ')' ')' pref {
+        /* `(void (__far *)())expr` (G21, ckvictor v9k_setvect): __far
+         * dropped as in the declarator forms. */
+        $$ = mknode('K', $11, 0);
+        $$->u.n = IDIR(FUNC($2));
+    }
     ;
 
 post: NUM
@@ -10802,6 +11134,14 @@ post: NUM
             $$->u.n = 1;
         else if ((member_array_bytes = sizeof_member_array_expr($3)) > 0)
             $$->u.n = member_array_bytes;
+        else if ($3->op == '+' && $3->l->op == 'V'
+                 && (member_array_bytes = var_aoa_dim($3->l->u.v)) > 0
+                 && $3->r->op == '*' && $3->r->r->op == 'N'
+                 && $3->r->r->u.n == member_array_bytes
+                 && (vs = varget($3->l->u.v)))
+            /* one subscript of a 2-D / array-typedef-row array (mkidx's
+             * aoa row-address shape): the ROW's size, not a pointer's */
+            $$->u.n = member_array_bytes * SIZE(DREF(vs->ctyp));
         else
             $$->u.n = SIZE(typeof_expr($3));
     }

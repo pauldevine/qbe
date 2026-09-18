@@ -12,9 +12,8 @@ with `CKW=`); these tools are tracked.  Paths/env come from `common.sh`:
 | tool | what |
 |---|---|
 | `pp.sh [mod..]` | regenerate `pp/*.i` with Watcom `wcc -p` + the exact victorow.mak flags, in the `ia16-ubuntu-2` container (starts it if needed) |
-| `sweep.sh [model]` | pp → strip Watcom-isms → `fixups.pl` → `splitdecl.pl` → minic → qbe → asm_to_omf → nasm; one PASS/stage-error line per module |
-| `fixups.pl` | text workarounds, one rule per minic gap (G#) or Watcom-ism (W#).  **Progress = deleting rules** (sweep must stay 24/24) |
-| `splitdecl.pl` | G8 workaround: split file-scope `T a = 1, b = 2;` |
+| `sweep.sh [model]` | pp → strip Watcom-isms → `fixups.pl` → minic → qbe → asm_to_omf → nasm; one PASS/stage-error line per module |
+| `fixups.pl` | text workarounds for Watcom-isms (W#); every minic-gap rule (G#) is gone as of item 2.  Item 3 (our headers) removes the rest |
 | `one.sh mod` / `it.sh mod` | show a module's minic error in context / re-sweep one module then show it |
 | `m.sh 'c line'...` | does this snippet parse? |
 | `locate.py mod` | bisect which statement triggers an end-of-function (emit-time) error; pairs with minic's "(in statement ending near line N)" suffix |

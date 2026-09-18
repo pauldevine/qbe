@@ -1,0 +1,19 @@
+tag+vars ok
+tag+array ok
+typedef tag ok
+union tag+var ok
+extern struct fn ok
+local tag 15
+pad size ok
+pad field ok
+intpackb ok
+zero width ok
+zero fields ok
+skip fields ok
+member ptrs ok
+member sizes ok
+cond assign ok
+cond ret ok
+long double ok
+east const ok
+structdecl_probe done
