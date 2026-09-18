@@ -9,7 +9,7 @@ enum {
 	NString = 128,  /* max identifier length; MicroPython has 49-char names
 	                 * (e.g. MP_MAP_LOOKUP_ADD_IF_NOT_FOUND_OR_REMOVE_IF_FOUND)
 	                 * and longer generated qstr symbols. Host-only memory. */
-	NGlo = 512,
+	NGlo = 8192, /* C-Kermit TUs define >512 file-scope data objects + string literals */
 	/* varh[] is an open-addressing table holding all globals + enum
 	 * constants (never cleared) plus the current function's locals.
 	 * MicroPython pulls ~214 MP_QSTR_* enum constants from genhdr alone,
@@ -230,6 +230,7 @@ struct Stmt {
 	} t;
 	void *p1, *p2, *p3, *p4;
 	int val; /* for case values */
+	int srcline; /* lexer line when the statement reduced (diagnostics only) */
 	char label[NString]; /* for goto target and label name */
 };
 
@@ -547,10 +548,15 @@ unsigned parsed_type = INT;  /* Stores type parsed in typed_decl for later use *
 unsigned kr_curtype = INT;  /* Stores type from current K&R param-decl group */
 char parsed_ident[NString];  /* Stores identifier parsed in typed_decl */
 
+int emit_srcline;  /* srcline of the Stmt being emitted, for die() */
+
 void
 die(char *s)
 {
-	fprintf(stderr, "error:%d: %s\n", line, s);
+	if (emit_srcline)
+		fprintf(stderr, "error:%d: %s (in statement ending near line %d)\n", line, s, emit_srcline);
+	else
+		fprintf(stderr, "error:%d: %s\n", line, s);
 	exit(1);
 }
 
@@ -801,7 +807,7 @@ varaddextern(char *v, unsigned ctyp, int isarray)
 		}
 		if (strcmp(varh[h].v, v) == 0) {
 			/* Allow multiple extern declarations, or extern after definition */
-			if (varh[h].isextern || varh[h].glo == 1) {
+			if (varh[h].isextern || varh[h].glo > 0) {  /* glo holds the defining slot index (>1) for an initialized global */
 				varh[h].isvolatile |= vol;  /* upgrade if any decl is volatile */
 				return;  /* Already declared/defined */
 			}
@@ -5117,6 +5123,7 @@ stmt(Stmt *s, int b, int c)
 
 	if (!s)
 		return 0;
+	emit_srcline = s->srcline;
 
 	switch (s->t) {
 	case Ret:
@@ -5713,6 +5720,7 @@ mkstmt(int t, void *p1, void *p2, void *p3)
 	Stmt *s;
 
 	s = alloc(sizeof *s);
+	s->srcline = line;
 	s->t = t;
 	s->p1 = p1;
 	s->p2 = p2;
@@ -9259,7 +9267,7 @@ dcls:
 		 * array-of-array so bufs[i] yields a row address (see mkidx). */
 		unsigned elem = g_td_arrayelem;
 		int dim = g_td_arraydim;
-		v = $3->u.v;
+		v = block_scope_decl($3, IDIR(elem), 1);  /* shadow a file-scope name */
 		total = SIZE(elem) * dim * n;
 		varadd(v, 0, IDIR(elem), 1);
 		var_set_arraybytes(v, total);
@@ -9267,7 +9275,7 @@ dcls:
 		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(),
 			iralign(elem), total);
 	} else {
-	v = $3->u.v;
+	v = block_scope_decl($3, IDIR($2), 1);  /* shadow a file-scope name (C-Kermit ckufio: local fullname[] vs static fullname[]) */
 	s = SIZE($2);  /* element size */
 	total = s * n;
 	varadd(v, 0, IDIR($2), 1);  /* Store as pointer to element type - IS AN ARRAY */
@@ -10109,11 +10117,11 @@ stmt: ';'                            { $$ = 0; }
             die("static assertion failed");
         $$ = 0;
     }
-    | expr ';'                       { $$ = mkstmt(Expr, $1, 0, 0); }
-    | WHILE '(' expr ')' stmt        { $$ = mkstmt(While, $3, $5, 0); }
+    | comma_expr ';'                 { $$ = mkstmt(Expr, $1, 0, 0); /* comma_expr: also the comma-operator statement a++, b--; */ }
+    | WHILE '(' comma_expr ')' stmt        { $$ = mkstmt(While, $3, $5, 0); }
     | DO stmt WHILE '(' expr ')' ';' { $$ = mkstmt(DoWhile, $2, $5, 0); }
-    | IF '(' expr ')' stmt ELSE stmt { $$ = mkstmt(If, $3, $5, $7); }
-    | IF '(' expr ')' stmt           { $$ = mkstmt(If, $3, $5, 0); }
+    | IF '(' comma_expr ')' stmt ELSE stmt { $$ = mkstmt(If, $3, $5, $7); }
+    | IF '(' comma_expr ')' stmt           { $$ = mkstmt(If, $3, $5, 0); }
     | FOR '(' comma_exp0 ';' comma_exp0 ';' comma_exp0 ')' stmt
                                      { $$ = mkfor($3, $5, $7, $9); }
     | FOR '(' forinit_var expr ';' comma_exp0 ';' comma_exp0 ')' stmt
@@ -11339,6 +11347,7 @@ yylex_inner()
 int
 yyerror(char *err)
 {
+	emit_srcline = 0;  /* a parse error is at the lexer line, not in an emitted stmt */
 	die("parse error");
 	return 0;
 }
