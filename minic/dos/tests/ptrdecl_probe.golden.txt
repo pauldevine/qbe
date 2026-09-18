@@ -1,0 +1,21 @@
+int a, *b ok
+char *p, c ok
+ptr arrays ok
+double ptrs ok
+later initializer ok
+array then ptr ok
+K&R proto item ok
+fn-first list ok
+extern ptr arrays ok
+extern ** ok
+extern void * ok
+extern int, *int ok
+local ptr array ok
+local ptr array use ok
+local double ptr ok
+local int + int* ok
+local prototype ok
+local multi extern ok
+static ptr arrays ok
+static rest ok
+ptrdecl_probe done

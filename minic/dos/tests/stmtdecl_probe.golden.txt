@@ -1,0 +1,9 @@
+stmt extern array ok
+stmt multi extern ok
+stmt ptr-array extern ok
+stmt prototypes ok
+stmt extern prototypes ok
+fn-top extern prototype ok
+loop-body decls ok
+loop-body decls ok
+stmtdecl_probe done

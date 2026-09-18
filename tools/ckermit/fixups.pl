@@ -14,20 +14,11 @@ s/^typedef void\s+__sigfpe_func\( int, int \);//;   # G1 non-pointer function ty
 s/extern void \( \*signal\( int __sig, void \( \*__func\)\(int\) \) \)\(int\);/extern __sig_func signal( int __sig, __sig_func __func );/;  # G2 fn returning fn-ptr declarator
 s/\b__int64\b/long long/g;   # W1 Watcom builtin type
 s/^(\s*)extern(\s+struct\s+\w+\s*\*+\s*\w+\s*\()/$1$2/;   # G3 `extern struct T *fn(...)` prototype
-if (/^(\s*)extern\s+((?:const\s+|unsigned\s+)*\w+\s*\*+\s*\w+\s*\[[^\]]*\]\s*;)/) { $_ = "$1$2\n"; s/\[\s*\]/[1]/; }   # G4 `extern T *name[N];` (ext_decl '*' IDENT steals the star)
 s/\(\s*\*\s*\)\s*\(/"(*_anon".($::an++).")("/ge if $::depth == 0 && !/^\s*\(/;   # G5 abstract fn-ptr parameter `int (*)(char)` in a file-scope prototype
 if (/^([^(]*)(\(.*)$/s) { my ($h,$t)=($1,$2); $t =~ s/\*\s*\[\s*\]\s*(?=[,)])/**/g; $t =~ s/(struct\s+\w+)\s*\[\s*\](?=\s*[,)])/$1 */g; $t =~ s/([(,]\s*(?:const\s+|unsigned\s+)*\w+)\s*\[\s*\](?=\s*[,)])/$1 */g; $_ = $h.$t; }   # G6 abstract array params `char *[]`, `struct T[]`, `char []` (only right of the first paren)
 s/\blong double\b/double/g;   # G7 `long double` type (== double on this target)
 s/^.*__based\(__segname.*$//;   # W2 Watcom __based() alloca helper
-if ($::depth > 0 && /^\s*extern\s+[\w\s]*\*\s*\w+\s*\[/) { s/\*\s*(\w+)\s*\[[^\]]*\]/**$1/g; }   # G4b block-scope `extern T *a[], *b[];` (triage-only: pointer, WRONG semantics)
-if (/^(\s*extern\s+(?:const\s+|unsigned\s+|struct\s+)*\w+)\s+([^(;]*,[^(;]*);\s*$/) { my ($b,$l)=($1,$2); if ($l =~ /\*\s*\*|\*\s*\w+\s*\[/) { $_ = join(' ', map { "$b $_;" } split /\s*,\s*/, $l) . "\n"; } }   # G4c multi-name extern with `**x` / `*x[]` declarators
-$_ = "\n" if $::depth > 0 && /^\s*(?:unsigned\s+)?(?:char|int|long|void|short|CHAR|VOID|FILE)\s*\*+\s*\w+\s*\([^()]*\)\s*;\s*$/;   # G11 block/stmt-scope fn prototype with pointer return (dropped; triage-only)
-$_ = "\n" if $::depth > 0 && /^\s*(?:extern\s+)?(?:unsigned\s+|const\s+|static\s+)*(?:char|int|long|void|short|CHAR|VOID|FILE|ULONG|time_t|off_t)\s*\**\s*\w+\s*\([^()]*\)\s*;\s*$/;   # G11b stmt-scope fn prototype (any return, extern or not; dropped; triage-only)
-if ($::depth > 0 && /^(\s*)(extern\s+(?:const\s+|unsigned\s+|struct\s+)*\w+)\s+([^(;]*,[^(;]*);\s*$/) { my ($i,$b,$l)=($1,$2,$3); $_ = join(' ', map { "$i$b $_;" } split /\s*,\s*/, $l) . "\n"; }   # G13 stmt-scope multi-name extern `extern int a, b;`
-s/(extern\s+(?:const\s+|unsigned\s+)*\w+\s*\*+\s*\w+\s*)\[\s*\](\s*;)/$1\[1\]$2/g if /^extern.*;\s*extern/;   # G4d several `extern T *x[];` on one line (see G4)
-s/\bextern\s+((?:const\s+|unsigned\s+)*\w+\s*\*+\s*\w+\s*\[[^\]]*\]\s*;)/$1/g if $::depth == 0;   # G4e  several `extern T *x[..];` per line: drop extern
 
 if (/^\s*(?:unsigned\s+)?:\s*\d+\s*[,;]/) { s/((?:^|,)\s*(?:unsigned\s+)?):(\s*\d+)/$1."_ubf".($::bf++).":$2"/ge; }   # G19 unnamed bitfield `unsigned :16, :16;` (Watcom dos.h INTPACKB)
-if ($::depth > 0 && /^\s*extern\s+[\w\s]*?\w+\s*\[\s*\]\s*;\s*$/) { s/(\w+)\s*\[\s*\]/*$1/; }   # G16 stmt-scope `extern char x[];` (triage-only: pointer, WRONG semantics)
 if ($::depth > 0 && /^(\s*)((?:const\s+|unsigned\s+|static\s+|register\s+)*(?:char|int|long|short|CHAR|unsigned|FILE|struct\s+\w+))\s+(\**\s*\w+.*?);\s*$/) { my ($i,$b,$l)=($1,$2,$3); my @p = ::tsplit($l); if (@p > 1 && $l =~ /\*|\[/ && $l !~ /"[^"]*,[^"]*"|','/) { $_ = join(' ', map { "$i$b $_;" } @p) . "\n"; } }   # G15 block-scope `char *p = 0, *q = f;` / `const char *p, *a[4];`
 { my $t = $_; $t =~ s/"(?:\\.|[^"\\])*"//g; $t =~ s/'(?:\\.|[^'\\])*'//g; $::depth += ($t =~ tr/{//) - ($t =~ tr/}//); }   # brace depth for the block-scope rules above

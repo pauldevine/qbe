@@ -29,25 +29,44 @@ audit only if `i8086/emit.c` changes).
   reproduces §9f's out-large-G exactly (24/24; `.omf.asm` identical modulo
   QBE's heap-address local labels `_0x…`, which vary under ASLR).
 
-### Item 1 — minic gaps whose rewrites CHANGE MEANING (highest priority)
-These make the current objects wrong C-Kermit; fix before anything links.
-- **1a. Pointer-array / double-pointer extern declarators.**
-  `extern T *x[N];`, `extern T *a[], *b[];`, `extern char **a, **b;` — at
-  file, block and statement scope.  Root cause: `ext_decl: '*' IDENT` steals
-  the `*` from `type`, and ext_decl allows only ONE star and no `[..]` after a
-  starred name.  Rewrites G4/G4b/G4c/G4d/G4e; **53 file-scope + 4 block-scope
-  hits** (the file-scope rewrite drops `extern`, turning a declaration into a
-  per-file DEFINITION — duplicate or silently separate keyword tables).
-- **1b. Block/statement-scope extern arrays and multi-name externs.**
-  `{ ...; extern char x[]; }`, `extern int a, b, c;` mid-block.  The
-  statement-scope rule set has only `EXTERN type IDENT ';'`; nested blocks
-  parse their leading decls in statement context.  Rewrites G16 (**11 hits**,
-  currently turned into a POINTER — loads garbage) and G13.
-- **1c. Statement-scope function prototypes.**  `{ int f(int); ... }` or
-  `char *homedir(void);` inside a nested block (function-top `dcls` context
-  already works).  Rewrite G11 **deletes 20 prototypes**; 4 return pointers
-  (`asctime`, `getlogin`, `homedir`, `zzndate`) and are now truncated to
-  16 bits by the implicit-int fallback in large model.
+### Item 1 — minic gaps whose rewrites CHANGE MEANING — DONE (2026-09-18)
+fixups.pl rules G4, G4b-e, G11, G11b, G13, G16 DELETED; sweep still 24/24
+(large, -G).  Gated: `ptrdecl_probe` + `stmtdecl_probe` × 5 models
+(test-dos 432 → 442); conflicts 117; MP TU SSA byte-identical (all 118
+`build/mp-link/*.pp.c` diffed old-vs-new minic) → MP body 689,760 unchanged;
+frontend-only → no emit audit.
+- **1a** `ext_decl: '*' ext_decl` — any number of `*` on any declarator form
+  (`**p`, `*a[]`, `*a[N]`, `**f()`); a Node `xptr` field counts stars beyond
+  the one the P/G/H tag encodes.  The first declarator's `*`s are absorbed
+  into `type` by the grammar, so later items must start from the
+  declaration's SPECIFIER: `starchain_note()` records each `type '*'`
+  reduction (TNAME pushes a 0-star entry), `decl_base0(type)` looks up the
+  latest chain ending at the rule's type (a ring, since casts/params inside
+  the declaration reduce more types), `ed_elem()` applies an item's own
+  stars.  All six consumers now share that rule: `extern_decl_list`
+  (file/dcls/stmt extern), `emit_global_rest_item` (file-scope `,` /
+  `[N],` / fn-first lists), `emit_local_decl_item` (block multi-decl +
+  `_full`, which gained a `first_in_list` flag), and the static rest item.
+  Known limit: a pointer-TYPEDEF base plus a same-type `*` cast/param inside
+  one declaration can pick the cast's chain (= the old always-peel
+  behavior, never worse).
+- Found + fixed on the way (all silent miscompiles): file-scope rest items
+  ignored their own `*` (`int a, *b;` → b int; `char *p, c;` → c pointer)
+  and dropped `= init` (`int a, b = 5;` → b 0), and `*f()`/`*f(int)` items
+  became variables; block `char *a[3], b;` made a char[3] + b char*, and
+  multi-decl local arrays never recorded their sizeof; `extern void *p;`
+  died; `sizeof(charvar)` was 2 (typeof_expr sees the promoted load).
+- **1b/1c** statement scope (a nested block's leading decls parse as stmts):
+  `EXTERN type ext_decllist ';'` replaces the single-name rule (arrays,
+  multi-name, pointer arrays), plus `EXTERN type IDENT '(' par1 ')' ';'`,
+  `type IDENT '(' ')' ';'`, `type IDENT '(' par1 ')' ';'`; and function-top
+  `dcls EXTERN type IDENT '(' par1 ')' ';'`.  (A dedicated stmt
+  `EXTERN type IDENT '(' ')' ';'` added a conflict against ext_decl's
+  `IDENT '(' ')'` — dropped, the list path handles it.)
+- New gaps noticed (item 2 material): `sizeof x` without parens;
+  `init_decllist` items take no `*` (G15: `char *p = 0, *q = f;`,
+  `register CHAR c = 0, *p;`); ext_decl dims must be a bare NUM
+  (`char f1[64+1], f2[64+1];` in ckcpro/ckcfns).
 
 ### Item 2 — remaining syntax-only minic gaps (same program, cleaner build)
 Each currently has a harmless rewrite in fixups.pl; fix in minic, delete the

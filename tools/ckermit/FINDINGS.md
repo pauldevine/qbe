@@ -33,26 +33,38 @@ Scripts (tools/ckermit/, see README.md): `sweep.sh` (driver), `fixups.pl` (text 
 - block-scope array shadowing a file-scope name: "double definition"
 - diagnostic: die() now reports the statement line for emit-time errors
 
+### Frontend gaps fixed in minic.y, 2026-09-18 (campaign item 1; rules deleted)
+Gated by ptrdecl_probe + stmtdecl_probe (5 models).  These rewrites CHANGED
+MEANING (extern dropped -> per-file definitions; extern arrays turned into
+pointers; pointer-returning prototypes deleted -> implicit int).
+- G4/G4b-e `extern T *x[];`, `extern T *a[], *b[];`, `extern char **a, **b;`
+  -- ext_decl now takes any number of `*` on any declarator form
+- G11/G11b statement-scope prototypes `{ char *homedir(void); ... }`
+- G13 statement-scope multi-name extern; G16 statement-scope `extern char x[];`
+- found on the way (silent miscompiles in the same code): file-scope
+  multi-declarator items ignored their own `*` (`int a, *b;` -> b int),
+  dropped a later item's initializer (`int a, b = 5;` -> b 0), and made
+  `*f()` / `*f(int)` items variables; `char *a[3], b;` in a function made a
+  char[3]; `extern void *p;` died; `sizeof(charvar)` was 2.
+
 ### Frontend gaps worked around in fixups.pl (not fixed)
 - G1  non-pointer function typedef `typedef void f(int,int);`
 - G2  function returning function pointer `void (*signal(int, void(*)(int)))(int)`
 - G3  `extern struct T *fn(...);`
-- G4  `extern T *name[N];` / multi `extern T *a[], *b[];` / `extern char **a, **b;`
-      (ext_decl `'*' IDENT` steals the star; one star only)
 - G5  abstract fn-ptr parameter `int (*)(char)` in a prototype
 - G6  abstract array parameters `char *[]`, `char []`, `struct T[]`
 - G7  `long double`
-- G11 statement-scope function prototypes (`{ ...; int f(int); }`)
 - G12 2-D arrays `char a[N][M]` (rewritten to the aoa array-typedef path)
-- G13 statement-scope multi-name extern `extern int a, b;`
 - G15 block-scope `char *p = 0, *q = f;` / `const char *p, *a[4];`
-- G16 statement-scope `extern char x[];`
 - G19 unnamed bitfields `unsigned :16;`
 - G20 parenthesized parameter declarator `T (name)`
 - G21 `void (__far *h)()`
 - G23 east-const `void const *`
 - G24 struct-typed `?:` as an assignment source ("invalid lvalue")
 - G8  file-scope `int a = 1, b = 2;` (first declarator initialized)
+- (new) `sizeof x` without parentheses; file-scope `struct S {...} s;`;
+  `init_decllist` items take no `*` (`char *p = 0, *q = f;`, G15); ext_decl
+  array dimensions must be a bare NUM (`char a[64+1], b[64+1];`)
 Watcom-isms (a real port would use our headers / crt0): `__declspec(__watcall)`,
 `__int64`, `__based`, `__interrupt`, `seg :> off`, the XI init-table record.
 

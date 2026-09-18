@@ -215,6 +215,9 @@ struct Node {
 	                       * 16-bit int) so expr() types it LNG not INT.
 	                       * 'F' nodes: 1 if the float literal carries an
 	                       * f/F suffix (single-precision Ks), 0 = double. */
+	unsigned char xptr;   /* ext_decl declarator nodes: extra leading `*`s
+	                       * beyond the one the P/G/H tag encodes (`**p`
+	                       * is P + xptr 1, `*a[]` is A + xptr 1). */
 	union {
 		int n;
 		char v[NString];
@@ -560,6 +563,70 @@ unsigned curfntyp = INT;  /* Current function return type (defaults to INT for K
 unsigned parsed_type = INT;  /* Stores type parsed in typed_decl for later use */
 unsigned kr_curtype = INT;  /* Stores type from current K&R param-decl group */
 char parsed_ident[NString];  /* Stores identifier parsed in typed_decl */
+
+/* Declarator-star tracking for multi-declarators (`T *a, **b, c;`).  The
+ * FIRST declarator's leading `*`s are absorbed into `type` by the grammar,
+ * so the declaration's shared base (the specifier, C 6.7) is not the type
+ * the rule sees.  Each `type '*'` reduction records the chain
+ * specifier -> pointer here (a TNAME specifier records a 0-star entry, so
+ * a pointer typedef is not mistaken for an absorbed star).  decl_base0()
+ * looks up the most recent chain ending at a declaration's type to recover
+ * the specifier.  A ring (not a single slot) because a cast or parameter
+ * list inside the declaration reduces more types before the declarator
+ * list is walked. */
+#define NSTARCHAIN 8
+static struct { unsigned base0, result; int k; } starchain[NSTARCHAIN];
+static int nstarchain;
+
+static void
+starchain_push(unsigned base0, unsigned result, int k)
+{
+	int i = nstarchain++ % NSTARCHAIN;
+	starchain[i].base0 = base0;
+	starchain[i].result = result;
+	starchain[i].k = k;
+}
+
+/* `type '*'` reduced: from -> to.  Extends the latest chain when it ends at
+ * `from` (the second `*` of `char **`), else starts a new 1-star chain. */
+static void
+starchain_note(unsigned from, unsigned to)
+{
+	int i = (nstarchain - 1) % NSTARCHAIN;
+	if (nstarchain > 0 && starchain[i].result == from) {
+		starchain[i].result = to;
+		starchain[i].k++;
+	} else
+		starchain_push(from, to, 1);
+}
+
+/* The specifier of a declaration whose first declarator gave `type`. */
+static unsigned
+decl_base0(unsigned type)
+{
+	int i, n;
+	for (n = 0; n < NSTARCHAIN && n < nstarchain; n++) {
+		i = (nstarchain - 1 - n) % NSTARCHAIN;
+		if (starchain[i].result == type)
+			return starchain[i].base0;
+	}
+	return type;
+}
+
+/* Element (object / array-element / function-return) type of one ext_decl
+ * item.  `start` is the declaration's specifier for an item after the
+ * first, or the rule's (star-absorbed) type for the first declarator; the
+ * item's own `*`s are applied on top. */
+static unsigned
+ed_elem(unsigned start, Node *n)
+{
+	int s = n->xptr;
+	if (n->op == 'P' || n->op == 'G' || n->op == 'H')
+		s++;
+	while (s-- > 0)
+		start = IDIR(start);
+	return start;
+}
 
 int emit_srcline;  /* srcline of the Stmt being emitted, for die() */
 
@@ -5514,6 +5581,7 @@ mknode(char op, Node *l, Node *r)
 	n = alloc(sizeof *n);
 	n->op = op;
 	n->nlong = 0;
+	n->xptr = 0;
 	n->l = l;
 	n->r = r;
 	return n;
@@ -7140,76 +7208,90 @@ multi_decl_chain_init(Node *chain, char *v, Node *init)
  * first) is in `list`.  Used when the first declarator is decorated
  * (`[N]`, `*`, `()`, etc.).  Returns the deferred initializer chain
  * (or 0); the caller decides placement. */
-Node *
-emit_local_multi_decl_full(unsigned base, Node *list)
+/* One block-scope multi-declarator item, allocating its storage (or
+ * registering a function declarator).  `start` is the type the item's own
+ * `*`s apply to (see ed_elem).  Returns the updated deferred init chain. */
+static Node *
+emit_local_decl_item(unsigned start, Node *n, Node *chain)
 {
-	Node *n, *chain;
-	unsigned t;
-	char *v;
+	unsigned e, t;
+	char *v = n->u.v;
 
-	if (base == NIL)
-		die("invalid void declaration");
-	chain = 0;
-	for (n = list; n; n = n->r) {
-		v = n->u.v;
-		if (n->op == 'F') {
-			varadd(v, 1, FUNC(base), 0);
-			continue;
-		}
-		if (n->op == 'G') {
-			/* `*ident()` — uniform-* peeling: when the first declarator
-			 * absorbed `*` into base, subsequent items already match it.
-			 * Treat as `FUNC(base)` like a plain 'F'. */
-			varadd(v, 1, FUNC(base), 0);
-			continue;
-		}
-		if (n->op == 'B') {
-			int count = n->l->u.n;
-			unsigned elem = (KIND(base) == PTR) ? DREF(base) : base;
-			/* Array-of-array-typedef declarator in a multi-decl
-			 * (`jmp_buf a[2], b[2];`): when the shared base is an array
-			 * typedef (g_td_arraydim = inner dim D > 0), the element is
-			 * itself a D-wide array, so this declarator's slot is
-			 * count*D*sizeof(elem) and the var carries aoa_dim=D so a
-			 * one-level subscript yields a row address (§7e mkidx).  For a
-			 * plain element (D==0) this is byte-identical to the old path. */
-			int aoa = g_td_arraydim;
-			int total = count * SIZE(elem) * (aoa > 0 ? aoa : 1);
-			/* Inner-block shadow rename (see emit_local_multi_decl). */
-			v = block_scope_decl(n, IDIR(elem), 1);
-			varadd(v, 0, IDIR(elem), 1);
-			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(elem), total);
-			if (aoa > 0)
-				var_set_aoa_dim(v, aoa);
-			continue;
-		}
-		if (n->op == 0 && g_td_arraydim > 0) {
-			/* Array-typedef INSTANCE in a multi-decl (`jmp_buf a, b;`):
-			 * the shared base was reduced to the element type, so this
-			 * plain declarator is the whole D-wide array — size it
-			 * D*sizeof(elem) and register IDIR(elem) array so it decays
-			 * to its address (not a scalar element load).  No aoa_dim:
-			 * it is a plain array typedef instance, not an aoa. */
-			unsigned elem = g_td_arrayelem;
-			int total = SIZE(elem) * g_td_arraydim;
-			v = block_scope_decl(n, IDIR(elem), 1);
-			varadd(v, 0, IDIR(elem), 1);
-			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(elem), total);
-			continue;
-		}
-		t = (n->op == 'P' || n->op == 'A') ? IDIR(base) : base;
-		/* Route through block_scope_decl so a multi-declarator local that
-		 * shadows a global/extern/function/enum or a different-typed
-		 * outer local is alpha-renamed instead of dying "double
-		 * definition" in varadd (single-decl already does this). */
-		v = block_scope_decl(n, t, n->op == 'A' ? 1 : 0);
-		varadd(v, 0, t, n->op == 'A' ? 1 : 0);
-		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
-		if ((KIND(t) == STRUCT_T || KIND(t) == UNION_T) && struct_has_bitfield(DREF(t)))
-			emit_zero_local(v, SIZE(t));
-		if ((n->op == 0 || n->op == 'P') && n->l)
-			chain = multi_decl_chain_init(chain, v, n->l);
+	if (n->op == 0 && g_td_arraydim > 0) {
+		/* Array-typedef INSTANCE in a multi-decl (`jmp_buf a, b;`):
+		 * the shared base was reduced to the element type, so this
+		 * plain declarator is the whole D-wide array — size it
+		 * D*sizeof(elem) and register IDIR(elem) array so it decays
+		 * to its address (not a scalar element load).  No aoa_dim:
+		 * it is a plain array typedef instance, not an aoa. */
+		unsigned elem = g_td_arrayelem;
+		int total = SIZE(elem) * g_td_arraydim;
+		v = block_scope_decl(n, IDIR(elem), 1);
+		varadd(v, 0, IDIR(elem), 1);
+		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(elem), total);
+		return chain;
 	}
+	e = ed_elem(start, n);
+	if (n->op == 'F' || n->op == 'G' || n->op == 'H') {
+		/* block-scope K&R / ANSI prototype: no storage */
+		varadd(v, 1, FUNC(e), 0);
+		if (n->op == 'H')
+			fnproto_record(v, n->l, e);
+		return chain;
+	}
+	if (e == NIL)
+		die("invalid void declaration");
+	if (n->op == 'B') {
+		int count = n->l->u.n;
+		/* Array-of-array-typedef declarator in a multi-decl
+		 * (`jmp_buf a[2], b[2];`): when the shared base is an array
+		 * typedef (g_td_arraydim = inner dim D > 0), the element is
+		 * itself a D-wide array, so this declarator's slot is
+		 * count*D*sizeof(elem) and the var carries aoa_dim=D so a
+		 * one-level subscript yields a row address (§7e mkidx).  For a
+		 * plain element (D==0) this is byte-identical to the old path. */
+		int aoa = g_td_arraydim;
+		int total = count * SIZE(e) * (aoa > 0 ? aoa : 1);
+		/* Inner-block shadow rename (see emit_local_multi_decl). */
+		v = block_scope_decl(n, IDIR(e), 1);
+		varadd(v, 0, IDIR(e), 1);
+		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(e), total);
+		var_set_arraybytes(v, total);
+		if (aoa > 0)
+			var_set_aoa_dim(v, aoa);
+		return chain;
+	}
+	t = (n->op == 'A') ? IDIR(e) : e;
+	/* Route through block_scope_decl so a multi-declarator local that
+	 * shadows a global/extern/function/enum or a different-typed
+	 * outer local is alpha-renamed instead of dying "double
+	 * definition" in varadd (single-decl already does this). */
+	v = block_scope_decl(n, t, n->op == 'A' ? 1 : 0);
+	varadd(v, 0, t, n->op == 'A' ? 1 : 0);
+	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
+	if ((KIND(t) == STRUCT_T || KIND(t) == UNION_T) && struct_has_bitfield(DREF(t)))
+		emit_zero_local(v, SIZE(t));
+	if ((n->op == 0 || n->op == 'P') && n->l)
+		chain = multi_decl_chain_init(chain, v, n->l);
+	return chain;
+}
+
+/* Same as emit_local_multi_decl but every declarator is in `list`.  Used
+ * when the first declarator is decorated (`[N]`, `()`) — then
+ * first_in_list is 1 and that node's type is `base` itself (its leading
+ * `*`s were absorbed into base); every later node starts from the
+ * declaration's specifier.  The fn-ptr-first rule passes only the rest
+ * items (first_in_list 0).  Returns the deferred initializer chain (or 0);
+ * the caller decides placement. */
+Node *
+emit_local_multi_decl_full(unsigned base, Node *list, int first_in_list)
+{
+	unsigned base0 = decl_base0(base);
+	Node *n, *chain;
+
+	chain = 0;
+	for (n = list; n; n = n->r)
+		chain = emit_local_decl_item((first_in_list && n == list) ? base : base0, n, chain);
 	return chain;
 }
 
@@ -7226,7 +7308,7 @@ emit_local_multi_decl(unsigned base, Node *firstnode, Node *rest)
 {
 	int s;
 	Node *n, *chain;
-	unsigned t;
+	unsigned base0;
 	char *v;
 
 	if (base == NIL)
@@ -7255,63 +7337,140 @@ emit_local_multi_decl(unsigned base, Node *firstnode, Node *rest)
 	if ((KIND(base) == STRUCT_T || KIND(base) == UNION_T) && struct_has_bitfield(DREF(base)))
 		emit_zero_local(v, s);
 rest_items:
-	for (n = rest; n; n = n->r) {
-		/* When the leading declarator's `*` was absorbed by greedy
-		 * type matching, the base already carries that pointer
-		 * level.  In Stevie's uniform-* multi-decls (`T *X, *Y` or
-		 * `T *X, Y[N]` etc.) the `*` we see in subsequent ext_decl
-		 * items should match the base's level rather than add one.
-		 * Peel one PTR off the base for consumers that would
-		 * otherwise re-pointer it. */
-		unsigned ebase = (KIND(base) == PTR) ? DREF(base) : base;
-		v = n->u.v;
-		if (n->op == 'F') {
-			varadd(v, 1, FUNC(base), 0);
-			continue;
-		}
-		if (n->op == 'G') {
-			varadd(v, 1, FUNC(IDIR(ebase)), 0);
-			continue;
-		}
-		if (n->op == 'B') {
-			int count = n->l->u.n;
-			int total = count * SIZE(ebase);
-			v = block_scope_decl(n, IDIR(ebase), 1);
-			varadd(v, 0, IDIR(ebase), 1);
-			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(ebase), total);
-			continue;
-		}
-		if (n->op == 'P') {
-			t = IDIR(ebase);
-			v = block_scope_decl(n, t, 0);
-			varadd(v, 0, t, 0);
-			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
-			if (n->l)
-				chain = multi_decl_chain_init(chain, v, n->l);
-			continue;
-		}
-		if (n->op == 0 && g_td_arraydim > 0) {
-			/* Array-typedef INSTANCE item (`jmp_buf a, b;` — b here). */
-			unsigned elem = g_td_arrayelem;
-			int total = SIZE(elem) * g_td_arraydim;
-			v = block_scope_decl(n, IDIR(elem), 1);
-			varadd(v, 0, IDIR(elem), 1);
-			fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(elem), total);
-			continue;
-		}
-		/* Plain or [N] declarator: peel one * off the absorbed base
-		 * so `char *p, c;` makes c a `char` (standard C semantics).
-		 * `[N]` similarly lands at element-of-base. */
-		t = (n->op == 'A') ? IDIR(ebase) : ebase;
-		v = block_scope_decl(n, t, n->op == 'A' ? 1 : 0);
-		varadd(v, 0, t, n->op == 'A' ? 1 : 0);
-		fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign(t), SIZE(t));
-		if ((KIND(t) == STRUCT_T || KIND(t) == UNION_T) && struct_has_bitfield(DREF(t)))
-			emit_zero_local(v, SIZE(t));
-		if (n->op == 0 && n->l)
-			chain = multi_decl_chain_init(chain, v, n->l);
-	}
+	/* Later declarators start from the declaration's specifier: the
+	 * first one's leading `*`s were absorbed into base (`char *p, c;`
+	 * makes c a char; `char **a, *b;` makes b a char*). */
+	base0 = decl_base0(base);
+	for (n = rest; n; n = n->r)
+		chain = emit_local_decl_item(base0, n, chain);
 	return chain;
+}
+
+/* File-scope `T NAME = <const expr>;` for parsed_type/parsed_ident (the
+ * `'=' expr` rule, and a multi-declarator item's own initializer). */
+void
+emit_global_scalar_init(Node *init)
+{
+	if (ISFLOAT(parsed_type)) {
+		emit_global_float_init(init);
+	} else {
+		/* cival_eval extends const_eval with symbol addresses, so
+		 * `char **environ = __env;` and `int *p = &x;` emit a
+		 * relocated `$sym+off` item (§6a) — pure-integer folds are
+		 * byte-identical to the old const_eval path. */
+		struct CIVal v;
+		cival_eval(init, &v);
+		if (v.issym)
+			emit_global_sym_init(v.sym, v.off);
+		else
+			emit_global_int_init((int)v.off);
+	}
+}
+
+void emit_global_arr_instance(char *name, unsigned elem, int dim);
+void emit_global_sized_array(char *name, long count);
+
+/* Register a multi-name extern list (`extern T a, *b, **c, *d[], *f();`).
+ * `base` is the rule's type, which absorbed the FIRST declarator's leading
+ * `*`s when the grammar reduced them into `type`; later items start from
+ * the declaration's specifier (decl_base0).  A `void` base is fine for
+ * pointers and functions; only a void OBJECT dies. */
+static void
+extern_decl_list(unsigned base, Node *list)
+{
+	unsigned base0 = decl_base0(base), e;
+	int isarr;
+	Node *n;
+
+	for (n = list; n; n = n->r) {
+		e = ed_elem(n == list ? base : base0, n);
+		if (n->op == 'F' || n->op == 'G' || n->op == 'H') {
+			varaddextern(n->u.v, FUNC(e), 0);
+			if (n->op == 'H')
+				fnproto_record(n->u.v, n->l, e);
+			continue;
+		}
+		if (e == NIL)
+			die("invalid void extern declaration");
+		isarr = (n->op == 'A' || n->op == 'B');
+		varaddextern(n->u.v, isarr ? IDIR(e) : e, isarr);
+		if (n->op == 'B')
+			var_set_arraybytes(n->u.v, SIZE(e) * n->l->u.n);
+	}
+}
+
+/* One file-scope multi-declarator item after the first (`int a, *b, c[4],
+ * *f(), d = 5;`), with `base0` the declaration's specifier.  Before this
+ * the items ignored their own `*` (`int a, *b;` made b an int, `char *a, b`
+ * made b a pointer), made `*f()` a variable, and dropped `= init`.
+ * Returns 1 if the item was an ANSI prototype (its params need varclr). */
+static int
+emit_global_rest_item(unsigned base0, Node *n, int aoa, unsigned aelem)
+{
+	char buf[64];
+	unsigned e;
+	int total;
+
+	if (n->op == 0 && aoa > 0) {
+		/* array-typedef INSTANCE item (`jmp_buf a, b;` — b here). */
+		emit_global_arr_instance(n->u.v, aelem, aoa);
+		return 0;
+	}
+	e = ed_elem(base0, n);
+	if (n->op == 'F' || n->op == 'G' || n->op == 'H') {
+		varadd(n->u.v, 1, FUNC(e), 0);
+		if (n->op == 'H') {
+			fnproto_record(n->u.v, n->l, e);
+			return 1;
+		}
+		return 0;
+	}
+	if (e == NIL)
+		die("invalid void declaration");
+	if (nglo == NGlo)
+		die("too many globals");
+	if (n->op == 'B') {
+		if (aoa > 0) {
+			/* `jmp_buf fa[2], fb[2];` (aoa-aware via the helper). */
+			emit_global_sized_array(n->u.v, n->l->u.n);
+			return 0;
+		}
+		total = SIZE(e) * n->l->u.n;
+		sprintf(buf, "align %d { z %d }", iralign(e), total);
+		ini[nglo] = alloc(strlen(buf) + 1);
+		strcpy(ini[nglo], buf);
+		strcpy(gloname[nglo], n->u.v);
+		maybe_mark_huge_global(nglo, n->u.v, total);
+		varadd(n->u.v, nglo++, IDIR(e), 1);
+		var_set_arraybytes(n->u.v, total);
+		return 0;
+	}
+	if (n->op == 'A') {
+		sprintf(buf, "align %d { z 0 }", iralign(e));
+		ini[nglo] = alloc(strlen(buf) + 1);
+		strcpy(ini[nglo], buf);
+		strcpy(gloname[nglo], n->u.v);
+		varadd(n->u.v, nglo++, IDIR(e), 1);
+		return 0;
+	}
+	if (n->l) {
+		/* `int a, b = 5;` — this item's own initializer. */
+		unsigned sv_type = parsed_type;
+		char sv_ident[NString];
+		strcpy(sv_ident, parsed_ident);
+		parsed_type = e;
+		strcpy(parsed_ident, n->u.v);
+		emit_global_scalar_init(n->l);
+		parsed_type = sv_type;
+		strcpy(parsed_ident, sv_ident);
+		return 0;
+	}
+	emit_zero_init(buf, e);
+	ini[nglo] = alloc(strlen(buf) + 1);
+	strcpy(ini[nglo], buf);
+	strcpy(gloname[nglo], n->u.v);
+	varadd(n->u.v, nglo++, e, 0);
+	return 0;
 }
 
 /* Emit a file-scope array-typedef INSTANCE (`jmp_buf env;` at file or
@@ -7439,32 +7598,38 @@ emit_static_local_rest_item(unsigned base, Node *n)
 {
 	char buf[64];
 	char *v = n->u.v;
-	unsigned ebase = (KIND(base) == PTR) ? DREF(base) : base;
-	unsigned t;
+	unsigned e;
 	int total;
 
-	if (n->op == 'F') {
-		varadd(v, 1, FUNC(base), 0);
+	if (n->op == 0 && g_td_arraydim > 0) {
+		total = SIZE(g_td_arrayelem) * g_td_arraydim;
+		sprintf(buf, "align %d { z %d }", iralign(g_td_arrayelem), total);
+		emit_static_local(v, IDIR(g_td_arrayelem), 1, buf);
+		var_set_arraybytes(v, total);
 		return;
 	}
-	if (n->op == 'G' || n->op == 'H') {
-		/* `*ident()` / `*ident(par1)` — K&R/ANSI proto returning a
-		 * pointer; register the function type, no storage. */
-		varadd(v, 1, FUNC(IDIR(ebase)), 0);
+	/* Items after the first start from the declaration's specifier (the
+	 * first declarator's `*`s were absorbed into base). */
+	e = ed_elem(decl_base0(base), n);
+	if (n->op == 'F' || n->op == 'G' || n->op == 'H') {
+		/* K&R/ANSI proto; register the function type, no storage. */
+		varadd(v, 1, FUNC(e), 0);
 		return;
 	}
 	if (n->op == 'A')
 		die("static array declarator needs a size");
+	if (e == NIL)
+		die("invalid void declaration");
 	if (n->op == 'B') {
 		long count;
-		unsigned elemtyp = ebase;
+		unsigned elemtyp = e;
 		int aoa = 0;
 		count = n->l->u.n;
 		if (g_td_arraydim > 0) {
 			aoa = g_td_arraydim;
 			elemtyp = g_td_arrayelem;
 		}
-		total = (aoa > 0 ? SIZE(elemtyp) * aoa : SIZE(ebase)) * count;
+		total = (aoa > 0 ? SIZE(elemtyp) * aoa : SIZE(e)) * count;
 		sprintf(buf, "align %d { z %d }", iralign(elemtyp), total);
 		emit_static_local(v, IDIR(elemtyp), 1, buf);
 		var_set_arraybytes(v, total);
@@ -7473,14 +7638,6 @@ emit_static_local_rest_item(unsigned base, Node *n)
 		maybe_mark_huge_global(nglo - 1, gloname[nglo - 1], total);
 		return;
 	}
-	if (n->op == 0 && g_td_arraydim > 0) {
-		total = SIZE(g_td_arrayelem) * g_td_arraydim;
-		sprintf(buf, "align %d { z %d }", iralign(g_td_arrayelem), total);
-		emit_static_local(v, IDIR(g_td_arrayelem), 1, buf);
-		var_set_arraybytes(v, total);
-		return;
-	}
-	t = (n->op == 'P') ? IDIR(ebase) : ebase;
 	if (n->l) {
 		/* A scalar/pointer rest item WITH an initializer
 		 * (`static int x = 1, y = 2;`, `static char *p = a, *q = b;`):
@@ -7490,11 +7647,11 @@ emit_static_local_rest_item(unsigned base, Node *n)
 		id.op = 'V';
 		id.l = id.r = 0;
 		strcpy(id.u.v, v);
-		emit_static_local_init(t, &id, n->l);
+		emit_static_local_init(e, &id, n->l);
 		return;
 	}
-	emit_zero_init(buf, t);
-	emit_static_local(v, t, 0, buf);
+	emit_zero_init(buf, e);
+	emit_static_local(v, e, 0, buf);
 }
 
 /* Emit a K&R-style function header.  Called from the prot_knr action
@@ -7865,41 +8022,9 @@ externdcl: EXTERN type IDENT ';'
 	 *   extern int Cursrow, Curscol, Cursvcol, Curswant;
 	 *   extern char Redobuff[], Insbuff[];
 	 *   extern char *malloc(), *strcpy();
-	 * Each declarator is registered with the same base type ($2),
-	 * adjusted for arrays and functions per `ext_decl_kind`. */
-	Node *n;
-	unsigned t;
-	for (n = $3; n; n = n->r) {
-		if (n->op == 'F') {
-			t = FUNC($2);
-		} else if (n->op == 'G') {
-			t = FUNC(IDIR($2));
-		} else if (n->op == 'H') {
-			t = FUNC(IDIR($2));
-			fnproto_record(n->u.v, n->l, IDIR($2));
-		} else if (n->op == 'A' || n->op == 'B') {
-			/* B = sized array declarator (the bare-NUM dimension form
-			 * reduces through ext_decl, NOT the dedicated rule above).
-			 * Before this branch existed it fell into the scalar else:
-			 * the symbol registered as a plain base-type scalar, so a
-			 * reference LOADED its first bytes instead of decaying to
-			 * the array address (gc_add got seg 0 and wrote the IVT). */
-			if ($2 == NIL)
-				die("invalid void extern array");
-			t = IDIR($2);
-		} else if (n->op == 'P') {
-			if ($2 == NIL)
-				die("invalid void extern pointer");
-			t = IDIR($2);
-		} else {
-			if ($2 == NIL)
-				die("invalid void extern declaration");
-			t = $2;
-		}
-		varaddextern(n->u.v, t, (n->op == 'A' || n->op == 'B') ? 1 : 0);
-		if (n->op == 'B')
-			var_set_arraybytes(n->u.v, SIZE($2) * n->l->u.n);
-	}
+	 *   extern char *binpatterns[], **cmlist, *versio;   (C-Kermit)
+	 * varclr drops any ANSI prototype's param names. */
+	extern_decl_list($2, $3);
 	varclr();
 }
          ;
@@ -7990,14 +8115,27 @@ ext_decllist: ext_decl
             ;
 
 ext_decl: IDENT                 { $$ = kr_name_node($1->u.v, 0); }
-        | '*' IDENT             { $$ = kr_name_node($2->u.v, 'P'); }
         | IDENT '[' ']'         { $$ = kr_name_node($1->u.v, 'A'); }
         | IDENT '[' NUM ']'     { $$ = kr_array_node($1->u.v, $3->u.n); }
-        | '*' IDENT '(' ')'     { $$ = kr_name_node($2->u.v, 'G'); }
         | '*' IDENT '(' par1 ')' { $$ = kr_name_node($2->u.v, 'H'); $$->l = $4; }
         | IDENT '(' ')'         { $$ = kr_name_node($1->u.v, 'F'); }
         | IDENT '=' expr        { $$ = kr_name_node($1->u.v, 0); $$->l = $3; }
-        | '*' IDENT '=' expr    { $$ = kr_name_node($2->u.v, 'P'); $$->l = $4; }
+        | '*' ext_decl
+{
+	/* A leading `*` on any declarator: `*p` (P), `*f()` (G), `*p = e` (P
+	 * with init), and — the C-Kermit forms that used to be parse errors —
+	 * `**p`, `*a[]`, `*a[N]`, `**f()`.  The first `*` turns a plain name
+	 * into P and a K&R function into G (the tags every consumer already
+	 * knows); any further `*` counts in xptr (see ed_elem).  `[]` binds
+	 * tighter than `*`, so `*a[]` is an array of pointers. */
+	$$ = $2;
+	if ($$->op == 0)
+		$$->op = 'P';
+	else if ($$->op == 'F')
+		$$->op = 'G';
+	else
+		$$->xptr++;
+}
         ;
 
 tdcl: TYPEDEF type IDENT ';'
@@ -8444,20 +8582,7 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	 * reduces via the '=' STR rule below (its '.' shifts ';'); '=' gaggr
 	 * is distinguished by its leading brace.  Non-constant initializers
 	 * die in const_eval. */
-	if (ISFLOAT(parsed_type)) {
-		emit_global_float_init($2);
-	} else {
-		/* cival_eval extends const_eval with symbol addresses, so
-		 * `char **environ = __env;` and `int *p = &x;` emit a
-		 * relocated `$sym+off` item (§6a) — pure-integer folds are
-		 * byte-identical to the old const_eval path. */
-		struct CIVal v;
-		cival_eval($2, &v);
-		if (v.issym)
-			emit_global_sym_init(v.sym, v.off);
-		else
-			emit_global_int_init((int)v.off);
-	}
+	emit_global_scalar_init($2);
 }
                | '=' gaggr ';'                   { emit_global_aggregate(parsed_type, parsed_ident, $2); }
                | '[' expr ']' ';'
@@ -8482,41 +8607,17 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	 * ext_decllist for the rest — mirroring the plain-first
 	 * `, ext_decllist ';'` rule's item handling. */
 	Node *n;
-	unsigned t;
-	char buf[64];
 	int aoa = g_td_arraydim;
 	unsigned aelem = g_td_arrayelem;
+	unsigned base0 = decl_base0(parsed_type);
+	int protos = 0;
 	if (parsed_type == NIL)
 		die("invalid void array");
 	emit_global_sized_array(parsed_ident, const_eval($2));
-	for (n = $5; n; n = n->r) {
-		if (n->op == 'B') {
-			/* sized array item — `fb[2]` (aoa-aware via the helper). */
-			emit_global_sized_array(n->u.v, n->l->u.n);
-		} else if (n->op == 0 && aoa > 0) {
-			/* array-typedef INSTANCE item (`jmp_buf fa[2], fb;`). */
-			emit_global_arr_instance(n->u.v, aelem, aoa);
-		} else if (n->op == 'F') {
-			varadd(n->u.v, 1, FUNC(parsed_type), 0);
-		} else if (n->op == 'A') {
-			t = IDIR(parsed_type);
-			if (nglo == NGlo)
-				die("too many globals");
-			sprintf(buf, "align %d { z 0 }", iralign(parsed_type));
-			ini[nglo] = alloc(strlen(buf) + 1);
-			strcpy(ini[nglo], buf);
-			strcpy(gloname[nglo], n->u.v);
-			varadd(n->u.v, nglo++, t, 1);
-		} else {
-			if (nglo == NGlo)
-				die("too many globals");
-			emit_zero_init(buf, parsed_type);
-			ini[nglo] = alloc(strlen(buf) + 1);
-			strcpy(ini[nglo], buf);
-			strcpy(gloname[nglo], n->u.v);
-			varadd(n->u.v, nglo++, parsed_type, 0);
-		}
-	}
+	for (n = $5; n; n = n->r)
+		protos |= emit_global_rest_item(base0, n, aoa, aelem);
+	if (protos)
+		varclr();
 }
                | '=' STR ';'
 {
@@ -8545,10 +8646,11 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	 * variable.  Emit a global for it, then walk ext_decllist for
 	 * the remaining declarators. */
 	Node *n;
-	unsigned t;
 	char buf[64];
 	int aoa = g_td_arraydim;   /* >0: shared base is an array typedef */
 	unsigned aelem = g_td_arrayelem;
+	unsigned base0 = decl_base0(parsed_type);
+	int protos = 0;
 	if (parsed_type == NIL)
 		die("invalid void declaration");
 	/* First name: emit as plain global (or D-wide array instance when the
@@ -8564,49 +8666,10 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	strcpy(gloname[nglo], parsed_ident);
 	varadd(parsed_ident, nglo++, parsed_type, 0);
 	}
-	for (n = $2; n; n = n->r) {
-		if (n->op == 0 && aoa > 0) {
-			/* array-typedef INSTANCE item (`jmp_buf a, b;` — b here). */
-			emit_global_arr_instance(n->u.v, aelem, aoa);
-			continue;
-		}
-		if (n->op == 'F') {
-			t = FUNC(parsed_type);
-			varadd(n->u.v, 1, t, 0);
-		} else if (n->op == 'A') {
-			t = IDIR(parsed_type);
-			if (nglo == NGlo)
-				die("too many globals");
-			sprintf(buf, "align %d { z 0 }", iralign(parsed_type));
-			ini[nglo] = alloc(strlen(buf) + 1);
-			strcpy(ini[nglo], buf);
-			strcpy(gloname[nglo], n->u.v);
-			varadd(n->u.v, nglo++, t, 1);
-		} else if (n->op == 'B') {
-			/* Sized array declarator in a multi-name file-scope decl,
-			 * e.g. int a, b 10 elements.  Emit a real zero block of the
-			 * full array size (the scalar else-branch used to emit one
-			 * element and register a scalar - wrong size AND no decay). */
-			int total = SIZE(parsed_type) * n->l->u.n;
-			t = IDIR(parsed_type);
-			if (nglo == NGlo)
-				die("too many globals");
-			sprintf(buf, "align %d { z %d }", iralign(parsed_type), total);
-			ini[nglo] = alloc(strlen(buf) + 1);
-			strcpy(ini[nglo], buf);
-			strcpy(gloname[nglo], n->u.v);
-			varadd(n->u.v, nglo++, t, 1);
-			var_set_arraybytes(n->u.v, total);
-		} else {
-			if (nglo == NGlo)
-				die("too many globals");
-			emit_zero_init(buf, parsed_type);
-			ini[nglo] = alloc(strlen(buf) + 1);
-			strcpy(ini[nglo], buf);
-			strcpy(gloname[nglo], n->u.v);
-			varadd(n->u.v, nglo++, parsed_type, 0);
-		}
-	}
+	for (n = $2; n; n = n->r)
+		protos |= emit_global_rest_item(base0, n, aoa, aelem);
+	if (protos)
+		varclr();
 }
                | knr_func_proto '{' dcls stmts '}'
 {
@@ -8629,30 +8692,17 @@ typed_decl_rest: ansi_func_proto '{' dcls stmts '}'
 	 *   char *alloc(), *strsave(), *mkstr();
 	 *   void filealloc(), freeall();
 	 * The first name (with its `()`) is registered as a function
-	 * returning parsed_type; ext_decllist handles the rest. */
+	 * returning parsed_type; ext_decllist handles the rest, each item
+	 * starting from the declaration's specifier (`char *f(), *g(), c;`
+	 * makes g a char* function and c a char variable). */
 	Node *n;
-	unsigned t;
+	unsigned base0 = decl_base0(parsed_type);
 	if (parsed_type == NIL)
 		varadd(parsed_ident, 1, FUNC(NIL), 0);
 	else
 		varadd(parsed_ident, 1, FUNC(parsed_type), 0);
-	for (n = $6; n; n = n->r) {
-		if (n->op == 'F' || n->op == 0) {
-			/* Function (with or without leading *). */
-			t = (parsed_type == NIL) ? FUNC(NIL) : FUNC(parsed_type);
-			varadd(n->u.v, 1, t, 0);
-		} else if (n->op == 'A') {
-			t = IDIR(parsed_type);
-			varadd(n->u.v, 0, t, 1);
-		} else if (n->op == 'H') {
-			t = (parsed_type == NIL) ? FUNC(NIL)
-			                         : FUNC(IDIR(parsed_type));
-			varadd(n->u.v, 1, t, 0);
-			fnproto_record(n->u.v, n->l, IDIR(parsed_type));
-		} else {
-			varadd(n->u.v, 1, FUNC(parsed_type), 0);
-		}
-	}
+	for (n = $6; n; n = n->r)
+		emit_global_rest_item(base0, n, 0, 0);
 	varclr();
 }
                | '[' ']' '=' gaggr ';'
@@ -9120,7 +9170,7 @@ dcls:
 	Node *first = kr_array_node($3->u.v, const_eval($5));
 	Node *ch;
 	first->r = $8;
-	ch = emit_local_multi_decl_full($2, first);
+	ch = emit_local_multi_decl_full($2, first, 1);
 	if (ch)
 		expr(ch);
 }
@@ -9131,7 +9181,7 @@ dcls:
 	Node *first = kr_name_node($3->u.v, 'F');
 	Node *ch;
 	first->r = $7;
-	ch = emit_local_multi_decl_full($2, first);
+	ch = emit_local_multi_decl_full($2, first, 1);
 	if (ch)
 		expr(ch);
 }
@@ -9316,28 +9366,16 @@ dcls:
 	/* Local K&R-style extern function decl:  extern char *strncpy(); */
 	varadd($4->u.v, 1, FUNC($3), 0);
 }
+    | dcls EXTERN type IDENT '(' par1 ')' ';'
+{
+	/* Local extern ANSI prototype:  extern int g(int); */
+	varadd($4->u.v, 1, FUNC($3), 0);
+	fnproto_record($4->u.v, $6, $3);
+}
     | dcls EXTERN type ext_decllist ';'
 {
 	/* Multi-name local extern decl. */
-	Node *n;
-	unsigned t;
-	for (n = $4; n; n = n->r) {
-		if (n->op == 'F')
-			t = FUNC($3);
-		else if (n->op == 'G')
-			t = FUNC(IDIR($3));
-		else if (n->op == 'H') {
-			t = FUNC(IDIR($3));
-			fnproto_record(n->u.v, n->l, IDIR($3));
-		}
-		else if (n->op == 'A' || n->op == 'B' || n->op == 'P')
-			t = IDIR($3);
-		else
-			t = $3;
-		varaddextern(n->u.v, t, (n->op == 'A' || n->op == 'B') ? 1 : 0);
-		if (n->op == 'B')
-			var_set_arraybytes(n->u.v, SIZE($3) * n->l->u.n);
-	}
+	extern_decl_list($3, $4);
 }
     | dcls type IDENT '[' expr ']' ';'
 {
@@ -9624,7 +9662,7 @@ dcls:
 	fprintf(of, "\t%%%s =%c alloc4 %d\n", v, CODEPTR_T(), CODEPTR_SZ());
 	(void)first;
 	{
-		Node *ch = emit_local_multi_decl_full($2, $11);
+		Node *ch = emit_local_multi_decl_full($2, $11, 0);
 		if (ch)
 			expr(ch);
 	}
@@ -9687,11 +9725,11 @@ vol_qual: VOLATILE
         | VOLATILE CONST
         ;
 
-type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; /* forming a pointer consumes any pending pointee-volatile (now in the type bit via IDIR) so the pointer OBJECT stays non-volatile; the trailing-VOLATILE rule re-sets it for the volatile-pointer case. */ }
-        | type '*' TFAR              { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; }
-        | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; }
-        | type '*' CONST             { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; }
-        | type '*' VOLATILE          { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 1; }
+type: type TFAR '*'                  { $$ = IDIR_FAR($1); starchain_note($1, $$); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; /* forming a pointer consumes any pending pointee-volatile (now in the type bit via IDIR) so the pointer OBJECT stays non-volatile; the trailing-VOLATILE rule re-sets it for the volatile-pointer case. */ }
+        | type '*' TFAR              { $$ = IDIR_FAR($1); starchain_note($1, $$); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; }
+        | type '*'                   { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); starchain_note($1, $$); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; }
+        | type '*' CONST             { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); starchain_note($1, $$); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 0; }
+        | type '*' VOLATILE          { $$ = ($1 & FAR) ? IDIR_FAR($1) : IDIR($1); starchain_note($1, $$); g_td_arraydim = 0; g_td_fpid = -1; g_decl_volatile = 1; }
         | TFAR type                  { $$ = $2 | FAR; }
         | TCHAR                      { $$ = CHR; }
     | TSHORT                     { $$ = INT | SHORT; }
@@ -9751,8 +9789,8 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
     | vol_qual TUNSIGNED TLNG     { $$ = LNG | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
     | vol_qual TUNSIGNED TLNGLNG  { $$ = LNG | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
     | vol_qual TUNSIGNED          { $$ = INT | UNSIGNED | QVOLATILE; g_decl_volatile = 1; }
-    | CONST TNAME    { $$ = $2; }
-    | vol_qual TNAME { $$ = $2 | QVOLATILE; g_decl_volatile = 1; }
+    | CONST TNAME    { $$ = $2; starchain_push($$, $$, 0); }
+    | vol_qual TNAME { $$ = $2 | QVOLATILE; g_decl_volatile = 1; starchain_push($$, $$, 0); }
     | STRUCT IDENT {
         /* An undefined tag here is an incomplete type — legal when only
          * referenced through a pointer or extern decl (e.g.
@@ -9827,7 +9865,7 @@ type: type TFAR '*'                  { $$ = IDIR_FAR($1); g_td_arraydim = 0; g_t
     | ENUM IDENT           { $$ = INT; /* enum Tag: an enumeration value is an int */ }
     | CONST ENUM IDENT     { $$ = INT; }
     | VOLATILE ENUM IDENT  { $$ = INT; g_decl_volatile = 1; }
-    | TNAME    { $$ = $1; }
+    | TNAME    { $$ = $1; starchain_push($$, $$, 0); }
     ;
 
 stmt: ';'                            { $$ = 0; }
@@ -10037,7 +10075,7 @@ stmt: ';'                            { $$ = 0; }
         Node *first = kr_array_node($2->u.v, const_eval($4));
         Node *ch;
         first->r = $7;
-        ch = emit_local_multi_decl_full($1, first);
+        ch = emit_local_multi_decl_full($1, first, 1);
         $$ = ch ? mkstmt(Expr, ch, 0, 0) : 0;
     }
     | type IDENT ',' ext_decllist ';' {
@@ -10192,11 +10230,33 @@ stmt: ';'                            { $$ = 0; }
             emit_static_local_rest_item($2, n);
         $$ = 0;
     }
-    | EXTERN type IDENT ';'          {
-        /* extern in statement scope: register as external symbol, no alloc. */
-        if ($2 == NIL)
-            die("invalid void declaration");
-        varaddextern($3->u.v, $2, 0);
+    | EXTERN type ext_decllist ';'   {
+        /* extern in statement scope (a nested block's leading decls parse
+         * here, not in dcls): register external symbols, no alloc.  One
+         * name, or the multi-name / array / pointer-array forms
+         * `extern char x[];`, `extern int a, b;`, `extern char *v[], **l;`
+         * (C-Kermit), which used to be parse errors here. */
+        extern_decl_list($2, $3);
+        $$ = 0;
+    }
+    | EXTERN type IDENT '(' par1 ')' ';' {
+        /* statement-scope extern ANSI prototype:  extern int g(int); */
+        varadd($3->u.v, 1, FUNC($2), 0);
+        fnproto_record($3->u.v, $5, $2);
+        $$ = 0;
+    }
+    | type IDENT '(' ')' ';'         {
+        /* statement-scope K&R prototype:  char *homedir();  Before this
+         * was accepted here (dcls, the function top, already was), the
+         * call fell back to implicit int -- a pointer return truncated
+         * to 16 bits in the far-data models. */
+        varadd($2->u.v, 1, FUNC($1), 0);
+        $$ = 0;
+    }
+    | type IDENT '(' par1 ')' ';'    {
+        /* statement-scope ANSI prototype:  char *homedir(void); */
+        varadd($2->u.v, 1, FUNC($1), 0);
+        fnproto_record($2->u.v, $4, $1);
         $$ = 0;
     }
     | STATIC_ASSERT '(' expr ',' STR ')' ';' {
@@ -10731,9 +10791,15 @@ post: NUM
          * A bare array variable reports its whole-array byte size;
          * everything else routes through typeof_expr. */
         int member_array_bytes;
+        Symb *vs;
         $$ = mknode('N', 0, 0);
         if ($3->op == 'V' && var_arraybytes($3->u.v) > 0)
             $$->u.n = var_arraybytes($3->u.v);
+        else if ($3->op == 'V' && (vs = varget($3->u.v)) && vs->t != Con
+                 && KIND(vs->ctyp) == CHR)
+            /* a bare char variable: typeof_expr reports the value after
+             * the load's integer promotion (2), not the object (1) */
+            $$->u.n = 1;
         else if ((member_array_bytes = sizeof_member_array_expr($3)) > 0)
             $$->u.n = member_array_bytes;
         else
