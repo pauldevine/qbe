@@ -1,3 +1,155 @@
+# Next session — C-KERMIT LINK CAMPAIGN (set 2026-09-18 after §9f; supersedes the §9e "consumer-driven" menu below)
+
+**Goal:** build C-Kermit (`~/projects/ckermit`, the Victor 9000 port, 24
+modules) with THIS toolchain, link it, and run it — DOSBox first, then MAME
+victor9k.  §9f proved all 24 modules compile end-to-end (large, `-G`), but
+only through the text rewrites in `build/ckermit-triage/fixups.pl`, against
+Open Watcom's headers, with no libc wired up.  The items below are the work
+between "compiles" and "runs", in order.  Take them one (or a few) per
+session; each compiler fix follows the house rules (bug-loud probe in
+test-dos, `make check`, MP compact byte-compare, conflicts stay 117, emit
+audit only if `i8086/emit.c` changes).
+
+**Ground rules for this campaign**
+- The Watcom build is authoritative in the ckermit repo, and its CLAUDE.md
+  says "there is one build ... do not reintroduce" a second one.  So our
+  build lives in THIS repo (a `tools/build-ckermit.sh` reading sources from
+  `~/projects/ckermit`), and the ckermit repo is not modified unless the user
+  asks.
+- Measure progress by deleting rules from `fixups.pl`: when a gap is fixed
+  in minic, remove its rewrite and re-run `sweep.sh` (must stay 24/24).
+- `ia16-ubuntu-2` container (Watcom `wcc -p`) needs `container system start`
+  then `container start ia16-ubuntu-2` first.
+
+### Item 0 — preserve the triage tooling (small, do first)
+- `build/ckermit-triage/` is untracked and `build/` gets wiped.  Move
+  `sweep.sh`, `fixups.pl`, `splitdecl.pl`, `one.sh`, `it.sh`, `m.sh`,
+  `locate.py`, `omfsize.py`, `FINDINGS.md` into a tracked `tools/ckermit/`
+  (keep outputs under `build/`).  `locate.py` + minic's new
+  "(in statement ending near line N)" suffix are how to find emit-time errors.
+
+### Item 1 — minic gaps whose rewrites CHANGE MEANING (highest priority)
+These make the current objects wrong C-Kermit; fix before anything links.
+- **1a. Pointer-array / double-pointer extern declarators.**
+  `extern T *x[N];`, `extern T *a[], *b[];`, `extern char **a, **b;` — at
+  file, block and statement scope.  Root cause: `ext_decl: '*' IDENT` steals
+  the `*` from `type`, and ext_decl allows only ONE star and no `[..]` after a
+  starred name.  Rewrites G4/G4b/G4c/G4d/G4e; **53 file-scope + 4 block-scope
+  hits** (the file-scope rewrite drops `extern`, turning a declaration into a
+  per-file DEFINITION — duplicate or silently separate keyword tables).
+- **1b. Block/statement-scope extern arrays and multi-name externs.**
+  `{ ...; extern char x[]; }`, `extern int a, b, c;` mid-block.  The
+  statement-scope rule set has only `EXTERN type IDENT ';'`; nested blocks
+  parse their leading decls in statement context.  Rewrites G16 (**11 hits**,
+  currently turned into a POINTER — loads garbage) and G13.
+- **1c. Statement-scope function prototypes.**  `{ int f(int); ... }` or
+  `char *homedir(void);` inside a nested block (function-top `dcls` context
+  already works).  Rewrite G11 **deletes 20 prototypes**; 4 return pointers
+  (`asctime`, `getlogin`, `homedir`, `zzndate`) and are now truncated to
+  16 bits by the implicit-int fallback in large model.
+
+### Item 2 — remaining syntax-only minic gaps (same program, cleaner build)
+Each currently has a harmless rewrite in fixups.pl; fix in minic, delete the
+rule.  Rough priority by C-Kermit hit count / general usefulness:
+- G8 file-scope `int a = 1, b = 2;` (first declarator initialized) — very
+  common; worked around by `splitdecl.pl`.
+- G15 block-scope `char *p = 0, *q = x;` / `const char *p, *a[4];`.
+- G5 abstract fn-ptr parameter `int (*)(char)`; G6 abstract array params
+  `char *[]`, `char []`, `struct T[]`.
+- G12 true 2-D arrays `T a[N][M]` (declared + subscripted; 3 in C-Kermit,
+  currently via the aoa row-typedef path).
+- G2 function returning a function pointer (`signal`, `_dos_getvect`).
+- G1 non-pointer function typedef; G3 `extern struct T *f(...);`;
+  G7 `long double`; G19 unnamed bitfields `unsigned :16;`;
+  G20 parenthesized param declarator `T (name)`; G21 `void (__far *h)()`;
+  G23 east-const `void const *`; G24 struct-typed `?:` as an assignment
+  source ("invalid lvalue").
+- NEW (found while testing -G): file-scope `struct S { ... } s;` (tag
+  definition + variable in one declaration) is a parse error.
+- Done-when: fixups.pl holds only the Watcom-ism rules (W1–W5), which item 3
+  removes entirely.
+
+### Item 3 — switch from Watcom's headers to ours
+- §9f preprocessed with Open Watcom's headers (exact config match, right for
+  "does it parse").  Wrong for linking: objects assume Watcom's `FILE`,
+  `struct stat`, `struct tm`, `struct dirent` layouts (packed to 1 byte) —
+  the §7s cross-header struct-ABI landmine.
+- Write `tools/build-ckermit.sh`: `clang -E` with minic/include + the
+  newlibc shim headers + C-Kermit's own `victor/` and `victorow/` shims
+  (`termios.h`, `pwd.h`, `sys/utsname.h`, `sys/time.h`, `curses.h`),
+  `-include ckvictor.h`, `-D__MINIC__`; compile large with `-G`; follow the
+  build-stevie.sh `--no-libstub` pattern for the runtime + support TUs.
+- Expect new gaps (headers we lack, Watcom-only declarations in ckvictor.c).
+  This removes the Watcom-internal undefined symbols (`___iob`, `__IsTable`,
+  `___get_errno_ptr`, `__setjmp`, `_disable`/`_enable`).
+- `ckcpro.c` is generated from `ckcpro.w` by the host tool `wart`
+  (`cc -DSIGTYP=void -o wart ckwart.c`); build it host-side into build/.
+
+### Item 4 — libc fill (84 undefined → 0)
+From `build/ckermit-triage/undefined.txt` (84 symbols, Watcom headers).
+Already provided by the libstub-free runtime: printf family + far bridges,
+str/mem, malloc/free, fopen/fread/fputs/fseek/fgetc, open/read/write/close,
+unlink/rename/stat, isatty, setjmp, _qbe_div32*, tolower/toupper.
+- **4a. Replace stubs with real code** — `dos_libc.c` copies libstub's
+  STUBS: `atoi` returns 0, `getenv` returns NULL, `signal` NULL.  C-Kermit
+  parses numbers and reads `TERM`.  Real versions change the
+  `dos_libc_probe` libstub-equivalence story — decide whether real
+  impls replace the stubs or live in a C-Kermit-specific TU.
+- **4b. Missing:** directory (`opendir`/`readdir`/`closedir` over INT 21h
+  4Eh/4Fh, `getcwd`, `chdir`, `mkdir`, `rmdir`); time (`time`, `localtime`,
+  `gmtime`, `ctime`, `asctime`, `tzset`, `utime` over INT 21h 2Ah/2Ch/57h);
+  misc (`umask`, `dup2`, `perror`, `putenv`, `setbuf`, `fdopen`, `memchr`,
+  `atexit`, `_exit`, `atol`); `execl`/`execvp` may stub.
+- Each new function gets a probe (DOS-hosted, golden) before C-Kermit relies
+  on it.  Far-data: remember the far_stdlib bridge names (`_far_X`) for any
+  function minic mangles.
+
+### Item 5 — the Victor-specific, Watcom-specific parts
+- **5a. `ckvisr.asm`** (the µPD7201 receive ISR, §16t in ckermit's
+  PORTING.md) is Watcom `wasm` syntax, declares
+  `DGROUP GROUP CONST,CONST2,_DATA,_BSS`, reaches C variables via DS.  Port to
+  nasm with our segment/group names (`_DATA`/`_BSS` only).  Alternatively
+  build with `XFLAGS=-dV9K_CISR` semantics (the C handler) first, using
+  minic's `__attribute__((interrupt))` ABI — simpler, slower (§16t measured
+  38400 baud needs the asm).
+- **5b. Object-level `__near` in minic.**  `ckvictor.c:2697`
+  `volatile unsigned char __near v9k_rxbuf[4096]` must stay in DGROUP for the
+  ISR, but under `-G` a 4096-byte array goes to `_FARDATA`.  minic ignores
+  `__near` on objects today.  Add it: forces DGROUP placement (and may allow
+  near access).  Gate with a probe that an asm TU reads through DS.
+- **5c. `_fmode` binary initializer.**  C-Kermit sets `_fmode = O_BINARY`
+  before main() via Watcom's XI init table (`__based(__segname("XI"))`,
+  rewrite W5 strips it).  Without it binary transfers corrupt (ckermit
+  PORTING.md §16h).  Needs a crt0 init hook or an explicit call, and our
+  runtime's equivalent of text/binary mode (dos_vfs is raw — check whether
+  `_fmode` even matters on our path).
+- **5d. Watcom runtime APIs** used by ckvictor.c: `_dos_getvect`/
+  `_dos_setvect` (a `__MINIC__` fill exists from §8z in newlibc
+  `v9k_hardware.h`), `_dos_gettime`, `_dos_getfileattr`, `_LpCmdLine`,
+  `_fmode`, the `seg :> off` base operator (rewrite W4; `MK_FP`).
+
+### Item 6 — link and run
+- Link with omf_link (large, `-G`, libstub-free runtime).  Budget: with -G,
+  code ≈ 427 KB + far data ≈ 64 KB + DGROUP ≈ 14 KB + libc.  Victor MS-DOS
+  3.1 gives 824,784 B at 896 KB — fits; DOSBox's ~600 KB free may be tight.
+- DOSBox: the serial path won't work, but the `C-Kermit>` prompt, SHOW,
+  local file commands and the command parser can be exercised (script via a
+  take file).  Compare behavior against the Watcom `ckermitw.exe`.
+- MAME victor9k (`tools/run-victor-sasi.sh`): a real file transfer round
+  trip, md5-compared, as the ckermit repo does.
+- Code-size follow-up (separate backend work, only if needed to fit or for
+  speed): the Kl slot-resident design (53k push/pop in C-Kermit), boolean
+  materialization before branches, linear `switch` chains — §9f measured
+  2.7× Watcom `-os` with -G.
+
+### Current state (end of §9f)
+- qbe master `afe82ad` (-G) on top of `647d4f9` (triage fixes); test-dos
+  432/432; MP compact body 689,760.
+- `build/ckermit-triage/out-large-G/` = the latest 24/24 compile (large, -G);
+  `FINDINGS.md` and `undefined.txt` there are the inputs to items 1–5.
+
+---
+
 # Next session (the §9d handoff completed the file-scope function-pointer grammar family and left only consumer-driven options; the user (AskUserQuestion) chose **HUNT A COMPILER TRACK**.  §9e [2026-06-19, this session] **CLOSED the MULTI-DECLARATOR bitfield list — `unsigned a:3, b:5, c:4;` (the common hardware-register form) plus the mixed `unsigned a:3, b;` / `unsigned a, b:5;` and arbitrary interleavings — all of which were hard parse errors; AND fixed a latent pre-existing bug in the same `sm_more_names` code path that silently dropped middle members from any struct declaration with 4+ comma-separated members.  The fix is a frontend `minic.y` change → no emit audit; test-dos 417 → 422; conflicts UNCHANGED at the §9a/§9b/§9d baseline 117 s/r, 0 r/r; MP compact body 689,760 BYTE-IDENTICAL → no Victor run; `make check` green.**  EMPIRICAL SCOPING FIRST (house rule): batch-probed ~30 C11/GNU constructs through `minic -m small < x.c` to find a REAL gap rather than assume one.  Genuine gaps surfaced — multi-declarator bitfields; block-scope/static-local/`__far`/array function-pointer VARIABLES (`int (*p)(int)` block-scope works, but `static int (*p)(int);`, `int __far (*p)(int);`, `int (*tab[3])(int);` all parse-error); pointer-to-array (`int (*p)[3];`); array-of-fn-ptr file-scope + typedef; unnamed fn-ptr parameter (`int f(int (*)(int))`); compound-literal-array (`(int[]){1,2,3}`); nested designated initializer (`{[0].x=1}`).  Picked **multi-declarator bitfields**: bounded, codegen already works (a single bitfield packs correctly with `and`/`shl`/`or` mask-shift), directly relevant to Victor 9000 hardware-register structs, and no consumer needed.  **THE GAP:** `smembers` had only a single-bitfield production (`type IDENT ':' expr ';'`) and a plain multi-NAME production (`type IDENT ',' sm_more_names ';'`, for `struct L *prev, *next;`) — there was no C11 struct-declarator-list (6.7.2.1) in which each comma-separated item can independently carry a `: width`.  **THE FIX (frontend `minic.y`, additive):** (1) a `sm_more_names` list node now carries an optional bitfield width-expr in `n->l` (NIL = a plain member); added a start item `IDENT ':' expr` and a chain item `sm_more_names ',' IDENT ':' expr`.  (2) a NEW production `smembers type IDENT ':' expr ',' sm_more_names ';'` handles a list whose FIRST declarator is a bitfield.  (3) the existing plain multi-name action was generalized to emit a bitfield (`structaddbitfield`) when a node's `n->l` is set, else `structaddmember` — so the plain-only path is byte-identical (every node keeps `n->l == NIL`, exactly the prior behavior) and an all-bitfield list emits SSA byte-identical to the equivalent separate-declaration form (verified by `diff`).  Lookahead distinguishes the single-bitfield rule (`;` after `expr`) from the new multi (`,` after `expr`), so it is conflict-free.  **THE LATENT BUG (found + fixed in the SAME code):** `sm_more_names` chained new items with `$1->r = n` — writing the HEAD node's link, not the tail's — so a list of 3+ TRAILING declarators (4+ comma-separated members total in one declaration) silently DROPPED its middle members: `struct L { int a, b, c, d; }` registered only 3 members (`alloc 6`, should be 8).  Latent because real `T a, b;` / `struct L *prev, *next;` lists rarely exceed ONE trailing name (the overwrite only bites the 2nd-and-later append); the new multi-declarator bitfield probe's 3-item tail (`n, o:4, r`) was the first construct to hit it.  Fixed all three `sm_more_names ','` chain productions to APPEND at the tail (`Node *tl = $1; while (tl->r) tl = tl->r; tl->r = n;`).  The MP body byte-compare being IDENTICAL proves MP contains no 4+-comma struct member lists (so the correctness fix changes no existing gated output).  **GATED bug-loud** by `minic/dos/examples/bitfield_multidecl_probe.c` (small+medium+compact+large+huge): on the pre-fix compiler the first multi-declarator bitfield is `error:46: parse error` so the program does not build (confirmed by `git stash`-ing the §9e `minic.y` change and recompiling); the probe covers form A all-bitfield / B bitfield+plain / C plain+bitfield / D mixed (bitfield,plain,bitfield,plain), field-independence (assigning `a = 13` to a 3-bit field wraps to `5` AND leaves `b`/`c` untouched — proving the per-field read-modify-write masking), and the four struct `sizeof`s (A=2 B=4 C=4 D=8).  All values are field contents and sizes (not addresses), so the golden is model-independent and byte-identical across all five models (golden ends `bitfield_multidecl_probe done`, no §8y trailing-blank trap).  **VALIDATION:** `make check` green; full gate **422/422 ok** (417 → 422, the 5 new probe entries, no regressions); MP compact body **689,760 BYTE-IDENTICAL** (the chaining fix + bitfield productions never alter MP's codegen → no Victor run); frontend-only (`minic.y`) → no emit audit.  **git scope:** qbe master (`minic.y` = the `smembers` bitfield-list productions + the generalized actions + the `sm_more_names` tail-append chaining fix; new `minic/dos/examples/bitfield_multidecl_probe.c` + `minic/dos/tests/bitfield_multidecl_probe.golden.txt`; 5 `tools/test-dos.sh` entries — NO compiler-backend/qbe/emit/build-script change, NO newlibc-tree change).  **NOTE on conflict figures:** they come from the SYSTEM yacc (`/usr/bin/yacc` = bison): `yacc -v minic/minic.y`, then sum the per-state `N shift/reduce` lines in `y.output` → 117 s/r, 0 r/r.  The vendored `minic/yacc` can no longer parse the current `minic.y` (the §9c finding, [[minic miniyacc and lexer quirks]]).  Rebuild minic staleness-safe: `rm -f minic/minic && touch minic/minic.y && make minic/minic`.  **⇒ Next session — still consumer-driven (pick with the user):** (1) hunt another bounded no-consumer compiler track — the scoping sweep above is a ready menu (block-scope/static-local/`__far`/array fn-ptr VARIABLES; ptr-to-array; unnamed fn-ptr param; compound-literal-array; nested designated init); (2) merge newlibc **PR #24** is ALREADY DONE (`victor9K_newlibc` `46eb8a7`, confirmed §9c/§9e); (3) deepen the capstone (cooked `/dev/console`; a far-code `interrupts.c` model); (4) Victor-native INT 1Ah/16h-free timer/keyboard DOS probes if wanted (the §8l/§8n bare-metal pattern already covers that ground).  NO QBE/minic codegen bug open; NO carried compiler track remains.)
 
 ## §9f session notes (2026-09-18) — C-Kermit triage + minic -G near globals
