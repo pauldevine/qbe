@@ -1,0 +1,4 @@
+s=215 t=215 u=2280 p=300 q=58 r=430 w=300
+cmp 1 1 1
+not -201 -21 -6
+char_promote_probe done

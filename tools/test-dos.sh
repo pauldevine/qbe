@@ -361,6 +361,28 @@ RUNTIME_TESTS=(
 	"minic/dos/examples/isr_fnptr_param_probe.c:minic/dos/tests/isr_fnptr_param_probe.golden.txt:compact"
 	"minic/dos/examples/isr_fnptr_param_probe.c:minic/dos/tests/isr_fnptr_param_probe.golden.txt:large"
 	"minic/dos/examples/isr_fnptr_param_probe.c:minic/dos/tests/isr_fnptr_param_probe.golden.txt:huge"
+	"minic/dos/examples/subword_bitfield_probe.c:minic/dos/tests/subword_bitfield_probe.golden.txt:small"
+	"minic/dos/examples/subword_bitfield_probe.c:minic/dos/tests/subword_bitfield_probe.golden.txt:medium"
+	"minic/dos/examples/subword_bitfield_probe.c:minic/dos/tests/subword_bitfield_probe.golden.txt:compact"
+	"minic/dos/examples/subword_bitfield_probe.c:minic/dos/tests/subword_bitfield_probe.golden.txt:large"
+	"minic/dos/examples/subword_bitfield_probe.c:minic/dos/tests/subword_bitfield_probe.golden.txt:huge"
+	"minic/dos/examples/struct_array_init_probe.c:minic/dos/tests/struct_array_init_probe.golden.txt:small"
+	"minic/dos/examples/struct_array_init_probe.c:minic/dos/tests/struct_array_init_probe.golden.txt:medium"
+	"minic/dos/examples/struct_array_init_probe.c:minic/dos/tests/struct_array_init_probe.golden.txt:compact"
+	"minic/dos/examples/struct_array_init_probe.c:minic/dos/tests/struct_array_init_probe.golden.txt:large"
+	"minic/dos/examples/struct_array_init_probe.c:minic/dos/tests/struct_array_init_probe.golden.txt:huge"
+	"minic/dos/examples/char_promote_probe.c:minic/dos/tests/char_promote_probe.golden.txt:small"
+	"minic/dos/examples/char_promote_probe.c:minic/dos/tests/char_promote_probe.golden.txt:medium"
+	"minic/dos/examples/char_promote_probe.c:minic/dos/tests/char_promote_probe.golden.txt:compact"
+	"minic/dos/examples/char_promote_probe.c:minic/dos/tests/char_promote_probe.golden.txt:large"
+	"minic/dos/examples/char_promote_probe.c:minic/dos/tests/char_promote_probe.golden.txt:huge"
+	"minic/dos/examples/float_narrow_probe.c:minic/dos/tests/float_narrow_probe.golden.txt:small"
+	"minic/dos/examples/float_narrow_probe.c:minic/dos/tests/float_narrow_probe.golden.txt:medium"
+	"minic/dos/examples/float_narrow_probe.c:minic/dos/tests/float_narrow_probe.golden.txt:compact"
+	"minic/dos/examples/float_narrow_probe.c:minic/dos/tests/float_narrow_probe.golden.txt:large"
+	"minic/dos/examples/float_narrow_probe.c:minic/dos/tests/float_narrow_probe.golden.txt:huge"
+	"minic/dos/examples/const_addr_probe.c:minic/dos/tests/const_addr_probe.golden.txt:small"
+	"minic/dos/examples/const_addr_probe.c:minic/dos/tests/const_addr_probe.golden.txt:medium"
 	"minic/dos/examples/sized_str_array_probe.c:minic/dos/tests/sized_str_array_probe.golden.txt:small"
 	"minic/dos/examples/sized_str_array_probe.c:minic/dos/tests/sized_str_array_probe.golden.txt:medium"
 	"minic/dos/examples/sized_str_array_probe.c:minic/dos/tests/sized_str_array_probe.golden.txt:compact"
@@ -791,7 +813,7 @@ build_runtime_probe() {
 	case "$base" in fardata_probe|farglobal_probe|farstruct_ptr_probe|slotarray_probe|gc_bigheap_probe|gc_churn_probe) farstatic=1 ;; esac
 	# Soft-float probes link the single-precision soft-float helper library.
 	sfflag=""
-	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe|float_arg_coerce_probe|float_cmp_cx_probe|mathfns_probe|float_dblptr_probe|const_float_init_probe) sfflag="--softfloat" ;; esac
+	case "$base" in softfloat_probe|float_literal_probe|float_fardata_probe|softlibm_probe|softtrig_probe|double_float_probe|float_arg_coerce_probe|float_cmp_cx_probe|mathfns_probe|float_dblptr_probe|const_float_init_probe|float_narrow_probe) sfflag="--softfloat" ;; esac
 	# Split-stack probe builds with SS in its own segment (qbe -s +
 	# omf_link --separate-stack); its ok8 asserts stack seg != DGROUP seg.
 	ssflag=""

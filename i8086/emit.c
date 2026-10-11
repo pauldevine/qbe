@@ -1226,7 +1226,12 @@ emitf(char *s, Ins *i, Fn *fn, FILE *f)
 					emitaddr(pc, f);
 					fputc(']', f);
 				} else {
-					fprintf(f, "%"PRIi64, pc->bits.i);
+					/* A literal integer address (`*(int *)0x10`): it
+					 * is the MEMORY operand, so bracket it -- the bare
+					 * number made a load read the immediate and a
+					 * store assemble as `mov word 0, _e` (nasm
+					 * error; gcc.dg torture/pr69117). */
+					fprintf(f, "[%s%"PRIi64"]", near_seg(r, fn), pc->bits.i);
 				}
 				break;
 			case RTmp:

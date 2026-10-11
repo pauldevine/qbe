@@ -248,6 +248,104 @@ unlink/rename/stat, isatty, setjmp, _qbe_div32*, tolower/toupper.
 
 # Next session (the §9d handoff completed the file-scope function-pointer grammar family and left only consumer-driven options; the user (AskUserQuestion) chose **HUNT A COMPILER TRACK**.  §9e [2026-06-19, this session] **CLOSED the MULTI-DECLARATOR bitfield list — `unsigned a:3, b:5, c:4;` (the common hardware-register form) plus the mixed `unsigned a:3, b;` / `unsigned a, b:5;` and arbitrary interleavings — all of which were hard parse errors; AND fixed a latent pre-existing bug in the same `sm_more_names` code path that silently dropped middle members from any struct declaration with 4+ comma-separated members.  The fix is a frontend `minic.y` change → no emit audit; test-dos 417 → 422; conflicts UNCHANGED at the §9a/§9b/§9d baseline 117 s/r, 0 r/r; MP compact body 689,760 BYTE-IDENTICAL → no Victor run; `make check` green.**  EMPIRICAL SCOPING FIRST (house rule): batch-probed ~30 C11/GNU constructs through `minic -m small < x.c` to find a REAL gap rather than assume one.  Genuine gaps surfaced — multi-declarator bitfields; block-scope/static-local/`__far`/array function-pointer VARIABLES (`int (*p)(int)` block-scope works, but `static int (*p)(int);`, `int __far (*p)(int);`, `int (*tab[3])(int);` all parse-error); pointer-to-array (`int (*p)[3];`); array-of-fn-ptr file-scope + typedef; unnamed fn-ptr parameter (`int f(int (*)(int))`); compound-literal-array (`(int[]){1,2,3}`); nested designated initializer (`{[0].x=1}`).  Picked **multi-declarator bitfields**: bounded, codegen already works (a single bitfield packs correctly with `and`/`shl`/`or` mask-shift), directly relevant to Victor 9000 hardware-register structs, and no consumer needed.  **THE GAP:** `smembers` had only a single-bitfield production (`type IDENT ':' expr ';'`) and a plain multi-NAME production (`type IDENT ',' sm_more_names ';'`, for `struct L *prev, *next;`) — there was no C11 struct-declarator-list (6.7.2.1) in which each comma-separated item can independently carry a `: width`.  **THE FIX (frontend `minic.y`, additive):** (1) a `sm_more_names` list node now carries an optional bitfield width-expr in `n->l` (NIL = a plain member); added a start item `IDENT ':' expr` and a chain item `sm_more_names ',' IDENT ':' expr`.  (2) a NEW production `smembers type IDENT ':' expr ',' sm_more_names ';'` handles a list whose FIRST declarator is a bitfield.  (3) the existing plain multi-name action was generalized to emit a bitfield (`structaddbitfield`) when a node's `n->l` is set, else `structaddmember` — so the plain-only path is byte-identical (every node keeps `n->l == NIL`, exactly the prior behavior) and an all-bitfield list emits SSA byte-identical to the equivalent separate-declaration form (verified by `diff`).  Lookahead distinguishes the single-bitfield rule (`;` after `expr`) from the new multi (`,` after `expr`), so it is conflict-free.  **THE LATENT BUG (found + fixed in the SAME code):** `sm_more_names` chained new items with `$1->r = n` — writing the HEAD node's link, not the tail's — so a list of 3+ TRAILING declarators (4+ comma-separated members total in one declaration) silently DROPPED its middle members: `struct L { int a, b, c, d; }` registered only 3 members (`alloc 6`, should be 8).  Latent because real `T a, b;` / `struct L *prev, *next;` lists rarely exceed ONE trailing name (the overwrite only bites the 2nd-and-later append); the new multi-declarator bitfield probe's 3-item tail (`n, o:4, r`) was the first construct to hit it.  Fixed all three `sm_more_names ','` chain productions to APPEND at the tail (`Node *tl = $1; while (tl->r) tl = tl->r; tl->r = n;`).  The MP body byte-compare being IDENTICAL proves MP contains no 4+-comma struct member lists (so the correctness fix changes no existing gated output).  **GATED bug-loud** by `minic/dos/examples/bitfield_multidecl_probe.c` (small+medium+compact+large+huge): on the pre-fix compiler the first multi-declarator bitfield is `error:46: parse error` so the program does not build (confirmed by `git stash`-ing the §9e `minic.y` change and recompiling); the probe covers form A all-bitfield / B bitfield+plain / C plain+bitfield / D mixed (bitfield,plain,bitfield,plain), field-independence (assigning `a = 13` to a 3-bit field wraps to `5` AND leaves `b`/`c` untouched — proving the per-field read-modify-write masking), and the four struct `sizeof`s (A=2 B=4 C=4 D=8).  All values are field contents and sizes (not addresses), so the golden is model-independent and byte-identical across all five models (golden ends `bitfield_multidecl_probe done`, no §8y trailing-blank trap).  **VALIDATION:** `make check` green; full gate **422/422 ok** (417 → 422, the 5 new probe entries, no regressions); MP compact body **689,760 BYTE-IDENTICAL** (the chaining fix + bitfield productions never alter MP's codegen → no Victor run); frontend-only (`minic.y`) → no emit audit.  **git scope:** qbe master (`minic.y` = the `smembers` bitfield-list productions + the generalized actions + the `sm_more_names` tail-append chaining fix; new `minic/dos/examples/bitfield_multidecl_probe.c` + `minic/dos/tests/bitfield_multidecl_probe.golden.txt`; 5 `tools/test-dos.sh` entries — NO compiler-backend/qbe/emit/build-script change, NO newlibc-tree change).  **NOTE on conflict figures:** they come from the SYSTEM yacc (`/usr/bin/yacc` = bison): `yacc -v minic/minic.y`, then sum the per-state `N shift/reduce` lines in `y.output` → 117 s/r, 0 r/r.  The vendored `minic/yacc` can no longer parse the current `minic.y` (the §9c finding, [[minic miniyacc and lexer quirks]]).  Rebuild minic staleness-safe: `rm -f minic/minic && touch minic/minic.y && make minic/minic`.  **⇒ Next session — still consumer-driven (pick with the user):** (1) hunt another bounded no-consumer compiler track — the scoping sweep above is a ready menu (block-scope/static-local/`__far`/array fn-ptr VARIABLES; ptr-to-array; unnamed fn-ptr param; compound-literal-array; nested designated init); (2) merge newlibc **PR #24** is ALREADY DONE (`victor9K_newlibc` `46eb8a7`, confirmed §9c/§9e); (3) deepen the capstone (cooked `/dev/console`; a far-code `interrupts.c` model); (4) Victor-native INT 1Ah/16h-free timer/keyboard DOS probes if wanted (the §8l/§8n bare-metal pattern already covers that ground).  NO QBE/minic codegen bug open; NO carried compiler track remains.)
 
+## §9g session notes (2026-10-10) — gcc.dg runtime corpus (tools/gccdg) + 5 compiler bugs it found
+
+**Ask:** "would the newly open-sourced EDG compiler's tests help evaluate this
+port?"  Answer: one slice does — EDG imports GCC's `gcc.dg` C suite with a
+per-file `//type:` tag, and the ~2,700 `rp` (runtime-positive) files are
+self-checking programs (abort() on a wrong answer), exactly the probe-gate
+shape.  Everything else in that repo is C++ / diagnostics-only.  The user
+agreed to stand it up as a third triage sweep (after newlibc §6a and
+C-Kermit §9f).  Classic `gcc.c-torture/execute` is NOT in EDG's import
+(it lives in GCC itself) — the obvious next corpus for the same wrapper.
+
+**The tool (`tools/gccdg/`, README there):** `fetch.sh` (sparse, shallow,
+rev-pinned checkout under `build/gccdg/edg` — GPLv3, never in-tree),
+`wrap.sh` (select `rp` single-file tests minus 32-bit-int / multi-TU /
+env-var ones; wrap each in a GCCDG:PASS/ABORT/FAIL driver; pre-expand with
+`clang -E`), `gccshim.h` (GCC builtins + libm names), `sweep.sh [model]`
+(compile-only through the exact build-example stages: PASS or first failing
+stage per test, crashes flagged), `run.sh [model] [--save-baseline]`
+(build-example --softfloat in parallel, DOSBox in chunks with hang
+attribution + re-run, verdicts vs `baseline-<model>.txt`; a PASS that stops
+passing exits 1).  Final numbers (small, 2,585 wrapped of 2,713 `rp`): sweep 1,120 PASS /
+1,447 minic (1,322 parse errors — GNU-only material) / 17 qbe rejects (12
+are "slot read but never stored to" = deliberate uninitialised reads, 3
+`nextafter` phi-type mismatches, scev-2 jump-arg type, pr105337 undefined
+temp) / 1 qbe-crash (pr85989: i8086 "unsupported soft-float (Ks) op 111");
+run 891 PASS / 114 BUILDFAIL (unprovided GCC builtins: `__builtin_apply*`,
+`*_overflow`, `bswap*`, `constant_p`, the `__atomic_*` family, the
+`link_error` optimizer-deletion idiom, 8 over the small `_TEXT` ceiling) /
+104 ABORT (59 of them name a 32-bit-int / 64-bit / bit-builtin assumption
+in the source; the rest are the next things to read) / 6 NOVERDICT / 5
+HANG.  `tools/gccdg/baseline-small.txt` records this; only CHANGES are loud
+from here (a PASS that stops passing exits 1).
+
+**Trap that cost an hour — macOS `cpp` is TRADITIONAL:** `F (x)` (space
+before the paren, GNU house style in every gcc.dg test) is NOT a macro
+call under `/usr/bin/cpp`, which `build-example.sh` runs on the example
+TU (`build-micropython.sh` and the newlibc paths use `clang -E`).  It
+turned the libm shim and most test-local macros into undefined symbols /
+parse errors; `wrap.sh` now pre-expands with `clang -E`.  The gate never
+hit it because probes are written without the space.  Memory:
+[[macos-cpp-traditional]].
+
+**Five bugs found and fixed (4 minic frontend, 1 i8086 emit), each gated
+bug-loud in test-dos (462 → 484 entries), all verified on the UNFIXED
+compiler via git stash; conflicts stay 115; `make check` green; MP compact
+BYTE-IDENTICAL old-vs-new compiler (body 689,760, `cmp` of the two exes) →
+no Victor run; emit audit CLEAN (510 files, 157,067 regions, 0 live-register clobbers; its two "build failed: near_globals_probe (large/huge)" lines are the audit trying every model on a probe gated small/medium/compact only — pre-existing, not from this change):**
+
+1. **Sub-int bitfield class** (`subword_bitfield_probe`, 5 models).  The
+   bitfield read (shr/and) and RMW store (and/and/shl/or) paths used
+   `irtyp()` — the MEMORY class, `b`/`h` for char/_Bool/short containers —
+   as the QBE op class, which only exists in w/l/s/d.  Every program with a
+   sub-int bitfield died "invalid class specifier" (c99-bool-3,
+   volatile-bitfields-2, store_merging_*).  int/long containers (all MP
+   uses) were fine.  New `opkls()` = irtyp with b/h→w, used for arithmetic;
+   irtyp stays the load/store suffix.  Same family, same session: unary `~`
+   on char/short (`=b xor`), float→char/short conversion (`=h stosi`), and a
+   float RHS stored into a bitfield (masked as an s-class temp) — covered by
+   `char_promote_probe` and the new `float_narrow_probe` (--softfloat).
+2. **Local array-of-struct brace init CRASHED minic** (`struct a g[] =
+   {{2,1},{2,1}};`, torture/pr101009 + pr36584): the four local array
+   brace-init rules handed each `{…}` item to expr() as a bare '{' node →
+   `case 0: abort()`.  Fix: `mk_elem_brace_init` lowers it to
+   `v[i] = (T){…}` (compound literal → struct copy; zero-filled members,
+   designators for free); a sized array of structs zero-fills whole.  Plus
+   nested ARRAY members in a struct initializer (`{6, {1.0, 2.0}}`) now fill
+   element-wise (`emit_clit_array`), and a string literal into a char-array
+   member (`.s = "123456"`, pr52769/array-init-2) copies the bytes instead
+   of storing the literal's ADDRESS into byte 0.  `struct_array_init_probe`.
+3. **`char buf[1024] = ""` SEGFAULTED minic** (pr38902): the §8x deferred
+   per-byte store chain was a LEFT-nested comma tree, expr() recursed once
+   per byte, C stack gone at ~400.  All three deferred-init builders now
+   collect on a growable `ilist` and return a balanced `mk_comma_tree`
+   (log2 depth).  Still one storeb per byte: pr38902's 19×1024-byte buffers
+   make 368 KB of code (over the small `_TEXT` ceiling) — a `memset`/loop
+   lowering is the follow-up if a real consumer appears.
+4. **char + char typed CHAR** (`char_promote_probe`): prom()'s "same type →
+   that type" rule won for two chars, so `int s; s += c1 + c2` re-extended
+   the 16-bit sum as a BYTE (extsb(215) = -41).  Now char OP char (and ~c)
+   promotes both operands per their own signedness and yields INT (C11
+   6.3.1.1).  MP provably unaffected (byte-identical).
+5. **Literal integer address as a memory operand** (`const_addr_probe`,
+   small+medium; i8086/emit.c `%M` RCon/CBits): printed bare, so a load
+   read the IMMEDIATE (`mov ax, 16` for `*(int *)16`) and a store did not
+   assemble (`mov word 0, _e`, torture/pr69117).  Now `[16]`.
+
+**Known gaps the corpus documents (not fixed, no consumer):** `_Bool` is
+`unsigned char` in minic, so `b = 2` stores 2 (no 0/1 conversion;
+c99-bool-3 still FAILs at runtime by design); designated struct-array
+element `[2] = {…}` is a parse error; `sizeof x` without parens is a parse
+error; `typedef long unsigned int size_t` (GCC spelling order) is a parse
+error; the 12 "slot read but never stored to" rejects are tests that
+deliberately read an uninitialised local — this fork hard-errors on that UB
+(a policy call); `int ****h = 0; *h = …` style tests need the §8z-adjacent
+store path only.  The `minic` parse bucket (~1,300) is mostly GNU-only
+material (preprocessed glibc headers, nested functions, `_BitInt`,
+`_Complex`, vectors, `__int128`, x86 fenv).
+
 ## §9f session notes (2026-09-18) — C-Kermit triage + minic -G near globals
 
 ### C-Kermit triage (~/projects/ckermit, Victor port, 24 modules)

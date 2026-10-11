@@ -3,13 +3,13 @@
 **Project:** C11/C17 + GNU-extensions C Compiler for 8086 DOS using QBE Backend
 **Standard:** C11 feature set (`_Static_assert`, `_Generic`, `_Alignof`/`_Alignas`, compound literals, designated initializers, anonymous struct/union) + GNU extensions (`__attribute__`, inline `__asm__`, `__far` pointers).  Equivalently **C17-level** since C17 added no new language features over C11.  **No C23 language features.**  C only — no C++.
 **Real target hardware:** Victor 9000 / Sirius 1 (~896 KB RAM) — NOT the IBM-PC 640 KB ceiling.  DOSBox is the fast loop for images that fit; MAME victor9k + SASI disk for the real thing.
-**Last Updated:** 2026-06-18 (§9a)
+**Last Updated:** 2026-10-10 (§9g)
 
 ---
 
 ## Where the project is (one paragraph)
 
-The original compiler goal is **complete**, and so is the MicroPython hardening campaign that followed it.  All **six memory models work** (tiny .COM / small / medium / compact / large / huge — small was the last broken one, fixed 2026-06-11).  The per-model runtime gate is **289/289** (`tools/test-dos.sh`).  MicroPython (108 TUs) runs on a real Victor 9000: full language surface, FLOAT, the `math` module, a 114 KB split GC heap, an interactive REPL — all Victor-verified byte-exact vs host python3.  MicroPython's remaining feature tracks are **PARKED**; its role now is a **regression corpus** (rebuild compact, byte-compare the body after toolchain changes; Victor re-runs only when bytes move).  **As of §8d (2026-06-16) the corpus is the libstub-FREE build (`tools/build-micropython.sh` default; compact default-heap body = 689,760, was 731,088 under libstub); `--libstub` is the opt-out equivalence anchor (body 731,088).**  Upstream QBE is in sync through `e786f06`.  Stevie ships as a 146 KB medium-model .EXE, interactively verified on the Victor.
+The original compiler goal is **complete**, and so is the MicroPython hardening campaign that followed it.  All **six memory models work** (tiny .COM / small / medium / compact / large / huge — small was the last broken one, fixed 2026-06-11).  The per-model runtime gate is **289/289** (`tools/test-dos.sh`).  MicroPython (108 TUs) runs on a real Victor 9000: full language surface, FLOAT, the `math` module, a 114 KB split GC heap, an interactive REPL — all Victor-verified byte-exact vs host python3.  MicroPython's remaining feature tracks are **PARKED**; its role now is a **regression corpus** (rebuild compact, byte-compare the body after toolchain changes; Victor re-runs only when bytes move).  **As of §8d (2026-06-16) the corpus is the libstub-FREE build (`tools/build-micropython.sh` default; compact default-heap body = 689,760, was 731,088 under libstub); `--libstub` is the opt-out equivalence anchor (body 731,088).**  Upstream QBE is in sync through `e786f06`.  Stevie ships as a 146 KB medium-model .EXE, interactively verified on the Victor.  **§9g (2026-10-10): a THIRD triage corpus stands — `tools/gccdg/` runs EDG's imported `gcc.dg` runtime-positive C tests (~2,600 self-checking GCC programs, GPL tree fetched under `build/`, never in-tree) through the exact build-example stages and DOSBox, with `baseline-<model>.txt` as the regression record (`sweep.sh` → `run.sh`); its first pass found and fixed FIVE bugs (sub-int bitfield op class; array-of-struct brace init crash + nested array member + string-literal char-array member; `char buf[1024]=""` stack-overflow crash; char+char promotion; bracketed literal address in emit), each a bug-loud test-dos probe (gate 462 → 484).  TRAP: macOS `cpp` (what build-example.sh runs on the example TU) is TRADITIONAL — `F (x)` never expands; wrap.sh pre-expands with `clang -E`.  See NEXT_SESSION.md §9g.**
 
 ## 🚧 Next frontier: newlibc for the Victor 9000 (Phase 6, designated 2026-06-11)
 
@@ -63,6 +63,8 @@ tools/build-newlibc-baremetal.sh hello_bm    # bare-metal raw binary @ 0x3000
 tools/run-victor-baremetal.sh <bin>          # MAME Lua-loader bare-metal run
 tools/test-victor.sh            # slow on-target gate (MAME; incl. bare-metal hello)
 tools/run-emit-audit.sh         # emit-bracket liveness audit (after emit.c changes)
+tools/gccdg/sweep.sh small      # gcc.dg corpus: compile-only triage (fetch.sh + wrap.sh first)
+tools/gccdg/run.sh small        # gcc.dg corpus: build + DOSBox run, diff vs baseline-small.txt
 ```
 
 ---

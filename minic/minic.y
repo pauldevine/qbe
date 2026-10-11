@@ -2025,6 +2025,18 @@ irtyp(unsigned ctyp)
 	return 'w';
 }
 
+/* Register class for ARITHMETIC on a value of type ctyp.  QBE's and/or/shl/shr
+ * (and the compares) exist only in w/l/s/d forms, so the byte/halfword memory
+ * classes irtyp() gives char/_Bool/short widen to w here; irtyp() itself stays
+ * the load/store suffix.  (Bitfields with a sub-int container type hit this:
+ * their RMW sequence emitted `=b and` / `=h or`, which QBE rejects.) */
+static char
+opkls(unsigned ctyp)
+{
+	char c = irtyp(ctyp);
+	return (c == 'b' || c == 'h') ? 'w' : c;
+}
+
 /* QBE return type - for function return types which must be w, l, s, d */
 char
 irtyp_ret(unsigned ctyp)
@@ -2329,6 +2341,29 @@ prom(int op, Symb *l, Symb *r)
 	 * Honor each operand's signedness: an unsigned char zero-extends (extub),
 	 * a signed char sign-extends (extsb) — see the int=char assignment note. */
 	if (strchr("ne<l", op) && KIND(l->ctyp) == CHR && KIND(r->ctyp) == CHR) {
+		fprintf(of, "\t%%t%d =w %s ", tmp, ISUNSIGNED(l->ctyp) ? "extub" : "extsb");
+		psymb(*l);
+		fprintf(of, "\n");
+		l->t = Tmp;
+		l->ctyp = INT;
+		l->u.n = tmp++;
+		fprintf(of, "\t%%t%d =w %s ", tmp, ISUNSIGNED(r->ctyp) ? "extub" : "extsb");
+		psymb(*r);
+		fprintf(of, "\n");
+		r->t = Tmp;
+		r->ctyp = INT;
+		r->u.n = tmp++;
+		return INT;
+	}
+
+	/* Integer promotion (C11 6.3.1.1): char OP char yields an INT, never a
+	 * char.  The 16-bit `w` sum/product of two bytes is already computed at
+	 * word width; typing the result CHR made a later int-context conversion
+	 * (`int s; s += c1 + c2`) re-extend it as a BYTE (`extsb` of 215 → -41,
+	 * gcc.dg sweep).  Each operand is (re)extended per its own signedness,
+	 * as the comparison path above does, so a char temp whose high byte is
+	 * not normalised (a narrowing cast, a char-returning call) is safe. */
+	if (KIND(l->ctyp) == CHR && KIND(r->ctyp) == CHR) {
 		fprintf(of, "\t%%t%d =w %s ", tmp, ISUNSIGNED(l->ctyp) ? "extub" : "extsb");
 		psymb(*l);
 		fprintf(of, "\n");
@@ -3514,6 +3549,9 @@ far_ptr_offset_binop(int op, Symb dst, Symb lhs, Symb rhs)
  * stores are `storef%c` — a near `=w add` + `store%c` would TRUNCATE the
  * segment and scatter members into the wrong segment (the latent member-init
  * truncation the old %_clit-only near path carried). */
+static void clit_store(const char *, int, unsigned, Symb, int, char);
+static int strlit_decode(int, unsigned char *, int);
+static void emit_clit_array(const char *, int, unsigned, int, Node *, int, char);
 static void
 emit_clit_aggr(const char *dst, int base_off, int sidx, Node *init)
 {
@@ -3526,8 +3564,6 @@ emit_clit_aggr(const char *dst, int base_off, int sidx, Node *init)
 		int midx, off;
 		struct Member *m;
 		Symb val;
-		char tc;
-		const char *spfx;
 
 		if (item->op == 'D') {
 			midx = structfindmember(sidx, item->r->u.v);
@@ -3542,31 +3578,95 @@ emit_clit_aggr(const char *dst, int base_off, int sidx, Node *init)
 		m = &structh[sidx].members[midx];
 		off = base_off + m->offset;
 
-		if (item->op == '{') {
+		if (item->op == 'S' && m->count > 0 && KIND(m->ctyp) == CHR) {
+			/* A string literal initializing a char-array member
+			 * (`.s = "123456"`, gcc.dg pr52769 / array-init-2): copy
+			 * the literal's bytes into the member (the storage is
+			 * already zero, so the NUL and any slack come free).
+			 * Before this the literal's ADDRESS was stored into the
+			 * first byte (`storeb $glo, …`). */
+			static unsigned char sbytes[65536];
+			int k, nb = strlit_decode(item->u.n, sbytes, sizeof sbytes);
+			if (nb > m->count)
+				die("string literal longer than the char-array member");
+			for (k = 0; k < nb; k++) {
+				Symb bv;
+				bv.t = Con;
+				bv.ctyp = INT;
+				bv.u.n = sbytes[k];
+				clit_store(dst, off + k, m->ctyp, bv, far, klass);
+			}
+		} else if (item->op == '{' && m->count > 0) {
+			/* Nested braces fill an ARRAY member `T arr[N]` element by
+			 * element (`{6, {1.0, 2.0}}`, gcc.dg pr36584); before this
+			 * only a sub-struct/union accepted a nested `{…}`. */
+			emit_clit_array(dst, off, m->ctyp, m->count, item->l, far, klass);
+		} else if (item->op == '{') {
 			/* Nested aggregate initializer fills a sub-struct/union. */
 			if (KIND(m->ctyp) != STRUCT_T && KIND(m->ctyp) != UNION_T)
 				die("braced initializer for non-aggregate member");
 			emit_clit_aggr(dst, off, DREF(m->ctyp), item->l);
 		} else {
 			val = expr(item);
-			tc = irtyp(m->ctyp);
-			/* storef has no float/double form; far float members
-			 * (no in-tree consumer) keep the plain store, as before. */
-			spfx = (far && tc != 's' && tc != 'd') ? "storef" : "store";
-			if (off > 0) {
-				fprintf(of, "\t%%t%d =%c add %s, %d\n", tmp, klass, dst, off);
-				fprintf(of, "\t%s%c ", spfx, tc);
-				psymb(val);
-				fprintf(of, ", %%t%d\n", tmp);
-				tmp++;
-			} else {
-				fprintf(of, "\t%s%c ", spfx, tc);
-				psymb(val);
-				fprintf(of, ", %s\n", dst);
-			}
+			clit_store(dst, off, m->ctyp, val, far, klass);
 		}
 
 		i = midx + 1;
+		init = init->r;
+	}
+}
+
+/* Store scalar `val` of type `ctyp` at byte `off` of the compound-literal
+ * storage `dst` (the member/element store emit_clit_aggr always did, now
+ * shared with emit_clit_array). */
+static void
+clit_store(const char *dst, int off, unsigned ctyp, Symb val, int far, char klass)
+{
+	char tc = irtyp(ctyp);
+	/* storef has no float/double form; far float members
+	 * (no in-tree consumer) keep the plain store, as before. */
+	const char *spfx = (far && tc != 's' && tc != 'd') ? "storef" : "store";
+	if (off > 0) {
+		fprintf(of, "\t%%t%d =%c add %s, %d\n", tmp, klass, dst, off);
+		fprintf(of, "\t%s%c ", spfx, tc);
+		psymb(val);
+		fprintf(of, ", %%t%d\n", tmp);
+		tmp++;
+	} else {
+		fprintf(of, "\t%s%c ", spfx, tc);
+		psymb(val);
+		fprintf(of, ", %s\n", dst);
+	}
+}
+
+/* Fill the `count`-element array member (element type `elem`) that starts
+ * at byte `base_off` of `dst` from a braced list: a scalar item stores at
+ * base_off + k*sizeof(elem), a `{…}` item of a struct-element array recurses
+ * into emit_clit_aggr, and `[k] = v` designators reposition.  The storage
+ * was zero-filled by the caller, so a short list leaves the tail zero. */
+static void
+emit_clit_array(const char *dst, int base_off, unsigned elem, int count,
+                Node *init, int far, char klass)
+{
+	int k = 0, es = SIZE(elem);
+
+	while (init) {
+		Node *item = init->l;
+		int idx;
+		if (item->op == 'd') {
+			idx = item->r->u.n;
+			item = item->l;
+		} else
+			idx = k;
+		if (idx < 0 || idx >= count)
+			die("too many initializers for array member");
+		if (item->op == '{') {
+			if (KIND(elem) != STRUCT_T && KIND(elem) != UNION_T)
+				die("braced initializer for non-aggregate array member element");
+			emit_clit_aggr(dst, base_off + idx * es, DREF(elem), item->l);
+		} else
+			clit_store(dst, base_off + idx * es, elem, expr(item), far, klass);
+		k = idx + 1;
 		init = init->r;
 	}
 }
@@ -4189,7 +4289,7 @@ expr(Node *n)
 					shifted.ctyp = m->ctyp;
 					fprintf(of, "\t");
 					psymb(shifted);
-					fprintf(of, " =%c shr ", irtyp(m->ctyp));
+					fprintf(of, " =%c shr ", opkls(m->ctyp));
 					psymb(sr);
 					fprintf(of, ", %d\n", m->bitoffset);
 					sr = shifted;
@@ -4202,7 +4302,7 @@ expr(Node *n)
 				masked.ctyp = m->ctyp;
 				fprintf(of, "\t");
 				psymb(masked);
-				fprintf(of, " =%c and ", irtyp(m->ctyp));
+				fprintf(of, " =%c and ", opkls(m->ctyp));
 				psymb(sr);
 				fprintf(of, ", %lu\n", bitmask);
 				sr = masked;
@@ -4219,10 +4319,21 @@ expr(Node *n)
 		s0 = expr(n->l);
 		if (ISFLOAT(s0.ctyp))
 			die("bitwise NOT not supported on floating-point types");
+		if (KIND(s0.ctyp) == CHR) {
+			/* Integer promotion: ~c is an INT (so ~(unsigned char)5 is
+			 * -6, not 250); extend per the operand's own signedness. */
+			fprintf(of, "\t%%t%d =w %s ", tmp, ISUNSIGNED(s0.ctyp) ? "extub" : "extsb");
+			psymb(s0);
+			fprintf(of, "\n");
+			s0.t = Tmp;
+			s0.ctyp = INT;
+			s0.u.n = tmp++;
+		}
 		sr.ctyp = s0.ctyp;
 		fprintf(of, "\t");
 		psymb(sr);
-		fprintf(of, " =%c xor ", irtyp(sr.ctyp));
+		/* opkls: a short operand's memory class is h, not a QBE op class */
+		fprintf(of, " =%c xor ", opkls(sr.ctyp));
 		psymb(s0);
 		fprintf(of, ", -1\n");
 		break;
@@ -4364,8 +4475,18 @@ expr(Node *n)
 						addr.ctyp = ptyp;
 					}
 
-					/* Evaluate RHS */
+					/* Evaluate RHS; a float RHS converts to the field's
+					 * integer type first (`bf = 0.2`, gcc.dg c99-bool-3)
+					 * -- the mask `and` below is an integer op. */
 					s0 = expr(n->r);
+					if (ISFLOAT(s0.ctyp)) {
+						fprintf(of, "\t%%t%d =%c stosi ", tmp, opkls(m->ctyp));
+						psymb(s0);
+						fprintf(of, "\n");
+						s0.t = Tmp;
+						s0.ctyp = m->ctyp;
+						s0.u.n = tmp++;
+					}
 
 					/* Load current storage unit value.  addr is far
 					 * (ptyp = IDIR_FAR) under any far-data model, so the
@@ -4398,7 +4519,7 @@ expr(Node *n)
 					clearmask.ctyp = m->ctyp;
 					fprintf(of, "\t");
 					psymb(clearmask);
-					fprintf(of, " =%c and ", irtyp(m->ctyp));
+					fprintf(of, " =%c and ", opkls(m->ctyp));
 					psymb(oldval);
 					fprintf(of, ", %lu\n", invmask);
 
@@ -4408,7 +4529,7 @@ expr(Node *n)
 					newval.ctyp = m->ctyp;
 					fprintf(of, "\t");
 					psymb(newval);
-					fprintf(of, " =%c and ", irtyp(m->ctyp));
+					fprintf(of, " =%c and ", opkls(m->ctyp));
 					psymb(s0);
 					fprintf(of, ", %lu\n", mask);
 
@@ -4419,7 +4540,7 @@ expr(Node *n)
 						shifted.ctyp = m->ctyp;
 						fprintf(of, "\t");
 						psymb(shifted);
-						fprintf(of, " =%c shl ", irtyp(m->ctyp));
+						fprintf(of, " =%c shl ", opkls(m->ctyp));
 						psymb(newval);
 						fprintf(of, ", %d\n", m->bitoffset);
 					} else {
@@ -4432,7 +4553,7 @@ expr(Node *n)
 					merged.ctyp = m->ctyp;
 					fprintf(of, "\t");
 					psymb(merged);
-					fprintf(of, " =%c or ", irtyp(m->ctyp));
+					fprintf(of, " =%c or ", opkls(m->ctyp));
 					psymb(clearmask);
 					fprintf(of, ", ");
 					psymb(shifted);
@@ -4504,8 +4625,9 @@ expr(Node *n)
 			s0.ctyp = s1.ctyp;
 			s0.u.n = tmp++;
 		} else if (!ISFLOAT(s1.ctyp) && ISFLOAT(s0.ctyp)) {
-			/* Convert float/double to int */
-			fprintf(of, "\t%%t%d =%c ", tmp, irtyp(s1.ctyp));
+			/* Convert float/double to int (opkls: a char/short target
+			 * converts at word width, `=h stosi` is not a QBE class) */
+			fprintf(of, "\t%%t%d =%c ", tmp, opkls(s1.ctyp));
 			if (KIND(s1.ctyp) == LNG)
 				fprintf(of, "dtosi ");
 			else
@@ -5693,6 +5815,65 @@ mkidx(Node *a, Node *i)
 	return n;
 }
 
+/* Balanced comma tree over items[lo..hi).  expr(',') recurses on both
+ * sides, so the old LEFT-nested chain of N deferred stores recursed N deep
+ * and blew the C stack at N≈400 (`char buf[1024] = ""`, gcc.dg pr38902).
+ * A balanced tree is log2(N) deep; in-order evaluation keeps the stores in
+ * lexical order.  The builders below collect their stores on `ilist` (a
+ * growable stack; each builder works from its own base so nesting is safe)
+ * and return ilist_tree(base). */
+static Node *
+mk_comma_tree(Node **items, int lo, int hi)
+{
+	int mid;
+	if (hi - lo == 1)
+		return items[lo];
+	mid = lo + (hi - lo) / 2;
+	return mknode(',', mk_comma_tree(items, lo, mid), mk_comma_tree(items, mid, hi));
+}
+static Node **ilist;
+static int ilist_n, ilist_cap;
+static void
+ilist_push(Node *n)
+{
+	if (ilist_n == ilist_cap) {
+		ilist_cap = ilist_cap ? 2 * ilist_cap : 256;
+		ilist = realloc(ilist, ilist_cap * sizeof *ilist);
+		if (!ilist)
+			die("out of memory");
+	}
+	ilist[ilist_n++] = n;
+}
+/* Pop the items pushed since `base` and return them as one tree (or 0). */
+static Node *
+ilist_tree(int base)
+{
+	Node *t = ilist_n > base ? mk_comma_tree(ilist, base, ilist_n) : 0;
+	ilist_n = base;
+	return t;
+}
+
+/* Element `idx` of local array `v` (element type `elem`) has a braced
+ * `{…}` initializer item: lower it to `v[idx] = (elem){…}`, a compound
+ * literal assigned through the ordinary struct-copy path (zero-filled
+ * members, nested braces and designators all come from emit_clit_aggr).
+ * `brace == 0` gives `(elem){}` = an all-zero element.  Before this a
+ * braced array element reached expr() as a bare '{' node and ABORTED the
+ * compiler (gcc.dg pr101009 / pr36584). */
+Node *mkidx(Node *, Node *);
+static Node *
+mk_elem_brace_init(char *v, int idx, unsigned elem, Node *brace)
+{
+	Node *av = mknode('V', 0, 0), *iv = mknode('N', 0, 0), *cl;
+	if (KIND(elem) != STRUCT_T && KIND(elem) != UNION_T)
+		die("braced initializer for a non-aggregate array element");
+	strcpy(av->u.v, v);
+	iv->u.n = idx;
+	cl = mknode('L', brace ? brace->l : 0, 0);
+	cl->u.n = elem;
+	return mknode('=', mkidx(av, iv), cl);
+}
+
 /* Build a deferred initializer for a block-scoped local array
  * `T a[] = { … }` / `T a[N] = { … }`: a comma-chain of `a[idx] = val`
  * assignments (via mkidx, so expr() scales each index by the element
@@ -5702,15 +5883,16 @@ mkidx(Node *a, Node *i)
  * (max designated index + 1 / sequential count).  If `zerofill` is
  * nonzero, `*out_n` elements are zeroed first (sized partial-init
  * semantics). */
-Node *mkidx(Node *, Node *);
 Node *
-mk_local_array_init(char *v, Node *initlist, int zerofill, int known_n, int *out_n)
+mk_local_array_init(char *v, unsigned elem, Node *initlist, int zerofill, int known_n, int *out_n)
 {
-	Node *chain = 0, *it;
-	int i = 0, n = 0;
+	Node *it, *chain;
+	int i = 0, n = 0, base = ilist_n, aggr;
+
+	aggr = KIND(elem) == STRUCT_T || KIND(elem) == UNION_T;
 
 	for (it = initlist; it; it = it->r) {
-		Node *item = it->l, *av, *iv, *lhs, *asgn;
+		Node *item = it->l, *av, *iv, *lhs, *asgn, *rhs;
 		int idx;
 
 		if (item->op == 'd') {
@@ -5721,32 +5903,45 @@ mk_local_array_init(char *v, Node *initlist, int zerofill, int known_n, int *out
 		}
 		if (idx + 1 > n)
 			n = idx + 1;
+		rhs = item->op == 'd' ? item->l : item;
+		if (rhs->op == '{') {
+			/* `{…}` element of a struct/union array (pr101009). */
+			ilist_push(mk_elem_brace_init(v, idx, elem, rhs));
+			continue;
+		}
 		av = mknode('V', 0, 0);
 		strcpy(av->u.v, v);
 		iv = mknode('N', 0, 0);
 		iv->u.n = idx;
 		lhs = mkidx(av, iv);
-		asgn = mknode('=', lhs, item->op == 'd' ? item->l : item);
-		chain = chain ? mknode(',', chain, asgn) : asgn;
+		asgn = mknode('=', lhs, rhs);
+		ilist_push(asgn);
 	}
 	if (known_n > n)
 		n = known_n;
 	*out_n = n;
+	chain = ilist_tree(base);
 
 	if (zerofill) {
-		Node *zhead = 0;
+		Node *zhead;
 		int j;
 		for (j = 0; j < n; j++) {
-			Node *av = mknode('V', 0, 0), *iv = mknode('N', 0, 0);
-			Node *lhs, *zasgn, *zero;
+			Node *av, *iv, *lhs, *zasgn, *zero;
+			if (aggr) {
+				/* a struct element zeroes as `v[j] = (elem){}` */
+				ilist_push(mk_elem_brace_init(v, j, elem, 0));
+				continue;
+			}
+			av = mknode('V', 0, 0); iv = mknode('N', 0, 0);
 			strcpy(av->u.v, v);
 			iv->u.n = j;
 			lhs = mkidx(av, iv);
 			zero = mknode('N', 0, 0);
 			zero->u.n = 0;
 			zasgn = mknode('=', lhs, zero);
-			zhead = zhead ? mknode(',', zhead, zasgn) : zasgn;
+			ilist_push(zasgn);
 		}
+		zhead = ilist_tree(base);
 		if (zhead)
 			chain = chain ? mknode(',', zhead, chain) : zhead;
 	}
@@ -5831,9 +6026,8 @@ static Node *
 mk_local_string_init(char *v, int str_idx, long total)
 {
 	static unsigned char bytes[65536];
-	int natural;
+	int natural, base = ilist_n;
 	long i;
-	Node *chain = 0;
 
 	natural = strlit_decode(str_idx, bytes, sizeof bytes);
 	for (i = 0; i < total; i++) {
@@ -5846,9 +6040,9 @@ mk_local_string_init(char *v, int str_idx, long total)
 		lhs = mkidx(av, iv);
 		bv->u.n = (i < natural) ? bytes[i] : 0;
 		asgn = mknode('=', lhs, bv);
-		chain = chain ? mknode(',', chain, asgn) : asgn;
+		ilist_push(asgn);
 	}
-	return chain;
+	return ilist_tree(base);
 }
 
 /* Build a deferred initializer for a block-scoped local 2-D table
@@ -5868,8 +6062,8 @@ static Node *
 mk_aoa_array_init(char *v, Node *initlist, int dim, int zerofill,
                   int rows, int *out_rows)
 {
-	Node *chain = 0, *it;
-	int lin = 0, nrows = 0;
+	Node *chain, *it;
+	int lin = 0, nrows = 0, base = ilist_n;
 
 	for (it = initlist; it; it = it->r) {
 		Node *item = it->l, *av, *off, *lhs, *asgn;
@@ -5894,7 +6088,7 @@ mk_aoa_array_init(char *v, Node *initlist, int dim, int zerofill,
 				off->u.n = nrows * dim + col;
 				lhs = mknode('@', mknode('+', av, off), 0);
 				asgn = mknode('=', lhs, val);
-				chain = chain ? mknode(',', chain, asgn) : asgn;
+				ilist_push(asgn);
 				c = col + 1;
 			}
 			nrows++;
@@ -5907,7 +6101,7 @@ mk_aoa_array_init(char *v, Node *initlist, int dim, int zerofill,
 			off->u.n = lin;
 			lhs = mknode('@', mknode('+', av, off), 0);
 			asgn = mknode('=', lhs, item);
-			chain = chain ? mknode(',', chain, asgn) : asgn;
+			ilist_push(asgn);
 			lin++;
 			if (lin > nrows * dim)
 				nrows = (lin + dim - 1) / dim;
@@ -5916,9 +6110,10 @@ mk_aoa_array_init(char *v, Node *initlist, int dim, int zerofill,
 	if (rows > nrows)
 		nrows = rows;
 	*out_rows = nrows;
+	chain = ilist_tree(base);
 
 	if (zerofill) {
-		Node *zhead = 0;
+		Node *zhead;
 		int k, tot = nrows * dim;
 		for (k = 0; k < tot; k++) {
 			Node *av = mknode('V', 0, 0), *off = mknode('N', 0, 0);
@@ -5929,8 +6124,9 @@ mk_aoa_array_init(char *v, Node *initlist, int dim, int zerofill,
 			zero = mknode('N', 0, 0);
 			zero->u.n = 0;
 			zasgn = mknode('=', lhs, zero);
-			zhead = zhead ? mknode(',', zhead, zasgn) : zasgn;
+			ilist_push(zasgn);
 		}
+		zhead = ilist_tree(base);
 		if (zhead)
 			chain = chain ? mknode(',', zhead, chain) : zhead;
 	}
@@ -9758,8 +9954,11 @@ dcls:
 	var_set_arraybytes(v, total);
 	fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($2), total);
 
-	/* Zero-initialize the array first */
-	{
+	/* Zero-initialize the array first (a struct/union element array is
+	 * zero-filled whole: its elements are not single stores). */
+	if (KIND($2) == STRUCT_T || KIND($2) == UNION_T) {
+		emit_zero_local(v, total);
+	} else {
 		int j;
 		for (j = 0; j < n; j++) {
 			fprintf(of, "\t%%t%d =w add ", tmp);
@@ -9774,7 +9973,7 @@ dcls:
 		Node *init = $9;
 		int i = 0;
 		while (init) {
-			Node *item = init->l;
+			Node *item = init->l, *rhs;
 			int idx;
 			Symb val;
 
@@ -9783,15 +9982,24 @@ dcls:
 				idx = item->r->u.n;
 				if (idx < 0 || idx >= n)
 					die("array index out of bounds in initializer");
-				val = expr(item->l);
+				rhs = item->l;
 			} else {
 				/* Regular initializer at current index */
 				idx = i;
 				if (idx >= n)
 					die("too many initializers for array");
-				val = expr(item);
+				rhs = item;
 				i++;  /* Only increment for non-designated */
 			}
+			if (rhs->op == '{') {
+				/* `{…}` element of a struct/union array: v[idx] = (T){…} */
+				expr(mk_elem_brace_init(v, idx, $2, rhs));
+				init = init->r;
+				if (item->op == 'd')
+					i = idx + 1;
+				continue;
+			}
+			val = expr(rhs);
 
 			fprintf(of, "\t%%t%d =w add ", tmp);
 			fprintf(of, "%%%s, %d\n", v, idx * s);
@@ -9866,17 +10074,24 @@ dcls:
 		Node *init = $8;
 		i = 0;
 		while (init) {
-			Node *item = init->l;
+			Node *item = init->l, *rhs;
 			int idx;
 			Symb val;
 			if (item->op == 'd') {
 				idx = item->r->u.n;
-				val = expr(item->l);
+				rhs = item->l;
 				i = idx + 1;
 			} else {
 				idx = i++;
-				val = expr(item);
+				rhs = item;
 			}
+			if (rhs->op == '{') {
+				/* `{…}` element of a struct/union array: v[idx] = (T){…} */
+				expr(mk_elem_brace_init(v, idx, $2, rhs));
+				init = init->r;
+				continue;
+			}
+			val = expr(rhs);
 			fprintf(of, "\t%%t%d =w add %%%s, %d\n", tmp, v, idx * s);
 			fprintf(of, "\tstore%c ", irtyp($2));
 			psymb(val);
@@ -10326,7 +10541,7 @@ stmt: ';'                            { $$ = 0; }
             var_set_aoa_dim(v, aoa);
             chain = mk_aoa_array_init(v, $8, aoa, 1, n, &rr);
         } else {
-            chain = mk_local_array_init(v, $8, 1, n, &n);
+            chain = mk_local_array_init(v, $1, $8, 1, n, &n);
         }
         $$ = mkstmt(Expr, chain, 0, 0);
     }
@@ -10352,7 +10567,7 @@ stmt: ';'                            { $$ = 0; }
             fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(),
                 iralign(elem), SIZE(elem) * aoa * rr);
         } else {
-            chain = mk_local_array_init(v, $7, 0, 0, &n);
+            chain = mk_local_array_init(v, $1, $7, 0, 0, &n);
             varadd(v, 0, IDIR($1), 1);
             var_set_arraybytes(v, SIZE($1) * n);
             fprintf(of, "\t%%%s =%c alloc%d %d\n", v, ALLOC_T(), iralign($1), SIZE($1) * n);

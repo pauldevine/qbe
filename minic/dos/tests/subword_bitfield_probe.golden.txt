@@ -1,0 +1,10 @@
+local byte a=5 b=2 c=6 size=1
+local byte after b=1: a=5 b=1 c=6
+global byte a=2 b=3 c=1
+bool f0=1 f1=0 v=9
+bool f0=0 f1=1 v=15
+local short lo=31 hi=1234 size=2
+global short lo=4 hi=1000
+mixed tag=3 count=-321 flags=5 width=511
+loop acc=308 last a=7 c=0
+subword_bitfield_probe done
